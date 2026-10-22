@@ -26,7 +26,6 @@ const state = {
   authMode: "token",
   busyJobs: new Set(),
   submitting: false,
-  approvingBatch: false,
   fileStep: "browse",
 };
 const names = {
@@ -56,6 +55,12 @@ function node(tag, text = "", className = "") {
   n.textContent = text;
   n.className = className;
   return n;
+}
+// A button that only opens something stays usable while its job is busy.
+function jobControlDisabled(b) {
+  if (!serverReachable) return true;
+  if (b.dataset.navigation === "true") return false;
+  return jobIsBusy(b.dataset.jobControl) || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
 }
 function jobIsBusy(id) {
   return state.busyJobs.has(id) || [...(state.commands?.values() || [])].some(command=>command.id===id && !["completed","failed","cancelled"].includes(command.status));
@@ -198,14 +203,12 @@ function setConnection(online) {
   $("connection-status").hidden = online;
   document.body?.classList.toggle("disconnected", !online);
   document.querySelectorAll("[data-job-control]").forEach((button) => {
-    button.disabled = !online || jobIsBusy(button.dataset.jobControl) ||
-      (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    button.disabled = jobControlDisabled(button);
   });
   document.querySelectorAll(".dialog-connection").forEach((notice) => {
     notice.hidden = online;
   });
-  $("approve-batch-review").disabled = !online || state.approvingBatch;
-  $("reject-batch-review").disabled = !online || state.approvingBatch;
+  syncBatchReview();
   $("approve-file-review").disabled = !online || state.approvingFile;
   $("confirm-action-review").disabled = !online;
   document.querySelectorAll("[data-review-choice]").forEach(b => { b.disabled = !online; });
@@ -253,7 +256,7 @@ function invalidateAuthentication() {
   state.jobsRevision++;
   state.detailRevision++;
   state.detail = null;
-  state.batchApproval = null;
+  state.batchReview = null;
   state.replacementChoice = null;
   $("job-detail").close();
   $("batch-review").close();
@@ -345,10 +348,10 @@ async function api(path, body, { signal, method } = {}) {
   if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
   return data;
 }
-async function tool(name, args = {}, onAccepted) {
+async function tool(name, args = {}, onAccepted, decision) {
   const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard","restore"].includes(args.mode);
   const result = mutates
-    ? await commandRequest("tool", {name,arguments:args,background:true}, onAccepted)
+    ? await commandRequest("tool", {name,arguments:args,background:true}, onAccepted, decision)
     : await api("tool", {name,arguments:args});
   if (!result.content) return result;
   const text = result.content
@@ -382,7 +385,7 @@ function trackCommand(request, receipt, result) {
   if (previous && previous.status !== info.status && !placeholder) announceCommand(info);
   renderCommandIndicators();
   document.querySelectorAll("[data-job-control]").forEach(button => {
-    if (button.dataset.jobControl === info.id) button.disabled = !serverReachable || jobIsBusy(info.id) || (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    if (button.dataset.jobControl === info.id) button.disabled = jobControlDisabled(button);
   });
   return info;
 }
@@ -394,7 +397,9 @@ const appliedChipMs = 8000;
 const commandVerbs = {"Preparing replacement review":"Preparing review","Applying replacement decision":"Applying decision","Applying decision":"Applying decision","Retrying job":"Retrying","Stopping job":"Stopping","Applying candidate decision":"Applying decision","Verifying recovery data":"Verifying","Verifying duplicate":"Verifying","Removing recovery copy":"Removing copy","Updating batch settings":"Updating settings"};
 const commandFailures = {"Preparing replacement review":"Review failed","Applying replacement decision":"Decision failed","Applying decision":"Decision failed","Retrying job":"Retry failed","Stopping job":"Stop failed","Applying candidate decision":"Decision failed","Verifying recovery data":"Check failed","Verifying duplicate":"Check failed","Removing recovery copy":"Removal failed","Updating batch settings":"Update failed"};
 const commandStatusText = {pending:"Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Failed",cancelled:"Cancelled"};
-function commandLabel(command) { return commandLabels[command.kind] || command.label || "Update"; }
+// A command that carries the decision it was sent for names it (for example
+// "Replace 3 files"); the others use the label of their kind.
+function commandLabel(command) { return command.decision?.label || commandLabels[command.kind] || command.label || "Update"; }
 // The engine keeps waiting_reason when a command runs again after a wait, and
 // a cancelled one stores its cancel reason there. Only a waiting one says why.
 function commandWaitingReason(command) { return command.status === "waiting_external" ? command.waiting_reason || "" : ""; }
@@ -410,11 +415,11 @@ function commandChip(id, now = commandClock()) {
   if (!newest) return null;
   const label = commandLabel(newest);
   if (newest.status === "failed" && !newest.dismissed)
-    return {kind:"failed", command:newest, text:commandFailures[label] || "Action failed", title:`${label} · Failed`};
+    return {kind:"failed", command:newest, text:newest.decision?.failure || commandFailures[label] || "Action failed", title:`${label} · Failed`};
   const active = commands.find((c) => !c.status || commandActiveStatuses.includes(c.status));
   if (active) {
     const activeLabel = commandLabel(active);
-    const text = active.status === "waiting_external" ? "Waiting to apply" : commandVerbs[activeLabel] || "Applying";
+    const text = active.status === "waiting_external" ? "Waiting to apply" : active.decision?.verb || commandVerbs[activeLabel] || "Applying";
     const reason = commandWaitingReason(active);
     return {kind:"active", command:active, text, title:`${activeLabel} · ${commandStatusText[active.status] || "Applying"}${reason ? ` · ${reason}` : ""}`};
   }
@@ -608,7 +613,7 @@ function restoreCommands() {
   }
   renderBackups(); renderBackupCleanup();
 }
-async function commandRequest(path, body, onAccepted) {
+async function commandRequest(path, body, onAccepted, decision) {
   const request = JSON.stringify([path,body]);
   const receipts = readCommandReceipts();
   const receipt = receipts[request] ||= {key:submissionID(),started:Date.now()};
@@ -617,6 +622,7 @@ async function commandRequest(path, body, onAccepted) {
   if (!result.command_id) { delete receipts[request]; sessionStorage.setItem("navigatorr_commands",JSON.stringify(receipts)); return result; }
   receipt.command_id = result.command_id; receipt.id = result.id || commandTarget(body);
   receipt.label = commandLabels[body.kind || body.arguments?.mode || body.name?.replace("action_","")] || "Update";
+  if (decision) receipt.decision = decision;
   if (state.backupCleaning?.id === receipt.id) {
     const task = state.backupCleaning;
     receipt.cleanup = {id:task.id,name:task.name,mode:task.mode,started:task.started};
@@ -2758,7 +2764,99 @@ function remainingLabel(seconds) {
   const hours = Math.floor(minutes / 60), rest = minutes % 60;
   return `~${hours} h${rest ? ` ${rest} min` : ""} left`;
 }
+// Where a failed replacement left the original: "in_place", "recovery" (a
+// recovery copy holds it) or "unclear". The server decides it from the
+// promotion's own state; only an unlabelled failure falls back to the flag.
+function originalStateOf(failure) {
+  return failure?.original_state || (failure?.original_intact ? "in_place" : "unclear");
+}
+// What an approved batch replacement is doing, in words about the files. The
+// server places each file in a short fixed sequence; none of this is a time
+// estimate.
+function replacementStepText(member) {
+  const freed = member.freed_bytes != null && member.freed_bytes > 0 ? ` · freed ${bytes(member.freed_bytes)}` : "";
+  switch (member.phase) {
+    case "checking": return "Checking the files";
+    case "backup": return `Backing up the original${member.percent != null ? ` (${member.percent}%)` : ""}`;
+    case "backup_check": return "Checking the backup";
+    case "swap": return "Swapping in the new file";
+    case "final_check": return "Checking the new file";
+    case "done": return `Done${freed}`;
+    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure ? {in_place: " · original kept", recovery: " · original in Recovery", unclear: " · check Recovery"}[originalStateOf(member.failure)] : ""}`;
+    default: return "Waiting";
+  }
+}
+// One sentence for the batch: what is being replaced, or how it ended.
+function replacementHeadline(job) {
+  const r = job.replacement;
+  if (!r?.approved || !r.total) return "";
+  const settled = r.done + r.failed >= r.total;
+  if (r.failed > 0) {
+    const failures = (r.members || []).filter((m) => m.failure).map((m) => m.failure);
+    const reasons = [...new Set(failures.map((f) => f.reason))];
+    // "Kept" is only said when every failure left the original in place; "in
+    // Recovery" only when a recovery copy holds it.
+    const states = failures.map(originalStateOf);
+    const kept = !failures.length ? "" : states.every((x) => x === "in_place") ? (failures.length === 1 ? " · original kept" : " · originals kept") : states.every((x) => x === "recovery") ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · check Recovery";
+    if (!settled) return `Replacing ${fileCount(r.total)} · ${r.failed} failed`;
+    return `${r.done} of ${r.total} replaced · ${r.failed} failed${reasons.length === 1 ? `: ${reasons[0]}` : ""}${kept}`;
+  }
+  if (r.done >= r.total) return `Replaced ${fileCount(r.total)}${r.freed_bytes > 0 ? ` · freed ${bytes(r.freed_bytes)}` : ""}`;
+  return `Replacing ${fileCount(r.total)}${r.frees_bytes > 0 ? ` · frees ${bytes(r.frees_bytes)}` : ""}`;
+}
+// The progress block of a batch whose replacement was approved and is still
+// running, or stopped on a failure: a headline, a bar of finished files, and
+// one line per file.
+function replacementProgressBlock(job) {
+  const r = job.replacement;
+  if (!r?.approved || !r.total) return null;
+  const active = operationIsActive(job.status);
+  if (!active && !r.failed && r.done >= r.total) return null;
+  const stopped = !active && r.failed > 0;
+  const block = node("div", "", `job-progress batch-progress replacement-progress${stopped ? " failed" : ""}`);
+  const heading = stopped ? replacementHeadline(job) : `Replacing ${fileCount(r.total)} · ${r.done} of ${r.total} done`;
+  block.append(node("strong", heading, "replacement-headline"));
+  const bar = document.createElement("progress");
+  bar.max = r.total;
+  bar.value = r.done;
+  bar.setAttribute("aria-label", `${r.done} of ${r.total} files replaced`);
+  block.append(bar);
+  const list = node("ul", "", "replacement-files");
+  for (const member of r.members || []) {
+    const item = node("li", "", `replacement-file ${member.phase}`);
+    item.append(node("span", member.name, "replacement-file-name"), node("span", replacementStepText(member), "replacement-file-step metadata"));
+    list.append(item);
+  }
+  block.append(list);
+  return block;
+}
+async function copyText(text, done) {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return notify("Copying is not available here.");
+  await navigator.clipboard.writeText(text);
+  notify(done);
+}
+// Where a replacement put things, short by default: the new file, and the
+// original's backup while one exists.
+function whereBlock(where, {heading = true} = {}) {
+  if (!where || !(where.new_path || where.backup_path || where.backup_removed)) return null;
+  const box = node("div", "", "replacement-where");
+  if (heading) box.append(node("strong", "Where"));
+  const line = (label, path, note) => {
+    const row = node("p", "", "metadata replacement-where-row");
+    row.append(node("span", `${label}: `), node("span", path || note, "backup-path"));
+    if (path) row.append(button("Copy", () => safe(() => copyText(path, `${label} path copied.`)), "text-button"));
+    box.append(row);
+  };
+  if (where.new_path) line("New file", where.new_path);
+  if (where.backup_path) {
+    line("Original backup", where.backup_path);
+    box.append(node("p", "Kept until the new file is verified, then removed. If a replacement stops, it stays until you remove it from Recovery.", "metadata"));
+  } else if (where.backup_removed) line("Original backup", "", "removed after the new file was verified");
+  return box;
+}
 function batchProgress(job) {
+  const replacing = replacementProgressBlock(job);
+  if (replacing) return replacing;
   const batch = visibleBatch(job);
   if (["completed", "failed", "cancelled"].includes(job.status)) return null;
   if (job.status === "waiting_decision" && !batch?.running) return null;
@@ -2821,11 +2919,10 @@ function batchProgress(job) {
     const waiting = count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
     result.append(node("span", [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files"), "batch-progress-phase metadata"));
   }
+  // A time is shown only when the worker measured one.
   const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
   const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
-  result.append(node("span", etas.length
-    ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`
-    : "Estimated workflow progress · Not time remaining", "batch-progress-explanation metadata"));
+  if (etas.length) result.append(node("span", `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`, "batch-progress-explanation metadata"));
   return result;
 }
 function telemetry(job) {
@@ -3058,19 +3155,19 @@ function renderSavings(data) {
       node("p", "No verified replacements yet.", "muted"),
     );
 }
-async function jobControl(id, name, args = {}, {onAccepted} = {}) {
+async function jobControl(id, name, args = {}, {onAccepted, decision} = {}) {
   if (jobIsBusy(id)) return;
   state.busyJobs.add(id);
   document.querySelectorAll("[data-job-control]").forEach((b) => {
-    if (b.dataset.jobControl === id) b.disabled = true;
+    if (b.dataset.jobControl === id && b.dataset.navigation !== "true") b.disabled = true;
   });
   try {
-    await tool(name, { id, ...args }, onAccepted);
+    await tool(name, { id, ...args }, onAccepted, decision);
     await Promise.all([state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve(), loadJobs()]);
   } finally {
     state.busyJobs.delete(id);
     document.querySelectorAll("[data-job-control]").forEach((b) => {
-      if (b.dataset.jobControl === id) b.disabled = !serverReachable || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+      if (b.dataset.jobControl === id) b.disabled = jobControlDisabled(b);
     });
   }
 }
@@ -3722,6 +3819,7 @@ function openGoalForm(path, options = {}) {
   if (options.mode) state.goalExplicit = true;
   if (options.pickTracks) $("keep-tracks").open = true;
 }
+const navigationLabels = ["View replacement", "View batch", "View preview", "Review preview", "Review", "View file"];
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -3741,8 +3839,8 @@ function jobControls(job, detail = false) {
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
         ["Review candidate", "Review replacements", "Keep originals"].includes(label))
     );
-    b.disabled = !serverReachable || jobIsBusy(job.id) ||
-      (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    if (navigationLabels.includes(label)) b.dataset.navigation = "true";
+    b.disabled = jobControlDisabled(b);
     actionRail.append(b);
   };
   if (job.archived) {
@@ -3775,16 +3873,14 @@ function jobControls(job, detail = false) {
           return;
         }
         if (choice.decision === "reject" && job.batch?.promotion_plan_ready) {
-          const plan = await readBatchPromotionPlan(job.id);
-          if (!plan?.digest) throw new Error("Reopen the replacement review before deciding.");
-          await commandRequest("batch-candidates",{id:job.id,digest:plan.digest,decision:"reject"});
+          await keepPreparedOriginals(job.id);
           return;
         }
         if (choice.decision === "approve" && job.action_name === "transcode_batch") {
           // A batch with a replacement plan is approved only against that
           // plan. Without one this is a forwarded per-file decision.
           if (job.batch?.promotion_plan_ready) {
-            await reviewBatchPromotion(job.id);
+            await reviewBatchReplacement(job.id);
             return;
           }
         }
@@ -3823,7 +3919,7 @@ function jobControls(job, detail = false) {
     }
   }
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
-    add("Review candidates", () => reviewBatchCandidates(job.id));
+    add("Review candidates", () => reviewBatchReplacement(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
   if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
     add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
@@ -3833,7 +3929,10 @@ function jobControls(job, detail = false) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode")
       add("Choose a goal", () => openGoalForm(job.source_path));
-    else add("Retry", () => jobControl(job.id, "action_retry"));
+    // Failed replacements are retried per file below. The batch's own Retry stays
+    // when nothing is retryable per file and only the batch recorded the failure,
+    // so a transient error can still be retried from here.
+    else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
@@ -3877,6 +3976,7 @@ function jobControls(job, detail = false) {
     job.status === "completed" &&
     job.candidate_ready &&
     !job.replacement_action_id &&
+    !job.replacement_plan &&
     state.info.allow_destructive
   )
     add("Replace file", () => prepareReplacement(job));
@@ -4103,7 +4203,7 @@ function queuePresentation(job) {
     (job.replaced && job.status === "completed");
   // Nothing was made, so there are no savings to report.
   const leftNoFile = notConverted(job);
-  const status = leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -4131,7 +4231,11 @@ function queuePresentation(job) {
   else if (!leftNoFile && !job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
     metrics.push(s.estimated_saved_bytes < 0 ? `about ${bytes(-s.estimated_saved_bytes)} larger (estimate)` : `${bytes(s.estimated_saved_bytes)} estimated savings`);
   let result;
-  if (leftNoFile) result = notConvertedReason(job);
+  const replacingHeadline = replacementHeadline(job);
+  if (replacingHeadline) {
+    result = replacingHeadline;
+    metrics.length = 0;
+  } else if (leftNoFile) result = notConvertedReason(job);
   else if (job.status === "failed")
     result = shortJobReason(job.error) || "Error details unavailable";
   else if (job.replaced && job.status === "completed") result = "Original replaced";
@@ -4144,7 +4248,7 @@ function queuePresentation(job) {
   if (job.workflow_actions?.length && replacement && job.status !== "failed") {
     result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
   }
-  if (job.replaced_files > 0) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
+  if (job.replaced_files > 0 && !replacingHeadline) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
   if (job.batch?.dry_run) result += " · Originals unchanged";
   else if (job.batch?.outcome === "no_changes") result += " · Originals kept";
   const summary = [kind, result, metrics.join(" · ")]
@@ -5095,7 +5199,10 @@ async function refreshDetail() {
     // The chips already carry a running conversion's size and encode, so its
     // summary line is left out then; the outcome dedupe below still counts it
     // as shown. Other jobs, such as a replacement, keep their line.
-    if (!(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
+    // A failed replacement's headline already is the summary.
+    const headline = progress?.querySelector?.(".replacement-headline")?.textContent;
+    const repeated = Boolean(headline) && presentation.summary.includes(headline);
+    if (!repeated && !(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
     // The summary line already says why a file was skipped. An outcome line that
     // only repeats text already shown is left out, so the reason appears once.
     const shownOutcomes = [presentation.summary];
@@ -5126,7 +5233,12 @@ async function refreshDetail() {
       technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
       summary.append(technical);
     }
-    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job));
+    // An approved replacement says replaced and failed in its own headline; a chip
+    // of completed encodes beside "1 failed" would contradict it, so only the
+    // other counts (skipped, rejected, ...) stay.
+    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job), job.replacement?.approved ? ["completed", "failed"] : []);
+    const where = whereBlock(job.where);
+    if (where) summary.append(where);
     if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
       const reason = job.batch_files.reasons[0];
       summary.append(node("p", `${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted"));
@@ -5202,6 +5314,19 @@ async function replaceBatchFile(batchID, childID) {
   if (!job || job.parent_action_id !== batchID || !job.candidate_ready || job.replacement_action_id) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
   await prepareReplacement(job);
 }
+// What a replacement Retry does. Retrying through the batch re-runs every failed
+// file that stopped before approval, so the button says how many; a file's own
+// retry re-runs just that file.
+function retryReplacementLabel(item, batchID, name) {
+  const count = item.retry_action_id === batchID ? state.detailJob?.replacement?.batch_retry_count || 0 : 0;
+  return count > 1 ? {button: `Retry ${count} failed replacements`, confirm: `Retry ${count} failed replacements`} : {button: "Retry replacement", confirm: `Retry replacement of ${name}`};
+}
+// Tries a failed file's replacement again. The server re-checks it against the
+// plan that was approved and does not encode again.
+async function retryFileReplacement(item, batchID) {
+  const name = item.display_label || (item.file_path || "").split("/").pop();
+  await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
+}
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -5218,29 +5343,63 @@ async function loadBatchItems(id, revision) {
   $("batch-items-list").replaceChildren();
   for (const item of response.items || []) {
     const row = node("div", "", "batch-item-row");
-    const label = item.replaced ? "Replaced" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
+    const member = state.detailJob?.replacement?.members?.find(m => m.item_key === item.item_key);
+    const queued = item.replacement_plan === "queued";
+    const failure = item.replacement_failure;
+    const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
     const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
-    row.append(node("span", item.display_label || item.file_path, "metadata"), statusBadge(label, item.replacement_status || label, review));
+    row.append(node("span", item.display_label || (item.file_path || "").split("/").pop(), "metadata batch-file-name"), statusBadge(label, item.replacement_status || label, review));
     if (item.child_action_id)
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
 
     const actions = node("div", "", "batch-file-actions");
-    const add = (label, fn) => {
+    // Buttons that only open something stay usable while the batch is busy.
+    const add = (label, fn, {navigation = false, target = id} = {}) => {
       const control = button(label, fn, label === "Replace file" ? "primary" : "");
-      control.dataset.jobControl = id;
+      control.dataset.jobControl = target;
       control.dataset.batchItemKey = item.item_key;
-      control.disabled = !serverReachable || jobIsBusy(id);
+      if (navigation) control.dataset.navigation = "true";
+      control.disabled = jobControlDisabled(control);
       actions.append(control);
     };
-    if (item.candidate_ready && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
-    if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id));
+    if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
+    if (failure) {
+      const card = node("div", "", "replacement-failure");
+      card.setAttribute("role", "group");
+      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
+      const options = node("div", "", "batch-file-actions");
+      const choose = (label, fn, opts = {}) => {
+        const control = button(label, fn, opts.primary ? "primary" : "");
+        control.dataset.jobControl = opts.target || id;
+        control.dataset.batchItemKey = item.item_key;
+        if (opts.navigation) control.dataset.navigation = "true";
+        control.disabled = jobControlDisabled(control);
+        options.append(control);
+      };
+      if (item.retry_action_id) choose(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
+      if (item.replacement_action_id) choose("View details", () => openJob(item.replacement_action_id), {navigation: true});
+      card.append(options);
+      if (failure.detail) {
+        const technical = node("details", "", "technical-reason");
+        technical.append(node("summary", "Technical details"), node("p", failure.detail, "metadata"));
+        card.append(technical);
+      }
+      row.append(card);
+    } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
     const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
     if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
     if (actions.children.length) row.append(actions);
-    const activity = batchFileActivity(item, state.detailJob);
+    const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
+    const where = whereBlock(item.where, {heading: false});
+    if (where) {
+      const details = node("details", "", "batch-where");
+      details.append(node("summary", "Where"), where);
+      row.append(details);
+    }
+
     if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
     if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
@@ -5251,13 +5410,17 @@ async function loadBatchItems(id, revision) {
       row.append(history);
     }
     const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
-    const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
+    // The recipe's reason says why a file was or was not converted; once it is
+    // being replaced or has a candidate it explains nothing more.
+    const visibleReasons = item.replacement_action_id || item.replacement_plan || item.replaced || item.candidate_ready ? [] : [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
     if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
     if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
     for (const control of row.querySelectorAll("button")) {
       control.dataset.batchItemKey = item.item_key;
+      // Buttons made without a target only open something.
+      if (!control.dataset.jobControl) control.dataset.navigation = "true";
       control.dataset.jobControl ||= item.child_action_id || id;
     }
     $("batch-items-list").append(row);
@@ -5364,14 +5527,14 @@ async function loadDetail() {
   );
 }
 
-function renderBatchCounts(container, batch) {
+function renderBatchCounts(container, batch, omit = []) {
   const counts = node("div", "", "batch-counts");
   if (batch.policy > 0) counts.append(statusBadge(`${batch.policy} Below minimum savings`, "neutral"));
   if (batch.rejected > 0) counts.append(statusBadge(`${batch.rejected} Rejected`, "rejected"));
   for (const [key, label, status] of [["completed","Completed","completed"],["running","Active","running"],["queued","Queued","queued"],["waiting_for_slot","Waiting for slot","queued"],["waiting_decision","Needs decision","waiting_decision"],["review","Needs review","review"],["failed","Failed","failed"],["skip","Skipped","skip"],["cancelled","Cancelled","cancelled"]]) {
-    if (batch[key] > 0) counts.append(statusBadge(`${batch[key]} ${label}`, status));
+    if (batch[key] > 0 && !omit.includes(key)) counts.append(statusBadge(`${batch[key]} ${label}`, status));
   }
-  container.append(counts);
+  if (counts.children.length) container.append(counts);
 }
 // The steps as the job dialog shows them, with batch and rejected-candidate
 // outcomes folded into the stored stage that reports them.
@@ -5476,24 +5639,22 @@ const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Im
 function showFileReview(job, approval) {
   const p = job.promotion;
   Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256, pending: false });
+  const facts = job.replacement_facts || {source_bytes: p.original_bytes, candidate_bytes: p.candidate_bytes, size_budget_outcome: job.size_budget_outcome};
+  const name = p.original_path.split("/").pop().replace(/\.[^.]+$/, "");
   const data = $("file-review-data");
-  data.replaceChildren(node("p", p.original_path.split("/").pop(), "review-filename"));
-  for (const [label, path, size] of [["Original", p.original_path, p.original_bytes], ["Verified candidate", p.candidate_path, p.candidate_bytes]]) {
-    const row = node("div", "", "review-file");
-    row.append(node("span", label, "muted"), node("strong", bytes(size)), node("span", path, "metadata review-path"));
-    data.append(row);
-  }
-  const savings = savingsLine(job.savings);
-  if (savings) data.append(savings);
-  data.append(node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
+  data.replaceChildren(replacementCard({name, facts, originalPath: p.original_path, newPath: p.candidate_path}), node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
   const warning = regrabWarning(p);
   if (warning) data.prepend(warning);
-  const below = belowTargetNotice(job.size_budget_outcome);
-  if (below) data.prepend(below);
+  const frees = replacementTotalLine([p], () => facts);
+  $("file-review-total").textContent = frees && frees.replace(/ across 1 file$/, "");
+  $("reject-file-review").hidden = !job.waiting_options?.some(option => option.decision === "reject");
+  $("reject-file-review").disabled = !serverReachable || state.approvingFile;
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
 }
 function showFileReviewPending(text) {
   $("file-review-data").replaceChildren(node("p", text, "muted"));
+  $("file-review-total").textContent = "";
+  $("reject-file-review").hidden = true;
   $("approve-file-review").disabled = true;
 }
 function pollDelay(ms) {
@@ -5535,6 +5696,13 @@ async function reviewFilePromotion(id, { wait = false } = {}) {
   $("file-review").showModal();
 }
 $("dismiss-file-review").addEventListener("click", () => $("file-review").close());
+$("dismiss-file-review-action").addEventListener("click", () => $("file-review").close());
+// Keeping the original needs no reviewed digest: it changes no file.
+$("reject-file-review").addEventListener("click", () => safe(async () => {
+  const approval = state.fileApproval;
+  if (!approval || approval.pending || state.approvingFile || !serverReachable) return;
+  await jobControl(approval.id, "action_resume", { decision: "reject" }, {onAccepted: () => $("file-review").close(), decision: {label: "Keep original", verb: "Keeping the original", failure: "Decision failed"}});
+}));
 $("file-review").addEventListener("close", () => { state.fileApproval = null; });
 $("approve-file-review").addEventListener("click", () => safe(async () => {
   const approval = state.fileApproval;
@@ -5548,109 +5716,261 @@ $("approve-file-review").addEventListener("click", () => safe(async () => {
       throw new Error("The replacement plan changed. Close this review and open it again.");
     // The server refuses an approval whose digest is not the reviewed plan's.
     // Once it accepts, the review is done: progress shows on the job's row.
-    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest }, {onAccepted: () => $("file-review").close()});
+    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest }, {onAccepted: () => $("file-review").close(), decision: {label: "Replace file", verb: "Replacing file", failure: "Replacement failed"}});
   } finally {
     state.approvingFile = false;
     $("approve-file-review").disabled = !serverReachable;
   }
 }));
 
-async function reviewBatchCandidates(id) {
-  const auth = state.authRevision;
-  const review = await api(`batch-candidates?id=${encodeURIComponent(id)}`);
-  if (auth !== state.authRevision) return;
-  const selected = new Set(review.members.map(member=>member.item_key));
-  const content = [node("p", `${review.members.length} candidates available · Originals unchanged`, "review-filename"), node("p", "Select candidates to review for replacement. Verification runs before any original is replaced. You can open each file to compare frames or try different settings.", "metadata")];
-  const all = node("input"); all.type="checkbox"; all.checked=true; all.setAttribute("aria-label","Select all candidates");
-  const allLabel=node("label","","check");allLabel.append(all,node("span","Select all candidates")); content.push(allLabel);
-  const checks=[];
-  for (const member of review.members) {
-    const row=node("div","","candidate-review-row"),label=node("label","","check"),check=node("input");
-    check.type="checkbox";check.checked=true;checks.push(check);
-    const name=member.episode || member.original_path.split("/").pop();
-    label.append(check,node("span",name));
-    check.addEventListener("change",()=>{check.checked?selected.add(member.item_key):selected.delete(member.item_key);all.checked=selected.size===review.members.length;all.indeterminate=selected.size>0&&!all.checked;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
-    row.append(label,node("p",`${member.original_path} → ${member.candidate_path}`,"metadata backup-path"));
-    const belowTarget=belowTargetNotice(review.size_budget_outcomes?.[member.transcode_action_id]);if(belowTarget)row.append(belowTarget);
-    row.append(button("View file",async()=>{finishActionReview(false);await openJob(member.transcode_action_id);},"text-button"));content.push(row);
-  }
-  all.addEventListener("change",()=>{selected.clear();checks.forEach((check,i)=>{check.checked=all.checked;if(all.checked)selected.add(review.members[i].item_key);});all.indeterminate=false;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
-  if (review.excluded) content.push(node("p",`${review.excluded} other files are unfinished, have no candidate, or already have a replacement job. They will stay unchanged.`,"metadata"));
-  if (!review.members.length) {notify("No unreserved candidates are available. Open the batch files to inspect their outcomes.");return;}
-  if (!state.info.allow_destructive) content.push(node("p","Replacement is disabled in the server settings.","metadata"));
-  const decision=reviewAction({title:"Review batch candidates",content,confirmLabel:"Prepare replacement review"});
-  $("confirm-action-review").disabled=!state.info.allow_destructive;
-  if (!await decision || auth!==state.authRevision) return;
-  await commandRequest("batch-candidates",{id,version:review.version,item_keys:[...selected]},()=>notify("Replacement review requested. Originals are unchanged."));
-  if (auth!==state.authRevision) return;
-  await reviewBatchPromotion(id);
+// One dialog decides a batch replacement: the files with what each saves and
+// how good it measured, then one button. Everything shown here is display;
+// what an approval is checked against is the plan's member list and digest,
+// which the server holds and this page reads back before it approves.
+const fileCount = (n) => `${n} ${n === 1 ? "file" : "files"}`;
+function replacementFileName(member) {
+  return member.episode || (member.original_path || "").split("/").pop().replace(/\.[^.]+$/, "") || "File";
 }
-async function readBatchPromotionPlan(id) {
-  const args = { id, section: "state", key: "batch_promotion_plan", chunk: 0 };
-  const first = await tool("action_detail", args);
-  let plan = first.data;
-  if (first.total_chunks) {
-    if (first.total_chunks > 128)
-      throw new Error("This replacement plan is too large to display safely.");
-    let content = first.content;
-    for (let chunk = 1; chunk < first.total_chunks; chunk++)
-      content += (await tool("action_detail", { ...args, chunk })).content;
-    plan = JSON.parse(content);
+function replacementSizes(facts) {
+  if (!(facts?.source_bytes > 0 && facts?.candidate_bytes > 0)) return null;
+  const saved = facts.source_bytes - facts.candidate_bytes;
+  const result = saved >= 0 ? `Saves ${bytes(saved)} (${Math.round(saved / facts.source_bytes * 100)}%)` : `Grows by ${bytes(-saved)}`;
+  return node("p", `${bytes(facts.source_bytes)} → ${bytes(facts.candidate_bytes)} · ${result}`, "replacement-sizes");
+}
+function replacementQuality(facts) {
+  if (facts?.vmaf_mean == null) return null;
+  const parts = [`Quality VMAF ${Math.round(facts.vmaf_mean)}`];
+  if (facts.vmaf_worst_window != null) parts.push(`worst ${Math.round(facts.vmaf_worst_window)}`);
+  return node("p", parts.join(" · "), "metadata replacement-quality");
+}
+// One file as a person decides on it. The paths stay behind a disclosure.
+function replacementCard({name, facts, originalPath, newPath, check, onView}) {
+  const card = node("div", "", "candidate-review-row replacement-row");
+  if (check) {
+    const label = node("label", "", "check replacement-name");
+    label.append(check, node("strong", name));
+    card.append(label);
+  } else card.append(node("strong", name, "replacement-name"));
+  for (const line of [replacementSizes(facts), replacementQuality(facts), belowTargetNotice(facts?.size_budget_outcome)]) if (line) card.append(line);
+  const tracks = facts?.tracks_message || facts?.audio_summary;
+  if (tracks) card.append(node("p", tracks, "metadata replacement-tracks"));
+  if (originalPath || newPath) {
+    const paths = node("details", "", "replacement-paths");
+    paths.append(node("summary", "Show paths"));
+    for (const [label, path] of [["Original", originalPath], ["New file", newPath]]) {
+      if (!path) continue;
+      const line = node("p", "", "metadata backup-path");
+      line.append(node("span", `${label}: `), node("span", path));
+      paths.append(line);
+    }
+    if (onView) paths.append(button("View file", onView, "text-button"));
+    card.append(paths);
   }
-  if (
-    plan?.batch_id !== id ||
-    !plan.digest ||
-    !Array.isArray(plan.members) ||
-    !plan.members.length
-  )
+  return card;
+}
+// The total a decision frees, only when every file in it reports its sizes.
+function replacementTotalLine(members, factsOf) {
+  const known = members.filter((m) => factsOf(m)?.source_bytes > 0 && factsOf(m)?.candidate_bytes > 0);
+  if (!members.length || known.length !== members.length) return "";
+  const saved = known.reduce((sum, m) => sum + factsOf(m).source_bytes - factsOf(m).candidate_bytes, 0);
+  return saved >= 0 ? `Frees ${bytes(saved)} across ${fileCount(members.length)}` : `Grows by ${bytes(-saved)} across ${fileCount(members.length)}`;
+}
+const replaceDecision = (n) => ({label: `Replace ${fileCount(n)}`, verb: `Replacing ${fileCount(n)}`, failure: "Replacement failed"});
+const prepareDecision = (n) => ({label: `Prepare replacement of ${fileCount(n)}`, verb: `Preparing replacement of ${fileCount(n)}`, failure: "Preparation failed"});
+const keepDecision = (n) => ({label: `Keep ${n} ${n === 1 ? "original" : "originals"}`, verb: `Keeping ${n} ${n === 1 ? "original" : "originals"}`, failure: "Keeping originals failed"});
+
+// The plan exactly as the server holds it. prepared is false when none exists.
+async function readBatchPlan(id) {
+  const plan = await api(`batch-candidates?${new URLSearchParams({id, plan: 1})}`);
+  if (plan.prepared && (plan.id !== id || !plan.digest || !Array.isArray(plan.members) || !plan.members.length))
     throw new Error("Cannot verify the batch replacement list.");
   return plan;
 }
-async function reviewBatchPromotion(id) {
-  const authRevision = state.authRevision;
-  const plan = await readBatchPromotionPlan(id);
-  const notice = await readBatchPromotionNotice(id, plan.digest);
-  if (authRevision !== state.authRevision || $("workspace").hidden) return;
-  state.batchApproval = {id,digest:plan.digest};
-  const host=$("batch-review-data");
-  host.replaceChildren(node("p",`${plan.members.length} ${plan.members.length === 1 ? "candidate selected" : "candidates selected"}`,"metadata"));
-  const warning = regrabWarning(notice);
-  if (warning) host.prepend(warning);
-  for (const member of plan.members) {
-    const row=node("div","","candidate-review-row");
-    row.append(node("strong",member.episode || member.original_path.split("/").pop()));
-    for (const [label,path] of [["Original",member.original_path],["Candidate",member.candidate_path]]) {
-      const line=node("p","","metadata backup-path");line.append(node("span",`${label}: `),node("span",path));row.append(line);
+// How the server's prepared plan differs from the files the person saw.
+function planDifferences(shown, members) {
+  const planned = new Map(members.map((m) => [m.item_key, m]));
+  const seen = new Map(shown.map((m) => [m.item_key, m]));
+  const out = [];
+  for (const m of shown) {
+    const p = planned.get(m.item_key);
+    if (!p) out.push(`Not in the prepared list: ${replacementFileName(m)}`);
+    else if (p.original_path !== m.original_path || p.candidate_path !== m.candidate_path || p.transcode_action_id !== m.transcode_action_id || (m.candidate_sha256 && p.candidate_sha256 !== m.candidate_sha256))
+      out.push(`Changed since you reviewed it: ${replacementFileName(m)}`);
+  }
+  for (const m of members) if (!seen.has(m.item_key)) out.push(`Added to the prepared list: ${replacementFileName(m)}`);
+  return out;
+}
+const reviewMembers = (r) => r.mode === "plan" ? r.members : r.members.filter((m) => r.selected.has(m.item_key));
+function syncBatchReview() {
+  const r = state.batchReview;
+  const chosen = r ? reviewMembers(r) : [];
+  const approve = $("approve-batch-review"), reject = $("reject-batch-review");
+  approve.textContent = chosen.length ? `Replace ${fileCount(chosen.length)}` : "Replace files";
+  $("batch-review-total").textContent = r ? replacementTotalLine(chosen, (m) => r.facts[m.transcode_action_id]) : "";
+  approve.disabled = !serverReachable || !r || r.busy || !chosen.length || !state.info?.allow_destructive;
+  reject.hidden = !r || r.mode !== "plan";
+  reject.disabled = !serverReachable || !r || r.busy || !state.info?.allow_destructive;
+}
+function renderBatchReview() {
+  const r = state.batchReview;
+  const notice = $("batch-review-notice"), host = $("batch-review-data");
+  const notes = [];
+  if (r.differences?.length) {
+    const box = node("div", "", "review-difference");
+    box.setAttribute("role", "alert");
+    box.append(node("strong", "The prepared list is not the one you selected. Nothing was replaced."), node("p", "Review this list, then confirm again."));
+    const list = node("ul", "", "metadata");
+    for (const line of r.differences) list.append(node("li", line));
+    box.append(list);
+    notes.push(box);
+  } else if (r.changed) {
+    notes.push(node("p", "The list changed while this review was open. Nothing was replaced. Review it, then confirm again.", "review-difference"));
+  }
+  const warning = regrabWarning(r.notice);
+  if (warning) notes.push(warning);
+  if (!state.info?.allow_destructive) notes.push(node("p", "Replacement is disabled in the server settings.", "metadata"));
+  notice.replaceChildren(...notes);
+  const rows = [];
+  const view = (m) => () => { $("batch-review").close(); return openJob(m.transcode_action_id); };
+  if (r.mode === "select") {
+    const all = node("input");
+    all.type = "checkbox";
+    all.checked = r.selected.size === r.members.length;
+    all.indeterminate = r.selected.size > 0 && !all.checked;
+    all.setAttribute("aria-label", "Select all files");
+    const allLabel = node("label", "", "check");
+    allLabel.append(all, node("span", "Select all files"));
+    const checks = [];
+    all.addEventListener("change", () => {
+      r.selected = new Set(all.checked ? r.members.map((m) => m.item_key) : []);
+      checks.forEach((c) => { c.checked = all.checked; });
+      all.indeterminate = false;
+      syncBatchReview();
+    });
+    rows.push(allLabel);
+    for (const m of r.members) {
+      const check = node("input");
+      check.type = "checkbox";
+      check.checked = r.selected.has(m.item_key);
+      checks.push(check);
+      check.addEventListener("change", () => {
+        if (check.checked) r.selected.add(m.item_key); else r.selected.delete(m.item_key);
+        all.checked = r.selected.size === r.members.length;
+        all.indeterminate = r.selected.size > 0 && !all.checked;
+        syncBatchReview();
+      });
+      rows.push(replacementCard({name: replacementFileName(m), facts: r.facts[m.transcode_action_id], originalPath: m.original_path, newPath: m.candidate_path, check, onView: view(m)}));
     }
-    host.append(row);
-    // The plan does not carry how a candidate was made; look up the few that
-    // came from a size budget and label them without delaying the review.
-    if (member.transcode_action_id && plan.members.length <= 50) api(`operations?id=${encodeURIComponent(member.transcode_action_id)}`).then(found => {
-      const notice = belowTargetNotice(found.jobs?.[0]?.size_budget_outcome);
-      if (notice) row.append(notice);
-    }).catch(() => {});
+    if (r.excluded) rows.push(node("p", `${r.excluded} other files are unfinished, have no candidate, or already have a replacement job. They stay unchanged.`, "metadata"));
+  } else {
+    for (const m of r.members)
+      rows.push(replacementCard({name: replacementFileName(m), facts: r.facts[m.transcode_action_id], originalPath: m.original_path, newPath: m.candidate_path, onView: view(m)}));
   }
-  $("batch-review").showModal();
+  host.replaceChildren(...rows);
+  syncBatchReview();
 }
-$("dismiss-batch-review").addEventListener("click", () =>
-  $("batch-review").close(),
-);
-async function decideBatchReplacement(decision) {
-  const approval=state.batchApproval;
-  if (!approval || state.approvingBatch) return;
-  state.approvingBatch=true;
-  $("approve-batch-review").disabled=$("reject-batch-review").disabled=true;
+function openBatchReview(review) {
+  state.batchReview = {busy: false, facts: {}, ...review};
+  renderBatchReview();
+  if (!$("batch-review").open) $("batch-review").showModal();
+}
+// The batch's replacement review. A batch with a prepared plan shows exactly
+// that plan; otherwise it shows the candidates to choose from.
+async function reviewBatchReplacement(id) {
+  const auth = state.authRevision;
+  const plan = await readBatchPlan(id);
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (plan.prepared) {
+    if (plan.approved) throw new Error("This replacement is already approved. Its progress shows on the batch.");
+    if (!plan.waiting) throw new Error("This replacement is not waiting for approval. Refresh the queue.");
+    const notice = await readBatchPromotionNotice(id, plan.digest);
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    openBatchReview({id, mode: "plan", members: plan.members, facts: plan.member_facts || {}, digest: plan.digest, notice, noticeSeen: true});
+    return;
+  }
+  const review = await api(`batch-candidates?id=${encodeURIComponent(id)}`);
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (!review.members.length) {
+    notify("No unreserved candidates are available. Open the batch files to inspect their outcomes.");
+    return;
+  }
+  openBatchReview({id, mode: "select", members: review.members, facts: review.member_facts || {}, version: review.version, excluded: review.excluded, selected: new Set(review.members.map((m) => m.item_key))});
+}
+// Shows the plan the server holds, with why it needs another look.
+function showPreparedPlan(r, plan, notice, differences, changed) {
+  Object.assign(r, {mode: "plan", members: plan.members, facts: plan.member_facts || {}, digest: plan.digest, selected: null, notice, noticeSeen: true, differences, changed});
+  renderBatchReview();
+}
+// One click: prepare the plan for exactly the checked files if none exists,
+// read it back, and approve only when it is the list that was shown, with the
+// digest the server returned for it.
+async function replaceBatchFiles() {
+  const r = state.batchReview;
+  if (!r || r.busy || !serverReachable || !state.info?.allow_destructive) return;
+  const auth = state.authRevision;
+  const live = () => state.batchReview === r && $("batch-review").open && auth === state.authRevision;
+  r.busy = true;
+  syncBatchReview();
   try {
-    await commandRequest("batch-candidates",{id:approval.id,digest:approval.digest,decision},()=>$("batch-review").close());
-    await refreshDetail();
-    await loadJobs();
+    const shown = reviewMembers(r);
+    let plan = await readBatchPlan(r.id);
+    if (!live()) return;
+    if (!plan.prepared) {
+      if (r.mode !== "select") throw new Error("This replacement is no longer prepared. Close this review and open it again.");
+      await commandRequest("batch-candidates", {id: r.id, version: r.version, item_keys: shown.map((m) => m.item_key)}, undefined, prepareDecision(shown.length));
+      if (!live()) return;
+      plan = await readBatchPlan(r.id);
+      if (!live()) return;
+    }
+    if (!plan.prepared || plan.approved || !plan.waiting) throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
+    const notice = await readBatchPromotionNotice(r.id, plan.digest);
+    if (!live()) return;
+    const differences = planDifferences(shown, plan.members);
+    const changed = r.mode === "plan" && plan.digest !== r.digest;
+    if (differences.length || changed || (notice?.regrab_warning && !r.noticeSeen)) {
+      showPreparedPlan(r, plan, notice, differences, changed);
+      return;
+    }
+    await commandRequest("batch-candidates", {id: r.id, digest: plan.digest, decision: "approve"}, () => $("batch-review").close(), replaceDecision(shown.length));
   } finally {
-    state.approvingBatch=false;
-    $("approve-batch-review").disabled=$("reject-batch-review").disabled=!serverReachable;
+    r.busy = false;
+    syncBatchReview();
   }
 }
-$("approve-batch-review").addEventListener("click",()=>safe(()=>decideBatchReplacement("approve")));
-$("reject-batch-review").addEventListener("click",()=>safe(()=>decideBatchReplacement("reject")));
+// Keeps every original of a prepared plan from the queue row, without opening
+// the review: dropping a plan changes no file.
+async function keepPreparedOriginals(id) {
+  const plan = await readBatchPlan(id);
+  if (!plan.prepared || !plan.waiting) throw new Error("Reopen the replacement review before deciding.");
+  await commandRequest("batch-candidates", {id, digest: plan.digest, decision: "reject"}, undefined, keepDecision(plan.members.length));
+}
+// Keeps every original: the plan is dropped and nothing is replaced.
+async function keepBatchOriginals() {
+  const r = state.batchReview;
+  if (!r || r.mode !== "plan" || r.busy || !serverReachable) return;
+  const auth = state.authRevision;
+  const live = () => state.batchReview === r && $("batch-review").open && auth === state.authRevision;
+  r.busy = true;
+  syncBatchReview();
+  try {
+    const plan = await readBatchPlan(r.id);
+    if (!live()) return;
+    if (!plan.prepared || !plan.waiting) throw new Error("This replacement is no longer waiting for a decision. Refresh the queue.");
+    if (plan.digest !== r.digest) {
+      showPreparedPlan(r, plan, r.notice, planDifferences(r.members, plan.members), true);
+      return;
+    }
+    await commandRequest("batch-candidates", {id: r.id, digest: plan.digest, decision: "reject"}, () => $("batch-review").close(), keepDecision(plan.members.length));
+  } finally {
+    r.busy = false;
+    syncBatchReview();
+  }
+}
+$("dismiss-batch-review").addEventListener("click", () => $("batch-review").close());
+$("close-batch-review").addEventListener("click", () => $("batch-review").close());
+$("batch-review").addEventListener("close", () => { state.batchReview = null; syncBatchReview(); });
+$("approve-batch-review").addEventListener("click", () => safe(replaceBatchFiles));
+$("reject-batch-review").addEventListener("click", () => safe(keepBatchOriginals));
 $("close-detail").addEventListener("click", () => $("job-detail").close());
 $("job-detail").addEventListener("close", () => { state.detailRevision++; state.detail=null; writeNavigation(); });
 $("detail-row-log").addEventListener("toggle", () => { if ($("detail-row-log").open) safe(loadDetail); });

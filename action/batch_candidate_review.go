@@ -75,6 +75,38 @@ func (e *Engine) BatchCandidates(ctx context.Context, id string) (*BatchCandidat
 	return &BatchCandidateReview{ID: id, Version: plan.Digest, Service: planService(plan), Members: plan.Members, Excluded: len(items) - len(plan.Members)}, nil
 }
 
+// BatchPromotionPlanRead is the prepared replacement plan exactly as the
+// server holds it: the members and the digest an approval must quote, plus
+// whether it still waits for that approval.
+type BatchPromotionPlanRead struct {
+	ID       string                 `json:"id"`
+	Digest   string                 `json:"digest"`
+	Service  string                 `json:"service"`
+	Approved bool                   `json:"approved"`
+	Waiting  bool                   `json:"waiting"`
+	Members  []batchPromotionMember `json:"members"`
+}
+
+// BatchPromotionPlan reads a batch's prepared plan from its durable state. It
+// changes nothing and hashes nothing: the member list and digest are the ones
+// an approval is checked against.
+func (e *Engine) BatchPromotionPlan(ctx context.Context, id string) (*BatchPromotionPlanRead, error) {
+	inst, err := e.deps.Store.GetActionInstance(id)
+	if err != nil {
+		return nil, err
+	}
+	if inst.ActionName != "transcode_batch" {
+		return nil, fmt.Errorf("this is not a batch")
+	}
+	ec := parseExecutionContext(inst, e)
+	plan := getBatchPromotionPlan(ec.State["batch_promotion_plan"])
+	if plan == nil {
+		return nil, nil
+	}
+	approved := getBool(ec.State, "batch_promotion_approved")
+	return &BatchPromotionPlanRead{ID: id, Digest: plan.Digest, Service: planService(plan), Approved: approved, Waiting: !approved && inst.Status == StatusWaitingDecision && inst.CurrentStep == 2, Members: plan.Members}, nil
+}
+
 func (e *Engine) PrepareBatchPromotion(ctx context.Context, id, version, receipt string, keys []string) (*ActionResult, error) {
 	if !e.AllowDestructive() {
 		return nil, fmt.Errorf("replacement is disabled in the server settings")

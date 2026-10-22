@@ -848,6 +848,16 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					}
 				}
 			}
+			if r.inst.ActionName == "promote_transcode_candidate" {
+				// What the person decides on, and where the files end up, come
+				// from the transcode job being replaced and this job's record.
+				if source, ok := recordsByID[operationString(r.inputs["transcode_action_id"])]; ok && source.inst.ActionName == "transcode_media" {
+					job["replacement_facts"] = replacementFactsOf(source)
+				}
+				if where := whereOf(r); where != nil {
+					job["where"] = where
+				}
+			}
 			if recordsByID[root].inst.ActionName != "transcode_batch" && len(members[root]) > 1 {
 				related := []map[string]any{}
 				for _, id := range []string{root, existingReplacements[root]} {
@@ -888,6 +898,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 						}
 					}
 				}
+				// A candidate in the batch's prepared replacement plan is replaced
+				// by that plan; it offers no replacement of its own.
+				if parent := recordsByID[operationString(r.inputs["parent_action_id"])]; parent.inst.ActionName == "transcode_batch" && existingReplacements[r.inst.ID] == "" {
+					if plan := replacementPlanState(parent.state, r.inst.ID); plan != "" {
+						job["replacement_plan"], job["candidate_ready"] = plan, false
+					}
+				}
 				if context := operationReplacementContext(r, recordsByID); context != nil {
 					job["replacement_context"] = context
 				}
@@ -914,6 +931,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 				job["batch_files"] = batchQueueFeedback(items)
+				if progress := s.batchReplacementProgress(r, recordsByID, existingReplacements); progress != nil {
+					job["replacement"] = progress
+				}
 				remaining, replacedFiles := 0, 0
 				for _, item := range items {
 					child := recordsByID[item.ChildActionID]
