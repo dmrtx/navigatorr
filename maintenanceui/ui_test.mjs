@@ -4907,16 +4907,16 @@ test("job details have one progress line with the worker's heartbeat", async () 
 
 test("job details show the pipeline as a stepper and name the current step", async () => {
   const h = await openDetail(detailJob());
-  const [stepper] = nodesWithClass(h.elements.get("detail-summary"), "stepper");
+  const [stepper] = nodesWithClass(h.elements.get("detail-summary"), "job-steps");
   assert.equal(stepper.children.length, 7);
   assert.deepEqual(stepper.children.map((n) => n.className.split(" ")[1]), ["done", "done", "done", "done", "done", "current", "pending"]);
-  assert.equal(nodesWithClass(h.elements.get("detail-summary"), "stepper-current")[0].textContent, "Step 6 of 7 · Convert file");
+  assert.equal(nodesWithClass(h.elements.get("detail-summary"), "job-steps-current")[0].textContent, "Step 6 of 7 · Convert file");
   const failed = await openDetail(detailJob({ status: "failed", error: "ffmpeg exited with status 1", worker: undefined, stages: stagesAt(5, "failed") }));
-  const [failedStepper] = nodesWithClass(failed.elements.get("detail-summary"), "stepper");
-  assert.equal(failedStepper.children[5].className, "step failed");
-  assert.equal(nodesWithClass(failed.elements.get("detail-summary"), "stepper-current")[0].textContent, "Failed at step 6 of 7 · Convert file");
+  const [failedStepper] = nodesWithClass(failed.elements.get("detail-summary"), "job-steps");
+  assert.equal(failedStepper.children[5].className, "job-step failed");
+  assert.equal(nodesWithClass(failed.elements.get("detail-summary"), "job-steps-current")[0].textContent, "Failed at step 6 of 7 · Convert file");
   const done = await openDetail(detailJob({ status: "completed", worker: undefined, stages: detailStageNames.map((name) => ({ name, status: "completed" })) }));
-  assert.equal(nodesWithClass(done.elements.get("detail-summary"), "stepper-current")[0].textContent, "All 7 steps done");
+  assert.equal(nodesWithClass(done.elements.get("detail-summary"), "job-steps-current")[0].textContent, "All 7 steps done");
 });
 
 test("job details print the plan once, in its own row, and not under the summary", async () => {

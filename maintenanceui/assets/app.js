@@ -4897,8 +4897,8 @@ function renderStages(job) {
   }
 }
 
-// The pipeline as a row of dots, one per step, with the current step named
-// under it. A step is done, current, pending or failed.
+// The pipeline as small dots joined by a thin line, one dot per step, with
+// the current step named under it. A step is done, current, pending or failed.
 const stepSymbols = {done: "✓", failed: "!", current: "", pending: ""};
 function renderStepper(job) {
   const stages = effectiveStages(job);
@@ -4908,16 +4908,16 @@ function renderStepper(job) {
     : active && (index === job.current_step || stage.status === "running") ? "current"
     : ["completed", "skip", "partial"].includes(stage.status) ? "done" : "pending";
   const states = stages.map(stateOf);
-  const wrap = node("div", "", "stepper-wrap");
-  const list = node("ol", "", "stepper");
+  const wrap = node("div", "", "job-steps-wrap");
+  const list = node("ol", "", "job-steps");
   list.setAttribute("aria-label", "Steps");
   for (const [index, stage] of stages.entries()) {
     const label = stageLabel(stage.name);
-    const item = node("li", "", `step ${states[index]}`);
+    const item = node("li", "", `job-step ${states[index]}`);
     item.title = label;
     item.setAttribute("aria-label", `Step ${index + 1} of ${stages.length}, ${label}: ${states[index]}`);
     if (states[index] === "current") item.setAttribute("aria-current", "step");
-    item.append(node("span", stepSymbols[states[index]], "step-dot"));
+    item.append(node("span", stepSymbols[states[index]], "job-step-dot"));
     list.append(item);
   }
   const at = states.includes("failed") ? states.indexOf("failed") : states.indexOf("current");
@@ -4925,7 +4925,7 @@ function renderStepper(job) {
     ? `${states[at] === "failed" ? "Failed at step" : "Step"} ${at + 1} of ${stages.length} · ${stageLabel(stages[at].name)}`
     : states.every(value => value === "done") ? `All ${stages.length} steps done`
     : `Next: ${stageLabel(stages[Math.max(0, states.indexOf("pending"))].name)}`;
-  wrap.append(list, node("p", text, "stepper-current"));
+  wrap.append(list, node("p", text, "job-steps-current"));
   return wrap;
 }
 // Compact replacements can be re-grabbed by Radarr/Sonarr. The tracking

@@ -2439,15 +2439,19 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .live-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--forest); }
 .live-dot.delayed::before { background: var(--warning); }
 .live-dot.stale::before { background: var(--danger); }
-.stepper-wrap { margin: 10px 0 6px; }
-.stepper { display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.step { flex: 1 1 0; min-width: 0; }
-.step-dot { display: grid; place-items: center; height: 18px; border-radius: 9px; background: var(--track); color: var(--on-primary); font-size: 11px; font-weight: 700; line-height: 1; }
-.step.done .step-dot { background: var(--forest); }
-.step.current .step-dot { background: var(--surface); box-shadow: inset 0 0 0 2px var(--forest); }
-.step.current .step-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--forest); }
-.step.failed .step-dot { background: var(--danger); color: var(--on-forest); }
-.stepper-current { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.job-steps-wrap { margin: 10px 0 6px; }
+.job-steps { display: flex; align-items: center; margin: 0; padding: 0; list-style: none; }
+.job-step { flex: 1 1 0; min-width: 0; display: flex; align-items: center; }
+.job-step:last-child { flex: 0 0 auto; }
+.job-step::after { content: ""; flex: 1 1 auto; height: 2px; margin: 0 4px; border-radius: 1px; background: var(--track); }
+.job-step:last-child::after { display: none; }
+.job-step.done::after { background: var(--forest); }
+.job-step-dot { flex: 0 0 16px; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--track); color: var(--on-primary); font-size: 10px; font-weight: 700; line-height: 1; }
+.job-step.done .job-step-dot { background: var(--forest); }
+.job-step.current .job-step-dot { background: var(--surface); box-shadow: inset 0 0 0 2px var(--forest); }
+.job-step.current .job-step-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--forest); }
+.job-step.failed .job-step-dot { background: var(--danger); color: var(--on-forest); }
+.job-steps-current { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
 .detail-rows { margin-top: 14px; border-top: 1px solid var(--line); }
 .detail-row, #detail-costs > .phase-costs { margin: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .detail-row > summary, .phase-costs.detail-row > summary { display: flex; align-items: center; gap: 8px; min-height: var(--control-size); cursor: pointer; font-size: 13px; font-weight: 600; list-style: none; }
