@@ -26,7 +26,6 @@ const state = {
   authMode: "token",
   busyJobs: new Set(),
   submitting: false,
-  approvingBatch: false,
   fileStep: "browse",
 };
 const names = {
@@ -56,6 +55,12 @@ function node(tag, text = "", className = "") {
   n.textContent = text;
   n.className = className;
   return n;
+}
+// A button that only opens something stays usable while its job is busy.
+function jobControlDisabled(b) {
+  if (!serverReachable) return true;
+  if (b.dataset.navigation === "true") return false;
+  return jobIsBusy(b.dataset.jobControl) || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
 }
 function jobIsBusy(id) {
   return state.busyJobs.has(id) || [...(state.commands?.values() || [])].some(command=>command.id===id && !["completed","failed","cancelled"].includes(command.status));
@@ -100,6 +105,7 @@ function actionIcon(label) {
     "Review candidates": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review candidate": "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Choose a goal": "M8 5h12v15H8ZM4 16V2h12",
+    "Choose tracks": "M4 7h16M4 17h16M9 4v6M15 14v6",
     // Keeping originals is a decision, not filing the job away: a shield, not a box.
     "Keep original": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
     "Keep originals": "M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6ZM9 12l2 2 4-4",
@@ -197,14 +203,12 @@ function setConnection(online) {
   $("connection-status").hidden = online;
   document.body?.classList.toggle("disconnected", !online);
   document.querySelectorAll("[data-job-control]").forEach((button) => {
-    button.disabled = !online || jobIsBusy(button.dataset.jobControl) ||
-      (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    button.disabled = jobControlDisabled(button);
   });
   document.querySelectorAll(".dialog-connection").forEach((notice) => {
     notice.hidden = online;
   });
-  $("approve-batch-review").disabled = !online || state.approvingBatch;
-  $("reject-batch-review").disabled = !online || state.approvingBatch;
+  syncBatchReview();
   $("approve-file-review").disabled = !online || state.approvingFile;
   $("confirm-action-review").disabled = !online;
   document.querySelectorAll("[data-review-choice]").forEach(b => { b.disabled = !online; });
@@ -252,7 +256,7 @@ function invalidateAuthentication() {
   state.jobsRevision++;
   state.detailRevision++;
   state.detail = null;
-  state.batchApproval = null;
+  state.batchReview = null;
   state.replacementChoice = null;
   $("job-detail").close();
   $("batch-review").close();
@@ -280,7 +284,7 @@ function authenticationMessage() {
     ? "Cloudflare Access sign-in required. Reload to sign in."
     : "sign in to Navigatorr";
 }
-async function api(path, body, { signal } = {}) {
+async function api(path, body, { signal, method } = {}) {
   if (body !== undefined && !serverReachable)
     throw new Error(
       "Offline. Changes are unavailable until the server responds.",
@@ -288,7 +292,7 @@ async function api(path, body, { signal } = {}) {
   let res;
   try {
     res = await fetch(`/api/maintenance/${path}`, {
-      method: body === undefined ? "GET" : "POST",
+      method: method || (body === undefined ? "GET" : "POST"),
       redirect: "manual",
       headers: {
         "Content-Type": "application/json",
@@ -344,10 +348,10 @@ async function api(path, body, { signal } = {}) {
   if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
   return data;
 }
-async function tool(name, args = {}, onAccepted) {
+async function tool(name, args = {}, onAccepted, decision) {
   const mutates = ["action_run","action_resume","action_retry","action_cancel"].includes(name) || name === "transcode_backups" && ["clean","discard_duplicate","discard","restore"].includes(args.mode);
   const result = mutates
-    ? await commandRequest("tool", {name,arguments:args,background:true}, onAccepted)
+    ? await commandRequest("tool", {name,arguments:args,background:true}, onAccepted, decision)
     : await api("tool", {name,arguments:args});
   if (!result.content) return result;
   const text = result.content
@@ -381,7 +385,7 @@ function trackCommand(request, receipt, result) {
   if (previous && previous.status !== info.status && !placeholder) announceCommand(info);
   renderCommandIndicators();
   document.querySelectorAll("[data-job-control]").forEach(button => {
-    if (button.dataset.jobControl === info.id) button.disabled = !serverReachable || jobIsBusy(info.id) || (button.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    if (button.dataset.jobControl === info.id) button.disabled = jobControlDisabled(button);
   });
   return info;
 }
@@ -393,7 +397,9 @@ const appliedChipMs = 8000;
 const commandVerbs = {"Preparing replacement review":"Preparing review","Applying replacement decision":"Applying decision","Applying decision":"Applying decision","Retrying job":"Retrying","Stopping job":"Stopping","Applying candidate decision":"Applying decision","Verifying recovery data":"Verifying","Verifying duplicate":"Verifying","Removing recovery copy":"Removing copy","Updating batch settings":"Updating settings"};
 const commandFailures = {"Preparing replacement review":"Review failed","Applying replacement decision":"Decision failed","Applying decision":"Decision failed","Retrying job":"Retry failed","Stopping job":"Stop failed","Applying candidate decision":"Decision failed","Verifying recovery data":"Check failed","Verifying duplicate":"Check failed","Removing recovery copy":"Removal failed","Updating batch settings":"Update failed"};
 const commandStatusText = {pending:"Waiting to apply",running:"Applying",waiting_external:"Waiting to apply",completed:"Applied",failed:"Failed",cancelled:"Cancelled"};
-function commandLabel(command) { return commandLabels[command.kind] || command.label || "Update"; }
+// A command that carries the decision it was sent for names it (for example
+// "Replace 3 files"); the others use the label of their kind.
+function commandLabel(command) { return command.decision?.label || commandLabels[command.kind] || command.label || "Update"; }
 // The engine keeps waiting_reason when a command runs again after a wait, and
 // a cancelled one stores its cancel reason there. Only a waiting one says why.
 function commandWaitingReason(command) { return command.status === "waiting_external" ? command.waiting_reason || "" : ""; }
@@ -409,11 +415,11 @@ function commandChip(id, now = commandClock()) {
   if (!newest) return null;
   const label = commandLabel(newest);
   if (newest.status === "failed" && !newest.dismissed)
-    return {kind:"failed", command:newest, text:commandFailures[label] || "Action failed", title:`${label} · Failed`};
+    return {kind:"failed", command:newest, text:newest.decision?.failure || commandFailures[label] || "Action failed", title:`${label} · Failed`};
   const active = commands.find((c) => !c.status || commandActiveStatuses.includes(c.status));
   if (active) {
     const activeLabel = commandLabel(active);
-    const text = active.status === "waiting_external" ? "Waiting to apply" : commandVerbs[activeLabel] || "Applying";
+    const text = active.status === "waiting_external" ? "Waiting to apply" : active.decision?.verb || commandVerbs[activeLabel] || "Applying";
     const reason = commandWaitingReason(active);
     return {kind:"active", command:active, text, title:`${activeLabel} · ${commandStatusText[active.status] || "Applying"}${reason ? ` · ${reason}` : ""}`};
   }
@@ -607,7 +613,7 @@ function restoreCommands() {
   }
   renderBackups(); renderBackupCleanup();
 }
-async function commandRequest(path, body, onAccepted) {
+async function commandRequest(path, body, onAccepted, decision) {
   const request = JSON.stringify([path,body]);
   const receipts = readCommandReceipts();
   const receipt = receipts[request] ||= {key:submissionID(),started:Date.now()};
@@ -616,6 +622,7 @@ async function commandRequest(path, body, onAccepted) {
   if (!result.command_id) { delete receipts[request]; sessionStorage.setItem("navigatorr_commands",JSON.stringify(receipts)); return result; }
   receipt.command_id = result.command_id; receipt.id = result.id || commandTarget(body);
   receipt.label = commandLabels[body.kind || body.arguments?.mode || body.name?.replace("action_","")] || "Update";
+  if (decision) receipt.decision = decision;
   if (state.backupCleaning?.id === receipt.id) {
     const task = state.backupCleaning;
     receipt.cleanup = {id:task.id,name:task.name,mode:task.mode,started:task.started};
@@ -788,6 +795,7 @@ function selectTab(tab, fromRoute = false) {
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
   // The node's job settings come from the worker activity report.
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
+  if (tab === "advanced") void loadKeepLanguages();
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     clearTimeout(state.folderSizesTimer);
@@ -910,6 +918,8 @@ async function initialize() {
   $("workspace").hidden = false;
   $("worker-status").hidden = false;
   void refreshWorkers();
+  // The picker in the goal form names the saved languages.
+  void loadKeepLanguages();
   $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
@@ -1716,6 +1726,8 @@ function sourceSummary() {
 function finishSubmission(mode) {
   if (mode === "encode") {
     state.goalExplicit = false;
+    state.goalCarry = null;
+    resetKeepTracks();
     state.selected.clear();
     state.folderSelected?.clear();
     $("library-items")
@@ -1798,24 +1810,31 @@ function refreshGoalProfile() {
   clearTimeout(state.goalProfileTimer);
   state.goalProfileTimer = setTimeout(() => { if (state.goalProfile?.key === key) loadGoalProfile(key); }, 150);
 }
+// Reading a file takes one of the server's two source slots. Both can still be
+// held by files just left, so a busy answer is asked once more.
+async function readSource(url, signal, current) {
+  try {
+    return await api(url, undefined, {signal});
+  } catch (err) {
+    if (err?.status !== 429 || !current()) throw err;
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    if (!current()) throw err;
+    return api(url, undefined, {signal});
+  }
+}
 async function loadGoalProfile(key) {
   const seq = state.goalProfileSeq, controller = new AbortController();
   state.goalProfileAbort = controller;
   const current = () => seq === state.goalProfileSeq && state.goalProfile?.key === key;
-  const read = () => api(`source-profile?${new URLSearchParams({path: key})}`, undefined, {signal: controller.signal});
   let data = null;
   try {
-    data = await read();
-  } catch (err) {
-    // Both read slots can still be held by files just left; ask once more.
-    if (err?.status === 429 && current()) {
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      if (current()) try { data = await read(); } catch {}
-    }
-  }
+    data = await readSource(`source-profile?${new URLSearchParams({path: key})}`, controller.signal, current);
+  } catch {}
   if (!current()) return;
   state.goalProfileAbort = null;
   state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
+  // The file's tracks are read after its profile, never beside it.
+  scheduleKeepTracks();
   const recommended = state.goalProfile.data?.recommended;
   // The recommendation fills in an unchosen goal; it never replaces a choice.
   if (recommended && goalNames[recommended] && !state.goalExplicit) setProcessingMode(recommended);
@@ -1852,6 +1871,370 @@ function goalSkipWarning() {
   if (verdict?.status !== "skip") return "";
   return `${goalNames[mode]} will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
 }
+// Languages to keep. The Save space and Shrink goals keep the audio and
+// subtitle tracks in these languages (plus the original-language audio and any
+// untagged track, which the server always keeps). A language is its ISO 639-2
+// terminology code, the spelling the server stores and compares by; names,
+// two-letter codes and the bibliographic spellings are accepted when typing.
+const languageTable = [
+  // code, name, ISO 639-1, bibliographic spelling
+  ["ara", "Arabic", "ar"], ["bul", "Bulgarian", "bg"], ["cat", "Catalan", "ca"], ["ces", "Czech", "cs", "cze"],
+  ["cym", "Welsh", "cy", "wel"], ["dan", "Danish", "da"], ["deu", "German", "de", "ger"], ["ell", "Greek", "el", "gre"],
+  ["eng", "English", "en"], ["est", "Estonian", "et"], ["eus", "Basque", "eu", "baq"], ["fas", "Persian", "fa", "per"],
+  ["fin", "Finnish", "fi"], ["fra", "French", "fr", "fre"], ["gle", "Irish", "ga"], ["glg", "Galician", "gl"],
+  ["heb", "Hebrew", "he"], ["hin", "Hindi", "hi"], ["hrv", "Croatian", "hr"], ["hun", "Hungarian", "hu"],
+  ["hye", "Armenian", "hy", "arm"], ["ind", "Indonesian", "id"], ["isl", "Icelandic", "is", "ice"], ["ita", "Italian", "it"],
+  ["jpn", "Japanese", "ja"], ["kat", "Georgian", "ka", "geo"], ["kor", "Korean", "ko"], ["lat", "Latin", "la"],
+  ["lav", "Latvian", "lv"], ["lit", "Lithuanian", "lt"], ["mkd", "Macedonian", "mk", "mac"], ["msa", "Malay", "ms", "may"],
+  ["nld", "Dutch", "nl", "dut"], ["nno", "Norwegian Nynorsk", "nn"], ["nob", "Norwegian Bokmål", "nb"], ["nor", "Norwegian", "no"],
+  ["pol", "Polish", "pl"], ["por", "Portuguese", "pt"], ["ron", "Romanian", "ro", "rum"], ["rus", "Russian", "ru"],
+  ["slk", "Slovak", "sk", "slo"], ["slv", "Slovenian", "sl"], ["spa", "Spanish", "es"], ["sqi", "Albanian", "sq", "alb"],
+  ["srp", "Serbian", "sr"], ["swe", "Swedish", "sv"], ["tam", "Tamil", "ta"], ["tel", "Telugu", "te"],
+  ["tgl", "Tagalog", "tl"], ["tha", "Thai", "th"], ["tur", "Turkish", "tr"], ["ukr", "Ukrainian", "uk"],
+  ["vie", "Vietnamese", "vi"], ["zho", "Chinese", "zh", "chi"],
+];
+const languageNameOf = new Map([...languageTable.map(([code, name]) => [code, name]), ["und", "Untagged"]]);
+const languageAliases = new Map([["untagged", "und"], ["unknown", "und"]]);
+for (const [code, name, twoLetter, bibliographic] of languageTable)
+  for (const alias of [code, name.toLowerCase(), twoLetter, bibliographic]) if (alias) languageAliases.set(alias, code);
+languageAliases.set("und", "und");
+// The one spelling two tags of a language share (es-419, spa and es are "spa").
+function canonicalLanguage(tag) {
+  const text = String(tag ?? "").trim().toLowerCase();
+  if (!text) return "und";
+  const base = text.split(/[-_]/)[0];
+  return languageAliases.get(base) || base;
+}
+function languageName(tag) {
+  const code = canonicalLanguage(tag);
+  return languageNameOf.get(code) || code;
+}
+// What was typed, as a language code: "", or a three-letter code the server
+// will check against ISO 639-2.
+function parseLanguage(text) {
+  const raw = String(text ?? "").trim().toLowerCase();
+  const known = languageAliases.get(raw) || languageAliases.get(raw.replace(/\s*\([a-z]{3}\)$/, ""));
+  return known || (/^[a-z]{3}$/.test(raw) ? raw : "");
+}
+function addLanguageTo(languages, text) {
+  const code = parseLanguage(text);
+  if (!code) return {message: "Enter a language such as English or eng."};
+  if (code === "und") return {message: "Untagged tracks are always kept."};
+  if (languages.includes(code)) return {message: `${languageName(code)} is already in the list.`};
+  return {languages: [...languages, code]};
+}
+const sameLanguages = (a, b) => a.length === b.length && [...a].sort().every((code, i) => code === [...b].sort()[i]);
+const languagesByName = languages => [...languages].sort((a, b) => languageName(a).localeCompare(languageName(b)));
+const languageNames = languages => languagesByName(languages).map(languageName).join(", ");
+// The suggestions offered while typing; choosing one types the name.
+$("language-options").append(...languageTable.map(([code, name]) => Object.assign(document.createElement("option"), {value: name, label: code})));
+function renderLanguageChips(list, languages, remove) {
+  list.hidden = !languages.length;
+  list.replaceChildren(...languagesByName(languages).map(code => {
+    const item = node("li", "", "language-chip");
+    const drop = button("×", () => remove(code), "chip-remove");
+    drop.setAttribute("aria-label", `Remove ${languageName(code)}`);
+    item.append(node("span", languageName(code)), node("span", code, "metadata"), drop);
+    return item;
+  }));
+}
+// Both language editors add the same way: say why an entry was refused, or take
+// it. The goal form's one sits inside the job form, so Enter adds the language
+// instead of submitting the job.
+function wireLanguageInput({input, add, note}, current, set) {
+  const submit = () => {
+    const result = addLanguageTo(current(), $(input).value);
+    $(note).textContent = result.message || "";
+    if (!result.languages) return;
+    $(input).value = "";
+    set(result.languages);
+  };
+  $(add).addEventListener("click", submit);
+  $(input).addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submit();
+  });
+}
+
+// The setting, in Settings: edited as a draft and saved with Apply, like the
+// node's parallel jobs. A load never replaces a draft that has been edited.
+const keepLanguages = {status: "idle", saved: [], draft: [], defaults: [], saving: false, request: 0};
+function applyKeepLanguages(data, adopt) {
+  const k = keepLanguages, clean = adopt || sameLanguages(k.draft, k.saved);
+  const changed = k.status === "ready" && !sameLanguages(k.saved, data.languages);
+  k.saved = [...data.languages];
+  k.defaults = [...(data.default || [])];
+  k.status = "ready";
+  if (clean) k.draft = [...k.saved];
+  // The pre-checked tracks follow the saved list only while the form uses it;
+  // a job's own languages, or every track, are not affected by it.
+  if (changed && keepTracks.scope === "saved") { keepTracks.key = ""; refreshKeepTracks(); }
+}
+async function loadKeepLanguages() {
+  const k = keepLanguages, auth = state.authRevision, request = ++k.request;
+  if (k.status === "idle") { k.status = "loading"; renderKeepLanguages(); }
+  try {
+    const data = await api("keep-languages");
+    if (auth !== state.authRevision || request !== k.request) return;
+    applyKeepLanguages(data, false);
+  } catch {
+    if (auth !== state.authRevision || request !== k.request) return;
+    if (k.status !== "ready") k.status = "error";
+  }
+  renderKeepLanguages();
+  renderKeepTracks();
+}
+function keepLanguagesState(k) {
+  if (k.status === "error") return "Could not load the list";
+  if (k.status !== "ready") return "Loading…";
+  if (!sameLanguages(k.draft, k.saved)) return "Not saved yet";
+  if (!k.saved.length) return "Off: every track is kept";
+  return sameLanguages(k.saved, k.defaults) ? "Default" : "Custom";
+}
+function stageKeepLanguages(languages) {
+  keepLanguages.draft = languages;
+  $("keep-languages-note").textContent = "";
+  renderKeepLanguages();
+}
+function renderKeepLanguages() {
+  const k = keepLanguages, ready = k.status === "ready";
+  $("keep-languages-state").textContent = keepLanguagesState(k);
+  renderLanguageChips($("keep-languages-list"), k.draft, code => {
+    stageKeepLanguages(k.draft.filter(language => language !== code));
+    $("keep-language-input").focus();
+  });
+  $("keep-language-input").disabled = !ready;
+  $("keep-language-add").disabled = !ready;
+  $("keep-languages-apply").disabled = !ready || k.saving || sameLanguages(k.draft, k.saved);
+  $("keep-languages-reset").disabled = !ready || sameLanguages(k.draft, k.defaults);
+  $("keep-languages-off").disabled = !ready || !k.draft.length;
+}
+async function saveKeepLanguages(languages) {
+  const k = keepLanguages, note = $("keep-languages-note"), auth = state.authRevision;
+  if (k.saving) return;
+  k.saving = true;
+  note.textContent = "Saving…";
+  renderKeepLanguages();
+  try {
+    const data = await api("keep-languages", {languages}, {method: "PUT"});
+    if (auth !== state.authRevision) return;
+    k.request++;
+    applyKeepLanguages(data, true);
+    note.textContent = "Saved. It applies to jobs created from now on; jobs already queued keep the list they started with.";
+  } catch (e) {
+    note.textContent = e.message;
+  } finally {
+    k.saving = false;
+    renderKeepLanguages();
+    renderKeepTracks();
+  }
+}
+wireLanguageInput({input: "keep-language-input", add: "keep-language-add", note: "keep-languages-note"}, () => keepLanguages.draft, stageKeepLanguages);
+$("keep-languages-apply").addEventListener("click", () => void saveKeepLanguages(keepLanguages.draft));
+$("keep-languages-reset").addEventListener("click", () => stageKeepLanguages([...keepLanguages.defaults]));
+$("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
+
+// The goal form's choice for one job: the saved languages, this job's own list,
+// or every track. For one file the file's tracks are listed too, checked the
+// way the server's rules would keep them (the server answers, so the rules live
+// in one place); changing a box sends explicit stream lists instead.
+const keepGoals = ["size", "compact"];
+const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
+// Which file or files the choice is for; null while the goal keeps no tracks.
+function keepTrackTarget() {
+  if ($("technical").checked || !keepGoals.includes(processingMode())) return null;
+  const target = goalProbeTarget();
+  return target ? {path: target.path, single: $("scope").value !== "batch"} : null;
+}
+function keepLanguageInputs() {
+  const kt = keepTracks;
+  return kt.scope === "saved" ? {} : {keep_languages: kt.scope === "all" ? [] : [...kt.languages]};
+}
+// The inputs the choice adds to a job. The saved list sends nothing; boxes that
+// were changed send both lists, so what is frozen is what was on screen.
+function keepTrackInputs(single, path) {
+  const kt = keepTracks, inputs = keepLanguageInputs();
+  if (!single || !kt.picks || kt.path !== path) return inputs;
+  const order = set => [...set].sort((a, b) => a - b);
+  // A file without audio has none to keep: the server takes the subtitles
+  // alone then, and refuses an empty audio list.
+  if (kt.data && !kt.data.audio.length) return {...inputs, keep_subtitle_streams: order(kt.picks.subtitles)};
+  if (!kt.picks.audio.size) throw new Error("Keep at least one audio track.");
+  return {...inputs, keep_audio_streams: order(kt.picks.audio), keep_subtitle_streams: order(kt.picks.subtitles)};
+}
+function resetKeepTracks() {
+  Object.assign(keepTracks, {scope: "saved", languages: [], picks: null, notice: "", key: ""});
+}
+// Opening a file again to pick tracks starts from the languages it was made with.
+function presetKeepLanguages(languages) {
+  Object.assign(keepTracks, {scope: languages.length ? "job" : "all", languages: [...languages], picks: null, notice: "", key: ""});
+}
+function setKeepScope(scope) {
+  const kt = keepTracks;
+  if (scope === kt.scope) return;
+  // Editing starts from the saved list rather than from nothing.
+  if (scope === "job" && !kt.languages.length) kt.languages = [...keepLanguages.saved];
+  kt.scope = scope;
+  $("keep-job-note").textContent = "";
+  controls();
+}
+document.querySelectorAll('input[name="keep-scope"]').forEach(radio => radio.addEventListener("change", () => { if (radio.checked) setKeepScope(radio.value); }));
+wireLanguageInput({input: "keep-job-input", add: "keep-job-add", note: "keep-job-note"}, () => keepTracks.languages, languages => { keepTracks.languages = languages; controls(); });
+function keepTracksQuery(path) {
+  const kt = keepTracks, params = new URLSearchParams({path});
+  if (kt.scope !== "saved") params.set("keep_languages", kt.scope === "all" ? "" : kt.languages.join(","));
+  return params.toString();
+}
+// Called whenever the form changes. A new file or a new language list reads the
+// file again; the same ones do nothing.
+function refreshKeepTracks() {
+  const kt = keepTracks, target = keepTrackTarget(), file = target?.single ? target.path : "";
+  const key = file ? keepTracksQuery(file) : "";
+  if (key === kt.key) return;
+  kt.seq++;
+  kt.abort?.abort();
+  kt.abort = null;
+  clearTimeout(kt.timer);
+  kt.key = key;
+  if (!file) {
+    Object.assign(kt, {status: "idle", data: null, picks: null, path: "", notice: "", error: ""});
+    return;
+  }
+  // A new file starts from the automatic choice. The same file with other
+  // languages does too: the boxes follow the languages again.
+  if (kt.path !== file) Object.assign(kt, {data: null, picks: null, path: file, notice: ""});
+  else if (kt.picks) Object.assign(kt, {picks: null, notice: "The boxes follow the languages again."});
+  kt.status = "loading";
+  kt.error = "";
+  scheduleKeepTracks();
+}
+// One file selection takes one of the server's two source slots at a time: the
+// goal's profile read goes first, and the tracks are read once it is done (or
+// at once when only the languages changed). A second tab keeps the other slot.
+function scheduleKeepTracks() {
+  const kt = keepTracks;
+  clearTimeout(kt.timer);
+  if (!kt.key || kt.status !== "loading" || kt.abort) return;
+  const profile = state.goalProfile;
+  if (profile?.status === "loading" && profile.key === kt.path) return;
+  const key = kt.key, seq = kt.seq;
+  kt.timer = setTimeout(() => loadKeepTracks(key, seq), 150);
+}
+async function loadKeepTracks(key, seq) {
+  const kt = keepTracks, controller = new AbortController();
+  kt.abort = controller;
+  const current = () => seq === kt.seq;
+  let data = null, error = "";
+  try {
+    data = await readSource(`source-tracks?${key}`, controller.signal, current);
+  } catch (err) {
+    error = err?.status === 400 ? err.message : "Could not read this file's tracks. The job still follows the languages.";
+  }
+  if (!current()) return;
+  kt.abort = null;
+  const ready = Boolean(data?.audio || data?.subtitles);
+  Object.assign(kt, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. The job still follows the languages."});
+  renderKeepTracks();
+}
+const trackCodecs = {eac3: "E-AC-3", ac3: "AC-3", truehd: "TrueHD", subrip: "SRT", ass: "ASS", ssa: "SSA", hdmv_pgs_subtitle: "PGS", dvd_subtitle: "VobSub", webvtt: "WebVTT", mov_text: "Text"};
+const trackCodec = codec => trackCodecs[codec] || codecLabel(codec);
+function trackChannels(count) {
+  return {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}[count] || (count > 0 ? `${count} channels` : "");
+}
+const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has(track.index) : track.keep;
+function keepTracksCount(data) {
+  const kept = kind => data[kind].filter(track => trackKept(kind, track)).length;
+  const part = (kind, one, many) => data[kind].length ? `${kept(kind)} of ${data[kind].length} ${data[kind].length === 1 ? one : many}` : "";
+  const parts = [part("audio", "audio track", "audio tracks"), part("subtitles", "subtitle", "subtitles")].filter(Boolean);
+  return parts.length ? `Keeping ${parts.join(" and ")}.` : "";
+}
+function toggleTrack(kind, index, on) {
+  const kt = keepTracks, data = kt.data;
+  if (!data) return;
+  const automatic = name => new Set(data[name].filter(track => track.keep).map(track => track.index));
+  const picks = kt.picks ||= {audio: automatic("audio"), subtitles: automatic("subtitles")};
+  if (on) picks[kind].add(index); else picks[kind].delete(index);
+  // A file keeps its audio, and boxes that match the automatic choice again are
+  // that choice, so nothing explicit is sent.
+  if (kind === "audio" && !picks.audio.size) picks.audio.add(index);
+  const same = name => picks[name].size === automatic(name).size && [...picks[name]].every(i => automatic(name).has(i));
+  if (same("audio") && same("subtitles")) kt.picks = null;
+  kt.notice = "";
+  renderKeepTracks();
+}
+function trackRow(kind, track) {
+  const row = node("li", "", "track-row"), label = node("label", "", "track-label");
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.addEventListener("change", () => toggleTrack(kind, track.index, box.checked));
+  const name = node("span", "", "track-text");
+  name.append(node("strong", languageName(track.language), "track-name"));
+  const facts = [trackCodec(track.codec), kind === "audio" ? trackChannels(track.channels) : "", track.title].filter(Boolean);
+  if (facts.length) name.append(node("span", facts.join(" · "), "metadata track-facts"));
+  label.append(box, name);
+  // The badges stay on the track's own row, stacked when the row is narrow.
+  const badges = node("span", "", "track-badges");
+  for (const [flag, text] of [["original", "Original"], ["default", "Default"], ["forced", "Forced"]])
+    if (track[flag]) badges.append(node("span", text, "badge track-badge"));
+  if (badges.children.length) label.append(badges);
+  row.append(label);
+  return {row, box, kind, track};
+}
+// The boxes are built when a file is read and updated in place afterwards, so a
+// keyboard user toggling one never loses their place.
+function syncTrackBoxes() {
+  const loading = keepTracks.status === "loading";
+  const audioKept = keepTracks.boxes.filter(entry => entry.kind === "audio" && trackKept(entry.kind, entry.track)).length;
+  for (const entry of keepTracks.boxes) {
+    entry.box.checked = trackKept(entry.kind, entry.track);
+    // Boxes wait for the file to be read again; the last audio track cannot be unticked.
+    entry.box.disabled = loading || (entry.kind === "audio" && entry.box.checked && audioKept <= 1);
+  }
+}
+function renderKeepTracks() {
+  const kt = keepTracks, target = keepTrackTarget();
+  $("keep-tracks").hidden = !target;
+  if (!target) return;
+  document.querySelectorAll('input[name="keep-scope"]').forEach(radio => { radio.checked = radio.value === kt.scope; });
+  $("keep-job-languages").hidden = kt.scope !== "job";
+  renderLanguageChips($("keep-job-list"), kt.languages, code => {
+    keepTracks.languages = keepTracks.languages.filter(language => language !== code);
+    controls();
+    $("keep-job-input").focus();
+  });
+  const data = target.single ? kt.data : null;
+  const saved = keepLanguages.status === "ready" ? keepLanguages.saved : null;
+  $("keep-tracks-summary").textContent = kt.picks ? "Tracks chosen by hand" : kt.scope === "all" ? "Keep every track"
+    : kt.scope === "job" ? (kt.languages.length ? `This job: ${languageNames(kt.languages)}` : "Keep every track")
+    : saved ? (saved.length ? `Saved list: ${languageNames(saved)}` : "Keep every track") : "Saved list";
+  $("keep-tracks-file").hidden = !target.single;
+  if (!target.single) return;
+  if (data && kt.built !== data) {
+    const audio = data.audio.map(track => trackRow("audio", track)), subtitles = data.subtitles.map(track => trackRow("subtitles", track));
+    kt.built = data;
+    kt.boxes = [...audio, ...subtitles];
+    $("keep-audio-list").replaceChildren(...audio.map(entry => entry.row));
+    $("keep-subtitle-list").replaceChildren(...subtitles.map(entry => entry.row));
+  }
+  if (!data) {
+    kt.built = null;
+    kt.boxes = [];
+    $("keep-audio-list").replaceChildren();
+    $("keep-subtitle-list").replaceChildren();
+  }
+  $("keep-audio").hidden = !data?.audio.length;
+  $("keep-subtitles").hidden = !data?.subtitles.length;
+  syncTrackBoxes();
+  $("keep-tracks-reset").hidden = !kt.picks;
+  $("keep-tracks-status").textContent = kt.status === "error" ? kt.error : kt.status === "loading" ? "Reading the file's tracks…"
+    : [data ? keepTracksCount(data) : "", kt.notice].filter(Boolean).join(" ");
+}
+$("keep-tracks-reset").addEventListener("click", () => {
+  Object.assign(keepTracks, {picks: null, notice: ""});
+  renderKeepTracks();
+});
+
 $("technical").addEventListener("change", controls);
 $("allow-hardware").addEventListener("change", controls);
 $("size-budget-kind").addEventListener("change", controls);
@@ -1906,6 +2289,8 @@ function controls() {
   refreshGoalProfile();
   renderGoalProfile();
   syncMoreGoals();
+  refreshKeepTracks();
+  renderKeepTracks();
   $("goal-overridden").hidden = !technical;
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
@@ -2170,6 +2555,11 @@ async function buildAndSubmitJob(mode = "encode") {
     inputs.allow_hardware = $("allow-hardware").checked;
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
+  if (simple && keepGoals.includes(inputs.mode)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
+  // Settings of an earlier job's goal that the form has no control for, while
+  // it is still that file and that goal.
+  const carry = state.goalCarry;
+  if (simple && !batch && carry && carry.path === $("path").value.trim() && carry.mode === inputs.mode) Object.assign(inputs, carry.inputs);
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
@@ -2374,7 +2764,99 @@ function remainingLabel(seconds) {
   const hours = Math.floor(minutes / 60), rest = minutes % 60;
   return `~${hours} h${rest ? ` ${rest} min` : ""} left`;
 }
+// Where a failed replacement left the original: "in_place", "recovery" (a
+// recovery copy holds it) or "unclear". The server decides it from the
+// promotion's own state; only an unlabelled failure falls back to the flag.
+function originalStateOf(failure) {
+  return failure?.original_state || (failure?.original_intact ? "in_place" : "unclear");
+}
+// What an approved batch replacement is doing, in words about the files. The
+// server places each file in a short fixed sequence; none of this is a time
+// estimate.
+function replacementStepText(member) {
+  const freed = member.freed_bytes != null && member.freed_bytes > 0 ? ` · freed ${bytes(member.freed_bytes)}` : "";
+  switch (member.phase) {
+    case "checking": return "Checking the files";
+    case "backup": return `Backing up the original${member.percent != null ? ` (${member.percent}%)` : ""}`;
+    case "backup_check": return "Checking the backup";
+    case "swap": return "Swapping in the new file";
+    case "final_check": return "Checking the new file";
+    case "done": return `Done${freed}`;
+    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure ? {in_place: " · original kept", recovery: " · original in Recovery", unclear: " · check Recovery"}[originalStateOf(member.failure)] : ""}`;
+    default: return "Waiting";
+  }
+}
+// One sentence for the batch: what is being replaced, or how it ended.
+function replacementHeadline(job) {
+  const r = job.replacement;
+  if (!r?.approved || !r.total) return "";
+  const settled = r.done + r.failed >= r.total;
+  if (r.failed > 0) {
+    const failures = (r.members || []).filter((m) => m.failure).map((m) => m.failure);
+    const reasons = [...new Set(failures.map((f) => f.reason))];
+    // "Kept" is only said when every failure left the original in place; "in
+    // Recovery" only when a recovery copy holds it.
+    const states = failures.map(originalStateOf);
+    const kept = !failures.length ? "" : states.every((x) => x === "in_place") ? (failures.length === 1 ? " · original kept" : " · originals kept") : states.every((x) => x === "recovery") ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · check Recovery";
+    if (!settled) return `Replacing ${fileCount(r.total)} · ${r.failed} failed`;
+    return `${r.done} of ${r.total} replaced · ${r.failed} failed${reasons.length === 1 ? `: ${reasons[0]}` : ""}${kept}`;
+  }
+  if (r.done >= r.total) return `Replaced ${fileCount(r.total)}${r.freed_bytes > 0 ? ` · freed ${bytes(r.freed_bytes)}` : ""}`;
+  return `Replacing ${fileCount(r.total)}${r.frees_bytes > 0 ? ` · frees ${bytes(r.frees_bytes)}` : ""}`;
+}
+// The progress block of a batch whose replacement was approved and is still
+// running, or stopped on a failure: a headline, a bar of finished files, and
+// one line per file.
+function replacementProgressBlock(job) {
+  const r = job.replacement;
+  if (!r?.approved || !r.total) return null;
+  const active = operationIsActive(job.status);
+  if (!active && !r.failed && r.done >= r.total) return null;
+  const stopped = !active && r.failed > 0;
+  const block = node("div", "", `job-progress batch-progress replacement-progress${stopped ? " failed" : ""}`);
+  const heading = stopped ? replacementHeadline(job) : `Replacing ${fileCount(r.total)} · ${r.done} of ${r.total} done`;
+  block.append(node("strong", heading, "replacement-headline"));
+  const bar = document.createElement("progress");
+  bar.max = r.total;
+  bar.value = r.done;
+  bar.setAttribute("aria-label", `${r.done} of ${r.total} files replaced`);
+  block.append(bar);
+  const list = node("ul", "", "replacement-files");
+  for (const member of r.members || []) {
+    const item = node("li", "", `replacement-file ${member.phase}`);
+    item.append(node("span", member.name, "replacement-file-name"), node("span", replacementStepText(member), "replacement-file-step metadata"));
+    list.append(item);
+  }
+  block.append(list);
+  return block;
+}
+async function copyText(text, done) {
+  if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return notify("Copying is not available here.");
+  await navigator.clipboard.writeText(text);
+  notify(done);
+}
+// Where a replacement put things, short by default: the new file, and the
+// original's backup while one exists.
+function whereBlock(where, {heading = true} = {}) {
+  if (!where || !(where.new_path || where.backup_path || where.backup_removed)) return null;
+  const box = node("div", "", "replacement-where");
+  if (heading) box.append(node("strong", "Where"));
+  const line = (label, path, note) => {
+    const row = node("p", "", "metadata replacement-where-row");
+    row.append(node("span", `${label}: `), node("span", path || note, "backup-path"));
+    if (path) row.append(button("Copy", () => safe(() => copyText(path, `${label} path copied.`)), "text-button"));
+    box.append(row);
+  };
+  if (where.new_path) line("New file", where.new_path);
+  if (where.backup_path) {
+    line("Original backup", where.backup_path);
+    box.append(node("p", "Kept until the new file is verified, then removed. If a replacement stops, it stays until you remove it from Recovery.", "metadata"));
+  } else if (where.backup_removed) line("Original backup", "", "removed after the new file was verified");
+  return box;
+}
 function batchProgress(job) {
+  const replacing = replacementProgressBlock(job);
+  if (replacing) return replacing;
   const batch = visibleBatch(job);
   if (["completed", "failed", "cancelled"].includes(job.status)) return null;
   if (job.status === "waiting_decision" && !batch?.running) return null;
@@ -2437,11 +2919,10 @@ function batchProgress(job) {
     const waiting = count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
     result.append(node("span", [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files"), "batch-progress-phase metadata"));
   }
+  // A time is shown only when the worker measured one.
   const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
   const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
-  result.append(node("span", etas.length
-    ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`
-    : "Estimated workflow progress · Not time remaining", "batch-progress-explanation metadata"));
+  if (etas.length) result.append(node("span", `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`, "batch-progress-explanation metadata"));
   return result;
 }
 function telemetry(job) {
@@ -2557,6 +3038,14 @@ function ladderStep(job) {
 function detailFacts(job) {
   if (job.podcast || job.batch?.total > 1) return [];
   const facts = [];
+  // Nothing was encoded, so there is no result size, encoder or try to report:
+  // only the source and the limit it could not meet.
+  if (notConverted(job)) {
+    const size = Number(job.savings?.source_bytes), cap = Number(job.size_mode?.size_budget?.budget_bytes);
+    if (size > 0) facts.push(bytes(size));
+    if (cap > 0) facts.push(`Limit ≤ ${bytes(cap)}`);
+    return facts;
+  }
   const source = Number(job.savings?.source_bytes), candidate = Number(job.savings?.candidate_bytes), expected = Number(job.size_mode?.expected_bytes);
   if (source > 0) facts.push(candidate > 0 ? `${bytes(source)} → ${bytes(candidate)}` : expected > 0 ? `${bytes(source)} → ~${bytes(expected)}` : bytes(source));
   const ladder = ladderStep(job);
@@ -2666,19 +3155,19 @@ function renderSavings(data) {
       node("p", "No verified replacements yet.", "muted"),
     );
 }
-async function jobControl(id, name, args = {}, {onAccepted} = {}) {
+async function jobControl(id, name, args = {}, {onAccepted, decision} = {}) {
   if (jobIsBusy(id)) return;
   state.busyJobs.add(id);
   document.querySelectorAll("[data-job-control]").forEach((b) => {
-    if (b.dataset.jobControl === id) b.disabled = true;
+    if (b.dataset.jobControl === id && b.dataset.navigation !== "true") b.disabled = true;
   });
   try {
-    await tool(name, { id, ...args }, onAccepted);
+    await tool(name, { id, ...args }, onAccepted, decision);
     await Promise.all([state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve(), loadJobs()]);
   } finally {
     state.busyJobs.delete(id);
     document.querySelectorAll("[data-job-control]").forEach((b) => {
-      if (b.dataset.jobControl === id) b.disabled = !serverReachable || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+      if (b.dataset.jobControl === id) b.disabled = jobControlDisabled(b);
     });
   }
 }
@@ -3289,16 +3778,48 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     state.busyJobs.delete(job.id);
   }
 }
-// openGoalForm opens the library's goal form for one file.
-function openGoalForm(path) {
+// A job's own goal, repeated for the same file: the encoder and the size limit
+// go into the form's controls, and what the form has no control for (the Shrink
+// height, the slow preset) is carried to the submit for this file and goal.
+function applyGoalSettings(path, goal) {
+  $("allow-hardware").checked = goal.allow_hardware !== false;
+  showSizeBudget("size-budget", goal);
+  const inputs = {};
+  for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
+  state.goalCarry = {path, mode: goal.mode, inputs};
+}
+// The series or movie the earlier job was made for, so the new job is listed
+// and replaced the same way.
+function applyLibraryContext(context, goal) {
+  const id = context?.[context?.service === "radarr" ? "movie_id" : "series_id"];
+  if (!["sonarr", "radarr"].includes(context?.service) || !Number.isInteger(id) || id <= 0) return;
+  state.fileService = context.service;
+  state.fileMedia = {id, seriesType: goal?.is_anime ? "anime" : "", genres: []};
+}
+// openGoalForm opens the library's goal form for one file, closing the job
+// that asked for it. options.mode, options.goal, options.context and
+// options.languages start the form on what an earlier job used (its goal and
+// size limit, its library and its languages); options.pickTracks opens the
+// track list.
+function openGoalForm(path, options = {}) {
+  if ($("job-detail").open) $("job-detail").close();
   $("path").value = path || "";
   $("scope").value = "file";
   state.fileMedia = null;
   state.fileService = null;
+  state.goalCarry = null;
+  if (options.mode) setProcessingMode(options.mode);
+  if (options.goal) applyGoalSettings(path, options.goal);
+  applyLibraryContext(options.context, options.goal);
+  if (options.languages) presetKeepLanguages(options.languages);
   selectTab("library");
   setFileStep("configure");
   controls();
+  // Opening a new file clears an explicit goal; this one was asked for.
+  if (options.mode) state.goalExplicit = true;
+  if (options.pickTracks) $("keep-tracks").open = true;
 }
+const navigationLabels = ["View replacement", "View batch", "View preview", "Review preview", "Review", "View file"];
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -3318,8 +3839,8 @@ function jobControls(job, detail = false) {
       (job.action_name === "transcode_batch" && !job.batch?.promotion_plan_ready &&
         ["Review candidate", "Review replacements", "Keep originals"].includes(label))
     );
-    b.disabled = !serverReachable || jobIsBusy(job.id) ||
-      (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
+    if (navigationLabels.includes(label)) b.dataset.navigation = "true";
+    b.disabled = jobControlDisabled(b);
     actionRail.append(b);
   };
   if (job.archived) {
@@ -3352,16 +3873,14 @@ function jobControls(job, detail = false) {
           return;
         }
         if (choice.decision === "reject" && job.batch?.promotion_plan_ready) {
-          const plan = await readBatchPromotionPlan(job.id);
-          if (!plan?.digest) throw new Error("Reopen the replacement review before deciding.");
-          await commandRequest("batch-candidates",{id:job.id,digest:plan.digest,decision:"reject"});
+          await keepPreparedOriginals(job.id);
           return;
         }
         if (choice.decision === "approve" && job.action_name === "transcode_batch") {
           // A batch with a replacement plan is approved only against that
           // plan. Without one this is a forwarded per-file decision.
           if (job.batch?.promotion_plan_ready) {
-            await reviewBatchPromotion(job.id);
+            await reviewBatchReplacement(job.id);
             return;
           }
         }
@@ -3400,7 +3919,7 @@ function jobControls(job, detail = false) {
     }
   }
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
-    add("Review candidates", () => reviewBatchCandidates(job.id));
+    add("Review candidates", () => reviewBatchReplacement(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
   if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
     add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
@@ -3410,7 +3929,10 @@ function jobControls(job, detail = false) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode")
       add("Choose a goal", () => openGoalForm(job.source_path));
-    else add("Retry", () => jobControl(job.id, "action_retry"));
+    // Failed replacements are retried per file below. The batch's own Retry stays
+    // when nothing is retryable per file and only the batch recorded the failure,
+    // so a transient error can still be retried from here.
+    else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
@@ -3454,11 +3976,18 @@ function jobControls(job, detail = false) {
     job.status === "completed" &&
     job.candidate_ready &&
     !job.replacement_action_id &&
+    !job.replacement_plan &&
     state.info.allow_destructive
   )
     add("Replace file", () => prepareReplacement(job));
   if (job.replacement_action_id)
     add("View replacement", () => openJob(job.replacement_action_id));
+  // Untagged tracks are kept without being asked; the finished file may have
+  // kept the wrong ones, and the tag is missing, not the track. The lists come
+  // with the one job only, so the queue rows never offer it. A job that was
+  // skipped or not converted made no file to choose tracks for.
+  if (detail && job.action_name === "transcode_media" && job.status === "completed" && job.candidate_ready && !job.replaced && !job.replacement_action_id && job.source_path && keepGoals.includes(job.mode) && keptUntagged(job.tracks))
+    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, goal: job.goal || {mode: job.mode}, context: job.replacement_context, languages: Array.isArray(job.tracks.languages) ? job.tracks.languages : undefined, pickTracks: true}));
   if (job.preview_action_id && detail)
     add("View preview", () => openJob(job.preview_action_id));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
@@ -3494,6 +4023,9 @@ function shortJobReason(reason) {
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",
     quality_policy_unavailable: "The worker cannot run the quality checks this goal needs; original kept",
     quality_vmaf_model_unavailable: "The worker cannot measure quality for this video (VMAF model unavailable); original kept",
+    size_budget_exceeded: "The encoded result was over the size budget; original kept",
+    size_budget_unreachable: "The audio, subtitles and other streams leave no room for video within the size budget; original kept",
+    size_budget_estimate_unavailable: "The size budget could not be planned for this file; original kept",
   };
   if (reasons[text]) return reasons[text];
   if (isCandidateRejection(text)) return ["Candidate rejected by you; original kept", candidateNoteInText(text)].filter(Boolean).join("; ");
@@ -3592,6 +4124,35 @@ function rejectedCandidate(job) {
 function savingsPolicyFailure(value) {
   return /benchmark winner predicts only -?\d+(?:\.\d+)?% savings, below required minimum \d+(?:\.\d+)?%|Full conversion not started; original kept/i.test(value || "");
 }
+// A conversion that finished and left nothing to review, replace or undo: no
+// candidate file, no replacement, no retired candidate. This is a fact about
+// the job, not a list of reason codes, so a reason the UI has never seen still
+// reads as "Not converted" instead of a green "Completed".
+function notConverted(job) {
+  return job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready &&
+    !job.replaced && !job.replacement_action_id && !job.candidate_cleanup && job.savings?.realized_saved_bytes == null;
+}
+// Why a not-converted job left its original alone: the server's own sentence
+// (the numbers are in it), else the curated line for its code, else the code
+// itself in words. Never empty.
+function notConvertedReason(job) {
+  const message = String(job.benchmark?.message || "").replace(/\s+/g, " ").trim();
+  if (message) {
+    // A sentence ends at ". " before a capital, so "approx. 5 GB" stays whole.
+    let sentence = (message.split(/(?<=[.!?])\s+(?=[A-Z])/)[0] || message).replace(/[.!?]+$/, "");
+    const suffix = "; original kept", limit = 160;
+    if (sentence.length + suffix.length > limit) {
+      // Cut at a clause or word boundary, never inside a number, and keep the
+      // suffix: the user must still learn that the original is untouched.
+      const room = sentence.slice(0, limit - suffix.length - 1);
+      const clause = Math.max(room.lastIndexOf(";"), room.lastIndexOf(","));
+      const cut = clause > room.length / 2 ? clause : room.lastIndexOf(" ");
+      sentence = `${room.slice(0, cut > 0 ? cut : room.length)}…`;
+    }
+    return /original (?:preserved|kept)/i.test(sentence) ? sentence : sentence + suffix;
+  }
+  return shortJobReason(job.reason_code) || "No converted file was made; original kept";
+}
 function visibleBatch(job) {
   if (!job.batch) return null;
   const rejected = Math.min(job.batch.failed || 0, job.batch_files?.rejected_count ?? (job.batch_files?.reasons || []).filter(reason=>isCandidateRejection(reason.reason)).reduce((count,reason)=>count+reason.count,0));
@@ -3640,8 +4201,9 @@ function queuePresentation(job) {
   const observation = workerProgressObservation(job);
   const replacementComplete = job.savings?.realized_saved_bytes != null ||
     (job.replaced && job.status === "completed");
-  const skippedFile = job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready && ["quality_not_met","insufficient_savings","size_growth","size_growth_exceeded","preservation_not_met","already_target_codec","no_suitable_candidate","audio_compaction_insufficient","audio_estimate_unavailable","audio_only_worker_unsupported","unsupported_source","hdr_requires_compact","compact_not_needed"].includes(job.reason_code);
-  const status = skippedFile ? "Skipped" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  // Nothing was made, so there are no savings to report.
+  const leftNoFile = notConverted(job);
+  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -3653,23 +4215,27 @@ function queuePresentation(job) {
     metrics = [];
   if (s.source_bytes != null) {
     metrics.push(
-      s.candidate_bytes != null && !job.replaced
+      s.candidate_bytes != null && !job.replaced && !leftNoFile
         ? `${bytes(s.source_bytes)} → ${bytes(s.candidate_bytes)}`
         : `${bytes(s.source_bytes)} source`,
     );
   }
   if (s.realized_saved_bytes != null)
     metrics.push(`${bytes(s.realized_saved_bytes)} freed`);
-  else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.candidate_saved_bytes != null)
+  else if (!leftNoFile && !job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.candidate_saved_bytes != null)
     metrics.push(
       s.candidate_saved_bytes < 0
         ? `${bytes(-s.candidate_saved_bytes)} larger`
         : `${bytes(s.candidate_saved_bytes)} potential savings`,
     );
-  else if (!job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
+  else if (!leftNoFile && !job.replaced && !rejectedCandidate(job) && batch?.outcome !== "rejected" && s.estimated_saved_bytes != null)
     metrics.push(s.estimated_saved_bytes < 0 ? `about ${bytes(-s.estimated_saved_bytes)} larger (estimate)` : `${bytes(s.estimated_saved_bytes)} estimated savings`);
   let result;
-  if (skippedFile) result = shortJobReason(job.reason_code);
+  const replacingHeadline = replacementHeadline(job);
+  if (replacingHeadline) {
+    result = replacingHeadline;
+    metrics.length = 0;
+  } else if (leftNoFile) result = notConvertedReason(job);
   else if (job.status === "failed")
     result = shortJobReason(job.error) || "Error details unavailable";
   else if (job.replaced && job.status === "completed") result = "Original replaced";
@@ -3682,7 +4248,7 @@ function queuePresentation(job) {
   if (job.workflow_actions?.length && replacement && job.status !== "failed") {
     result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
   }
-  if (job.replaced_files > 0) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
+  if (job.replaced_files > 0 && !replacingHeadline) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
   if (job.batch?.dry_run) result += " · Originals unchanged";
   else if (job.batch?.outcome === "no_changes") result += " · Originals kept";
   const summary = [kind, result, metrics.join(" · ")]
@@ -3814,6 +4380,7 @@ function resultHeadline(job) {
 }
 // The job's one-line outcome when no result card explains it.
 function jobOutcomeText(job) {
+  if (notConverted(job)) return notConvertedReason(job);
   if (job.status === "completed" && !job.candidate_ready && job.reason_code) return shortJobReason(job.reason_code);
   // A size budget ladder or a goal's recipe says which full encode runs.
   if (["size_budget_ladder", "recipe"].includes(job.benchmark?.outcome) && job.benchmark.message) return job.benchmark.message;
@@ -3841,6 +4408,41 @@ function resultReport(job) {
     next.append(node("strong", "Next step: "), node("span", nextStep));
     box.append(next);
   }
+  return box;
+}
+// What a Save space or Shrink job kept of the audio and subtitles: the sentence
+// the server wrote, and the tracks behind it, one line each.
+function keptUntagged(tracks) {
+  return Boolean(tracks) && !tracks.manual && [tracks.audio, tracks.subtitles].some(split => split?.kept?.some(entry => canonicalLanguage(entry.language) === "und"));
+}
+function trackReport(job) {
+  const report = job.tracks, message = report?.message || job.tracks_message;
+  if (!message) return null;
+  const box = node("section", "", "track-report");
+  box.setAttribute("aria-label", "Audio and subtitles");
+  const line = node("p", "", "track-report-line");
+  line.append(node("strong", "Tracks: "), node("span", message));
+  box.append(line);
+  const groups = [["Audio", report?.audio], ["Subtitles", report?.subtitles]].filter(([, split]) => split?.total > 0);
+  if (!groups.length) return box;
+  const details = node("details", "", "track-report-details");
+  // A refresh rebuilds the dialog; the list stays open for the job it was opened on.
+  details.open = state.trackReportOpen === job.id;
+  details.addEventListener("toggle", () => { state.trackReportOpen = details.open ? job.id : null; });
+  details.append(node("summary", "Kept and dropped tracks"));
+  for (const [title, split] of groups) {
+    const entries = [...split.kept.map(entry => ({...entry, kept: true})), ...split.dropped.map(entry => ({...entry, kept: false}))].sort((a, b) => a.index - b.index);
+    const list = node("ul", "", "track-report-list");
+    for (const entry of entries) {
+      const row = node("li", "", `track-report-row ${entry.kept ? "kept" : "dropped"}`);
+      row.append(node("span", entry.kept ? "Kept" : "Dropped", "badge track-badge"), node("strong", languageName(entry.language)));
+      const facts = [trackCodec(entry.codec), entry.title, entry.bytes > 0 ? bytes(entry.bytes) : ""].filter(Boolean);
+      if (facts.length) row.append(node("span", facts.join(" · "), "metadata"));
+      list.append(row);
+    }
+    details.append(node("h4", `${title} · ${split.kept.length} of ${split.total} kept`), list);
+  }
+  box.append(details);
   return box;
 }
 // plan_source/plan_note arrive only once the encode's settings are settled; a
@@ -4098,6 +4700,7 @@ function queueOutcome(job) {
   if (batch?.outcome === "failed") return "No candidates created · Change settings to try again";
   if (batch?.completed > 0) return `${batch.completed} ${batch.completed === 1 ? "candidate ready" : "candidates ready"} · Originals unchanged`;
   if (job.candidate_ready) return `Original preserved · Candidate available${belowTargetLabel(job.size_budget_outcome) ? ` · ${belowTargetLabel(job.size_budget_outcome)}` : ""}`;
+  if (notConverted(job)) return notConvertedReason(job);
   if (job.action_name === "transcode_media" && job.reason_code && job.status === "completed") return shortJobReason(job.reason_code);
   if (job.action_name === "benchmark_transcode") return "Sample test complete · Original preserved";
   return "Finished · Open job for details";
@@ -4667,7 +5270,10 @@ async function refreshDetail() {
     // The chips already carry a running conversion's size and encode, so its
     // summary line is left out then; the outcome dedupe below still counts it
     // as shown. Other jobs, such as a replacement, keep their line.
-    if (!(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
+    // A failed replacement's headline already is the summary.
+    const headline = progress?.querySelector?.(".replacement-headline")?.textContent;
+    const repeated = Boolean(headline) && presentation.summary.includes(headline);
+    if (!repeated && !(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
     // The summary line already says why a file was skipped. An outcome line that
     // only repeats text already shown is left out, so the reason appears once.
     const shownOutcomes = [presentation.summary];
@@ -4687,6 +5293,8 @@ async function refreshDetail() {
     }
     const report = resultReport(job);
     if (report) summary.append(report);
+    const tracks = trackReport(job);
+    if (tracks) summary.append(tracks);
     if (!presentation.showTelemetry && !progress && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
     if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
     if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
@@ -4696,7 +5304,12 @@ async function refreshDetail() {
       technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
       summary.append(technical);
     }
-    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job));
+    // An approved replacement says replaced and failed in its own headline; a chip
+    // of completed encodes beside "1 failed" would contradict it, so only the
+    // other counts (skipped, rejected, ...) stay.
+    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job), job.replacement?.approved ? ["completed", "failed"] : []);
+    const where = whereBlock(job.where);
+    if (where) summary.append(where);
     if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
       const reason = job.batch_files.reasons[0];
       summary.append(node("p", `${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted"));
@@ -4772,6 +5385,19 @@ async function replaceBatchFile(batchID, childID) {
   if (!job || job.parent_action_id !== batchID || !job.candidate_ready || job.replacement_action_id) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
   await prepareReplacement(job);
 }
+// What a replacement Retry does. Retrying through the batch re-runs every failed
+// file that stopped before approval, so the button says how many; a file's own
+// retry re-runs just that file.
+function retryReplacementLabel(item, batchID, name) {
+  const count = item.retry_action_id === batchID ? state.detailJob?.replacement?.batch_retry_count || 0 : 0;
+  return count > 1 ? {button: `Retry ${count} failed replacements`, confirm: `Retry ${count} failed replacements`} : {button: "Retry replacement", confirm: `Retry replacement of ${name}`};
+}
+// Tries a failed file's replacement again. The server re-checks it against the
+// plan that was approved and does not encode again.
+async function retryFileReplacement(item, batchID) {
+  const name = item.display_label || (item.file_path || "").split("/").pop();
+  await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
+}
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -4788,29 +5414,64 @@ async function loadBatchItems(id, revision) {
   $("batch-items-list").replaceChildren();
   for (const item of response.items || []) {
     const row = node("div", "", "batch-item-row");
-    const label = item.replaced ? "Replaced" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
+    const member = state.detailJob?.replacement?.members?.find(m => m.item_key === item.item_key);
+    const queued = item.replacement_plan === "queued";
+    const failure = item.replacement_failure;
+    const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
     const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
-    row.append(node("span", item.display_label || item.file_path, "metadata"), statusBadge(label, item.replacement_status || label, review));
+    row.append(node("span", item.display_label || (item.file_path || "").split("/").pop(), "metadata batch-file-name"), statusBadge(label, item.replacement_status || label, review));
     if (item.child_action_id)
       row.append(
         button("View file", () => openJob(item.child_action_id), "quiet"),
       );
 
     const actions = node("div", "", "batch-file-actions");
-    const add = (label, fn) => {
+    // Buttons that only open something stay usable while the batch is busy.
+    const add = (label, fn, {navigation = false, target = id} = {}) => {
       const control = button(label, fn, label === "Replace file" ? "primary" : "");
-      control.dataset.jobControl = id;
+      control.dataset.jobControl = target;
       control.dataset.batchItemKey = item.item_key;
-      control.disabled = !serverReachable || jobIsBusy(id);
+      if (navigation) control.dataset.navigation = "true";
+      control.disabled = jobControlDisabled(control);
       actions.append(control);
     };
-    if (item.candidate_ready && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
-    if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id));
+    if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
+    if (failure) {
+      const card = node("div", "", "replacement-failure");
+      card.setAttribute("role", "group");
+      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
+      const options = node("div", "", "batch-file-actions");
+      const choose = (label, fn, opts = {}) => {
+        const control = button(label, fn, opts.primary ? "primary" : "");
+        control.dataset.jobControl = opts.target || id;
+        control.dataset.batchItemKey = item.item_key;
+        if (opts.navigation) control.dataset.navigation = "true";
+        control.disabled = jobControlDisabled(control);
+        options.append(control);
+      };
+      if (item.retry_action_id) choose(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
+      if (item.replacement_action_id) choose("View details", () => openJob(item.replacement_action_id), {navigation: true});
+      card.append(options);
+      if (failure.detail) {
+        const technical = node("details", "", "technical-reason");
+        technical.append(node("summary", "Technical details"), node("p", failure.detail, "metadata"));
+        card.append(technical);
+      }
+      row.append(card);
+    } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
     const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
     if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
     if (actions.children.length) row.append(actions);
-    const activity = batchFileActivity(item, state.detailJob);
+    const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
+    const where = whereBlock(item.where, {heading: false});
+    if (where) {
+      const details = node("details", "", "batch-where");
+      details.append(node("summary", "Where"), where);
+      row.append(details);
+    }
+
+    if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
     if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
@@ -4820,13 +5481,17 @@ async function loadBatchItems(id, revision) {
       row.append(history);
     }
     const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
-    const visibleReasons = [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
+    // The recipe's reason says why a file was or was not converted; once it is
+    // being replaced or has a candidate it explains nothing more.
+    const visibleReasons = item.replacement_action_id || item.replacement_plan || item.replaced || item.candidate_ready ? [] : [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
     if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
     if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
     for (const control of row.querySelectorAll("button")) {
       control.dataset.batchItemKey = item.item_key;
+      // Buttons made without a target only open something.
+      if (!control.dataset.jobControl) control.dataset.navigation = "true";
       control.dataset.jobControl ||= item.child_action_id || id;
     }
     $("batch-items-list").append(row);
@@ -4935,14 +5600,14 @@ async function loadDetail() {
   );
 }
 
-function renderBatchCounts(container, batch) {
+function renderBatchCounts(container, batch, omit = []) {
   const counts = node("div", "", "batch-counts");
   if (batch.policy > 0) counts.append(statusBadge(`${batch.policy} Below minimum savings`, "neutral"));
   if (batch.rejected > 0) counts.append(statusBadge(`${batch.rejected} Rejected`, "rejected"));
   for (const [key, label, status] of [["completed","Completed","completed"],["running","Active","running"],["queued","Queued","queued"],["waiting_for_slot","Waiting for slot","queued"],["waiting_decision","Needs decision","waiting_decision"],["review","Needs review","review"],["failed","Failed","failed"],["skip","Skipped","skip"],["cancelled","Cancelled","cancelled"]]) {
-    if (batch[key] > 0) counts.append(statusBadge(`${batch[key]} ${label}`, status));
+    if (batch[key] > 0 && !omit.includes(key)) counts.append(statusBadge(`${batch[key]} ${label}`, status));
   }
-  container.append(counts);
+  if (counts.children.length) container.append(counts);
 }
 // The steps as the job dialog shows them, with batch and rejected-candidate
 // outcomes folded into the stored stage that reports them.
@@ -5039,24 +5704,22 @@ const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Im
 function showFileReview(job, approval) {
   const p = job.promotion;
   Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256, pending: false });
+  const facts = job.replacement_facts || {source_bytes: p.original_bytes, candidate_bytes: p.candidate_bytes, size_budget_outcome: job.size_budget_outcome};
+  const name = p.original_path.split("/").pop().replace(/\.[^.]+$/, "");
   const data = $("file-review-data");
-  data.replaceChildren(node("p", p.original_path.split("/").pop(), "review-filename"));
-  for (const [label, path, size] of [["Original", p.original_path, p.original_bytes], ["Verified candidate", p.candidate_path, p.candidate_bytes]]) {
-    const row = node("div", "", "review-file");
-    row.append(node("span", label, "muted"), node("strong", bytes(size)), node("span", path, "metadata review-path"));
-    data.append(row);
-  }
-  const savings = savingsLine(job.savings);
-  if (savings) data.append(savings);
-  data.append(node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
+  data.replaceChildren(replacementCard({name, facts, originalPath: p.original_path, newPath: p.candidate_path}), node("p", `Method: ${replacementMethods[p.service] || p.service || "Replace the file in place"}`, "metadata"));
   const warning = regrabWarning(p);
   if (warning) data.prepend(warning);
-  const below = belowTargetNotice(job.size_budget_outcome);
-  if (below) data.prepend(below);
+  const frees = replacementTotalLine([p], () => facts);
+  $("file-review-total").textContent = frees && frees.replace(/ across 1 file$/, "");
+  $("reject-file-review").hidden = !job.waiting_options?.some(option => option.decision === "reject");
+  $("reject-file-review").disabled = !serverReachable || state.approvingFile;
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
 }
 function showFileReviewPending(text) {
   $("file-review-data").replaceChildren(node("p", text, "muted"));
+  $("file-review-total").textContent = "";
+  $("reject-file-review").hidden = true;
   $("approve-file-review").disabled = true;
 }
 function pollDelay(ms) {
@@ -5098,6 +5761,13 @@ async function reviewFilePromotion(id, { wait = false } = {}) {
   $("file-review").showModal();
 }
 $("dismiss-file-review").addEventListener("click", () => $("file-review").close());
+$("dismiss-file-review-action").addEventListener("click", () => $("file-review").close());
+// Keeping the original needs no reviewed digest: it changes no file.
+$("reject-file-review").addEventListener("click", () => safe(async () => {
+  const approval = state.fileApproval;
+  if (!approval || approval.pending || state.approvingFile || !serverReachable) return;
+  await jobControl(approval.id, "action_resume", { decision: "reject" }, {onAccepted: () => $("file-review").close(), decision: {label: "Keep original", verb: "Keeping the original", failure: "Decision failed"}});
+}));
 $("file-review").addEventListener("close", () => { state.fileApproval = null; });
 $("approve-file-review").addEventListener("click", () => safe(async () => {
   const approval = state.fileApproval;
@@ -5111,109 +5781,261 @@ $("approve-file-review").addEventListener("click", () => safe(async () => {
       throw new Error("The replacement plan changed. Close this review and open it again.");
     // The server refuses an approval whose digest is not the reviewed plan's.
     // Once it accepts, the review is done: progress shows on the job's row.
-    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest }, {onAccepted: () => $("file-review").close()});
+    await jobControl(approval.id, "action_resume", { decision: "approve", plan_digest: approval.digest }, {onAccepted: () => $("file-review").close(), decision: {label: "Replace file", verb: "Replacing file", failure: "Replacement failed"}});
   } finally {
     state.approvingFile = false;
     $("approve-file-review").disabled = !serverReachable;
   }
 }));
 
-async function reviewBatchCandidates(id) {
-  const auth = state.authRevision;
-  const review = await api(`batch-candidates?id=${encodeURIComponent(id)}`);
-  if (auth !== state.authRevision) return;
-  const selected = new Set(review.members.map(member=>member.item_key));
-  const content = [node("p", `${review.members.length} candidates available · Originals unchanged`, "review-filename"), node("p", "Select candidates to review for replacement. Verification runs before any original is replaced. You can open each file to compare frames or try different settings.", "metadata")];
-  const all = node("input"); all.type="checkbox"; all.checked=true; all.setAttribute("aria-label","Select all candidates");
-  const allLabel=node("label","","check");allLabel.append(all,node("span","Select all candidates")); content.push(allLabel);
-  const checks=[];
-  for (const member of review.members) {
-    const row=node("div","","candidate-review-row"),label=node("label","","check"),check=node("input");
-    check.type="checkbox";check.checked=true;checks.push(check);
-    const name=member.episode || member.original_path.split("/").pop();
-    label.append(check,node("span",name));
-    check.addEventListener("change",()=>{check.checked?selected.add(member.item_key):selected.delete(member.item_key);all.checked=selected.size===review.members.length;all.indeterminate=selected.size>0&&!all.checked;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
-    row.append(label,node("p",`${member.original_path} → ${member.candidate_path}`,"metadata backup-path"));
-    const belowTarget=belowTargetNotice(review.size_budget_outcomes?.[member.transcode_action_id]);if(belowTarget)row.append(belowTarget);
-    row.append(button("View file",async()=>{finishActionReview(false);await openJob(member.transcode_action_id);},"text-button"));content.push(row);
-  }
-  all.addEventListener("change",()=>{selected.clear();checks.forEach((check,i)=>{check.checked=all.checked;if(all.checked)selected.add(review.members[i].item_key);});all.indeterminate=false;$("confirm-action-review").disabled=!selected.size || !state.info.allow_destructive;});
-  if (review.excluded) content.push(node("p",`${review.excluded} other files are unfinished, have no candidate, or already have a replacement job. They will stay unchanged.`,"metadata"));
-  if (!review.members.length) {notify("No unreserved candidates are available. Open the batch files to inspect their outcomes.");return;}
-  if (!state.info.allow_destructive) content.push(node("p","Replacement is disabled in the server settings.","metadata"));
-  const decision=reviewAction({title:"Review batch candidates",content,confirmLabel:"Prepare replacement review"});
-  $("confirm-action-review").disabled=!state.info.allow_destructive;
-  if (!await decision || auth!==state.authRevision) return;
-  await commandRequest("batch-candidates",{id,version:review.version,item_keys:[...selected]},()=>notify("Replacement review requested. Originals are unchanged."));
-  if (auth!==state.authRevision) return;
-  await reviewBatchPromotion(id);
+// One dialog decides a batch replacement: the files with what each saves and
+// how good it measured, then one button. Everything shown here is display;
+// what an approval is checked against is the plan's member list and digest,
+// which the server holds and this page reads back before it approves.
+const fileCount = (n) => `${n} ${n === 1 ? "file" : "files"}`;
+function replacementFileName(member) {
+  return member.episode || (member.original_path || "").split("/").pop().replace(/\.[^.]+$/, "") || "File";
 }
-async function readBatchPromotionPlan(id) {
-  const args = { id, section: "state", key: "batch_promotion_plan", chunk: 0 };
-  const first = await tool("action_detail", args);
-  let plan = first.data;
-  if (first.total_chunks) {
-    if (first.total_chunks > 128)
-      throw new Error("This replacement plan is too large to display safely.");
-    let content = first.content;
-    for (let chunk = 1; chunk < first.total_chunks; chunk++)
-      content += (await tool("action_detail", { ...args, chunk })).content;
-    plan = JSON.parse(content);
+function replacementSizes(facts) {
+  if (!(facts?.source_bytes > 0 && facts?.candidate_bytes > 0)) return null;
+  const saved = facts.source_bytes - facts.candidate_bytes;
+  const result = saved >= 0 ? `Saves ${bytes(saved)} (${Math.round(saved / facts.source_bytes * 100)}%)` : `Grows by ${bytes(-saved)}`;
+  return node("p", `${bytes(facts.source_bytes)} → ${bytes(facts.candidate_bytes)} · ${result}`, "replacement-sizes");
+}
+function replacementQuality(facts) {
+  if (facts?.vmaf_mean == null) return null;
+  const parts = [`Quality VMAF ${Math.round(facts.vmaf_mean)}`];
+  if (facts.vmaf_worst_window != null) parts.push(`worst ${Math.round(facts.vmaf_worst_window)}`);
+  return node("p", parts.join(" · "), "metadata replacement-quality");
+}
+// One file as a person decides on it. The paths stay behind a disclosure.
+function replacementCard({name, facts, originalPath, newPath, check, onView}) {
+  const card = node("div", "", "candidate-review-row replacement-row");
+  if (check) {
+    const label = node("label", "", "check replacement-name");
+    label.append(check, node("strong", name));
+    card.append(label);
+  } else card.append(node("strong", name, "replacement-name"));
+  for (const line of [replacementSizes(facts), replacementQuality(facts), belowTargetNotice(facts?.size_budget_outcome)]) if (line) card.append(line);
+  const tracks = facts?.tracks_message || facts?.audio_summary;
+  if (tracks) card.append(node("p", tracks, "metadata replacement-tracks"));
+  if (originalPath || newPath) {
+    const paths = node("details", "", "replacement-paths");
+    paths.append(node("summary", "Show paths"));
+    for (const [label, path] of [["Original", originalPath], ["New file", newPath]]) {
+      if (!path) continue;
+      const line = node("p", "", "metadata backup-path");
+      line.append(node("span", `${label}: `), node("span", path));
+      paths.append(line);
+    }
+    if (onView) paths.append(button("View file", onView, "text-button"));
+    card.append(paths);
   }
-  if (
-    plan?.batch_id !== id ||
-    !plan.digest ||
-    !Array.isArray(plan.members) ||
-    !plan.members.length
-  )
+  return card;
+}
+// The total a decision frees, only when every file in it reports its sizes.
+function replacementTotalLine(members, factsOf) {
+  const known = members.filter((m) => factsOf(m)?.source_bytes > 0 && factsOf(m)?.candidate_bytes > 0);
+  if (!members.length || known.length !== members.length) return "";
+  const saved = known.reduce((sum, m) => sum + factsOf(m).source_bytes - factsOf(m).candidate_bytes, 0);
+  return saved >= 0 ? `Frees ${bytes(saved)} across ${fileCount(members.length)}` : `Grows by ${bytes(-saved)} across ${fileCount(members.length)}`;
+}
+const replaceDecision = (n) => ({label: `Replace ${fileCount(n)}`, verb: `Replacing ${fileCount(n)}`, failure: "Replacement failed"});
+const prepareDecision = (n) => ({label: `Prepare replacement of ${fileCount(n)}`, verb: `Preparing replacement of ${fileCount(n)}`, failure: "Preparation failed"});
+const keepDecision = (n) => ({label: `Keep ${n} ${n === 1 ? "original" : "originals"}`, verb: `Keeping ${n} ${n === 1 ? "original" : "originals"}`, failure: "Keeping originals failed"});
+
+// The plan exactly as the server holds it. prepared is false when none exists.
+async function readBatchPlan(id) {
+  const plan = await api(`batch-candidates?${new URLSearchParams({id, plan: 1})}`);
+  if (plan.prepared && (plan.id !== id || !plan.digest || !Array.isArray(plan.members) || !plan.members.length))
     throw new Error("Cannot verify the batch replacement list.");
   return plan;
 }
-async function reviewBatchPromotion(id) {
-  const authRevision = state.authRevision;
-  const plan = await readBatchPromotionPlan(id);
-  const notice = await readBatchPromotionNotice(id);
-  if (authRevision !== state.authRevision || $("workspace").hidden) return;
-  state.batchApproval = {id,digest:plan.digest};
-  const host=$("batch-review-data");
-  host.replaceChildren(node("p",`${plan.members.length} ${plan.members.length === 1 ? "candidate selected" : "candidates selected"}`,"metadata"));
-  const warning = regrabWarning(notice);
-  if (warning) host.prepend(warning);
-  for (const member of plan.members) {
-    const row=node("div","","candidate-review-row");
-    row.append(node("strong",member.episode || member.original_path.split("/").pop()));
-    for (const [label,path] of [["Original",member.original_path],["Candidate",member.candidate_path]]) {
-      const line=node("p","","metadata backup-path");line.append(node("span",`${label}: `),node("span",path));row.append(line);
+// How the server's prepared plan differs from the files the person saw.
+function planDifferences(shown, members) {
+  const planned = new Map(members.map((m) => [m.item_key, m]));
+  const seen = new Map(shown.map((m) => [m.item_key, m]));
+  const out = [];
+  for (const m of shown) {
+    const p = planned.get(m.item_key);
+    if (!p) out.push(`Not in the prepared list: ${replacementFileName(m)}`);
+    else if (p.original_path !== m.original_path || p.candidate_path !== m.candidate_path || p.transcode_action_id !== m.transcode_action_id || (m.candidate_sha256 && p.candidate_sha256 !== m.candidate_sha256))
+      out.push(`Changed since you reviewed it: ${replacementFileName(m)}`);
+  }
+  for (const m of members) if (!seen.has(m.item_key)) out.push(`Added to the prepared list: ${replacementFileName(m)}`);
+  return out;
+}
+const reviewMembers = (r) => r.mode === "plan" ? r.members : r.members.filter((m) => r.selected.has(m.item_key));
+function syncBatchReview() {
+  const r = state.batchReview;
+  const chosen = r ? reviewMembers(r) : [];
+  const approve = $("approve-batch-review"), reject = $("reject-batch-review");
+  approve.textContent = chosen.length ? `Replace ${fileCount(chosen.length)}` : "Replace files";
+  $("batch-review-total").textContent = r ? replacementTotalLine(chosen, (m) => r.facts[m.transcode_action_id]) : "";
+  approve.disabled = !serverReachable || !r || r.busy || !chosen.length || !state.info?.allow_destructive;
+  reject.hidden = !r || r.mode !== "plan";
+  reject.disabled = !serverReachable || !r || r.busy || !state.info?.allow_destructive;
+}
+function renderBatchReview() {
+  const r = state.batchReview;
+  const notice = $("batch-review-notice"), host = $("batch-review-data");
+  const notes = [];
+  if (r.differences?.length) {
+    const box = node("div", "", "review-difference");
+    box.setAttribute("role", "alert");
+    box.append(node("strong", "The prepared list is not the one you selected. Nothing was replaced."), node("p", "Review this list, then confirm again."));
+    const list = node("ul", "", "metadata");
+    for (const line of r.differences) list.append(node("li", line));
+    box.append(list);
+    notes.push(box);
+  } else if (r.changed) {
+    notes.push(node("p", "The list changed while this review was open. Nothing was replaced. Review it, then confirm again.", "review-difference"));
+  }
+  const warning = regrabWarning(r.notice);
+  if (warning) notes.push(warning);
+  if (!state.info?.allow_destructive) notes.push(node("p", "Replacement is disabled in the server settings.", "metadata"));
+  notice.replaceChildren(...notes);
+  const rows = [];
+  const view = (m) => () => { $("batch-review").close(); return openJob(m.transcode_action_id); };
+  if (r.mode === "select") {
+    const all = node("input");
+    all.type = "checkbox";
+    all.checked = r.selected.size === r.members.length;
+    all.indeterminate = r.selected.size > 0 && !all.checked;
+    all.setAttribute("aria-label", "Select all files");
+    const allLabel = node("label", "", "check");
+    allLabel.append(all, node("span", "Select all files"));
+    const checks = [];
+    all.addEventListener("change", () => {
+      r.selected = new Set(all.checked ? r.members.map((m) => m.item_key) : []);
+      checks.forEach((c) => { c.checked = all.checked; });
+      all.indeterminate = false;
+      syncBatchReview();
+    });
+    rows.push(allLabel);
+    for (const m of r.members) {
+      const check = node("input");
+      check.type = "checkbox";
+      check.checked = r.selected.has(m.item_key);
+      checks.push(check);
+      check.addEventListener("change", () => {
+        if (check.checked) r.selected.add(m.item_key); else r.selected.delete(m.item_key);
+        all.checked = r.selected.size === r.members.length;
+        all.indeterminate = r.selected.size > 0 && !all.checked;
+        syncBatchReview();
+      });
+      rows.push(replacementCard({name: replacementFileName(m), facts: r.facts[m.transcode_action_id], originalPath: m.original_path, newPath: m.candidate_path, check, onView: view(m)}));
     }
-    host.append(row);
-    // The plan does not carry how a candidate was made; look up the few that
-    // came from a size budget and label them without delaying the review.
-    if (member.transcode_action_id && plan.members.length <= 50) api(`operations?id=${encodeURIComponent(member.transcode_action_id)}`).then(found => {
-      const notice = belowTargetNotice(found.jobs?.[0]?.size_budget_outcome);
-      if (notice) row.append(notice);
-    }).catch(() => {});
+    if (r.excluded) rows.push(node("p", `${r.excluded} other files are unfinished, have no candidate, or already have a replacement job. They stay unchanged.`, "metadata"));
+  } else {
+    for (const m of r.members)
+      rows.push(replacementCard({name: replacementFileName(m), facts: r.facts[m.transcode_action_id], originalPath: m.original_path, newPath: m.candidate_path, onView: view(m)}));
   }
-  $("batch-review").showModal();
+  host.replaceChildren(...rows);
+  syncBatchReview();
 }
-$("dismiss-batch-review").addEventListener("click", () =>
-  $("batch-review").close(),
-);
-async function decideBatchReplacement(decision) {
-  const approval=state.batchApproval;
-  if (!approval || state.approvingBatch) return;
-  state.approvingBatch=true;
-  $("approve-batch-review").disabled=$("reject-batch-review").disabled=true;
+function openBatchReview(review) {
+  state.batchReview = {busy: false, facts: {}, ...review};
+  renderBatchReview();
+  if (!$("batch-review").open) $("batch-review").showModal();
+}
+// The batch's replacement review. A batch with a prepared plan shows exactly
+// that plan; otherwise it shows the candidates to choose from.
+async function reviewBatchReplacement(id) {
+  const auth = state.authRevision;
+  const plan = await readBatchPlan(id);
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (plan.prepared) {
+    if (plan.approved) throw new Error("This replacement is already approved. Its progress shows on the batch.");
+    if (!plan.waiting) throw new Error("This replacement is not waiting for approval. Refresh the queue.");
+    const notice = await readBatchPromotionNotice(id);
+    if (auth !== state.authRevision || $("workspace").hidden) return;
+    openBatchReview({id, mode: "plan", members: plan.members, facts: plan.member_facts || {}, digest: plan.digest, notice, noticeSeen: true});
+    return;
+  }
+  const review = await api(`batch-candidates?id=${encodeURIComponent(id)}`);
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (!review.members.length) {
+    notify("No unreserved candidates are available. Open the batch files to inspect their outcomes.");
+    return;
+  }
+  openBatchReview({id, mode: "select", members: review.members, facts: review.member_facts || {}, version: review.version, excluded: review.excluded, selected: new Set(review.members.map((m) => m.item_key))});
+}
+// Shows the plan the server holds, with why it needs another look.
+function showPreparedPlan(r, plan, notice, differences, changed) {
+  Object.assign(r, {mode: "plan", members: plan.members, facts: plan.member_facts || {}, digest: plan.digest, selected: null, notice, noticeSeen: true, differences, changed});
+  renderBatchReview();
+}
+// One click: prepare the plan for exactly the checked files if none exists,
+// read it back, and approve only when it is the list that was shown, with the
+// digest the server returned for it.
+async function replaceBatchFiles() {
+  const r = state.batchReview;
+  if (!r || r.busy || !serverReachable || !state.info?.allow_destructive) return;
+  const auth = state.authRevision;
+  const live = () => state.batchReview === r && $("batch-review").open && auth === state.authRevision;
+  r.busy = true;
+  syncBatchReview();
   try {
-    await commandRequest("batch-candidates",{id:approval.id,digest:approval.digest,decision},()=>$("batch-review").close());
-    await refreshDetail();
-    await loadJobs();
+    const shown = reviewMembers(r);
+    let plan = await readBatchPlan(r.id);
+    if (!live()) return;
+    if (!plan.prepared) {
+      if (r.mode !== "select") throw new Error("This replacement is no longer prepared. Close this review and open it again.");
+      await commandRequest("batch-candidates", {id: r.id, version: r.version, item_keys: shown.map((m) => m.item_key)}, undefined, prepareDecision(shown.length));
+      if (!live()) return;
+      plan = await readBatchPlan(r.id);
+      if (!live()) return;
+    }
+    if (!plan.prepared || plan.approved || !plan.waiting) throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
+    const notice = await readBatchPromotionNotice(r.id);
+    if (!live()) return;
+    const differences = planDifferences(shown, plan.members);
+    const changed = r.mode === "plan" && plan.digest !== r.digest;
+    if (differences.length || changed || (notice?.regrab_warning && !r.noticeSeen)) {
+      showPreparedPlan(r, plan, notice, differences, changed);
+      return;
+    }
+    await commandRequest("batch-candidates", {id: r.id, digest: plan.digest, decision: "approve"}, () => $("batch-review").close(), replaceDecision(shown.length));
   } finally {
-    state.approvingBatch=false;
-    $("approve-batch-review").disabled=$("reject-batch-review").disabled=!serverReachable;
+    r.busy = false;
+    syncBatchReview();
   }
 }
-$("approve-batch-review").addEventListener("click",()=>safe(()=>decideBatchReplacement("approve")));
-$("reject-batch-review").addEventListener("click",()=>safe(()=>decideBatchReplacement("reject")));
+// Keeps every original of a prepared plan from the queue row, without opening
+// the review: dropping a plan changes no file.
+async function keepPreparedOriginals(id) {
+  const plan = await readBatchPlan(id);
+  if (!plan.prepared || !plan.waiting) throw new Error("Reopen the replacement review before deciding.");
+  await commandRequest("batch-candidates", {id, digest: plan.digest, decision: "reject"}, undefined, keepDecision(plan.members.length));
+}
+// Keeps every original: the plan is dropped and nothing is replaced.
+async function keepBatchOriginals() {
+  const r = state.batchReview;
+  if (!r || r.mode !== "plan" || r.busy || !serverReachable) return;
+  const auth = state.authRevision;
+  const live = () => state.batchReview === r && $("batch-review").open && auth === state.authRevision;
+  r.busy = true;
+  syncBatchReview();
+  try {
+    const plan = await readBatchPlan(r.id);
+    if (!live()) return;
+    if (!plan.prepared || !plan.waiting) throw new Error("This replacement is no longer waiting for a decision. Refresh the queue.");
+    if (plan.digest !== r.digest) {
+      showPreparedPlan(r, plan, r.notice, planDifferences(r.members, plan.members), true);
+      return;
+    }
+    await commandRequest("batch-candidates", {id: r.id, digest: plan.digest, decision: "reject"}, () => $("batch-review").close(), keepDecision(plan.members.length));
+  } finally {
+    r.busy = false;
+    syncBatchReview();
+  }
+}
+$("dismiss-batch-review").addEventListener("click", () => $("batch-review").close());
+$("close-batch-review").addEventListener("click", () => $("batch-review").close());
+$("batch-review").addEventListener("close", () => { state.batchReview = null; syncBatchReview(); });
+$("approve-batch-review").addEventListener("click", () => safe(replaceBatchFiles));
+$("reject-batch-review").addEventListener("click", () => safe(keepBatchOriginals));
 $("close-detail").addEventListener("click", () => $("job-detail").close());
 $("job-detail").addEventListener("close", () => { state.detailRevision++; state.detail=null; writeNavigation(); });
 $("detail-row-log").addEventListener("toggle", () => { if ($("detail-row-log").open) safe(loadDetail); });

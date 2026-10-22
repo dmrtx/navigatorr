@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -127,10 +128,24 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	if err != nil || with.Digest == plain.Digest || with.Size.SizeBudget == nil {
 		t.Fatalf("budget not frozen: %+v %v", with.Size, err)
 	}
-	// The frozen budget, its encode settings and floor are part of the identity.
-	const pinned = "sha256:acab2deaadb3e3deb498dda0ff3080a5a8f86844531d9bc79153679cfdd6839b"
+	// The frozen budget, its encode settings, floor and audio levels are part of
+	// the identity. The audio levels changed it on purpose: a new goal freezes
+	// them, so its digest is not the one a budget frozen before them carried.
+	const pinned = "sha256:7c02f9ea61de68d9187c9f5ee1cf6b28fd44a79f9ce2f9d8d56dd09cca2cc018"
 	if with.Digest != pinned {
 		t.Fatalf("size budget policy digest changed: %s", with.Digest)
+	}
+	// A budget frozen before the levels carries none, and its digest is the one
+	// it was frozen with, so it verifies and behaves as it did.
+	const pinnedBeforeLevels = "sha256:acab2deaadb3e3deb498dda0ff3080a5a8f86844531d9bc79153679cfdd6839b"
+	before := *budget
+	before.Audio = nil
+	legacy, err := legacyModePolicyWithBudget("size", false, 0, nil, false, &before)
+	if err != nil || legacy.Digest != pinnedBeforeLevels || legacy.workerVersion() != transcode.ModePolicyV3 || legacy.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
+		t.Fatalf("a budget frozen before the audio levels changed: %s worker %s (%v)", legacy.Digest, legacy.workerVersion(), err)
+	}
+	if with.Size.SizeBudget.Audio == nil || !slices.Equal(with.Size.SizeBudget.Audio.Modes, []string{transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC}) {
+		t.Fatalf("a new budget does not freeze the levels: %+v", with.Size.SizeBudget.Audio)
 	}
 	// A frozen budget is re-verified like the rest of the snapshot.
 	ec := &ExecutionContext{Inputs: map[string]any{"mode": "size", "size_budget_percent": 40.0}, State: map[string]any{"mode_policy": with}}
@@ -161,7 +176,7 @@ func TestSizeBudgetBytesAndBitrate(t *testing.T) {
 	if got := (&SizeBudgetPolicy{Bytes: 9_500_000_000}).BudgetBytes(budgetSourceBytes, nil); got != 8_500_000_000 {
 		t.Fatalf("absolute budget not capped: %d", got)
 	}
-	nonVideo, known := sizeBudgetNonVideoBytes(budgetReport(), budgetSourceBytes)
+	nonVideo, known := sizeBudgetNonVideoBytes(budgetReport(), budgetSourceBytes, transcode.AudioModeCompactLossless)
 	if !known || nonVideo != 300_000_000 {
 		t.Fatalf("non-video bytes %d %v", nonVideo, known)
 	}
@@ -175,7 +190,7 @@ func TestSizeBudgetBytesAndBitrate(t *testing.T) {
 	// Lossless audio that will be compacted leaves more room for the video.
 	rep := audioOnlyReport()
 	rep.Video[0].BitRate, rep.Video[0].Tags = 0, map[string]string{"NUMBER_OF_BYTES": "4000000000"}
-	lossless, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000)
+	lossless, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000, transcode.AudioModeCompactLossless)
 	if !known || lossless >= 10_700_000_000-4_000_000_000 {
 		t.Fatalf("lossless audio savings ignored: %d", lossless)
 	}
@@ -186,16 +201,16 @@ func TestSizeBudgetBytesAndBitrate(t *testing.T) {
 	rep.Video[0].Tags = nil
 	_, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)"})
 	want := 10_700_000_000*sizeBudgetOverheadPerMille/1000 + 2*int64(kbps)*1000*6000/8 + 192000*6000/8
-	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived != want {
+	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000, transcode.AudioModeCompactLossless); !known || derived != want {
 		t.Fatalf("other streams %d %v, want %d", derived, known, want)
 	}
 	rep.Audio[1].BitRate = 0
-	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); !known || derived != want {
+	if derived, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000, transcode.AudioModeCompactLossless); !known || derived != want {
 		t.Fatalf("unsized lossless track: %d %v, want %d", derived, known, want)
 	}
 	// A copied track that states no size leaves the video size unknown.
 	rep.Audio[2].BitRate = 0
-	if _, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000); known {
+	if _, known := sizeBudgetNonVideoBytes(rep, 10_700_000_000, transcode.AudioModeCompactLossless); known {
 		t.Fatal("unknown video size treated as known")
 	}
 }
@@ -425,7 +440,7 @@ func TestSizeBudgetBitrateCeiling(t *testing.T) {
 	if enc.Reason != "" || enc.X265.BitrateKbps != transcode.X265MaxBitrateKbps {
 		t.Fatalf("encode %+v", enc)
 	}
-	if enc := planSizeBudgetEncode(c.snapshot.Size.SizeBudget, rep, 60_000_000_000, 1_000_000_000); enc.Reason != "size_budget_unreachable" {
+	if enc := planSizeBudgetEncode(c.snapshot.Size.SizeBudget, rep, 60_000_000_000, 500_000_000); enc.Reason != "size_budget_unreachable" {
 		t.Fatalf("budget under the other streams planned: %+v", enc)
 	}
 }
@@ -645,7 +660,7 @@ func TestSizeBudgetNonVideoBytesWithoutVideoStatistics(t *testing.T) {
 		Subtitles: []mediainspect.DetailedStream{{Index: 3, Codec: "subrip"}, {Index: 4, Codec: "subrip"}},
 	}
 	const source = int64(5_000_000_000)
-	got, known := sizeBudgetNonVideoBytes(rep, source)
+	got, known := sizeBudgetNonVideoBytes(rep, source, transcode.AudioModeCompactLossless)
 	audio := int64(192000+384000) * 3600 / 8
 	want := audio + 2*defaultTextSubtitleSizeBytes + source*sizeBudgetOverheadPerMille/1000
 	if !known || got != want {
@@ -665,7 +680,7 @@ func TestSizeBudgetNonVideoBytesWithoutVideoStatistics(t *testing.T) {
 		r.Audio = append([]mediainspect.DetailedStream(nil), rep.Audio...)
 		r.Subtitles = append([]mediainspect.DetailedStream(nil), rep.Subtitles...)
 		mutate(&r)
-		if _, known := sizeBudgetNonVideoBytes(&r, source); known {
+		if _, known := sizeBudgetNonVideoBytes(&r, source, transcode.AudioModeCompactLossless); known {
 			t.Fatalf("%s: a video size was derived from streams that do not bound it", name)
 		}
 	}

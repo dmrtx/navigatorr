@@ -105,6 +105,11 @@ type SizeBudgetPolicy struct {
 	// first), then at the budget's average bitrate. The first encode within the
 	// budget is the one validated.
 	VTLadder []int `json:"vt_quality_ladder,omitempty"`
+	// Audio is set by policy v5, which every new budget freezes: the audio
+	// levels the plan may use and what counts as good video (see
+	// transcode_size_budget_audio.go). Absent, the budget keeps the one audio
+	// policy snapshots frozen before it carry: only lossless audio converted.
+	Audio *SizeBudgetAudio `json:"audio,omitempty"`
 }
 
 // sizeBudgetVTLadder is the quality ladder new snapshots freeze: VideoToolbox
@@ -125,6 +130,11 @@ func (b *SizeBudgetPolicy) Clone() *SizeBudgetPolicy {
 		cp.Comparison = &c
 	}
 	cp.VTLadder = slices.Clone(b.VTLadder)
+	if b.Audio != nil {
+		a := *b.Audio
+		a.Modes = slices.Clone(a.Modes)
+		cp.Audio = &a
+	}
 	return &cp
 }
 
@@ -146,6 +156,9 @@ func (b *SizeBudgetPolicy) Validate() error {
 		return err
 	}
 	if err := b.Comparison.validate(); err != nil {
+		return err
+	}
+	if err := b.Audio.validate(); err != nil {
 		return err
 	}
 	if len(b.VTLadder) > 0 {
@@ -264,7 +277,7 @@ func modeSizeBudgetInput(mode string, inputs map[string]any) (*SizeBudgetPolicy,
 	if hasMultiplier && !hasSource {
 		return nil, inputErr("size_budget_sibling_multiplier", "size_budget_sibling_multiplier requires size_budget_source=siblings")
 	}
-	b := &SizeBudgetPolicy{FillPercent: sizeBudgetFillPercent, Preset: sizeBudgetPreset, X265: sizeBudgetX265, Floor: sizeBudgetFloor}
+	b := &SizeBudgetPolicy{FillPercent: sizeBudgetFillPercent, Preset: sizeBudgetPreset, X265: sizeBudgetX265, Floor: sizeBudgetFloor, Audio: newSizeBudgetAudio()}
 	if hasSource {
 		if source != "siblings" {
 			return nil, inputErr("size_budget_source", `size_budget_source must be "siblings"`)
@@ -331,6 +344,9 @@ type SizeBudgetRecord struct {
 	NonVideoBytes    int64   `json:"non_video_bytes"`
 	VideoBitrateKbps int     `json:"video_bitrate_kbps"`
 	DurationSeconds  float64 `json:"duration_seconds"`
+	// Audio is the level the plan uses and each track's planned codec and
+	// bitrate; absent for a budget frozen before the levels.
+	Audio *SizeBudgetAudioRecord `json:"audio,omitempty"`
 	// OverBudgetCandidateID is the passing setting the budget ruled out.
 	OverBudgetCandidateID    string `json:"over_budget_candidate_id,omitempty"`
 	OverBudgetEstimatedBytes int64  `json:"over_budget_estimated_bytes,omitempty"`
@@ -380,12 +396,12 @@ func sizeBudgetActive(state map[string]any) bool {
 }
 
 // sizeBudgetNonVideoBytes is what everything but the main video takes in the
-// output: the source minus its video stream, minus what compacting the
-// lossless audio saves. A converted track whose source size is unknown saves
-// nothing here, which errs towards a smaller file. It is unknown (false) when
-// the video stream's own size cannot be read and a copied stream states no
-// size either.
-func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64) (int64, bool) {
+// output under an audio mode: the source minus its video stream, minus what
+// converting the audio saves. A converted track whose source size is unknown
+// saves nothing here, which errs towards a smaller file. It is unknown (false)
+// when the video stream's own size cannot be read and a copied stream states
+// no size either.
+func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64, audioMode string) (int64, bool) {
 	if rep == nil || sourceBytes <= 0 || rep.DurationSec <= 0 {
 		return 0, false
 	}
@@ -398,12 +414,12 @@ func sizeBudgetNonVideoBytes(rep *mediainspect.DetailedReport, sourceBytes int64
 		// Files muxed without Matroska statistics give no video size. The
 		// output's other streams are sized directly instead: converted audio
 		// is re-encoded at a known bitrate, whatever its source size.
-		return sizeBudgetOtherStreamBytes(rep, sourceBytes)
+		return sizeBudgetOtherStreamBytes(rep, sourceBytes, audioMode)
 	}
 	if videoBytes >= sourceBytes {
 		return 0, false
 	}
-	return estimateAudioOnly(rep, sourceBytes).CandidateBytes - videoBytes, true
+	return estimateAudioOnly(rep, sourceBytes, audioMode).CandidateBytes - videoBytes, true
 }
 
 // Upper bounds for streams that state no size of their own: cover art is a
@@ -422,15 +438,15 @@ const (
 // one (they can be gigabytes); text subtitles and cover art are bounded and
 // attachments carry their size. Overestimating these streams plans a smaller
 // video, never a larger one.
-func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes int64) (int64, bool) {
+func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes int64, audioMode string) (int64, bool) {
 	total := sourceBytes * sizeBudgetOverheadPerMille / 1000
 	for _, a := range rep.Audio {
-		target, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.DetailedAudioTrack(a.Codec, a.Profile, a.Title, a.Tags, a.Channels, a.ChannelLayout))
+		target, kbps := transcode.AudioTarget(audioMode, audioTrackOf(a, rep.DurationSec))
 		if target != "copy" {
 			total += int64(kbps) * 1000 * int64(math.Ceil(rep.DurationSec)) / 8
 			continue
 		}
-		n := audioStreamBytes(a, rep.DurationSec, sourceBytes)
+		n := audioTrackBytes(a, rep.DurationSec, sourceBytes)
 		if n <= 0 {
 			return 0, false
 		}
@@ -506,17 +522,48 @@ type sizeBudgetEncode struct {
 	TargetBytes   int64
 	NonVideoBytes int64
 	X265          transcode.X265Settings
-	Reason        string
-	Message       string
+	// AudioMode is the audio level the encode plans with; Audio records it and
+	// each track's plan (nil for a budget frozen before the levels).
+	AudioMode string
+	Audio     *SizeBudgetAudioRecord
+	Reason    string
+	Message   string
 }
 
+// planSizeBudgetEncode chooses the audio level (see
+// transcode_size_budget_audio.go) and plans the video bitrate that leaves.
 func planSizeBudgetEncode(policy *SizeBudgetPolicy, rep *mediainspect.DetailedReport, sourceBytes, budget int64) sizeBudgetEncode {
-	var enc sizeBudgetEncode
 	if policy == nil || rep == nil || budget <= 0 || rep.DurationSec <= 0 {
-		enc.Reason, enc.Message = "size_budget_estimate_unavailable", "The source's size or duration could not be read, so no bitrate for the size budget could be planned."
-		return enc
+		return sizeBudgetEncode{Reason: "size_budget_estimate_unavailable", Message: "The source's size or duration could not be read, so no bitrate for the size budget could be planned."}
 	}
-	nonVideo, known := sizeBudgetNonVideoBytes(rep, sourceBytes)
+	modes := policy.audioModes()
+	good := policy.Audio.goodVideoKbps(rep, sourceBytes)
+	var last, usable sizeBudgetEncode
+	previous := 0
+	for i, mode := range modes {
+		enc := planSizeBudgetEncodeAt(policy, rep, sourceBytes, budget, mode)
+		if policy.Audio != nil {
+			enc.Audio = sizeBudgetAudioRecord(rep, mode, i+1, good, previous)
+		}
+		if enc.Reason == "" {
+			if i == len(modes)-1 || enc.X265.BitrateKbps >= good {
+				return enc
+			}
+			usable, previous = enc, enc.X265.BitrateKbps
+		}
+		last = enc
+	}
+	if usable.AudioMode != "" {
+		return usable
+	}
+	return last
+}
+
+// planSizeBudgetEncodeAt is the encode at one audio mode: the size it aims at,
+// what the other streams take and the x265 settings at the bitrate that leaves.
+func planSizeBudgetEncodeAt(policy *SizeBudgetPolicy, rep *mediainspect.DetailedReport, sourceBytes, budget int64, audioMode string) sizeBudgetEncode {
+	enc := sizeBudgetEncode{AudioMode: audioMode}
+	nonVideo, known := sizeBudgetNonVideoBytes(rep, sourceBytes, audioMode)
 	if !known {
 		enc.Reason, enc.Message = "size_budget_estimate_unavailable", "The size of the source's video stream could not be read, so no bitrate for the size budget could be planned."
 		return enc
@@ -555,7 +602,7 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" {
 		return StepResult{}, false
 	}
-	if snapshot == nil || snapshot.workerVersion() != transcode.ModePolicyV3 || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
+	if snapshot == nil || !transcode.IsSizePolicyVersion(snapshot.workerVersion()) || snapshot.Size == nil || snapshot.Size.SizeBudget == nil {
 		return StepResult{}, false
 	}
 	policy := snapshot.Size.SizeBudget
@@ -566,14 +613,15 @@ func endUnreachableSizeBudget(ec *ExecutionContext, snapshot *ModePolicySnapshot
 	if rep == nil || budget <= 0 {
 		return StepResult{}, false
 	}
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, budget)
 	if enc.Reason != "size_budget_unreachable" {
 		return StepResult{}, false
 	}
 	// No video bitrate fits, but copying the video and compacting the lossless
 	// audio may: that answer is still the search's to give.
 	if snapshot.Size.AudioOnlyFallback {
-		if est := estimateAudioOnly(rep, original); est.Compacted > 0 && est.CandidateBytes <= budget {
+		if _, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {
 			return StepResult{}, false
 		}
 	}
@@ -638,6 +686,9 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 	}
 	p := *base
 	video.apply(&p)
+	if rec.Audio != nil {
+		p.AudioMode = rec.Audio.Mode
+	}
 	if sizeBudgetIsLadder(rec) && base.SizePolicy != nil {
 		sp := *base.SizePolicy
 		sp.MaxCandidateBytes = rec.BudgetBytes
@@ -816,7 +867,7 @@ func sizeBudgetPlannedMessage(r *SizeBudgetRecord, policy *SizeBudgetPolicy, pla
 	if r.Trigger == sizeBudgetTriggerBudgetFirst {
 		// Policy v4: nothing was searched; the budget's one encode is the
 		// recipe.
-		return fmt.Sprintf("Encoding the whole file once with two-pass x265 at %d kbps of video for about %s of the %s budget. Its quality is checked on the final validation windows against the floor; below this goal's target it is reported as such.%s", r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), from)
+		return fmt.Sprintf("Encoding the whole file once with two-pass x265 at %d kbps of video for about %s of the %s budget. Its quality is checked on the final validation windows against the floor; below this goal's target it is reported as such.%s%s", r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), sizeBudgetAudioSentence(r.Audio), from)
 	}
 	why := "No tested setting met this goal's quality limits"
 	if r.Trigger == sizeBudgetTriggerOverBudget {
@@ -892,8 +943,9 @@ func (e *Engine) batchPromotionBelowTarget(plan *batchPromotionPlan) int {
 // BatchItemFrozenSizeBudget is the size budget one batch item runs under, as
 // frozen (nil without one): its own goal-change policy when it has one, else
 // the batch's. state is the batch's decoded state. The encoder comparison and
-// the VideoToolbox ladder are left out: they follow allow_hardware and the
-// version the budget was frozen with, not a budget setting the user chose.
+// the VideoToolbox ladder and the audio levels are left out: they follow
+// allow_hardware and the version the budget was frozen with, not a budget
+// setting the user chose.
 func BatchItemFrozenSizeBudget(state map[string]any, itemKey string) map[string]any {
 	holder := state
 	if row := objectMap(objectMap(state["batch_item_settings"])[itemKey]); objectMap(row["mode_policy"]) != nil {
@@ -905,7 +957,7 @@ func BatchItemFrozenSizeBudget(state map[string]any, itemKey string) map[string]
 	}
 	budget := make(map[string]any, len(frozen))
 	for k, v := range frozen {
-		if k != "encoder_comparison" && k != "vt_quality_ladder" {
+		if k != "encoder_comparison" && k != "vt_quality_ladder" && k != "audio" {
 			budget[k] = v
 		}
 	}

@@ -361,6 +361,40 @@
                   </div>
                 </details>
               </fieldset>
+              <details id="keep-tracks" class="keep-tracks" hidden>
+                <summary><span class="keep-tracks-title">Audio and subtitles</span><span id="keep-tracks-summary" class="metadata"></span></summary>
+                <div class="keep-tracks-body">
+                  <div class="goal-option">
+                    <span id="keep-scope-label" class="goal-option-label">Languages to keep</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="keep-scope-label">
+                      <label><input type="radio" name="keep-scope" value="saved" checked /><span>Saved list</span></label>
+                      <label><input type="radio" name="keep-scope" value="job" /><span>This job only</span></label>
+                      <label><input type="radio" name="keep-scope" value="all" /><span>All tracks</span></label>
+                    </div>
+                  </div>
+                  <div id="keep-job-languages" class="goal-option" hidden>
+                    <ul id="keep-job-list" class="language-chips" aria-label="Languages to keep for this job"></ul>
+                    <div class="inline-form language-add">
+                      <input id="keep-job-input" list="language-options" aria-label="Add a language for this job" aria-describedby="keep-job-note" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Add a language" />
+                      <button id="keep-job-add" type="button">Add</button>
+                    </div>
+                    <p id="keep-job-note" class="metadata" role="status"></p>
+                  </div>
+                  <p class="muted">Tracks in the file's original language and untagged tracks are always kept.</p>
+                  <div id="keep-tracks-file" class="goal-option" hidden>
+                    <p id="keep-tracks-status" class="metadata" role="status"></p>
+                    <fieldset id="keep-audio" class="track-group">
+                      <legend>Audio · keep at least one</legend>
+                      <ul id="keep-audio-list" class="track-list"></ul>
+                    </fieldset>
+                    <fieldset id="keep-subtitles" class="track-group">
+                      <legend>Subtitles</legend>
+                      <ul id="keep-subtitle-list" class="track-list"></ul>
+                    </fieldset>
+                    <button id="keep-tracks-reset" type="button" class="quiet">Back to the automatic choice</button>
+                  </div>
+                </div>
+              </details>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
               <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <details id="advanced-profiles" class="advanced-profiles">
@@ -843,6 +877,25 @@
               </details>
             </div>
           </section>
+          <section id="settings-languages" class="node-settings language-settings" aria-labelledby="settings-languages-title">
+            <strong id="settings-languages-title" class="node-settings-title">Languages to keep</strong>
+            <div class="settings-row">
+              <span>Audio and subtitles<span id="keep-languages-state" class="metadata"></span></span>
+              <div class="inline-form language-add">
+                <input id="keep-language-input" list="language-options" aria-label="Add a language" aria-describedby="keep-languages-note" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Add a language" />
+                <button id="keep-language-add" type="button">Add</button>
+              </div>
+            </div>
+            <ul id="keep-languages-list" class="language-chips" aria-label="Languages to keep"></ul>
+            <p class="muted">Save space and Shrink to 1080p SDR drop audio and subtitle tracks in other languages. Tracks in the file's original language and untagged tracks are always kept.</p>
+            <div class="submit-actions">
+              <button id="keep-languages-apply" type="button" class="primary">Apply</button>
+              <button id="keep-languages-reset" type="button" class="quiet">Reset to default</button>
+              <button id="keep-languages-off" type="button" class="quiet">Turn off</button>
+            </div>
+            <p id="keep-languages-note" class="metadata" role="status"></p>
+            <datalist id="language-options"></datalist>
+          </section>
           <div class="settings-row">
             <span
               >Shared presets<span class="metadata">New jobs only</span></span
@@ -1082,13 +1135,16 @@
     </dialog>
     <dialog id="file-review" aria-labelledby="file-review-title">
       <div class="dialog-heading">
-        <h2 id="file-review-title">Review replacement</h2>
+        <h2 id="file-review-title">Replace file</h2>
         <button id="dismiss-file-review" class="icon-button" aria-label="Close">×</button>
       </div>
       <p class="dialog-connection muted" role="status" hidden>Server unavailable. Approval is paused until it responds.</p>
       <div id="file-review-data"></div>
+      <p id="file-review-total" class="review-total" role="status"></p>
       <p class="muted">The original is kept as a recovery copy until the replacement is verified, then removed.</p>
       <div class="submit-actions">
+        <button id="dismiss-file-review-action">Cancel</button>
+        <button id="reject-file-review" hidden>Keep original</button>
         <button id="approve-file-review" class="primary">Replace file</button>
       </div>
     </dialog>
@@ -1114,20 +1170,23 @@
       </div>
     </dialog>
     <dialog id="batch-review" aria-labelledby="batch-review-title">
-      <h2 id="batch-review-title">Review replacements</h2>
+      <div class="dialog-heading">
+        <h2 id="batch-review-title">Replace files</h2>
+        <button id="close-batch-review" class="icon-button" aria-label="Close">×</button>
+      </div>
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Approval is paused until it responds.
       </p>
-      <p class="muted">
-        Replaces every file below after verification, with recovery copies.
-      </p>
+      <div id="batch-review-notice" role="status"></div>
       <div id="batch-review-data"></div>
+      <p id="batch-review-total" class="review-total" role="status"></p>
+      <p class="muted">
+        Each original is kept as a recovery copy until its new file is verified, then removed.
+      </p>
       <div class="submit-actions">
-        <button id="dismiss-batch-review">Back</button
-        ><button id="reject-batch-review">Keep originals</button
-        ><button id="approve-batch-review" class="primary">
-          Approve replacements
-        </button>
+        <button id="dismiss-batch-review">Cancel</button>
+        <button id="reject-batch-review" hidden>Keep originals</button>
+        <button id="approve-batch-review" class="primary">Replace files</button>
       </div>
     </dialog>
   </body>

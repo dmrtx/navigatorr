@@ -620,7 +620,8 @@ test("batch rows show a smoothed encode ETA and the files left, only while speed
   h.run('progressJob.worker.speed=0;');
   text = progressText(h.run('batchProgress(progressJob)'));
   assert.doesNotMatch(text, / left/);
-  assert.match(text, /Estimated workflow progress · Not time remaining/);
+  // No estimate line appears unless a time was measured.
+  assert.doesNotMatch(text, /Estimated workflow progress|Not time remaining/);
   // Files that finished are forgotten; the smoothing map stays bounded.
   h.run('for(let i=0;i<100;i++)encodeEta("old-"+i,{transcode_phase:"encoding",speed:1},600);');
   assert.ok(h.run('encodeEtas.size') <= 64);
@@ -1265,7 +1266,7 @@ test("reconnection refreshes monitoring without discarding a prepared transcode"
 test("expired session closes stale approval dialogs and exposes sign-in", async () => {
   const h = harness();
   h.run(
-    "controls = () => {}; state.detail = 'old'; state.batchApproval = 'old';",
+    "controls = () => {}; state.detail = 'old'; state.batchReview = {id:'old'};",
   );
   h.document.getElementById("job-detail").open = true;
   h.document.getElementById("batch-review").open = true;
@@ -1278,7 +1279,7 @@ test("expired session closes stale approval dialogs and exposes sign-in", async 
   assert.equal(h.elements.get("job-detail").open, false);
   assert.equal(h.elements.get("batch-review").open, false);
   assert.equal(h.elements.get("login").hidden, false);
-  assert.equal(h.run("state.batchApproval"), null);
+  assert.equal(h.run("state.batchReview"), null);
   assert.equal(h.run("state.authRevision"), 1);
 });
 
@@ -1298,20 +1299,16 @@ test("session invalidation prevents a delayed batch approval from reopening", as
   const h = harness(),
     plan = deferred();
   h.context.plan = plan.promise;
-  h.run("tool = async () => plan; controls = () => {};");
-  const pending = h.run('reviewBatchPromotion("batch-a")');
-  h.context.fetch = async () => ({
-    ok: false,
-    status: 401,
-    json: async () => ({ error: "sign in to Navigatorr" }),
-  });
-  await assert.rejects(h.run('api("bootstrap")'), /sign in/);
+  h.run("api = async () => plan; controls = () => {};");
+  const pending = h.run('reviewBatchReplacement("batch-a")');
+  h.run("invalidateAuthentication()");
   plan.resolve({
-    data: {
-      batch_id: "batch-a",
-      digest: "verified",
-      members: [{ item_key: "file" }],
-    },
+    prepared: true,
+    id: "batch-a",
+    digest: "verified",
+    approved: false,
+    waiting: true,
+    members: [{ item_key: "file" }],
   });
   await pending;
   assert.equal(h.elements.get("batch-review").open, false);
@@ -1362,8 +1359,11 @@ test("batch approval first shows the concrete plan without resuming", async () =
   const h = harness(),
     calls = [];
   h.context.plan = {
-    batch_id: "batch-a",
+    prepared: true,
+    id: "batch-a",
     digest: "sha256:plan",
+    approved: false,
+    waiting: true,
     members: [
       {
         item_key: "episode-1",
@@ -1373,13 +1373,15 @@ test("batch approval first shows the concrete plan without resuming", async () =
     ],
   };
   h.context.record = (name) => calls.push(name);
-  h.run("tool = async (name) => {record(name); return {data:plan};};");
+  h.run("api = async (path) => {record(path); return plan;}; tool = async (name) => {record(name); return {data:null};};");
   const controls = h.run(
     'jobControls({id:"batch-a",status:"waiting_decision",action_name:"transcode_batch",batch:{promotion_plan_ready:true},waiting_options:[{decision:"approve",description:"Aprobar"}]})',
   );
   await controls.children[0].listeners.get("click")();
-  assert.deepEqual(calls, ["action_detail", "action_detail"]);
+  // The plan is read from the server's own list; nothing is resumed.
+  assert.deepEqual(calls, ["batch-candidates?id=batch-a&plan=1", "action_detail"]);
   assert.equal(h.elements.get("batch-review").open, true);
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
   assert.match(JSON.stringify(h.elements.get("batch-review-data").children), /\/source.mkv/);
   assert.match(
     JSON.stringify(h.elements.get("batch-review-data").children),
@@ -2515,14 +2517,14 @@ test("compact replacement reviews warn about re-grabs and show read-only trackin
   assert.match(text(first), /download the original again/);
   assert.match(text(first), /Monitored · Quality profile: Any/);
   h.context.notice = {regrab_warning:"May download the original again.",arr_monitored:false};
-  h.context.plan = {batch_id:"batch-a",digest:"sha256:plan",members:[{item_key:"e1",original_path:"/source.mkv",candidate_path:"/candidate.mkv"}]};
-  h.run('tool = async (name, args) => ({data: args.key === "batch_promotion_notice" ? notice : plan});');
-  await h.run('reviewBatchPromotion("batch-a")');
-  const batch = h.elements.get("batch-review-data").children[0];
+  h.context.plan = {prepared:true,id:"batch-a",digest:"sha256:plan",approved:false,waiting:true,members:[{item_key:"e1",original_path:"/source.mkv",candidate_path:"/candidate.mkv"}]};
+  h.run('api = async () => plan; tool = async (name, args) => ({data: args.key === "batch_promotion_notice" ? notice : null});');
+  await h.run('reviewBatchReplacement("batch-a")');
+  const batch = h.elements.get("batch-review-notice").children[0];
   assert.match(text(batch), /Not monitored/);
   h.context.notice = null;
-  await h.run('reviewBatchPromotion("batch-a")');
-  assert.doesNotMatch(text(h.elements.get("batch-review-data")), /download the original again/);
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.doesNotMatch(text(h.elements.get("batch-review-notice")), /download the original again/);
 });
 
 test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
@@ -2918,9 +2920,9 @@ test("file details offer goal changes and keep-original decisions without duplic
   const labels=h.run('jobControls({id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",mode:"size",parent_action_id:"batch",parent_item_key:"one",waiting_options:[{decision:"cancel"}]}).children.map(b=>b.textContent)');
   assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
   const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
-  assert.equal(skipped.status,"Skipped");assert.match(skipped.summary,/quality target; original kept/);
+  assert.equal(skipped.status,"Not converted");assert.match(skipped.summary,/quality target; original kept/);
   const unsupported=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",candidate_ready:false})');
-  assert.equal(unsupported.status,"Skipped");assert.match(unsupported.summary,/does not support this source format yet/);
+  assert.equal(unsupported.status,"Not converted");assert.match(unsupported.summary,/does not support this source format yet/);
 });
 
 test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{
@@ -4599,7 +4601,8 @@ test("leaving a file cancels its read, and a busy server is asked once more", as
   h.context.signals = signals;
   h.context.setTimeout = (fn) => { fn(); return 0; };
   h.context.answers = [Object.assign(new Error("busy reading another file; try again"), { status: 429 }), goalProfileFixture()];
-  h.run('api = async (path, body, opts) => { signals.push(opts.signal); const a = answers.shift(); if (a instanceof Error) throw a; return a; }; $("path").value = "/media/a.mkv"; controls();');
+  // The goal also reads the file's tracks; this test is about the profile read.
+  h.run('api = async (path, body, opts) => { if (path.startsWith("source-tracks")) return {audio: [], subtitles: []}; signals.push(opts.signal); const a = answers.shift(); if (a instanceof Error) throw a; return a; }; $("path").value = "/media/a.mkv"; controls();');
   await h.run('loadGoalProfile("/media/a.mkv")');
   assert.equal(signals.length, 2, "one retry after 429");
   assert.equal(mode(), "compact");
@@ -4607,7 +4610,7 @@ test("leaving a file cancels its read, and a busy server is asked once more", as
   // A read still running when the user moves on is aborted.
   const pending = deferred();
   h.context.pending = pending.promise;
-  h.run('api = async (path, body, opts) => { signals.push(opts.signal); return pending; }; $("path").value = "/media/b.mkv"; controls();');
+  h.run('api = async (path, body, opts) => { if (path.startsWith("source-tracks")) return {audio: [], subtitles: []}; signals.push(opts.signal); return pending; }; $("path").value = "/media/b.mkv"; controls();');
   const load = h.run('loadGoalProfile("/media/b.mkv")');
   const signal = signals.at(-1);
   h.run('$("path").value = "/media/c.mkv"; controls();');
@@ -5025,6 +5028,1295 @@ test("the copy button copies the full path", async () => {
   await h.elements.get("copy-detail-path").listeners.get("click")();
   await settle();
   assert.deepEqual(copied, ["/media/Example Show/Season 1/Example Show S01E01.mkv"]);
+});
+
+// ---- A job that left no file says so, and why ----
+
+const sizeRejectedMessage = "The audio, subtitles and other streams alone take 1.14 GB, which leaves no usable video bitrate within the 1.00 GB budget. At least 1.20 GB would be needed for this file; raise the budget, or remove audio or subtitle tracks first. Original preserved.";
+const sizeRejectedNextStep = "Raise the size budget, or remove audio or subtitle tracks, then run it again.";
+function notConvertedJob(extra = {}) {
+  return detailJob({
+    status: "completed", reason_code: "size_budget_exceeded", candidate_ready: false, replaced: false, worker: undefined,
+    stages: stagesAt(7, "completed"), current_step: 7,
+    savings: { source_bytes: 2790000000, estimated_saved_bytes: 1820000000 },
+    benchmark: { outcome: "size_rejected", message: sizeRejectedMessage, user_next_step: sizeRejectedNextStep },
+    transcode: { message: "" },
+    size_mode: { expected_bytes: 970000000, encoder: "libx265", size_budget: { budget_bytes: 1000000000 } },
+    ...extra,
+  });
+}
+
+test("a size-rejected file is Not converted, says why and shows no savings", async () => {
+  const h = harness();
+  h.context.job = notConvertedJob();
+  const row = h.run("queuePresentation(job)");
+  assert.equal(row.status, "Not converted");
+  assert.match(row.summary, /1\.14 GB/);
+  assert.match(row.summary, /1\.00 GB budget/);
+  assert.match(row.summary, /original kept/i);
+  assert.match(row.summary, /2\.79 GB source/);
+  assert.doesNotMatch(row.summary, /estimated savings|potential savings|freed/);
+  assert.equal(h.run("statusClass(queuePresentation(job).status)"), "neutral");
+  // The job's details carry the full message and the next step.
+  const detail = await openDetail(notConvertedJob());
+  const text = allTextOf(detail.elements.get("detail-summary"));
+  assert.match(allTextOf(detail.elements.get("detail-status")), /Not converted/);
+  assert.match(text, /Result/);
+  assert.match(text, /At least 1\.20 GB would be needed/);
+  assert.match(text, /Next step:\s*Raise the size budget/);
+  assert.doesNotMatch(text, /estimated savings/);
+  // The chips name what is known, not an encode that never ran.
+  const chips = (d) => nodesWithClass(d.elements.get("detail-summary"), "detail-fact").map((n) => n.textContent);
+  assert.deepEqual(chips(detail), ["2.79 GB", "Limit ≤ 1.00 GB"]);
+  const measured = await openDetail(notConvertedJob({ savings: { source_bytes: 2790000000, candidate_bytes: 2000000000 } }));
+  assert.deepEqual(chips(measured), ["2.79 GB", "Limit ≤ 1.00 GB"]);
+});
+
+test("a reason code the UI has never heard of still reads as a sentence", () => {
+  const h = harness();
+  h.context.noMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: undefined });
+  const bare = h.run("queuePresentation(noMessage)");
+  assert.equal(bare.status, "Not converted");
+  assert.match(bare.summary, /Future new reason/);
+  assert.doesNotMatch(bare.summary, /future_new_reason|estimated savings/);
+  h.context.withMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: { outcome: "future_outcome", message: "The worker could not read this file's frame rate. Original preserved." } });
+  const said = h.run("queuePresentation(withMessage)");
+  assert.equal(said.status, "Not converted");
+  assert.match(said.summary, /The worker could not read this file's frame rate; original kept/);
+  // Neither an empty job reason nor an empty message drops the sentence.
+  h.context.nothing = notConvertedJob({ reason_code: undefined, benchmark: undefined });
+  assert.match(h.run("queuePresentation(nothing)").summary, /No converted file was made/);
+});
+
+test("a long reason is trimmed at a boundary, keeps its numbers and the original-kept suffix", () => {
+  const h = harness();
+  const reason = (message) => { h.context.probe = notConvertedJob({ benchmark: { outcome: "quality_rejected", message } }); return h.run("queuePresentation(probe).summary"); };
+  const long = "The encoded result did not meet the quality requirements on the whole file: VMAF mean 91.2 is below the minimum 93.0; VMAF 5th percentile 71.4 is below the minimum 80.0; the worst 10 second window scored 52.5 against a floor of 60.0. Original preserved.";
+  const text = reason(long);
+  assert.match(text, /…; original kept/);
+  assert.match(text, /minimum 93\.0…; original kept/, "cut at a clause, numbers whole");
+  assert.ok(text.length < 210, text);
+  // A sentence that already says so is not repeated.
+  assert.match(reason("The goal was not met; original preserved. Raise the budget."), /preserved · 2\.79 GB source$/);
+  assert.doesNotMatch(reason("The goal was not met; original preserved. Raise the budget."), /original kept/i);
+  assert.equal((reason("Nothing met the goal; original kept.").match(/original kept/gi) || []).length, 1);
+  // An abbreviation does not end the sentence.
+  assert.match(reason("The file needs approx. 5.00 GB for this goal. Raise the budget."), /approx\. 5\.00 GB for this goal; original kept/);
+});
+
+test("only a job that left no file and replaced nothing is Not converted", () => {
+  const h = harness();
+  const status = (patch) => { h.context.probe = notConvertedJob(patch); return h.run("queuePresentation(probe).status"); };
+  assert.equal(status({}), "Not converted");
+  assert.equal(status({ reason_code: "quality_not_met" }), "Not converted");
+  assert.equal(status({ candidate_ready: true }), "Candidate ready");
+  assert.equal(status({ replaced: true }), "Replaced");
+  assert.equal(status({ replacement_action_id: "replacement" }), "Completed");
+  assert.equal(status({ candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } }), "Completed");
+  assert.equal(status({ status: "failed", error: "transcode candidate rejected by user decision; candidate file removed" }), "Rejected");
+  assert.equal(status({ status: "failed", error: "ffmpeg exited with status 1" }), "Failed");
+  assert.equal(status({ status: "cancelled" }), "Cancelled");
+  assert.equal(status({ action_name: "promote_transcode_candidate" }), "Completed");
+  // A job with a retired candidate is not Not converted, but keeps its reason in the details.
+  h.context.retired = notConvertedJob({ benchmark: undefined, reason_code: "quality_not_met", candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } });
+  assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
+});
+
+// ---- One-step batch replacement approval ----
+const flatten = (el) => [el, ...(el.children || []).flatMap(flatten)];
+const textOf = (el) => flatten(el).map((e) => e.textContent).filter(Boolean).join(" ");
+const sampleMember = (key, name, extra = {}) => ({ item_key: key, episode: name, transcode_action_id: `t-${key}`, original_path: `/media/${name}.mkv`, candidate_path: `/media/.candidates/${name}.mkv`, candidate_sha256: `sha-${key}`, ...extra });
+const sampleFacts = (source, candidate, extra = {}) => ({ source_bytes: source, candidate_bytes: candidate, saved_bytes: source - candidate, vmaf_mean: 93.4, vmaf_worst_window: 90.2, tracks_message: "Kept English and Japanese audio", ...extra });
+const threeMembers = () => [sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02"), sampleMember("c", "Sample Show S01E03")];
+const threeFacts = () => ({ "t-a": sampleFacts(4e9, 2.4e9), "t-b": sampleFacts(3e9, 1.8e9), "t-c": sampleFacts(2e9, 1.2e9, { size_budget_outcome: "below_quality_target_within_budget" }) });
+const preparedPlan = (members, digest = "sha256:new", extra = {}) => ({ prepared: true, id: "batch-a", digest, approved: false, waiting: true, service: "filesystem", members, member_facts: threeFacts(), ...extra });
+// A review harness: plan reads come from a queue, every command is recorded.
+function batchReviewHarness({ planReads, members = threeMembers(), notice = null }) {
+  const h = harness();
+  h.run("state.info = {allow_destructive:true};");
+  h.context.calls = [];
+  h.context.planReads = planReads;
+  h.context.review = { id: "batch-a", version: "v1", service: "filesystem", excluded: 0, members, member_facts: threeFacts() };
+  h.context.notice = notice;
+  h.run(`api = async (path) => { calls.push(["api", path]); if (path.includes("plan=1")) return planReads.shift(); return review; };
+    tool = async () => ({data: notice});
+    commandRequest = async (path, body, onAccepted, decision) => { calls.push(["command", path, JSON.parse(JSON.stringify(body)), JSON.parse(JSON.stringify(decision))]); onAccepted?.(); return {id: body.id}; };`);
+  return h;
+}
+const commandCalls = (h) => plain(h.context.calls.filter((c) => c[0] === "command"));
+const click = (h, id) => h.elements.get(id).listeners.get("click")();
+
+test("one dialog shows each file's sizes, savings, quality and tracks, and the total it frees", async () => {
+  const h = batchReviewHarness({ planReads: [{ prepared: false }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("batch-review").open, true);
+  const rows = h.elements.get("batch-review-data").children;
+  // Select all, then one row per file.
+  assert.equal(rows.length, 4);
+  const first = textOf(rows[1]);
+  assert.match(first, /Sample Show S01E01/);
+  assert.match(first, /4\.00 GB → 2\.40 GB · Saves 1\.60 GB \(40%\)/);
+  assert.match(first, /Quality VMAF 93 · worst 90/);
+  assert.match(first, /Kept English and Japanese audio/);
+  assert.match(textOf(rows[3]), /Below quality target — within size budget/);
+  // Paths are behind a disclosure that is closed by default.
+  const paths = flatten(rows[1]).find((e) => /replacement-paths/.test(e.className));
+  assert.ok(paths);
+  assert.equal(flatten(paths).find((e) => e.textContent === "Show paths") !== undefined, true);
+  assert.equal(paths.open, false);
+  assert.equal(h.elements.get("batch-review-total").textContent, "Frees 3.60 GB across 3 files");
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 3 files");
+  assert.equal(h.elements.get("approve-batch-review").disabled, false);
+  // Nothing to reject yet: the secondary button appears only for a prepared plan.
+  assert.equal(h.elements.get("reject-batch-review").hidden, true);
+  // No per-row lookups of the transcode jobs.
+  assert.equal(h.context.calls.some((c) => /operations\?id=/.test(c[1] || "")), false);
+});
+
+test("one click prepares the checked files, reads the plan back, verifies it and approves its digest", async () => {
+  const prepared = preparedPlan(threeMembers());
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, prepared] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  const commands = commandCalls(h);
+  assert.equal(commands.length, 2);
+  assert.deepEqual(commands[0].slice(1, 3), ["batch-candidates", { id: "batch-a", version: "v1", item_keys: ["a", "b", "c"] }]);
+  assert.equal(commands[0][3].label, "Prepare replacement of 3 files");
+  assert.equal(commands[0][3].verb, "Preparing replacement of 3 files");
+  assert.deepEqual(commands[1].slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:new", decision: "approve" }]);
+  assert.deepEqual(commands[1][3], { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" });
+  // The plan was read before preparing and after it, never approved unread.
+  const order = h.context.calls.map((c) => (c[0] === "command" ? c[2].decision || "prepare" : "read"));
+  assert.deepEqual(order.filter((x) => x !== "read"), ["prepare", "approve"]);
+  assert.ok(order.lastIndexOf("read") < order.indexOf("approve"));
+  assert.equal(h.elements.get("batch-review").open, false);
+});
+
+test("only the checked files are prepared and the button and total follow the checks", async () => {
+  const prepared = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("c", "Sample Show S01E03")]);
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, prepared] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  const rows = h.elements.get("batch-review-data").children;
+  const input = flatten(rows[2]).find((e) => e.listeners?.has("change"));
+  input.checked = false;
+  input.listeners.get("change")();
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 2 files");
+  assert.equal(h.elements.get("batch-review-total").textContent, "Frees 2.40 GB across 2 files");
+  await click(h, "approve-batch-review");
+  const commands = commandCalls(h);
+  assert.deepEqual(commands[0][2].item_keys, ["a", "c"]);
+  assert.equal(commands[1][2].decision, "approve");
+  assert.equal(commands[1][3].label, "Replace 2 files");
+  // Nothing selected cannot be sent.
+  const input2 = flatten(h.elements.get("batch-review-data").children[1]).find((e) => e.listeners?.has("change"));
+  input2.checked = false;
+  input2.listeners.get("change")();
+  const input3 = flatten(h.elements.get("batch-review-data").children[3]).find((e) => e.listeners?.has("change"));
+  input3.checked = false;
+  input3.listeners.get("change")();
+  assert.equal(h.elements.get("approve-batch-review").disabled, true);
+});
+
+test("a prepared list that differs from what was shown is not approved; the difference is shown and asks again", async () => {
+  const different = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02"), sampleMember("d", "Sample Show S01E04")], "sha256:other");
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, different, different] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  // Prepared once, never approved.
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.equal(h.elements.get("batch-review").open, true);
+  const notice = textOf(h.elements.get("batch-review-notice"));
+  assert.match(notice, /Not in the prepared list: Sample Show S01E03/);
+  assert.match(notice, /Added to the prepared list: Sample Show S01E04/);
+  assert.match(textOf(h.elements.get("batch-review-data")), /Sample Show S01E04/);
+  assert.doesNotMatch(textOf(h.elements.get("batch-review-data")), /Sample Show S01E03/);
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
+  // The person sees the server's list and confirms it: approved with its digest.
+  await click(h, "approve-batch-review");
+  const last = commandCalls(h).at(-1);
+  assert.deepEqual(last.slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:other", decision: "approve" }]);
+});
+
+test("a changed candidate path or hash under the same file is a difference", async () => {
+  const swapped = threeMembers().map((m) => (m.item_key === "b" ? { ...m, candidate_sha256: "sha-changed" } : m));
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, preparedPlan(swapped)] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /Changed since you reviewed it: Sample Show S01E02/);
+});
+
+test("a plan that already exists for another selection is shown, not replaced or approved", async () => {
+  const existing = preparedPlan([sampleMember("a", "Sample Show S01E01")], "sha256:existing");
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, existing] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.equal(commandCalls(h).length, 0);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /Not in the prepared list: Sample Show S01E02/);
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 1 file");
+});
+
+test("a plan opened from the queue shows the same dialog and approves only the digest it showed", async () => {
+  const plan = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02")], "sha256:d1");
+  const h = batchReviewHarness({ planReads: [plan, { ...plan }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 2 files");
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
+  assert.equal(h.elements.get("batch-review-data").children.length, 2);
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision), ["approve"]);
+  assert.equal(commandCalls(h)[0][2].digest, "sha256:d1");
+  // A plan whose digest changed while the dialog was open is shown again.
+  const h2 = batchReviewHarness({ planReads: [plan, { ...plan, digest: "sha256:d2" }] });
+  await h2.run('reviewBatchReplacement("batch-a")');
+  await click(h2, "approve-batch-review");
+  assert.equal(commandCalls(h2).length, 0);
+  assert.match(textOf(h2.elements.get("batch-review-notice")), /list changed while this review was open/);
+});
+
+test("an approved or not-waiting plan does not open the dialog", async () => {
+  const h = batchReviewHarness({ planReads: [preparedPlan(threeMembers(), "sha256:x", { approved: true, waiting: false })] });
+  await assert.rejects(h.run('reviewBatchReplacement("batch-a")'), /already approved/);
+  assert.equal(h.elements.get("batch-review").open, false);
+  const h2 = batchReviewHarness({ planReads: [preparedPlan(threeMembers(), "sha256:x", { waiting: false })] });
+  await assert.rejects(h2.run('reviewBatchReplacement("batch-a")'), /not waiting for approval/);
+});
+
+test("Keep originals rejects the prepared plan by digest and names the decision", async () => {
+  const plan = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02")], "sha256:d1");
+  const h = batchReviewHarness({ planReads: [plan, { ...plan }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "reject-batch-review");
+  const command = commandCalls(h)[0];
+  assert.deepEqual(command.slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:d1", decision: "reject" }]);
+  assert.equal(command[3].label, "Keep 2 originals");
+  assert.equal(command[3].verb, "Keeping 2 originals");
+});
+
+test("a re-grab warning that appears after preparing is shown before anything is approved", async () => {
+  const notice = { regrab_warning: "May download the original again.", arr_monitored: true };
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, preparedPlan(threeMembers())], notice });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /download the original again/);
+});
+
+test("replacement stays disabled in the dialog when the server setting is off", async () => {
+  const h = batchReviewHarness({ planReads: [{ prepared: false }] });
+  h.run("state.info = {allow_destructive:false};");
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("approve-batch-review").disabled, true);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /disabled in the server settings/);
+});
+
+// ---- Decisions named in chips and history ----
+test("chips and the history name the decision that was sent", () => {
+  const now = 5_000_000;
+  const h = commandHarness([
+    { command_id: "r1", id: "batch-a", kind: "review_batch_promotion", status: "running", started: now - 4_000, decision: { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" } },
+    { command_id: "p1", id: "batch-p", kind: "prepare_batch_promotion", status: "pending", started: now - 4_000, decision: { label: "Prepare replacement of 3 files", verb: "Preparing replacement of 3 files", failure: "Preparation failed" } },
+    { command_id: "k1", id: "batch-k", kind: "review_batch_promotion", status: "running", started: now - 4_000, decision: { label: "Keep 3 originals", verb: "Keeping 3 originals", failure: "Keeping originals failed" } },
+    { command_id: "f1", id: "batch-f", kind: "review_batch_promotion", status: "failed", error: "x", started: now - 4_000, decision: { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" } },
+  ]);
+  assert.equal(chipOf(h, "batch-a", now).text, "Replacing 3 files");
+  assert.equal(chipOf(h, "batch-p", now).text, "Preparing replacement of 3 files");
+  assert.equal(chipOf(h, "batch-k", now).text, "Keeping 3 originals");
+  assert.equal(chipOf(h, "batch-f", now).text, "Replacement failed");
+  h.run(`state.detail="batch-a";renderCommandHistory(${now});`);
+  assert.match(textOf(h.elements.get("detail-command-list").children[0]), /^Replace 3 files\s+· Applying/);
+  // A command with no named decision keeps its generic wording.
+  const plain = commandHarness([{ command_id: "z1", id: "job-z", kind: "retry", label: "Retrying job", status: "running", started: now - 1_000 }]);
+  assert.equal(chipOf(plain, "job-z", now).text, "Retrying");
+});
+
+test("a command request stores the decision it was sent for", async () => {
+  const h = harness();
+  const stored = {};
+  h.context.crypto = { getRandomValues: (b) => b.fill(7) };
+  h.context.sessionStorage = { getItem: (k) => stored[k] ?? null, setItem: (k, v) => { stored[k] = v; }, removeItem() {} };
+  h.run('api = async () => ({command_id:"cmd-1", id:"batch-a"}); waitCommand = async () => ({id:"batch-a"}); notify = () => {};');
+  await h.run('commandRequest("batch-candidates", {id:"batch-a", digest:"d", decision:"approve"}, undefined, {label:"Replace 3 files", verb:"Replacing 3 files", failure:"Replacement failed"})');
+  const receipts = JSON.parse(stored.navigatorr_commands);
+  assert.equal(Object.values(receipts)[0].decision.label, "Replace 3 files");
+});
+
+// ---- Queue row, progress and members of an approved replacement ----
+const replacingBatch = (extra = {}) => ({
+  id: "batch-a", action_name: "transcode_batch", status: "running", batch: { total: 3, completed: 3, promotion_plan_ready: true },
+  replacement: {
+    approved: true, total: 3, done: 1, failed: 0, frees_bytes: 5160000000, freed_bytes: 1600000000,
+    members: [
+      { item_key: "k-a", name: "Sample Show S01E01", phase: "done", freed_bytes: 1600000000 },
+      { item_key: "k-b", name: "Sample Show S01E02", phase: "backup", percent: 55 },
+      { item_key: "k-c", name: "Sample Show S01E03", phase: "waiting" },
+    ],
+  },
+  ...extra,
+});
+
+test("the queue row names what is being replaced and what it frees", () => {
+  const h = harness();
+  h.context.job = replacingBatch();
+  const presentation = JSON.parse(h.run("JSON.stringify(queuePresentation(job))"));
+  assert.equal(presentation.status, "Replacing");
+  assert.match(presentation.summary, /Replacing 3 files · frees 5\.16 GB/);
+  assert.doesNotMatch(presentation.summary, /approval required/);
+  assert.equal(h.run("replacementHeadline(job)"), "Replacing 3 files · frees 5.16 GB");
+  h.run('job.replacement.done = 3; job.replacement.members.forEach(m => { m.phase = "done"; }); job.replacement.freed_bytes = 5160000000;');
+  assert.equal(h.run("replacementHeadline(job)"), "Replaced 3 files · freed 5.16 GB");
+});
+
+test("the progress headline and one line per file describe the real stage, with no estimate", () => {
+  const h = harness();
+  h.context.job = replacingBatch();
+  const block = h.run("replacementProgressBlock(job)");
+  const text = textOf(block);
+  assert.match(text, /Replacing 3 files · 1 of 3 done/);
+  assert.match(text, /Sample Show S01E01 Done · freed 1\.60 GB/);
+  assert.match(text, /Sample Show S01E02 Backing up the original \(55%\)/);
+  assert.match(text, /Sample Show S01E03 Waiting/);
+  assert.doesNotMatch(text, /Estimated workflow progress|Not time remaining|%\s*$/);
+  // Each stage reads as a plain step.
+  const steps = JSON.parse(h.run(`JSON.stringify(["checking","backup","backup_check","swap","final_check","done","waiting"].map(phase => replacementStepText({phase})))`));
+  assert.deepEqual(steps, ["Checking the files", "Backing up the original", "Checking the backup", "Swapping in the new file", "Checking the new file", "Done", "Waiting"]);
+  // The batch progress block is this block while a replacement runs.
+  assert.match(textOf(h.run("batchProgress(job)")), /1 of 3 done/);
+});
+
+const failedReplacement = () => replacingBatch({
+  status: "failed", error: "1 batch promotion(s) need attention: item-key-9: promotion validation failed: audio bitrate mismatch (truncated",
+  replacement: {
+    approved: true, total: 3, done: 2, failed: 1, frees_bytes: 5160000000, freed_bytes: 2800000000,
+    members: [
+      { item_key: "k-a", name: "Sample Show S01E01", phase: "done", freed_bytes: 1600000000 },
+      { item_key: "k-b", name: "Sample Show S01E02", phase: "done", freed_bytes: 1200000000 },
+      { item_key: "k-c", name: "Sample Show S01E03", phase: "failed", failure: { reason: "final check before replacing found an audio mismatch", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" } },
+    ],
+  },
+});
+
+test("a batch with one failed replacement says so in plain words, without item keys", () => {
+  const h = harness();
+  h.context.job = failedReplacement();
+  const summary = h.run("queuePresentation(job).summary");
+  assert.match(summary, /2 of 3 replaced · 1 failed: final check before replacing found an audio mismatch · original kept/);
+  assert.doesNotMatch(summary, /item-key|need attention|truncated/);
+  const text = textOf(h.run("batchProgress(job)"));
+  assert.match(text, /2 of 3 replaced · 1 failed/);
+  assert.match(text, /Sample Show S01E03 Stopped: final check before replacing found an audio mismatch · original kept/);
+  assert.doesNotMatch(text, /item-key/);
+});
+
+test("the batch headline says 'original kept' only when every failure left the original untouched", () => {
+  const h = harness();
+  const headline = (failures) => {
+    const members = failures.map((f, i) => ({ item_key: `k-${i}`, name: `File ${i}`, phase: "failed", failure: { reason: "the library did not accept the new file", ...f } }));
+    h.context.job = { replacement: { approved: true, total: failures.length + 1, done: 1, failed: failures.length, members } };
+    return h.run("replacementHeadline(job)");
+  };
+  const inPlace = { original_state: "in_place", original_intact: true }, recovery = { original_state: "recovery", original_intact: false }, unclear = { original_state: "unclear", original_intact: false };
+  assert.match(headline([inPlace]), /original kept$/);
+  assert.match(headline([inPlace, inPlace]), /originals kept$/);
+  const safe = headline([recovery]);
+  assert.match(safe, /original in Recovery$/);
+  assert.doesNotMatch(safe, /kept|intact/);
+  assert.match(headline([inPlace, recovery]), /check Recovery$/);
+  assert.match(headline([unclear]), /check Recovery$/);
+  const step = (f) => h.run(`replacementStepText({phase:"failed", failure:${JSON.stringify({ reason: "x", ...f })}})`);
+  assert.match(step(recovery), /original in Recovery/);
+  assert.match(step(inPlace), /original kept/);
+  assert.match(step(unclear), /check Recovery/);
+});
+
+async function batchItemsHarness(items, { detailJob = { status: "completed", batch: {} }, destructive = true } = {}) {
+  const h = harness();
+  h.context.items = items;
+  h.context.detailJob = detailJob;
+  h.run(`state.info={allow_destructive:${destructive}};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob=detailJob;api=async()=>({items,total:items.length});`);
+  await h.run('loadBatchItems("batch-a",2)');
+  return h;
+}
+const itemRows = (h) => h.elements.get("batch-items-list").children;
+const buttonLabels = (row) => flatten(row).filter((e) => e.type === "button").map((e) => e.textContent);
+
+test("a member of the approved plan that has not started is queued, with no way to replace it again", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_plan: "queued", mode: "size", reason_code: "eligible" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", replacement_plan: "queued" },
+  ];
+  const h = await batchItemsHarness(items, { detailJob: { status: "running", batch: {}, replacement: { approved: true, total: 2, members: [] } } });
+  const row = textOf(itemRows(h)[0]);
+  assert.match(row, /Sample Show S01E01/);
+  assert.match(row, /Replacement queued \(approved\)/);
+  assert.doesNotMatch(row, /Replace file|awaiting approval|View replacement|Candidate verified/);
+  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => /Replace|replacement/i.test(l)), []);
+});
+
+test("a candidate waiting for a plan decision says so, and a candidate still unplanned offers Replace file", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_plan: "review" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", candidate_ready: true },
+  ];
+  const h = await batchItemsHarness(items);
+  assert.match(textOf(itemRows(h)[0]), /Replacement awaiting approval/);
+  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => l === "Replace file"), []);
+  assert.deepEqual(buttonLabels(itemRows(h)[1]).filter((l) => l === "Replace file"), ["Replace file"]);
+});
+
+test("buttons that only open something are not disabled by a busy batch, and none show before they can work", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_action_id: "p-a", replacement_status: "running" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", replacement_plan: "queued" },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};state.busyJobs.add("batch-a");api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const viewReplacement = flatten(itemRows(h)[0]).find((e) => e.textContent === "View replacement");
+  assert.ok(viewReplacement);
+  assert.equal(viewReplacement.disabled, false);
+  // The queued file has no replacement yet, so no such button exists for it.
+  assert.equal(buttonLabels(itemRows(h)[1]).includes("View replacement"), false);
+  // The same rule holds when the connection returns: navigation stays usable.
+  h.run("setConnection(false); setConnection(true);");
+  assert.equal(flatten(itemRows(h)[0]).find((e) => e.textContent === "View replacement").disabled, false);
+});
+
+test("the single-file job view offers no Replace file while the batch plan covers the candidate", () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  const labels = (job) => JSON.stringify(h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`));
+  const base = { id: "t-a", action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "batch-a" };
+  assert.match(labels(base), /Replace file/);
+  assert.doesNotMatch(labels({ ...base, replacement_plan: "queued" }), /Replace file/);
+  assert.doesNotMatch(labels({ ...base, replacement_plan: "review" }), /Replace file/);
+});
+
+const failedItem = (extra = {}) => ({
+  item_key: "k-c", display_label: "Sample Show S01E03", status: "completed", child_action_id: "t-c", replacement_action_id: "p-c", replacement_status: "failed",
+  replacement_failure: { reason: "final check before replacing found an audio mismatch", original_state: "in_place", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" },
+  retry_action_id: "batch-a", reason_code: "eligible", ...extra,
+});
+
+test("a failed replacement row says why, that the original is still in place, and offers retry and details", async () => {
+  const h = await batchItemsHarness([failedItem()], { detailJob: { status: "failed", batch: {} } });
+  const row = itemRows(h)[0];
+  const text = textOf(row);
+  assert.match(text, /Replacement failed/);
+  assert.match(text, /Replacement stopped: final check before replacing found an audio mismatch/);
+  assert.match(text, /Your original file is still in place\./);
+  assert.deepEqual(buttonLabels(row).filter((l) => ["Retry replacement", "Keep original", "View details"].includes(l)), ["Retry replacement", "View details"]);
+  assert.doesNotMatch(text, /recovery copy/);
+  // Technical detail is behind a disclosure; the key and the recipe reason are not shown.
+  const technical = flatten(row).find((e) => /technical-reason/.test(e.className));
+  assert.match(textOf(technical), /audio bitrate mismatch/);
+  assert.doesNotMatch(text, /k-c|eligible/);
+  // Retry goes to the action that re-runs only that replacement, naming the file.
+  h.context.retries = [];
+  h.run("jobControl = async (...args) => retries.push(JSON.parse(JSON.stringify(args)));");
+  await flatten(row).find((e) => e.textContent === "Retry replacement").listeners.get("click")();
+  const retry = plain(h.context.retries[0]);
+  assert.deepEqual(retry.slice(0, 3), ["batch-a", "action_retry", {}]);
+  assert.equal(retry[3].decision.label, "Retry replacement of Sample Show S01E03");
+});
+
+test("the failure text says where the original is, from the server's state, and never calls it intact when it may have changed", async () => {
+  const row = async (original_state) => {
+    const h = await batchItemsHarness([failedItem({ replacement_failure: { reason: "the library did not accept the new file", original_state, original_intact: original_state === "in_place", detail: "library did not accept the new file" }, retry_action_id: "p-c" })], { detailJob: { status: "failed", batch: {} } });
+    return textOf(itemRows(h)[0]);
+  };
+  const safe = await row("recovery");
+  assert.match(safe, /Your original is safe in its recovery copy\. Check Recovery before trying again\./);
+  assert.doesNotMatch(safe, /intact|in place|original kept/i);
+  const unclear = await row("unclear");
+  assert.match(unclear, /Check Recovery to see where your original is before trying again\./);
+  assert.doesNotMatch(unclear, /intact|in place|safe in its recovery|original kept/i);
+  assert.match(await row("in_place"), /Your original file is still in place\./);
+});
+
+test("Retry goes to the batch for a file that stopped early, to the file itself for one that stopped later, and to nobody when it cannot change", async () => {
+  const retries = async (item, detailJob) => {
+    const h = await batchItemsHarness([item], { detailJob });
+    h.context.calls = [];
+    h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+    const button = flatten(itemRows(h)[0]).find((e) => e.type === "button" && /^Retry/.test(e.textContent));
+    if (!button) return { label: null, calls: [] };
+    await button.listeners.get("click")();
+    return { label: button.textContent, calls: plain(h.context.calls) };
+  };
+  const failedBatch = { status: "failed", batch: {}, replacement: { approved: true, failed: 1, batch_retry_count: 1, members: [] } };
+  const early = await retries(failedItem({ retry_action_id: "batch-a" }), failedBatch);
+  assert.equal(early.label, "Retry replacement");
+  assert.deepEqual(early.calls[0].slice(0, 2), ["batch-a", "action_retry"]);
+  assert.equal(early.calls[0][3].decision.label, "Retry replacement of Sample Show S01E03");
+  const late = await retries(failedItem({ retry_action_id: "p-c" }), failedBatch);
+  assert.equal(late.label, "Retry replacement");
+  assert.deepEqual(late.calls[0].slice(0, 2), ["p-c", "action_retry"]);
+  // A failure only the batch recorded would fail the same way again: nothing to retry, the reason still shows.
+  const recorded = await retries(failedItem({ replacement_action_id: undefined, replacement_status: undefined, retry_action_id: undefined }), failedBatch);
+  assert.equal(recorded.label, null);
+});
+
+test("one batch Retry that re-runs several failed files says how many", async () => {
+  const detailJob = { status: "failed", batch: {}, replacement: { approved: true, failed: 3, batch_retry_count: 2, members: [] } };
+  const h = await batchItemsHarness([failedItem({ retry_action_id: "batch-a" }), failedItem({ item_key: "k-d", display_label: "Sample Show S01E04", retry_action_id: "batch-a" })], { detailJob });
+  h.context.calls = [];
+  h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+  const button = flatten(itemRows(h)[0]).find((e) => /^Retry/.test(e.textContent));
+  assert.equal(button.textContent, "Retry 2 failed replacements");
+  await button.listeners.get("click")();
+  assert.equal(plain(h.context.calls)[0][3].decision.label, "Retry 2 failed replacements");
+  // A file's own retry is never described as retrying more than that file.
+  const own = await batchItemsHarness([failedItem({ retry_action_id: "p-c" })], { detailJob });
+  assert.deepEqual(buttonLabels(itemRows(own)[0]).filter((l) => /^Retry/.test(l)), ["Retry replacement"]);
+});
+
+test("a batch with failed replacements has one Retry, on each file, and no second batch-level button unless only the batch recorded the failure", () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  const labels = (job) => plain(h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`));
+  const batch = { id: "batch-a", action_name: "transcode_batch", status: "failed", batch: { total: 3, promotion_plan_ready: true } };
+  assert.ok(labels(batch).includes("Retry"));
+  // A file with a retry of its own, or a failure no retry can fix (approve_promotion), leaves only the per-file button.
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, retryable: 1 } }).includes("Retry"));
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1 } }).includes("Retry"));
+  // Only the batch recorded the failure: no file can retry, so a transient error is retried from the batch.
+  assert.ok(labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, batch_recorded_failed: 1 } }).includes("Retry"));
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 2, retryable: 1, batch_recorded_failed: 1 } }).includes("Retry"));
+});
+
+test("an approved replacement drops the completed and failed chips its headline already states", () => {
+  const h = harness();
+  const chips = (batch, omit) => textOf(h.run(`(() => { const c = document.createElement("div"); renderBatchCounts(c, ${JSON.stringify(batch)}, ${JSON.stringify(omit)}); return c; })()`));
+  const batch = { completed: 3, failed: 1, skip: 2 };
+  assert.match(chips(batch, []), /3 Completed/);
+  const honest = chips(batch, ["completed", "failed"]);
+  assert.doesNotMatch(honest, /Completed|Failed/);
+  assert.match(honest, /2 Skipped/);
+});
+
+test("a file that was replaced shows no recipe reason, and a failed encode still does", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_action_id: "p-a", replacement_status: "completed", replaced: true, reason_code: "quality_not_met" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "skip", child_action_id: "t-b", reason_code: "already_hevc" },
+  ];
+  const h = await batchItemsHarness(items);
+  assert.doesNotMatch(textOf(itemRows(h)[0]), /quality target/);
+  assert.match(textOf(itemRows(h)[1]), /Already HEVC/);
+});
+
+test("Where shows the new file and the backup with copy buttons, short by default", () => {
+  const h = harness();
+  const where = h.run('whereBlock({new_path:"/media/Sample Show/S01E01.mkv", backup_path:"/recovery/S01E01.mkv.bak"})');
+  const text = textOf(where);
+  assert.match(text, /Where/);
+  assert.match(text, /New file:\s+\/media\/Sample Show\/S01E01\.mkv/);
+  assert.match(text, /Original backup:\s+\/recovery\/S01E01\.mkv\.bak/);
+  assert.match(text, /removed|stays until you remove it from Recovery/);
+  assert.equal(flatten(where).filter((e) => e.textContent === "Copy").length, 2);
+  assert.match(textOf(h.run('whereBlock({new_path:"/media/x.mkv", backup_removed:true})')), /Original backup:\s+removed after the new file was verified/);
+  assert.equal(h.run("whereBlock(null)"), null);
+  assert.equal(h.run("whereBlock({})"), null);
+});
+
+test("the single-file review uses the same card, the total it frees and a Keep original option", async () => {
+  const h = harness();
+  h.context.current = { id: "replace", status: "waiting_decision", waiting_options: [{ decision: "approve" }, { decision: "reject" }], replacement_facts: sampleFacts(4e9, 2.4e9), promotion: { original_path: "/media/Sample Show S01E01.mkv", candidate_path: "/media/.candidates/Sample Show S01E01.mkv", original_sha256: "o", candidate_sha256: "c", plan_digest: "sha256:plan" } };
+  h.run("api = async () => ({jobs:[current]});");
+  await h.run('reviewFilePromotion("replace")');
+  const text = textOf(h.elements.get("file-review-data"));
+  assert.match(text, /Sample Show S01E01/);
+  assert.match(text, /4\.00 GB → 2\.40 GB · Saves 1\.60 GB \(40%\)/);
+  assert.match(text, /Quality VMAF 93 · worst 90/);
+  assert.equal(h.elements.get("file-review-total").textContent, "Frees 1.60 GB");
+  assert.equal(h.elements.get("reject-file-review").hidden, false);
+});
+
+// Languages to keep: the Settings editor, the goal form's track picker, and the
+// track report in the job details.
+const plain = (value) => JSON.parse(JSON.stringify(value ?? null));
+
+test("language entries accept names, codes and older spellings and say why one is refused", () => {
+  const h = harness();
+  const parse = (text) => h.run(`parseLanguage(${JSON.stringify(text)})`);
+  assert.equal(parse("French"), "fra");
+  assert.equal(parse("fre"), "fra");
+  assert.equal(parse("FR"), "fra");
+  assert.equal(parse(" Spanish (spa) "), "spa");
+  assert.equal(parse("untagged"), "und");
+  // Any other three letters go to the server, which checks them against ISO 639-2.
+  assert.equal(parse("xyz"), "xyz");
+  assert.equal(parse(""), "");
+  assert.equal(parse("english please"), "");
+  assert.equal(parse("e"), "");
+  const canonical = (tag) => h.run(`canonicalLanguage(${JSON.stringify(tag)})`);
+  assert.equal(canonical("es-419"), "spa");
+  assert.equal(canonical("ger"), "deu");
+  assert.equal(canonical(""), "und");
+  assert.equal(h.run('languageName("fre")'), "French");
+  assert.equal(h.run('languageName("und")'), "Untagged");
+  assert.equal(h.run('languageName("xyz")'), "xyz");
+  assert.deepEqual(plain(h.run('addLanguageTo(["eng"], "Spanish")')), { languages: ["eng", "spa"] });
+  assert.match(h.run('addLanguageTo(["eng"], "English")').message, /English is already in the list/);
+  assert.match(h.run('addLanguageTo([], "und")').message, /Untagged tracks are always kept/);
+  assert.match(h.run('addLanguageTo([], "??")').message, /Enter a language/);
+  assert.equal(h.run('sameLanguages(["eng", "spa"], ["spa", "eng"])'), true);
+  assert.equal(h.run('sameLanguages(["eng"], ["eng", "spa"])'), false);
+});
+
+function languagesHarness() {
+  const h = harness();
+  h.context.calls = [];
+  h.run(`api = async (path, body, opts) => {
+    calls.push([path, body, opts?.method]);
+    if (opts?.method === "PUT") {
+      if (body.languages.includes("xyz")) throw new Error('"xyz" is not an ISO 639-2 language code');
+      return { languages: [...body.languages].sort(), default: ["eng", "jpn", "spa"], is_default: false, revision: 2 };
+    }
+    return { languages: ["eng", "jpn", "spa"], default: ["eng", "jpn", "spa"], is_default: true, revision: 1 };
+  };`);
+  const el = (id) => h.elements.get(id);
+  const chips = () => el("keep-languages-list").children.map((chip) => chip.children[0].textContent);
+  return { h, el, chips };
+}
+
+test("Settings lists the languages to keep with readable names and disables what does nothing", async () => {
+  const { h, el, chips } = languagesHarness();
+  h.run("renderKeepLanguages()");
+  assert.equal(el("keep-languages-state").textContent, "Loading…");
+  assert.equal(el("keep-language-add").disabled, true, "nothing to edit before the list is read");
+  await h.run("loadKeepLanguages()");
+  assert.deepEqual(plain(h.context.calls), [["keep-languages", null, null]]);
+  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
+  assert.equal(el("keep-languages-list").children[0].children[1].textContent, "eng");
+  assert.equal(el("keep-languages-state").textContent, "Default");
+  assert.equal(el("keep-languages-apply").disabled, true, "nothing changed yet");
+  assert.equal(el("keep-languages-reset").disabled, true, "already the default");
+  assert.equal(el("keep-languages-off").disabled, false);
+  assert.equal(el("keep-language-add").disabled, false);
+});
+
+test("Settings stages additions and removals and saves them with Apply", async () => {
+  const { h, el, chips } = languagesHarness();
+  await h.run("loadKeepLanguages()");
+  // Add by name, both with the button and with Enter, which must not submit the job form.
+  el("keep-language-input").value = "French";
+  el("keep-language-add").listeners.get("click")();
+  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
+  assert.equal(el("keep-language-input").value, "");
+  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
+  assert.equal(el("keep-languages-apply").disabled, false);
+  let prevented = 0;
+  el("keep-language-input").value = "German";
+  el("keep-language-input").listeners.get("keydown")({ key: "Enter", preventDefault: () => prevented++ });
+  assert.equal(prevented, 1);
+  assert.deepEqual(chips(), ["English", "French", "German", "Japanese", "Spanish"]);
+  el("keep-language-input").listeners.get("keydown")({ key: "a", preventDefault: () => prevented++ });
+  assert.equal(prevented, 1, "other keys are left alone");
+  // Remove one with its own button.
+  el("keep-languages-list").children[2].children[2].listeners.get("click")();
+  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
+  // A refused entry says why and changes nothing.
+  el("keep-language-input").value = "English";
+  el("keep-language-add").listeners.get("click")();
+  assert.match(el("keep-languages-note").textContent, /already in the list/);
+  assert.equal(chips().length, 4);
+  // Nothing is sent until Apply.
+  assert.equal(h.context.calls.length, 1);
+  await h.run("saveKeepLanguages(keepLanguages.draft)");
+  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: ["eng", "jpn", "spa", "fra"] }, "PUT"]);
+  assert.match(el("keep-languages-note").textContent, /^Saved\. It applies to jobs created from now on/);
+  assert.equal(el("keep-languages-state").textContent, "Custom");
+  assert.equal(el("keep-languages-apply").disabled, true);
+  assert.equal(el("keep-languages-reset").disabled, false);
+});
+
+test("Settings resets to the default and turns the setting off", async () => {
+  const { h, el, chips } = languagesHarness();
+  await h.run("loadKeepLanguages()");
+  el("keep-languages-off").listeners.get("click")();
+  assert.deepEqual(chips(), []);
+  assert.equal(el("keep-languages-list").hidden, true);
+  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
+  assert.equal(el("keep-languages-off").disabled, true);
+  await h.run("saveKeepLanguages(keepLanguages.draft)");
+  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: [] }, "PUT"]);
+  assert.equal(el("keep-languages-state").textContent, "Off: every track is kept");
+  el("keep-languages-reset").listeners.get("click")();
+  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
+  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
+  await h.run("saveKeepLanguages(keepLanguages.draft)");
+  assert.deepEqual(plain(h.context.calls[2][1]), { languages: ["eng", "jpn", "spa"] });
+  assert.equal(el("keep-languages-state").textContent, "Default");
+});
+
+test("Settings shows the server's refusal and a reload never replaces an edited draft", async () => {
+  const { h, el, chips } = languagesHarness();
+  await h.run("loadKeepLanguages()");
+  el("keep-language-input").value = "xyz";
+  el("keep-language-add").listeners.get("click")();
+  await h.run("saveKeepLanguages(keepLanguages.draft)");
+  assert.match(el("keep-languages-note").textContent, /"xyz" is not an ISO 639-2 language code/);
+  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
+  assert.ok(chips().includes("xyz"), "the draft is kept so it can be corrected");
+  assert.equal(el("keep-languages-apply").disabled, false, "and saved again");
+  // Another tab changed the saved list; the unsaved draft stays.
+  h.run('api = async () => ({ languages: ["eng"], default: ["eng", "jpn", "spa"], is_default: false, revision: 3 });');
+  await h.run("loadKeepLanguages()");
+  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng"]);
+  assert.ok(chips().includes("xyz"));
+  // A list that cannot be read is said so and not edited.
+  const failed = languagesHarness();
+  failed.h.run('api = async () => { throw new Error("down"); };');
+  await failed.h.run("loadKeepLanguages()");
+  assert.equal(failed.el("keep-languages-state").textContent, "Could not load the list");
+  assert.equal(failed.el("keep-language-add").disabled, true);
+});
+
+function keepFixture() {
+  return {
+    languages: ["eng", "jpn", "spa"],
+    audio: [
+      { index: 1, language: "eng", title: "Surround", codec: "eac3", channels: 6, default: true, original: true, keep: true },
+      { index: 2, language: "fra", title: "", codec: "ac3", channels: 6, keep: false },
+      { index: 3, language: "und", title: "Commentary", codec: "aac", channels: 2, keep: true },
+      { index: 4, language: "jpn", title: "", codec: "dts", channels: 6, keep: true },
+    ],
+    subtitles: [
+      { index: 5, language: "spa", title: "", codec: "subrip", keep: true },
+      { index: 6, language: "deu", title: "Forced", codec: "subrip", forced: true, keep: false },
+      { index: 7, language: "und", title: "", codec: "hdmv_pgs_subtitle", keep: true },
+    ],
+  };
+}
+function keepHarness() {
+  const h = harness({ radios: true });
+  h.context.tracks = keepFixture();
+  h.run(`$("scope").value = "file"; $("service").value = "folder:/media"; $("path").value = "/media/movie.mkv"; $("technical").checked = false;
+    keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; keepLanguages.draft = ["eng", "jpn", "spa"]; keepLanguages.defaults = ["eng", "jpn", "spa"];
+    var queries = []; api = async (path) => { queries.push(path); return tracks; };
+    controls = () => { refreshKeepTracks(); renderKeepTracks(); };`);
+  const el = (id) => h.elements.get(id);
+  const open = async () => {
+    h.run("controls()");
+    await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  };
+  const boxes = (kind) => plain(h.run(`keepTracks.boxes.filter(e => e.kind === "${kind}").map(e => e.box.checked)`));
+  const inputs = (single = true, path = "/media/movie.mkv") => plain(h.run(`keepTrackInputs(${single}, ${JSON.stringify(path)})`));
+  return { h, el, open, boxes, inputs };
+}
+
+test("the picker lists the file's tracks, checked as the server's rules keep them, and a default submit sends nothing", async () => {
+  const { h, el, open, boxes, inputs } = keepHarness();
+  h.run("controls()");
+  assert.equal(el("keep-tracks").hidden, false);
+  assert.equal(el("keep-tracks-status").textContent, "Reading the file's tracks…");
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  assert.deepEqual(plain(h.run("queries")), ["source-tracks?path=%2Fmedia%2Fmovie.mkv"]);
+  assert.deepEqual(boxes("audio"), [true, false, true, true]);
+  assert.deepEqual(boxes("subtitles"), [true, false, true]);
+  assert.equal(el("keep-audio").hidden, false);
+  assert.equal(el("keep-audio-list").children.length, 4);
+  assert.equal(el("keep-subtitle-list").children.length, 3);
+  assert.equal(el("keep-tracks-summary").textContent, "Saved list: English, Japanese, Spanish");
+  assert.equal(el("keep-tracks-status").textContent, "Keeping 3 of 4 audio tracks and 2 of 3 subtitles.");
+  assert.equal(el("keep-tracks-reset").hidden, true);
+  // Language, codec, channels and title read as one line; badges say what the track is.
+  const first = el("keep-audio-list").children[0].children[0];
+  assert.equal(first.children[1].children[0].textContent, "English");
+  assert.equal(first.children[1].children[1].textContent, "E-AC-3 · 5.1 · Surround");
+  assert.deepEqual(first.children[2].children.map((badge) => badge.textContent), ["Original", "Default"]);
+  assert.equal(el("keep-audio-list").children[2].children[0].children[1].children[0].textContent, "Untagged");
+  assert.deepEqual(inputs(), {}, "the automatic choice sends no stream lists");
+  assert.deepEqual(inputs(false), {});
+});
+
+test("hand-picked tracks send explicit lists, and picking the automatic choice again sends none", async () => {
+  const { h, el, open, boxes, inputs } = keepHarness();
+  await open();
+  h.run('toggleTrack("subtitles", 6, true)');
+  assert.deepEqual(boxes("subtitles"), [true, true, true]);
+  assert.deepEqual(inputs(), { keep_audio_streams: [1, 3, 4], keep_subtitle_streams: [5, 6, 7] });
+  assert.equal(el("keep-tracks-summary").textContent, "Tracks chosen by hand");
+  assert.equal(el("keep-tracks-reset").hidden, false);
+  assert.equal(el("keep-tracks-status").textContent, "Keeping 3 of 4 audio tracks and 3 of 3 subtitles.");
+  h.run('toggleTrack("audio", 2, true); toggleTrack("subtitles", 5, false)');
+  assert.deepEqual(inputs(), { keep_audio_streams: [1, 2, 3, 4], keep_subtitle_streams: [6, 7] });
+  // The boxes are the user's own again once they match what the rules would do.
+  h.run('toggleTrack("audio", 2, false); toggleTrack("subtitles", 5, true); toggleTrack("subtitles", 6, false)');
+  assert.equal(h.run("keepTracks.picks"), null);
+  assert.deepEqual(inputs(), {});
+  assert.equal(el("keep-tracks-reset").hidden, true);
+  // The reset button drops hand-picked boxes.
+  h.run('toggleTrack("audio", 4, false)');
+  assert.deepEqual(boxes("audio"), [true, false, true, false]);
+  el("keep-tracks-reset").listeners.get("click")();
+  assert.deepEqual(boxes("audio"), [true, false, true, true]);
+  assert.deepEqual(inputs(), {});
+  // Only this file's picks apply to it, and a batch never takes stream lists.
+  h.run('toggleTrack("audio", 4, false)');
+  assert.deepEqual(inputs(true, "/media/other.mkv"), {});
+  assert.deepEqual(inputs(false), {});
+});
+
+test("a file always keeps at least one audio track", async () => {
+  const { h, open, boxes, inputs } = keepHarness();
+  await open();
+  h.run('toggleTrack("audio", 1, false); toggleTrack("audio", 3, false)');
+  assert.deepEqual(boxes("audio"), [false, false, false, true]);
+  assert.equal(h.run("keepTracks.boxes.find(e => e.kind === 'audio' && e.track.index === 4).box.disabled"), true, "the last one cannot be unticked");
+  assert.equal(h.run("keepTracks.boxes.find(e => e.kind === 'audio' && e.track.index === 3).box.disabled"), false);
+  h.run('toggleTrack("audio", 4, false)');
+  assert.deepEqual(boxes("audio"), [false, false, false, true]);
+  assert.deepEqual(inputs(), { keep_audio_streams: [4], keep_subtitle_streams: [5, 7] });
+  // A box change goes through the checkbox's own listener.
+  h.run('keepTracks.boxes[0].box.checked = true; keepTracks.boxes[0].box.listeners.get("change")()');
+  assert.deepEqual(boxes("audio"), [true, false, false, true]);
+  // Should an empty audio list ever reach a submit, it is refused rather than sent.
+  h.run("keepTracks.picks.audio.clear()");
+  assert.throws(() => h.run('keepTrackInputs(true, "/media/movie.mkv")'), /Keep at least one audio track/);
+});
+
+test("this job's languages and every track change what the picker reads and sends", async () => {
+  const { h, el, open, boxes, inputs } = keepHarness();
+  await open();
+  h.run('toggleTrack("subtitles", 6, true)');
+  // Editing this job's languages starts from the saved list and reads the file again.
+  h.run('setKeepScope("job")');
+  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
+  assert.equal(h.run("keepTracks.picks"), null, "the boxes follow the languages again");
+  assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=eng%2Cjpn%2Cspa");
+  assert.equal(el("keep-job-languages").hidden, false);
+  assert.equal(el("keep-tracks-summary").textContent, "This job: English, Japanese, Spanish");
+  assert.deepEqual(inputs(), { keep_languages: ["eng", "jpn", "spa"] });
+  h.context.tracks = { ...keepFixture(), languages: ["eng", "fra", "jpn", "spa"] };
+  h.context.tracks.audio[1].keep = true;
+  el("keep-job-input").value = "French";
+  el("keep-job-add").listeners.get("click")();
+  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa", "fra"]);
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  assert.equal(h.run("queries.at(-1)"), "source-tracks?path=%2Fmedia%2Fmovie.mkv&keep_languages=eng%2Cjpn%2Cspa%2Cfra");
+  assert.deepEqual(boxes("audio"), [true, true, true, true]);
+  assert.deepEqual(inputs(), { keep_languages: ["eng", "jpn", "spa", "fra"] });
+  // Removing a language goes through its chip.
+  el("keep-job-list").children.find((chip) => chip.children[0].textContent === "French").children[2].listeners.get("click")();
+  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
+  // Every track: an empty list, which the server reads as no filtering.
+  h.run('setKeepScope("all")');
+  assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=");
+  assert.deepEqual(inputs(), { keep_languages: [] });
+  assert.equal(el("keep-tracks-summary").textContent, "Keep every track");
+  assert.equal(el("keep-job-languages").hidden, true);
+  // Back to the saved list sends nothing again.
+  h.run('setKeepScope("saved")');
+  assert.deepEqual(inputs(), {});
+  // A batch has no track list but still takes the language choice.
+  h.run('setKeepScope("job"); toggleTrack("audio", 1, true)');
+  assert.deepEqual(inputs(false), { keep_languages: ["eng", "jpn", "spa"] });
+});
+
+test("a language list for a batch is chosen without reading any file's tracks", () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); setKeepScope("job"); renderKeepTracks();');
+  assert.equal(el("keep-tracks").hidden, false);
+  assert.equal(el("keep-tracks-file").hidden, true);
+  assert.equal(h.run("queries.length"), 0);
+  assert.deepEqual(plain(h.run("keepTrackInputs(false, '/media/a.mkv')")), { keep_languages: ["eng", "jpn", "spa"] });
+  // Goals that keep no tracks, and technical profiles, hide the whole choice.
+  h.run('$("scope").value = "file"; $("technical").checked = true; renderKeepTracks();');
+  assert.equal(el("keep-tracks").hidden, true);
+  h.run('$("technical").checked = false; document.querySelectorAll = () => []; processingMode = () => "quality"; renderKeepTracks();');
+  assert.equal(el("keep-tracks").hidden, true);
+});
+
+test("a new file starts from the automatic choice, and a stale or failed read cannot change the boxes", async () => {
+  const { h, el, open, boxes } = keepHarness();
+  await open();
+  h.run('toggleTrack("audio", 4, false)');
+  // Another file: picks are gone at once and the old tracks are not shown for it.
+  h.run('$("path").value = "/media/other.mkv"; controls();');
+  assert.equal(h.run("keepTracks.picks"), null);
+  assert.equal(h.run("keepTracks.path"), "/media/other.mkv");
+  assert.equal(el("keep-audio-list").children.length, 0);
+  assert.equal(el("keep-tracks-status").textContent, "Reading the file's tracks…");
+  // A read for the file the user left finishes late and is ignored.
+  const late = deferred();
+  h.context.late = late.promise;
+  h.run("api = async () => late;");
+  const staleKey = h.run("keepTracks.key"), staleSeq = h.run("keepTracks.seq");
+  const pending = h.run(`loadKeepTracks(${JSON.stringify(staleKey)}, ${staleSeq})`);
+  h.run('$("path").value = "/media/third.mkv"; controls();');
+  late.resolve(keepFixture());
+  await pending;
+  assert.equal(h.run("keepTracks.data"), null);
+  assert.equal(h.run("keepTracks.status"), "loading");
+  // The server's own refusal is shown; any other failure leaves the job on the languages.
+  h.run('api = async () => { throw Object.assign(new Error("keep_languages: not a language"), { status: 400 }); };');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  assert.equal(el("keep-tracks-status").textContent, "keep_languages: not a language");
+  h.run('api = async () => { throw new Error("down"); };');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  assert.equal(el("keep-tracks-status").textContent, "Could not read this file's tracks. The job still follows the languages.");
+  assert.equal(h.run("keepTracks.status"), "error");
+  assert.deepEqual(plain(h.run("keepTrackInputs(true, '/media/third.mkv')")), {});
+  assert.deepEqual(boxes("audio"), []);
+});
+
+test("saving a different list in Settings refreshes the picker's pre-checked tracks", async () => {
+  const { h, open } = keepHarness();
+  await open();
+  const before = h.run("queries.length");
+  h.run('api = async (path, body, opts) => opts?.method === "PUT" ? { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] } : tracks;');
+  await h.run('saveKeepLanguages(["eng", "fra"])');
+  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
+  assert.equal(h.run("keepTracks.status"), "loading", "the file is read again with the new list");
+  assert.ok(h.run("keepTracks.key") !== "", "and the key stays for the same file");
+  assert.equal(h.run("queries.length"), before, "the read itself waits for the debounce");
+});
+
+test("submitting a single Save space or Shrink job sends the picker's choice, and other goals send none", async () => {
+  const { h } = submissionHarness({ radios: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.saved = ["eng"];');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "size");
+  assert.equal("keep_languages" in sent[0] || "keep_audio_streams" in sent[0], false, "the saved list is applied by the server");
+  // Hand-picked tracks, for this file only.
+  h.run(`keepTracks.path = "/media/one.mp4"; keepTracks.scope = "job"; keepTracks.languages = ["eng", "fra"];
+    keepTracks.picks = { audio: new Set([4, 1]), subtitles: new Set([5]) }; $("path").value = "/media/one.mp4"; $("scope").value = "file"; state.folderSelected = new Set(["/media/one.mp4"]);`);
+  await h.run('buildAndSubmitJob("encode")');
+  assert.deepEqual(sent[1].keep_languages, ["eng", "fra"]);
+  assert.deepEqual(sent[1].keep_audio_streams, [1, 4]);
+  assert.deepEqual(sent[1].keep_subtitle_streams, [5]);
+  // A finished submission starts the next file from the saved list.
+  assert.equal(h.run("keepTracks.scope"), "saved");
+  assert.equal(h.run("keepTracks.picks"), null);
+  // Quality keeps every track as it always did, and says nothing about them.
+  h.run('processingMode = () => "quality"; keepTracks.scope = "job"; keepTracks.languages = ["fra"]; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[2].mode, "quality");
+  assert.equal("keep_languages" in sent[2], false);
+  // The shrink goal takes the same choice.
+  h.run('processingMode = () => "compact"; keepTracks.scope = "all"; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[3].mode, "compact");
+  assert.deepEqual(sent[3].keep_languages, []);
+});
+
+function trackReportFixture(overrides = {}) {
+  return {
+    id: "finished",
+    action_name: "transcode_media",
+    status: "completed",
+    mode: "size",
+    source_path: "/media/Show/Episode 1.mkv",
+    candidate_ready: true,
+    tracks_message: "Kept 3 of 4 audio tracks (eng, und, jpn) and 2 of 3 subtitles; dropping the rest saves about 700.0 MB",
+    tracks: {
+      audio: {
+        total: 4,
+        kept: [
+          { index: 1, language: "eng", title: "Surround", codec: "eac3", bytes: 1200000000 },
+          { index: 3, language: "und", title: "Commentary", codec: "aac", bytes: 90000000 },
+          { index: 4, language: "jpn", codec: "dts", bytes: 1800000000 },
+        ],
+        dropped: [{ index: 2, language: "fre", codec: "ac3", bytes: 700000000 }],
+      },
+      subtitles: {
+        total: 3,
+        kept: [{ index: 5, language: "spa", codec: "subrip" }, { index: 7, language: "", codec: "hdmv_pgs_subtitle", bytes: 4000000 }],
+        dropped: [{ index: 6, language: "deu", title: "Forced", codec: "subrip" }],
+      },
+      bytes_saved: 700000000,
+      languages: ["eng", "jpn", "spa"],
+      message: "Kept 3 of 4 audio tracks (eng, und, jpn) and 2 of 3 subtitles; dropping the rest saves about 700.0 MB",
+    },
+    ...overrides,
+  };
+}
+
+test("the job details report what was kept and dropped, in a line with the tracks behind it", () => {
+  const h = harness();
+  h.context.job = trackReportFixture();
+  const box = h.run("trackReport(job)");
+  const [line, details] = box.children;
+  assert.equal(line.children[0].textContent, "Tracks: ");
+  assert.match(line.children[1].textContent, /^Kept 3 of 4 audio tracks .* saves about 700\.0 MB$/);
+  assert.equal(details.className, "track-report-details");
+  const headings = details.children.filter((child) => child.textContent.includes(" kept"));
+  assert.deepEqual(headings.map((heading) => heading.textContent), ["Audio · 3 of 4 kept", "Subtitles · 2 of 3 kept"]);
+  const rows = (list) => list.children.map((row) => row.children.map((cell) => cell.textContent).join(" | "));
+  const lists = details.children.filter((child) => child.className === "track-report-list");
+  assert.deepEqual(rows(lists[0]), [
+    "Kept | English | E-AC-3 · Surround · 1.20 GB",
+    "Dropped | French | AC-3 · 700.0 MB",
+    "Kept | Untagged | AAC · Commentary · 90.0 MB",
+    "Kept | Japanese | DTS · 1.80 GB",
+  ]);
+  assert.deepEqual(lists[0].children.map((row) => row.className), ["track-report-row kept", "track-report-row dropped", "track-report-row kept", "track-report-row kept"]);
+  assert.deepEqual(rows(lists[1]), [
+    "Kept | Spanish | SRT",
+    "Dropped | German | SRT · Forced",
+    "Kept | Untagged | PGS · 4.0 MB",
+  ]);
+});
+
+test("the track report is one line where only the message is known, and absent without one", () => {
+  const h = harness();
+  // A queue row carries the message and not the lists.
+  h.context.job = trackReportFixture({ tracks: undefined });
+  assert.equal(h.run("trackReport(job)").children.length, 1);
+  h.context.job = trackReportFixture();
+  h.context.job.tracks.audio.total = 0;
+  h.context.job.tracks.subtitles.total = 0;
+  assert.equal(h.run("trackReport(job)").children.length, 1, "nothing to expand");
+  h.context.job = trackReportFixture({ tracks_message: "", tracks: undefined });
+  assert.equal(h.run("trackReport(job)"), null);
+  h.context.job = { id: "plain", action_name: "transcode_media", status: "completed" };
+  assert.equal(h.run("trackReport(job)"), null);
+});
+
+test("the track list stays open for its job while the details refresh", () => {
+  const h = harness();
+  h.context.job = trackReportFixture();
+  const first = h.run("trackReport(job)").children[1];
+  assert.equal(first.open, false);
+  first.open = true;
+  first.listeners.get("toggle")();
+  assert.equal(h.run("state.trackReportOpen"), "finished");
+  assert.equal(h.run("trackReport(job).children[1].open"), true);
+  h.run('job = { ...job, id: "another" }');
+  assert.equal(h.run("trackReport(job).children[1].open"), false);
+  first.open = false;
+  first.listeners.get("toggle")();
+  assert.equal(h.run("state.trackReportOpen"), null);
+});
+
+test("untagged tracks that were kept are detected from the report, not from a manual choice", () => {
+  const h = harness();
+  const kept = (tracks) => h.run(`keptUntagged(${JSON.stringify(tracks)})`);
+  const report = trackReportFixture().tracks;
+  assert.equal(kept(report), true);
+  assert.equal(kept({ ...report, manual: true }), false, "hand-picked tracks were chosen, not defaulted");
+  assert.equal(kept({ audio: { total: 1, kept: [{ index: 1, language: "eng" }], dropped: [{ index: 2, language: "und" }] } }), false, "dropped does not count");
+  assert.equal(kept({ subtitles: { total: 1, kept: [{ index: 3, language: "" }], dropped: [] } }), true, "an empty tag is untagged");
+  assert.equal(kept(null), false);
+  assert.equal(kept({}), false);
+});
+
+test("Choose tracks is offered in the details of a finished file that kept untagged tracks, and nowhere else", () => {
+  const h = harness();
+  const labels = (job, detail) => {
+    h.context.job = job;
+    return h.run(`jobControls(job, ${detail}).children.map(b => b.textContent)`);
+  };
+  const job = trackReportFixture();
+  assert.ok(labels(job, true).includes("Choose tracks"));
+  assert.ok(!labels(job, false).includes("Choose tracks"), "queue rows carry no track lists");
+  for (const change of [
+    { replaced: true },
+    { candidate_ready: false },
+    { candidate_ready: undefined },
+    { replacement_action_id: "replacement" },
+    { status: "running" },
+    { mode: "quality" },
+    { source_path: "" },
+    { action_name: "transcode_batch" },
+    { tracks: { ...job.tracks, manual: true } },
+    { tracks: { ...job.tracks, audio: { total: 1, kept: [{ index: 1, language: "eng" }], dropped: [] }, subtitles: { total: 0, kept: [], dropped: [] } } },
+  ]) assert.ok(!labels({ ...job, ...change }, true).includes("Choose tracks"), JSON.stringify(Object.keys(change)));
+  assert.ok(labels({ ...job, mode: "compact" }, true).includes("Choose tracks"));
+});
+
+test("Choose tracks opens the goal form for the file with its goal and languages, and the track list open", async () => {
+  const h = harness({ radios: true });
+  h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; controls = () => { renderKeepTracks(); };');
+  h.run('$("technical").checked = false; $("job-detail").open = true; $("keep-tracks").open = false;');
+  h.context.job = trackReportFixture({ mode: "compact" });
+  const choose = h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks");
+  await choose.listeners.get("click")();
+  assert.equal(h.elements.get("job-detail").open, false, "the dialog gives way to the form");
+  assert.equal(h.elements.get("path").value, "/media/Show/Episode 1.mkv");
+  assert.equal(h.elements.get("scope").value, "file");
+  assert.equal(h.run("processingMode()"), "compact");
+  assert.equal(h.run("state.goalExplicit"), true);
+  assert.equal(h.run("state.tab"), "library");
+  assert.equal(h.run("state.fileStep"), "configure");
+  assert.equal(h.run("keepTracks.scope"), "job");
+  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
+  assert.equal(h.elements.get("keep-tracks").open, true);
+  // A job made with no language filter starts the form on every track.
+  h.context.job = trackReportFixture({ tracks: { ...trackReportFixture().tracks, languages: [] } });
+  await h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  assert.equal(h.run("keepTracks.scope"), "all");
+  // Opening a file the ordinary way takes no goal or languages with it.
+  h.run('openGoalForm("/media/plain.mkv")');
+  assert.equal(h.elements.get("path").value, "/media/plain.mkv");
+});
+
+test("a batch's file rows carry the sentence about the tracks they kept", async () => {
+  const h = harness();
+  h.run(`state.detail = "batch"; state.detailRevision = 1; state.batchItemsOffset = 0; $("job-detail").open = true;
+    api = async () => ({ items: [
+      { item_key: "1", display_label: "one.mkv", status: "completed", tracks_message: "Kept 2 of 3 audio tracks (eng, und)" },
+      { item_key: "2", display_label: "two.mkv", status: "completed" },
+    ] });`);
+  await h.run('loadBatchItems("batch", 1)');
+  const rows = h.elements.get("batch-items-list").children;
+  const tracks = (row) => row.children.filter((cell) => String(cell.className).includes("batch-file-tracks")).map((cell) => cell.textContent);
+  assert.deepEqual(tracks(rows[0]), ["Kept 2 of 3 audio tracks (eng, und)"]);
+  assert.deepEqual(tracks(rows[1]), []);
+});
+
+test("the markup carries the languages editor and the picker inside the forms they belong to", () => {
+  const section = markup.slice(markup.indexOf('<section id="settings-languages"'), markup.indexOf("</section>", markup.indexOf('<section id="settings-languages"')));
+  for (const id of ["keep-languages-state", "keep-language-input", "keep-language-add", "keep-languages-list", "keep-languages-apply", "keep-languages-reset", "keep-languages-off", "keep-languages-note", "language-options"])
+    assert.match(section, new RegExp(`id="${id}"`), id);
+  assert.match(section, /original language and untagged tracks are always kept/i);
+  assert.match(section, /id="keep-languages-note"[^>]*role="status"/);
+  const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
+  const picker = form.slice(form.indexOf('<details id="keep-tracks"'), form.indexOf("</details>", form.indexOf('<details id="keep-tracks"')));
+  assert.ok(picker, "the picker is part of the goal step");
+  for (const id of ["keep-tracks-summary", "keep-job-languages", "keep-job-list", "keep-job-input", "keep-job-add", "keep-job-note", "keep-tracks-file", "keep-tracks-status", "keep-audio", "keep-audio-list", "keep-subtitles", "keep-subtitle-list", "keep-tracks-reset"])
+    assert.match(picker, new RegExp(`id="${id}"`), id);
+  assert.deepEqual([...picker.matchAll(/name="keep-scope" value="(\w+)"/g)].map((m) => m[1]), ["saved", "job", "all"]);
+  assert.match(picker, /keep at least one/i);
+  // The job form is a form: an editor inside it must not open another one.
+  assert.doesNotMatch(picker, /<form\b/);
+  assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<details id="keep-tracks"'), "the choice follows the goal");
+  assert.match(css, /\.track-list\s*\{[^}]*overflow-y:\s*auto/);
+});
+
+test("Choose tracks starts the new job with the earlier job's goal, size limit, encoder and library", async () => {
+  const { h } = submissionHarness({ radios: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  const choose = async (job) => {
+    h.context.job = job;
+    await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
+  };
+  // Shrink to 720p for a series episode: the height has no control in the form, so it is carried.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720, media_type: "tv", is_anime: true }, replacement_context: { service: "sonarr", series_id: 7, source: "job_inputs" } }));
+  assert.equal(h.run("processingMode()"), "compact");
+  assert.equal(h.run("state.fileService"), "sonarr");
+  assert.equal(h.run("state.fileMedia.id"), 7);
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "compact");
+  assert.equal(sent[0].max_height, 720);
+  assert.equal(sent[0].path, "/media/Show/Episode 1.mkv");
+  assert.equal(sent[0].media_type, "tv");
+  assert.equal(sent[0].is_anime, true);
+  assert.deepEqual(plain(sent[0].library_context), { service: "sonarr", id: 7 });
+  assert.deepEqual(sent[0].keep_languages, ["eng", "jpn", "spa"], "the languages the earlier job used");
+  assert.equal(h.run("state.goalCarry"), null, "what was carried is used once");
+  // Save space with the media engine off and a limit like the other episodes.
+  await choose(trackReportFixture({ goal: { mode: "size", allow_hardware: false, allow_slow_preset: true, size_budget_source: "siblings", size_budget_sibling_multiplier: 1.8 }, replacement_context: { service: "filesystem", source: "parent_batch" } }));
+  assert.equal(h.run("state.fileMedia"), null, "a folder library has no series to attach");
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[1].mode, "size");
+  assert.equal(sent[1].allow_hardware, false);
+  assert.equal(sent[1].allow_slow_preset, true);
+  assert.equal(sent[1].size_budget_source, "siblings");
+  assert.equal(sent[1].size_budget_sibling_multiplier, 1.8);
+  assert.equal("max_height" in sent[1], false);
+  assert.equal("library_context" in sent[1], false);
+  // A budget in bytes and the media engine on.
+  await choose(trackReportFixture({ goal: { mode: "size", size_budget_bytes: 1500000000 } }));
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[2].allow_hardware, true);
+  assert.equal(sent[2].size_budget_bytes, 1500000000);
+  // The carried settings belong to that goal: choosing another one sends none of them.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720 } }));
+  h.run('processingMode = () => "size"');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[3].mode, "size");
+  assert.equal("max_height" in sent[3], false);
+  // And an ordinary open of the form carries nothing.
+  await choose(trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720 } }));
+  h.run('openGoalForm("/media/plain.mkv")');
+  assert.equal(h.run("state.goalCarry"), null);
+  assert.equal(h.run("state.fileMedia"), null);
+});
+
+test("a file without audio takes subtitle picks alone", async () => {
+  const { h, el, open, boxes, inputs } = keepHarness();
+  h.context.tracks = { ...keepFixture(), audio: [] };
+  await open();
+  assert.equal(el("keep-audio").hidden, true);
+  assert.deepEqual(boxes("audio"), []);
+  assert.equal(el("keep-tracks-status").textContent, "Keeping 2 of 3 subtitles.");
+  h.run('toggleTrack("subtitles", 6, true)');
+  assert.deepEqual(inputs(), { keep_subtitle_streams: [5, 6, 7] }, "an empty audio list would be refused");
+  h.run('toggleTrack("subtitles", 6, false)');
+  assert.deepEqual(inputs(), {});
+});
+
+test("saving the list in Settings resets hand picks only where the form follows the saved list", async () => {
+  const { h, open } = keepHarness();
+  await open();
+  const changed = { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] };
+  // This job's own languages do not depend on the saved list.
+  h.run('setKeepScope("job")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  const key = h.run("keepTracks.key");
+  h.context.changed = changed;
+  h.run("applyKeepLanguages(changed, true)");
+  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
+  assert.equal(h.run("keepTracks.key"), key);
+  assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [1, 3]);
+  // Every track neither.
+  h.run('setKeepScope("all")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  h.context.changed = { languages: ["eng"], default: [] };
+  h.run("applyKeepLanguages(changed, true)");
+  assert.notEqual(h.run("keepTracks.picks"), null);
+  // The saved list does: the boxes follow it again.
+  h.run('setKeepScope("saved")');
+  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
+  h.run('toggleTrack("audio", 4, false)');
+  assert.notEqual(h.run("keepTracks.picks"), null);
+  h.context.changed = { languages: ["eng", "spa"], default: [] };
+  h.run("applyKeepLanguages(changed, true)");
+  assert.equal(h.run("keepTracks.picks"), null);
+  assert.equal(h.run("keepTracks.status"), "loading");
+  assert.equal(h.run("keepTracks.notice"), "The boxes follow the languages again.");
+});
+
+test("one file takes one source slot at a time: its tracks are read after its profile", async () => {
+  const { h, open } = keepHarness();
+  h.context.timers = [];
+  h.context.setTimeout = (fn) => { h.context.timers.push(fn); return h.context.timers.length; };
+  h.context.profile = goalProfileFixture();
+  h.run('var reads = []; api = async (path) => { reads.push(path.split("?")[0]); return path.startsWith("source-tracks") ? tracks : profile; };');
+  // Opening the file starts the profile read; the tracks wait for it.
+  h.run("refreshGoalProfile(); refreshKeepTracks();");
+  assert.equal(h.run("state.goalProfile.status"), "loading");
+  assert.equal(h.run("keepTracks.status"), "loading");
+  const profileTimer = h.context.timers.length;
+  assert.equal(profileTimer, 1, "only the profile read is scheduled");
+  // Changing the languages meanwhile does not start a second read.
+  h.run('setKeepScope("job")');
+  assert.equal(h.context.timers.length, profileTimer);
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.deepEqual(plain(h.run("reads")), ["source-profile"]);
+  assert.equal(h.context.timers.length, profileTimer + 1, "the profile is in; now the tracks are scheduled");
+  await h.context.timers.at(-1)();
+  assert.deepEqual(plain(h.run("reads")), ["source-profile", "source-tracks"]);
+  assert.equal(h.run("keepTracks.status"), "ready");
+  // With the profile already read, a language change reads the tracks at once.
+  h.run('keepTracks.languages = ["eng"]; refreshKeepTracks();');
+  assert.equal(h.context.timers.length, profileTimer + 2);
+  // A failed profile read does not hold the tracks back either.
+  h.run('$("path").value = "/media/next.mkv"; api = async (path) => { if (!path.startsWith("source-tracks")) throw new Error("no"); return tracks; }; refreshGoalProfile(); refreshKeepTracks();');
+  const before = h.context.timers.length;
+  await h.run('loadGoalProfile("/media/next.mkv")');
+  assert.equal(h.run("state.goalProfile.status"), "error");
+  assert.equal(h.context.timers.length, before + 1);
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.

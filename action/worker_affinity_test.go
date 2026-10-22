@@ -461,3 +461,38 @@ func TestAnOfflineWorkerDoesNotDecideCoverArt(t *testing.T) {
 		t.Fatal("ready m4 without cover art was ignored")
 	}
 }
+
+// Capability gates read the job's own worker: a plan that drops tracks is
+// refused on a worker without track selection even when the other worker has
+// it, and never sent to either.
+func TestTrackSelectionGateReadsTheAssignedWorker(t *testing.T) {
+	withTracks := func(capable bool) *mockTranscodeExecutor {
+		return &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, TrackSelection: capable}, nil
+		}}
+	}
+	for _, tc := range []struct {
+		worker  string
+		refused bool
+	}{{"m4", true}, {"m1", false}} {
+		m1, m4 := withTracks(true), withTracks(false)
+		e := NewEngine(EngineDeps{Workers: twoWorkers(t, m1, m4, 0)})
+		ec := testReconcileEC("job-tracks")
+		ec.State[workerStateKey] = tc.worker
+		plan := testReconcilePlan()
+		plan.Mode, plan.ModePolicyVersion, plan.AudioMode = "size", transcode.ModePolicyV6, transcode.AudioModeSizeAAC
+		plan.Tracks = &transcode.TrackSelection{KeepAudio: []int{1}, KeepSubtitles: []int{}}
+		ec.State["plan"] = plan
+		res, err := e.stepTranscodeSubmit(context.Background(), ec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		refused := res.Status == StepFailed && strings.Contains(res.Error, "audio and subtitle tracks")
+		if refused != tc.refused {
+			t.Fatalf("on %s: status %s error %q", tc.worker, res.Status, res.Error)
+		}
+		if m4.submitCalls != 0 || (tc.worker == "m4" && m1.submitCalls != 0) {
+			t.Fatalf("on %s: submitted to m1 %d, m4 %d times", tc.worker, m1.submitCalls, m4.submitCalls)
+		}
+	}
+}

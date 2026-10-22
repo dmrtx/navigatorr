@@ -87,6 +87,18 @@ type WorkerCapabilities struct {
 	// from ffprobe's demuxed payload hashes, and lossless audio is
 	// compacted to AAC.
 	SizeAudioOnly bool `json:"size_audio_only,omitempty"`
+	// SizeAudioLevels reports a worker that runs size policy v5 plans: the
+	// size goal's audio levels (AAC-LC and HE-AAC per track, from the source
+	// bitrate). Older workers refuse the audio modes, so the coordinator checks
+	// this before it submits a v5 plan.
+	SizeAudioLevels bool `json:"size_audio_levels,omitempty"`
+	// TrackSelection reports a worker that runs plans of mode policy v6: it maps
+	// exactly the audio and subtitle streams the plan keeps and validates that
+	// the output has those tracks and no others. Older workers refuse the plan,
+	// so the coordinator checks this before it submits one. Like the flags
+	// before it, it is not part of the pinned capability fingerprint (the
+	// fingerprint of an unchanged machine must not move).
+	TrackSelection bool `json:"track_selection,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
@@ -185,6 +197,7 @@ type fingerprintPayload struct {
 	CoverArt                  bool                           `json:"cover_art,omitempty"`
 	SizeModeV3                bool                           `json:"size_mode_v3,omitempty"`
 	SizeAudioOnly             bool                           `json:"size_audio_only,omitempty"`
+	SizeAudioLevels           bool                           `json:"size_audio_levels,omitempty"`
 	SearchBudgetExtension     bool                           `json:"search_budget_extension,omitempty"`
 	AutomaticSearchRules      bool                           `json:"automatic_search_rules,omitempty"`
 	AutomaticGridVerification bool                           `json:"automatic_grid_verification,omitempty"`
@@ -239,6 +252,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		CoverArt:                  caps.CoverArt,
 		SizeModeV3:                caps.SizeModeV3,
 		SizeAudioOnly:             caps.SizeAudioOnly,
+		SizeAudioLevels:           caps.SizeAudioLevels,
 		SearchBudgetExtension:     caps.SearchBudgetExtension,
 		AutomaticSearchRules:      caps.AutomaticSearchRules,
 		AutomaticGridVerification: caps.AutomaticGridVerification,

@@ -80,6 +80,72 @@ If every VideoToolbox rung misses the quality limits the record sets
 file may be run again with `allow_hardware=false` (the job says so and the web UI
 offers **Try with x265**).
 
+## Tracks to keep (size and compact)
+
+The size and compact goals leave out the audio and subtitle tracks in languages
+nobody asked to keep. The selection is a pure function of the file's probe and
+a list of languages, decided once when the job is created and frozen with it.
+
+**Languages.** The global setting is `["spa","eng","jpn"]` until changed
+(`GET` / `PUT /api/maintenance/keep-languages`, body `{"languages":[...]}`,
+the same revisioned shape as the per-node parallel-jobs setting). Codes are
+ISO 639-2, three letters; the bibliographic and terminology spellings are one
+language (ger = deu, fre = fra, chi = zho, dut = nld, rum = ron, gre = ell,
+per = fas, cze = ces, and the rest), stored in the terminology form, sorted.
+`[]` turns the selection off. A job's own `keep_languages` replaces the global
+list; `keep_audio_streams` and `keep_subtitle_streams` (source stream indexes,
+a single `transcode_media` job only) pick tracks by hand, exactly.
+
+| Rule | Behaviour |
+| --- | --- |
+| Original audio | The track with disposition `original`, else the first audio track, is always kept. |
+| Audio match | Audio in a listed language is kept; so is any other audio in the original track's language (a commentary stays with its film), and untagged and `und` audio. |
+| No audio matches | Every audio track is kept. "Matches" looks at the list only, not at the original language. |
+| Subtitles | Kept when in a listed language, in the original track's language, or untagged / `und`. Forced subtitles follow the same rule. No match drops them. |
+| Never dropped | Video, attachments (fonts) and chapters. |
+| Defaults | When the default audio track is dropped, the first kept audio track becomes the default. For subtitles, only if a default subtitle existed: its replacement is the first kept subtitle, or, when the dropped default was a forced subtitle, a kept forced subtitle (none at all if there is none: a full subtitle never replaces a forced default). |
+| No audio in the source | Only subtitles can be dropped; the plan keeps no audio and the worker accepts that for a source that has none (never for one that has audio). |
+| Nothing to drop | The plan is the same as before, with no selection recorded. |
+
+**Frozen, versioned, gated.** The selection is part of the job's frozen policy
+(`tracks` in the snapshot, in its digest only when present, so every older
+digest is unchanged). A plan that drops tracks is policy `v6` and carries the
+kept source stream indexes; a plan that drops nothing keeps its earlier
+version. A snapshot frozen before this feature has no selection and keeps every
+track. The worker advertises `track_selection`; the server refuses to submit,
+to plan a size budget, or to request final validation of a selection to a
+worker that lacks it ("needs a worker that follows the selection"), and an
+older worker rejects the v6 plan on its own.
+
+A goal change of a batch (a new budget, size to compact) keeps the languages
+the batch was created with: its own `keep_languages` (`[]` included), else the
+list it froze at creation. Only a batch frozen before this setting existed has
+no record of its languages and reads the global list as it is at the change;
+likewise, work that was created but not yet frozen when this version is
+deployed takes the list in force when it is frozen (`spa`, `eng`, `jpn` unless
+changed), which is expected and not a regression.
+
+**Size accounting.** The budget counts only the kept tracks: dropped audio
+bytes stay out of the audio levels and the video allowance, and dropped
+streams' stated bytes are credited as savings. For a source of eight E-AC-3
+5.1 640 kbps tracks (eng, spa Castilian, spa Latin, fre, ger, ita, por, jpn),
+1.0 GB, 1080p23.976, 1800 s, keeping spa, eng and jpn leaves four tracks:
+level 1 (AAC-LC 5.1 at 384 kbps) fits and leaves the video 2579 kbps, where
+all eight tracks needed level 2 (HE-AAC 160) for a video of 2373 kbps.
+
+**Worker.** The encode maps `0:v?`, each kept stream by source index and
+`0:t?` (attachments), copies chapters, and sets codec arguments by output
+position. Before publishing, the worker and the server's final validation
+require exactly the planned tracks, in source order, with their languages,
+codecs and the planned default and forced flags; a count mismatch fails with
+no accept-loss option. Promotion is unchanged.
+
+**Reporting.** A job that drops tracks reports `tracks` (kept and dropped audio
+and subtitles with index, language, title, codec and stated bytes,
+`bytes_saved`, `languages`, `manual`) and `tracks_message`, for example "Kept 4
+of 8 audio tracks (spa, spa, eng, jpn) and 6 of 32 subtitles". Both are outputs
+of the finished job (the validation step) and are repeated inside its `result`.
+
 ## Earlier policies
 
 Operations frozen under `transcode-modes-v1`, `-v2` (quality, x265_preserve,
@@ -191,12 +257,71 @@ or on a worker without it, one two-pass x265 average-bitrate encode (preset
 medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
 psy-rd 2, psy-rdoq 1; main10 when the plan is main10) aims at 97% of the budget.
 The video bitrate is `(target - non-video bytes) * 8 / duration`, where
-non-video bytes are the source minus its video stream, minus what lossless audio
-compaction saves. A budget roomier than two-pass x265's 50 Mbps ceiling is met at
+non-video bytes are the source minus its video stream, minus what the chosen
+audio level saves (see **Audio levels** below). A budget roomier than two-pass x265's 50 Mbps ceiling is met at
 the ceiling, and the file comes out smaller. The size is therefore known before
 the encode starts and shown as the estimate (*Budget estimate*). Validation
 rebuilds these settings from the frozen policy and the source and accepts only a
 plan that matches them exactly. It faces the same floor and outcomes as below.
+
+**Audio levels.** A budget also decides what happens to the audio, because a
+file with many lossy surround tracks can leave no room for the picture: eight
+E-AC-3 5.1 tracks at 640 kbps take about 1.15 GB of a 30-minute episode, so a
+1.00 GB budget would otherwise end as exceeded. Each source gets one of two
+levels, a pure rule applied to every audio track, and the same rule is used by
+the planner and the worker:
+
+| Level | Mode | What it does to a track |
+| --- | --- | --- |
+| 1 | `size_aac` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
+| 2 | `size_he_aac` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
+
+The 1.25 factor is a minimum gain: AC-3 5.1 at 448 kbps is copied at level 1
+(it would save 14% for a second lossy generation) while E-AC-3 5.1 at 640 kbps
+is converted, and AAC 5.1 at 384 kbps becomes HE-AAC at 160 at level 2. At both
+levels any other track is copied: one under the factor, lossless included when
+it states its bitrate (a quiet or mono FLAC can already be smaller than the
+target), E-AC-3 Atmos (JOC), a layout AAC cannot keep, more than 8 channels, and
+a lossy track whose bitrate the probe could not read. A lossless track that
+states no bitrate is converted. Track count, order, languages, titles,
+dispositions and channel layout never change, and subtitles and attachments are
+never touched. Level 1 is the minimum for a new goal: lossy tracks over the
+factor are always converted (the old behaviour, level 0, converted only
+lossless tracks and survives only in snapshots frozen before the levels).
+AAC-LC is encoded with AudioToolbox's `aac_at` (profile 2) where it keeps the
+track's layout (mono, stereo, 3.0, 4.0, quad, 5.0, 5.1, their side variants, 6.1(back),
+7.0 and octagonal, and an unlabelled layout of 1, 2 and 4 to 7 channels), and
+with FFmpeg's native encoder for the layouts it changes (7.1 loses its LFE; 2.1,
+3.1, 4.1 and hexagonal come out different). HE-AAC is `aac_at` (profile 4) and
+only for the layouts it writes correctly, which a real encode of each layout
+established: stereo, quad and 5.1. `aac_at` turns mono HE-AAC into stereo and
+refuses 3.0, 4.0, 5.0 and 7.1 as HE-AAC, so those stay AAC-LC at level 2. An
+unlabelled layout (PCM in Matroska) follows its channel count: 2 and 6 channels
+can be HE-AAC, 4 and 5 channels stay AAC-LC. These tables are part of the
+`transcode-modes-v5` contract and are pinned by `TestSizeAudioV5Contract`; a
+change to any of them needs a new plan version.
+
+The level is chosen once per source. The least aggressive level that leaves
+the video at least a good bitrate wins, where good is 0.04 bits per pixel per
+frame (about 2.0 Mbps for 1080p at 23.976 fps, never more than the source's own
+video bitrate). When neither level reaches it, the more compressed level wins if
+it leaves a usable video bitrate (at least x265's 64 kbps floor); when not even
+that fits, the budget ends as unreachable and the "at least X" figure is the more
+compressed level's. For the 8-track example above, level 1 leaves the picture
+about 0.6 Mbps and level 2 about 2.4 Mbps, so level 2 is used; with a budget of
+2.5 GB level 1 already leaves far more than 2 Mbps and is used.
+
+The frozen record carries the level, every track's planned codec, bitrate and
+encoder (`aac_at` or `aac`), the good bitrate and, when level 1 was rejected, what it left. The job and
+`action_status` show a sentence such as "Audio level 2 of 2: 8 of 8 tracks are
+re-encoded as HE-AAC". Validation chooses the level again from the frozen policy
+and the source and requires the plan and the record to match it. The worker
+checks each output track's codec, profile (AAC-LC or HE-AAC) and, from its
+packets, its bitrate against the plan, plus the track count, languages,
+channels and layout; the server repeats the codec, profile and bitrate checks on
+the finished file. A budget frozen with levels is plan policy `transcode-modes-v5`
+and needs a worker that reports `size_audio_levels`; an older worker is
+declined before anything is submitted (`size_budget_worker_unsupported`).
 
 **Validation.** The result is judged against the same final windows as any size
 result, but against a lower, frozen floor: VMAF mean 70, p5 60 and worst

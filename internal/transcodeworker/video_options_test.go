@@ -166,8 +166,8 @@ func TestBuildFFmpegArgsPlacesTypedVideoOptionsDeterministically(t *testing.T) {
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "hevc_videotoolbox", "-q:v", "65", "-profile:v", "main", "-pix_fmt", "yuv420p", "-prio_speed", "0", "-spatial_aq", "0", "-realtime", "0",
 		"-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux",
-		"-c:a", "copy", "-c:t", "copy", "/media/candidate.mkv",
 	}
+	want = append(append(want, clearStatisticsTags("v", 0, nil)...), "-c:a", "copy", "-c:t", "copy", "/media/candidate.mkv")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected full args\nwant=%v\n got=%v", want, got)
 	}
@@ -265,9 +265,13 @@ func TestBuildFFmpegArgsLibX265PreservesAudioSubtitlesMetadata(t *testing.T) {
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "libx265", "-crf", "24", "-preset", "slow", "-profile:v", "main", "-pix_fmt", "yuv420p",
 		"-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux",
-		"-c:a", "copy", "-c:s:0", "subrip", "-c:s:1", "copy", "-c:t", "copy",
-		"/media/candidate.mkv",
 	}
+	// The re-encoded video and the converted subtitle lose the source's muxer
+	// statistics; the copied subtitle keeps its own.
+	want = append(want, clearStatisticsTags("v", 0, nil)...)
+	want = append(want, "-c:a", "copy", "-c:s:0", "subrip")
+	want = append(want, clearStatisticsTags("s", 0, nil)...)
+	want = append(want, "-c:s:1", "copy", "-c:t", "copy", "/media/candidate.mkv")
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("unexpected full libx265 args\nwant=%v\n got=%v", want, got)
 	}

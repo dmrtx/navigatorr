@@ -29,7 +29,7 @@ func audioOnlyReport() *mediainspect.DetailedReport {
 func TestEstimateAudioOnly(t *testing.T) {
 	rep := audioOnlyReport()
 	const source = int64(10_700_000_000)
-	e := estimateAudioOnly(rep, source)
+	e := estimateAudioOnly(rep, source, transcode.AudioModeCompactLossless)
 	_, kbps := transcode.AudioTarget(transcode.AudioModeCompactLossless, transcode.AudioTrack{Codec: "dts", Profile: "DTS-HD MA", Channels: 6, Layout: "5.1(side)"})
 	compacted := int64(kbps) * 1000 * 6000 / 8
 	want := source - (3_000_000_000 - compacted) - (3_000_000_000 - compacted)
@@ -38,7 +38,7 @@ func TestEstimateAudioOnly(t *testing.T) {
 	}
 	// A lossless track with no size is counted but saves nothing.
 	rep.Audio[1].BitRate = 0
-	if e := estimateAudioOnly(rep, source); e.Compacted != 2 || e.Unknown != 1 || e.CandidateBytes != source-(3_000_000_000-compacted) {
+	if e := estimateAudioOnly(rep, source, transcode.AudioModeCompactLossless); e.Compacted != 2 || e.Unknown != 1 || e.CandidateBytes != source-(3_000_000_000-compacted) {
 		t.Fatalf("unknown track estimate %+v", e)
 	}
 	// The exact statistics tag wins over a language variant, and a size
@@ -57,11 +57,11 @@ func TestEstimateAudioOnly(t *testing.T) {
 		{Codec: "truehd", Title: "TrueHD Atmos 7.1", Channels: 8, ChannelLayout: "7.1", BitRate: 5000000},
 		{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 6, ChannelLayout: "5.1", BitRate: 768000},
 	}}
-	if e := estimateAudioOnly(atmos, source); e.Compacted != 1 || e.CandidateBytes != source-(5000000-512000)*6000/8 {
+	if e := estimateAudioOnly(atmos, source, transcode.AudioModeCompactLossless); e.Compacted != 1 || e.CandidateBytes != source-(5000000-512000)*6000/8 {
 		t.Fatalf("Atmos estimate %+v", e)
 	}
 	lossy := &mediainspect.DetailedReport{DurationSec: 6000, Audio: rep.Audio[2:]}
-	if e := estimateAudioOnly(lossy, source); e.Compacted != 0 || e.CandidateBytes != source {
+	if e := estimateAudioOnly(lossy, source, transcode.AudioModeCompactLossless); e.Compacted != 0 || e.CandidateBytes != source {
 		t.Fatalf("lossy-only estimate %+v", e)
 	}
 }
@@ -99,7 +99,7 @@ func audioOnlyCaps() transcode.WorkerCapabilities {
 
 func TestSizeAudioOnlyFallbackBuildsCopyPlan(t *testing.T) {
 	c := newAudioOnlyCase(t, audioOnlyCaps(), nil)
-	result, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs)
+	result, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs, "")
 	if !handled || result.Status != StepCompleted || getBool(c.ec.State, "skip_transcode") {
 		t.Fatalf("fallback %+v handled=%v state=%+v", result, handled, c.ec.State)
 	}
@@ -161,7 +161,7 @@ func TestSizeAudioOnlyFallbackDeclines(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(c)
 			}
-			result, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs)
+			result, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs, "")
 			if handled != tc.handled {
 				t.Fatalf("handled=%v want %v (%+v)", handled, tc.handled, result)
 			}
@@ -183,7 +183,7 @@ func TestSizeAudioOnlyFallbackDeclines(t *testing.T) {
 
 func TestAudioOnlyCandidateValidation(t *testing.T) {
 	c := newAudioOnlyCase(t, audioOnlyCaps(), nil)
-	if _, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs); !handled {
+	if _, handled := c.engine.sizeAudioOnlyFallback(context.Background(), c.ec, c.outputs, ""); !handled {
 		t.Fatal("fallback not taken")
 	}
 	plan := getPlan(c.ec.State["plan"])

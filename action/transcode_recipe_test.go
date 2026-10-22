@@ -65,8 +65,8 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 		"quality":                    {map[string]any{"mode": "quality"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}, ModePolicyVersion},
 		"x265_preserve":              {map[string]any{"mode": "x265_preserve"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}, ModePolicyVersion},
 		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, ModePolicyVersion},
-		"size budget, media engine":  {map[string]any{"mode": "size", "size_budget_percent": 40.0}, RecipeSizeBudget, transcode.VideoCodecHEVCVideoToolbox, "", nil, transcode.ModePolicyV3},
-		"size budget, x265":          {map[string]any{"mode": "size", "size_budget_percent": 40.0, "allow_hardware": false}, RecipeSizeBudget, transcode.VideoCodecLibX265, "", nil, transcode.ModePolicyV3},
+		"size budget, media engine":  {map[string]any{"mode": "size", "size_budget_percent": 40.0}, RecipeSizeBudget, transcode.VideoCodecHEVCVideoToolbox, "", nil, transcode.ModePolicyV5},
+		"size budget, x265":          {map[string]any{"mode": "size", "size_budget_percent": 40.0, "allow_hardware": false}, RecipeSizeBudget, transcode.VideoCodecLibX265, "", nil, transcode.ModePolicyV5},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := freezeFresh(t, tc.inputs)

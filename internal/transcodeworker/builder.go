@@ -289,10 +289,48 @@ func boolFFmpeg(v bool) string {
 // that describe the source bitstream, not a re-encoded one.
 var statisticsTags = []string{"BPS", "NUMBER_OF_BYTES", "NUMBER_OF_FRAMES", "DURATION", "_STATISTICS_WRITING_APP", "_STATISTICS_WRITING_DATE_UTC", "_STATISTICS_TAGS"}
 
-func clearStatisticsTags(kind string, typeIndex int) []string {
-	args := make([]string, 0, 2*len(statisticsTags))
+// statisticsTagKeys returns the tag names among tags that are muxer
+// statistics: an exact name, or one with a language suffix. A Matroska tag
+// with a language other than "und" reaches ffprobe (and ffmpeg's stream
+// metadata) as "NAME-lang", and many mkvmerge versions write the statistics
+// as "BPS-eng"; clearing only "BPS" leaves that one in the output. A key
+// holding "=" is skipped: as "KEY=" it would set a junk tag, not clear one.
+func statisticsTagKeys(tags map[string]string) []string {
+	var keys []string
+	for key := range tags {
+		if strings.Contains(key, "=") {
+			continue
+		}
+		name, _, _ := strings.Cut(key, "-")
+		for _, tag := range statisticsTags {
+			if strings.EqualFold(name, tag) {
+				keys = append(keys, key)
+				break
+			}
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// clearStatisticsTags empties a re-encoded stream's statistics: every
+// standard name and each name the source stream carries (see
+// statisticsTagKeys), so no player or later check reads the source's
+// bitrate, size, frame count or duration as the new stream's. ffmpeg's
+// Matroska muxer writes a fresh DURATION of its own.
+func clearStatisticsTags(kind string, typeIndex int, sourceKeys []string) []string {
+	args := make([]string, 0, 2*(len(statisticsTags)+len(sourceKeys)))
 	for _, tag := range statisticsTags {
 		args = append(args, fmt.Sprintf("-metadata:s:%s:%d", kind, typeIndex), tag+"=")
+	}
+	for _, key := range sourceKeys {
+		standard := false
+		for _, tag := range statisticsTags {
+			standard = standard || strings.EqualFold(key, tag)
+		}
+		if !standard {
+			args = append(args, fmt.Sprintf("-metadata:s:%s:%d", kind, typeIndex), key+"=")
+		}
 	}
 	return args
 }
@@ -465,10 +503,9 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		"-nostats",
 		"-i", sourcePath,
 		"-map", videoMap,
-		"-map", "0:a?",
-		"-map", "0:s?",
-		"-map", "0:t?",
 	}
+	args = append(args, trackMaps(execPlan)...)
+	args = append(args, "-map", "0:t?")
 
 	if execPlan.Plan.PreserveMetadata {
 		args = append(args, "-map_metadata", "0")
@@ -487,49 +524,62 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	}
 	if execPlan.Plan.Compact != nil {
 		// The source title often names the dropped format ("... Dolby
-		// Vision", "... HDR10"), and its muxer statistics describe the old
-		// bitstream; neither may survive on the SDR stream.
+		// Vision", "... HDR10"); it may not survive on the SDR stream.
 		args = append(args, "-metadata:s:v:0", "title=")
-		args = append(args, clearStatisticsTags("v", 0)...)
+	}
+	if execPlan.Plan.Compact != nil || norm(execPlan.Plan.VideoCodec) != transcode.VideoCodecCopy {
+		// A re-encoded video stream's muxer statistics are the source's.
+		// Programme video is mapped in source order (covers are
+		// attachments); a video plan always has the first.
+		var video []StreamAction
+		for _, stream := range execPlan.Streams {
+			if stream.Kind == "video" {
+				video = append(video, stream)
+			}
+		}
+		if len(video) == 0 {
+			video = []StreamAction{{Kind: "video"}}
+		}
+		for out, stream := range video {
+			args = append(args, clearStatisticsTags("v", out, stream.StatisticsTags)...)
+		}
 	}
 
 	// Keep every audio stream; compact only selected source codecs, never
 	// downmix or remove languages. Already compact/unknown formats are copied.
 	args = append(args, "-c:a", "copy")
+	plan := execPlan.Plan
 	for _, stream := range execPlan.Streams {
+		// The per-stream options address the output's streams, which are the
+		// source's unless the plan drops tracks.
+		out := outputIndex(plan, stream)
 		if stream.Kind == "audio" && stream.Disposition != nil {
-			var flags []string
-			for name, value := range stream.Disposition {
-				if value > 0 {
-					flags = append(flags, name)
-				}
-			}
-			sort.Strings(flags)
-			disposition := strings.Join(flags, "+")
-			if disposition == "" {
-				disposition = "0"
-			}
-			args = append(args, fmt.Sprintf("-disposition:a:%d", stream.TypeIndex), disposition)
+			args = append(args, fmt.Sprintf("-disposition:a:%d", out), dispositionFlags(stream.Disposition))
 		}
 		if stream.Kind == "audio" && stream.TargetCodec != "copy" {
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
 				return nil, fmt.Errorf("invalid compact audio action")
 			}
 			encoder := "aac"
-			if execPlan.Plan.AudioMode == "he_aac" {
+			switch {
+			case stream.HEAAC:
 				encoder = "aac_at"
-				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "4")
+				args = append(args, fmt.Sprintf("-profile:a:%d", out), "4")
+			case stream.AudioToolbox:
+				// AAC-LC of the size goal's levels: profile 2 is AAC-LC.
+				encoder = "aac_at"
+				args = append(args, fmt.Sprintf("-profile:a:%d", out), "2")
 			}
-			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), encoder, fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
+			args = append(args, fmt.Sprintf("-c:a:%d", out), encoder, fmt.Sprintf("-b:a:%d", out), strconv.Itoa(stream.BitrateKbps)+"k")
 			// Source muxer bitrate/size tags no longer describe an encoded track.
-			args = append(args, clearStatisticsTags("a", stream.TypeIndex)...)
+			args = append(args, clearStatisticsTags("a", out, stream.StatisticsTags)...)
 			if title, ok := convertedAudioTitle(stream.Title, stream.Layout, stream.Channels); ok {
-				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "title="+title)
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", out), "title="+title)
 			}
 			// Size mode flattens lossless Atmos and DTS:X to their bed; a
 			// handler still naming them would describe the old track.
-			if execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless && transcode.ObjectAudioText(stream.Handler) {
-				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "handler_name=")
+			if (execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless || transcode.IsAudioLevelMode(execPlan.Plan.AudioMode)) && transcode.ObjectAudioText(stream.Handler) {
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", out), "handler_name=")
 			}
 		}
 	}
@@ -537,7 +587,15 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	// Subtitle streams: specify explicitly per subtitle stream index
 	for _, stream := range execPlan.Streams {
 		if stream.Kind == "subtitle" {
-			args = append(args, fmt.Sprintf("-c:s:%d", stream.TypeIndex), stream.TargetCodec)
+			out := outputIndex(plan, stream)
+			args = append(args, fmt.Sprintf("-c:s:%d", out), stream.TargetCodec)
+			if stream.TargetCodec != "copy" {
+				// A converted subtitle's byte and frame counts are the source's.
+				args = append(args, clearStatisticsTags("s", out, stream.StatisticsTags)...)
+			}
+			if stream.Disposition != nil {
+				args = append(args, fmt.Sprintf("-disposition:s:%d", out), dispositionFlags(stream.Disposition))
+			}
 		}
 	}
 
@@ -557,4 +615,41 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	args = append(args, candidatePath)
 
 	return args, nil
+}
+
+// dispositionFlags is the -disposition value for a set of flags: the names set,
+// joined, or "0" for none (which also stops ffmpeg from marking a stream default
+// on its own).
+func dispositionFlags(disposition map[string]int) string {
+	var flags []string
+	for name, value := range disposition {
+		if value > 0 {
+			flags = append(flags, name)
+		}
+	}
+	sort.Strings(flags)
+	if len(flags) == 0 {
+		return "0"
+	}
+	return strings.Join(flags, "+")
+}
+
+// trackMaps maps the audio and subtitle streams of the output: all of them in
+// source order, or, when the plan keeps only some (Plan.Tracks), exactly those
+// by source stream index, audio then subtitles, each in source order. The
+// output's streams of a kind are then in the order of the source's.
+func trackMaps(execPlan *ExecutionPlan) []string {
+	if execPlan.Plan.Tracks == nil {
+		return []string{"-map", "0:a?", "-map", "0:s?"}
+	}
+	var audio, subtitles []string
+	for _, s := range execPlan.Streams {
+		switch s.Kind {
+		case "audio":
+			audio = append(audio, "-map", fmt.Sprintf("0:%d", s.SourceIndex))
+		case "subtitle":
+			subtitles = append(subtitles, "-map", fmt.Sprintf("0:%d", s.SourceIndex))
+		}
+	}
+	return append(audio, subtitles...)
 }

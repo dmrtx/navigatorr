@@ -195,7 +195,7 @@ func ValidateProfile(name string, p Profile) error {
 	if videoProfile == "main" && pixelFormat == "p010le" {
 		return fmt.Errorf("profile %q: HEVC main is incompatible with pixel_format p010le", name)
 	}
-	if mode := strings.ToLower(strings.TrimSpace(p.Audio.Mode)); mode != "copy" && mode != "compact" && mode != "he_aac" && mode != "compact_lossless" {
+	if mode := strings.ToLower(strings.TrimSpace(p.Audio.Mode)); mode != "copy" && mode != "compact" && mode != "he_aac" && mode != transcode.AudioModeCompactLossless && !transcode.IsAudioLevelMode(mode) {
 		return fmt.Errorf("profile %q: unsupported audio mode %q", name, p.Audio.Mode)
 	}
 	if strings.ToLower(strings.TrimSpace(p.Subtitles.Mode)) != "preserve" {

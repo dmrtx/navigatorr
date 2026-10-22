@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -24,6 +25,9 @@ type SourceStream struct {
 	Layout      string         `json:"channel_layout,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
 	StartTime   *float64       `json:"start_time,omitempty"`
+	// BitrateKbps is an audio track's source bitrate (zero when the probe
+	// states none), which the size goal's audio levels read.
+	BitrateKbps int `json:"bitrate_kbps,omitempty"`
 	// Detailed video fields (zero/empty when the probe could not determine
 	// them). They drive the worker-local pre-publish policy validation so an
 	// invalid candidate is rejected before any NAS publish.
@@ -37,11 +41,14 @@ type SourceStream struct {
 	// carries both; they are reused when the cover is re-attached.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// StatisticsTags are the stream's muxer statistics tag names as the probe
+	// reports them, language-suffixed variants ("BPS-eng") included.
+	StatisticsTags []string `json:"-"`
 }
 
 // AudioTrack is the stream as the audio policy reads it.
 func (s SourceStream) AudioTrack() transcode.AudioTrack {
-	return transcode.AudioTrack{Codec: s.Codec, Profile: s.Profile, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout}
+	return transcode.AudioTrack{Codec: s.Codec, Profile: s.Profile, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, BitrateKbps: s.BitrateKbps}
 }
 
 // IsAttachedPicture reports whether s is embedded cover art (a video stream
@@ -85,6 +92,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 	var probe struct {
 		Streams []struct {
 			Index            int               `json:"index"`
+			BitRate          any               `json:"bit_rate"`
 			CodecType        string            `json:"codec_type"`
 			CodecName        string            `json:"codec_name"`
 			Profile          string            `json:"profile"`
@@ -139,12 +147,17 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if v, err := strconv.ParseFloat(st.StartTime, 64); err == nil && isFiniteQuality(v) {
 			startTime = &v
 		}
+		bitrateKbps := 0
+		if kind == "audio" {
+			bitrateKbps = transcode.SourceAudioKbps(mediainspect.ParseBitRate(st.BitRate, st.Tags), st.Tags, duration)
+		}
 		out = append(out, SourceStream{
 			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
-			Filename: filename, MimeType: mimeType,
+			Filename: filename, MimeType: mimeType, BitrateKbps: bitrateKbps,
+			StatisticsTags: statisticsTagKeys(st.Tags),
 		})
 	}
 	return SourceProbe{Path: filePath, Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
@@ -196,9 +209,19 @@ type StreamAction struct {
 	Kind        string         `json:"kind"`
 	SourceIndex int            `json:"source_index"`
 	TypeIndex   int            `json:"type_index"`
-	Codec       string         `json:"codec"`
-	TargetCodec string         `json:"target_codec"`
-	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
+	// OutputIndex is the stream's position among the output's streams of its
+	// kind (audio or subtitle). It equals TypeIndex unless the plan drops
+	// tracks (Plan.Tracks); only then do the per-stream arguments use it, for
+	// they address the output's streams.
+	OutputIndex int    `json:"output_index"`
+	Codec       string `json:"codec"`
+	TargetCodec string `json:"target_codec"`
+	BitrateKbps int    `json:"bitrate_kbps,omitempty"`
+	// HEAAC is set on an audio track converted to HE-AAC rather than AAC-LC.
+	HEAAC bool `json:"he_aac,omitempty"`
+	// AudioToolbox is set on a converted audio track that aac_at encodes
+	// (HE-AAC always; AAC-LC in the size goal's levels), else the native encoder.
+	AudioToolbox bool `json:"aac_at,omitempty"`
 	// Audio only: the source title, handler, channels and layout, used to
 	// retitle a converted track whose title or handler names its old format.
 	Title    string `json:"title,omitempty"`
@@ -208,6 +231,9 @@ type StreamAction struct {
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// StatisticsTags are the source stream's statistics tag names, cleared on
+	// a re-encoded stream (see clearStatisticsTags).
+	StatisticsTags []string `json:"-"`
 }
 type ExecutionPlan struct {
 	Plan        *transcode.Plan              `json:"plan"`
@@ -295,7 +321,37 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		subtitleActions[a.TypeIndex] = a
 	}
 	seenSubs := map[int]bool{}
+	// With a track selection only the kept audio and subtitle streams get an
+	// action. A kept track's disposition is what the output must carry (the
+	// default moves to the first kept track when the source's was dropped), and
+	// its position among the output's streams of its kind is counted here.
+	kept := map[int]map[string]int{}
+	seenKept := map[int]bool{}
+	outAudio, outSubtitle := 0, 0
+	if plan.Tracks != nil {
+		// A selection with no audio is a source with none (only its subtitles
+		// are dropped); a source that has audio never loses all of it.
+		if len(plan.Tracks.KeepAudio) == 0 {
+			for _, s := range streams {
+				if s.Kind == "audio" {
+					return nil, sourceChanged(fmt.Errorf("resolved plan keeps no audio stream but the source has audio stream %d (source changed; fail closed)", s.Index))
+				}
+			}
+		}
+		keptAudio, keptSubs, _, _ := plan.Tracks.Partition(trackInfos(streams))
+		for _, t := range append(keptAudio, keptSubs...) {
+			kept[t.Index] = t.Disposition
+		}
+	}
 	for _, s := range streams {
+		if plan.Tracks != nil && (s.Kind == "audio" || s.Kind == "subtitle") && !plan.Tracks.Keeps(s.Kind, s.Index) {
+			if s.Kind == "subtitle" {
+				if _, planned := subtitleActions[s.TypeIndex]; planned {
+					return nil, sourceChanged(fmt.Errorf("resolved plan has an action for dropped subtitle #%d (source changed; fail closed)", s.TypeIndex))
+				}
+			}
+			continue
+		}
 		switch {
 		case s.IsAttachedPicture():
 			a, err := coverArtAction(s)
@@ -309,12 +365,21 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		}
 		switch s.Kind {
 		case "video":
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec, StatisticsTags: s.StatisticsTags})
 		case "audio":
-			target, bitrate := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
+			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
+			target, bitrate := out.Codec, out.Kbps
+			disposition := s.Disposition
+			if plan.Tracks != nil {
+				disposition, seenKept[s.Index] = kept[s.Index], true
+			}
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, StatisticsTags: s.StatisticsTags})
+			outAudio++
 			if target != "copy" {
 				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				if out.HEAAC {
+					reason = fmt.Sprintf("%s audio requested; HE-AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
+				}
 				if transcode.ObjectAudio(s.AudioTrack()) {
 					reason += "; Atmos/DTS:X object and height metadata dropped, channel bed kept"
 				}
@@ -341,7 +406,17 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			if norm(a.Operation) == "copy" {
 				target = "copy"
 			}
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target})
+			var disposition map[string]int
+			if plan.Tracks != nil {
+				seenKept[s.Index] = true
+				// Subtitle dispositions are copied with the stream; only a
+				// default that moved to this track is written.
+				if kept[s.Index]["default"] > 0 && s.Disposition["default"] == 0 {
+					disposition = kept[s.Index]
+				}
+			}
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outSubtitle, Codec: s.Codec, TargetCodec: target, Disposition: disposition, StatisticsTags: s.StatisticsTags})
+			outSubtitle++
 			seenSubs[s.TypeIndex] = true
 			if norm(a.Operation) == "transcode" {
 				ep.Conversions = append(ep.Conversions, transcode.ConversionRecord{StreamType: "subtitle", StreamIndex: s.TypeIndex, FromCodec: s.Codec, ToCodec: target, Reason: a.Reason})
@@ -357,7 +432,39 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			return nil, sourceChanged(fmt.Errorf("resolved plan references missing subtitle #%d (source changed; fail closed)", idx))
 		}
 	}
+	if plan.Tracks != nil {
+		// Every stream the plan keeps must still be there, as the kind the plan
+		// says: a source that changed since planning fails here, not after an
+		// encode that mapped something else.
+		for _, idx := range append(append([]int(nil), plan.Tracks.KeepAudio...), plan.Tracks.KeepSubtitles...) {
+			if !seenKept[idx] {
+				return nil, sourceChanged(fmt.Errorf("resolved plan keeps stream %d, which is not a stream of that kind in the source (source changed; fail closed)", idx))
+			}
+		}
+	}
 	return ep, nil
+}
+
+// trackInfos lists the audio and subtitle streams as the track selection reads
+// them.
+func trackInfos(streams []SourceStream) []transcode.TrackInfo {
+	var out []transcode.TrackInfo
+	for _, s := range streams {
+		if s.Kind == "audio" || s.Kind == "subtitle" {
+			out = append(out, transcode.TrackInfo{Index: s.Index, Kind: s.Kind, Language: s.Language, Title: s.Title, Codec: s.Codec, Disposition: s.Disposition})
+		}
+	}
+	return out
+}
+
+// outputIndex is the stream's position among the output's streams of its kind.
+// A plan that drops no track keeps every source stream, so it is the source's
+// type index (the form earlier plans and their tests use).
+func outputIndex(plan *transcode.Plan, s StreamAction) int {
+	if plan.Tracks == nil {
+		return s.TypeIndex
+	}
+	return s.OutputIndex
 }
 
 func legacyHevcVTSubtitleAction(s SourceStream) (transcode.SubtitleAction, bool) {

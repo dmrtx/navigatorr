@@ -76,7 +76,7 @@ func sizeBudgetLadderMessage(rec *SizeBudgetRecord, policy *SizeBudgetPolicy, pl
 	if rec.Siblings != nil {
 		from = " " + rec.Siblings.Message
 	}
-	return fmt.Sprintf("Encoding with VideoToolbox at %s (step %d of %d) to fit the %s budget.%s", sizeBudgetRungDescription(plan), rec.Rung+1, len(policy.VTLadder)+1, formatBudgetBytes(rec.BudgetBytes), from)
+	return fmt.Sprintf("Encoding with VideoToolbox at %s (step %d of %d) to fit the %s budget.%s%s", sizeBudgetRungDescription(plan), rec.Rung+1, len(policy.VTLadder)+1, formatBudgetBytes(rec.BudgetBytes), sizeBudgetAudioSentence(rec.Audio), from)
 }
 
 // newSizeBudgetRecord is a budget record before any encoder is chosen: the
@@ -92,7 +92,7 @@ func newSizeBudgetRecord(snapshot *ModePolicySnapshot, rep *mediainspect.Detaile
 		rec.Target = *limits
 		rec.Floor.WorstWindowSeconds, rec.Floor.CAMBIMean, rec.Floor.CAMBIPeak = limits.WorstWindowSeconds, limits.CAMBIMean, limits.CAMBIPeak
 	}
-	rec.NonVideoBytes, rec.TargetBytes, rec.VideoBitrateKbps = enc.NonVideoBytes, enc.TargetBytes, enc.X265.BitrateKbps
+	rec.NonVideoBytes, rec.TargetBytes, rec.VideoBitrateKbps, rec.Audio = enc.NonVideoBytes, enc.TargetBytes, enc.X265.BitrateKbps, enc.Audio
 	return rec
 }
 
@@ -137,6 +137,8 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 			sizeBudgetSkipReasonKey: reason, sizeBudgetSkipMessageKey: message, "plan_note": message}}, true
 	}
 	original := getInt64(ec.State, "original_size")
+	// The other streams are the ones the output keeps (see keptView).
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
 	siblings := siblingEvidenceOf(ec.State)
 	budget := policy.BudgetBytes(original, siblings)
 	if budget <= 0 {
@@ -146,17 +148,20 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 		}
 		return decline("size_budget_unavailable", message)
 	}
-	audioFits := false
+	if trackSelectionOf(ec.State) != nil && !caps.TrackSelection {
+		return decline("size_budget_worker_unsupported", "The goal keeps only some audio and subtitle tracks, which needs a worker that follows that selection; upgrade the worker to use it.")
+	}
+	if policy.Audio != nil && !caps.SizeAudioLevels {
+		return decline("size_budget_worker_unsupported", "The size budget needs a worker that converts audio per track to AAC and HE-AAC; upgrade the worker to use it.")
+	}
 	if snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
-		est := estimateAudioOnly(rep, original)
-		audioFits = est.Compacted > 0 && est.CandidateBytes <= budget
+		if audioMode, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {
+			// Copying the video loses no picture quality, and also answers a
+			// budget too small for any video bitrate.
+			return e.startSizeBudgetAudioOnly(ctx, ec, budget, audioMode)
+		}
 	}
-	if audioFits {
-		// Copying the video loses no picture quality, and also answers a
-		// budget too small for any video bitrate.
-		return e.startSizeBudgetAudioOnly(ctx, ec, budget)
-	}
-	enc := planSizeBudgetEncode(policy, rep, original, budget)
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, budget)
 	if enc.Reason != "" {
 		return decline(enc.Reason, enc.Message)
 	}
@@ -199,9 +204,9 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 // the video is copied and only the audio is compacted. The fit is an
 // estimate, so the plan carries the budget as its byte ceiling, as a ladder
 // rung does, and the worker refuses a larger file.
-func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionContext, budget int64) (StepResult, bool) {
+func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionContext, budget int64, audioMode string) (StepResult, bool) {
 	outputs := map[string]any{}
-	res, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs)
+	res, handled := e.sizeAudioOnlyFallback(ctx, ec, outputs, audioMode)
 	if !handled {
 		return StepResult{Status: StepFailed, Error: "audio-only encode could not be planned for the size budget (fail closed)"}, true
 	}
@@ -212,7 +217,7 @@ func (e *Engine) startSizeBudgetAudioOnly(ctx context.Context, ec *ExecutionCont
 		}
 		ec.State["plan"], ec.State["plan_digest"] = plan, plan.PlanDigest
 		res.Outputs["plan"], res.Outputs["plan_digest"] = plan, plan.PlanDigest
-		res.Outputs["plan_note"] = "Copying the video and compacting the lossless audio alone fits the budget, so the video is copied unchanged and only the lossless audio is compacted."
+		res.Outputs["plan_note"] = sizeBudgetAudioOnlyNote(plan)
 	}
 	return res, true
 }
@@ -270,7 +275,8 @@ func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int6
 	}
 	policy := snapshot.Size.SizeBudget
 	rep := getSourceReport(ec.State["source_report"])
-	enc := planSizeBudgetEncode(policy, rep, getInt64(ec.State, "original_size"), rec.BudgetBytes)
+	keptRep, keptBytes := keptViewOf(ec.State, rep, getInt64(ec.State, "original_size"))
+	enc := planSizeBudgetEncode(policy, keptRep, keptBytes, rec.BudgetBytes)
 	if enc.Reason != "" {
 		return StepResult{Status: StepFailed, Error: "size budget encode can no longer be planned for the next VideoToolbox step (fail closed)"}, true
 	}

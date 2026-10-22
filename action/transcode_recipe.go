@@ -184,6 +184,11 @@ func (p *ModePolicySnapshot) workerVersion() string {
 		return p.Version
 	}
 	if p.Mode == "size" {
+		// A size budget that froze audio levels is policy v5; every other size
+		// goal, and budgets frozen before the levels, stay v3.
+		if p.Size != nil && p.Size.SizeBudget != nil && p.Size.SizeBudget.Audio != nil {
+			return transcode.ModePolicyV5
+		}
 		return SizeModePolicyVersion
 	}
 	return ModePolicyVersion
@@ -532,7 +537,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 	if snapshot.Mode == "size" && snapshot.Size != nil && snapshot.Size.AudioOnlyFallback && !getBool(ec.State, "size_audio_only") {
 		scratch := map[string]any{}
 		state := map[string]any{"skip_transcode": ec.State["skip_transcode"], "reason_code": ec.State["reason_code"]}
-		if res, handled := e.sizeAudioOnlyFallback(ctx, ec, scratch); handled {
+		if res, handled := e.sizeAudioOnlyFallback(ctx, ec, scratch, ""); handled {
 			if res.Status == StepCompleted && getString(ec.State, "plan_source") == "audio_only" {
 				plan := getPlan(ec.State["plan"])
 				rec.Message = message + " The video is copied unchanged and only the lossless audio is compacted instead."

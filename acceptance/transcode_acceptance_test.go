@@ -50,6 +50,8 @@ func TestTranscodeAcceptance(t *testing.T) {
 		{"7_timestamp_glitch", caseTimestampGlitch},
 		{"8_no_size_tags", caseNoSizeTags},
 		{"8b_no_size_tags_flac", caseNoSizeTagsFLAC},
+		{"8c_size_lossy_audio", caseSizeLossyAudio},
+		{"8d_keep_languages", caseKeepLanguages},
 		{"9_promotion", casePromotion},
 	}
 	for _, c := range cases {
@@ -275,6 +277,67 @@ func caseNoSizeTagsFLAC(k *kase) {
 	k.require(r.reason() != "size_budget_estimate_unavailable", "the size budget could not be planned for a source whose streams state no size and whose audio states no bitrate: %s", r.describe())
 	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, maxBytes: budgetBytes(fileSize(k.T, src)), audio: "aac"})
 	k.expectLadder(r)
+}
+
+// lossyAudioSource carries a tagged AC-3 stereo track at 384 kbps, twice the
+// AAC-LC stereo target: the size goal's audio level 1 converts it.
+var lossyAudioSource = srcSpec{name: "sdr-ac3-1080p", w: 1920, h: 1080, secs: 20, noise: 1, audio: "ac3"}
+
+func caseSizeLossyAudio(k *kase) {
+	k.needCaps("libx264", "ac3", "aac", "libx265", "vmaf")
+	k.row.Goal = "size+x265"
+	src := k.s.source(k.T, lossyAudioSource)
+	sha := k.sha(src)
+	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": false, "size_budget_percent": budgetPercent}, caseTimeout)
+	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac", maxBytes: budgetBytes(fileSize(k.T, src))})
+	k.expectBudgetX265(r)
+	k.require(r.budget.Audio != nil && r.budget.Audio.Level >= 1 && len(r.budget.Audio.Tracks) == 1,
+		"the budget recorded no audio level for a lossy track above the AAC-LC target: %+v", r.budget.Audio)
+	k.require(r.budget.Audio.Tracks[0].Output != "copy", "the lossy track was %q, want it converted", r.budget.Audio.Tracks[0].Output)
+}
+
+// languagesSource is a multi-language file: three AC-3 stereo tracks (English
+// the default and original, French, Spanish), English, French and Spanish
+// subtitles (the Spanish one forced) and a font attachment.
+var languagesSource = srcSpec{name: "sdr-languages-1080p", w: 1920, h: 1080, secs: 20, noise: 1, audio: "ac3",
+	langs: []string{"eng", "fre", "spa"}, subs: []string{"eng", "fre", "spa"}, forcedSub: true}
+
+// caseKeepLanguages runs the size goal with a language selection: the job
+// keeps English and Spanish and drops French, and the candidate has exactly
+// those tracks (audio and subtitles, in source order, the forced Spanish
+// subtitle and the font kept) and reports what was dropped.
+func caseKeepLanguages(k *kase) {
+	k.needCaps("libx264", "ac3", "aac", "libx265", "vmaf")
+	k.row.Goal = "size+x265, keep eng/spa"
+	src := k.s.source(k.T, languagesSource)
+	sha := k.sha(src)
+	r := k.s.transcode(k.T, src, map[string]any{"mode": "size", "allow_hardware": false, "size_budget_percent": budgetPercent, "keep_languages": []any{"eng", "spa"}}, caseTimeout)
+	k.expectCandidate(src, sha, r, candidateWant{minSaved: 15, audio: "aac", maxBytes: budgetBytes(fileSize(k.T, src)), audioTracks: 2})
+	k.expectBudgetX265(r)
+
+	info := k.s.probe(k.T, r.candidate())
+	var langs []string
+	var subs []probeStream
+	for _, st := range info.Streams {
+		switch st.CodecType {
+		case "audio":
+			langs = append(langs, st.Tags["language"])
+		case "subtitle":
+			subs = append(subs, st)
+		}
+	}
+	k.require(strings.Join(langs, ",") == "eng,spa", "the candidate's audio languages are %v, want eng,spa", langs)
+	k.require(len(subs) == 2 && subs[0].Tags["language"] == "eng" && subs[1].Tags["language"] == "spa",
+		"the candidate's subtitles are %+v, want eng and spa", subs)
+	k.require(subs[1].Disposition["forced"] == 1 && subs[0].Disposition["forced"] == 0, "the forced subtitle lost its flag: %+v", subs)
+	k.require(countKind(info, "attachment") == 1, "the font attachment was not kept: %d attachments", countKind(info, "attachment"))
+
+	var rep action.TrackSelectionReport
+	k.require(decode(pick(r.res, "tracks"), &rep), "the result has no track report: %s", r.describe())
+	k.require(rep.Audio.Total == 3 && len(rep.Audio.Kept) == 2 && len(rep.Audio.Dropped) == 1 && rep.Audio.Dropped[0].Language == "fre",
+		"the track report keeps %d of %d audio tracks and drops %+v", len(rep.Audio.Kept), rep.Audio.Total, rep.Audio.Dropped)
+	k.require(rep.Subtitles.Total == 3 && len(rep.Subtitles.Kept) == 2, "the track report keeps %d of %d subtitles", len(rep.Subtitles.Kept), rep.Subtitles.Total)
+	k.require(rep.BytesSaved > 0 && rep.Message != "", "the track report states no savings or message: %+v", rep)
 }
 
 // promoSource is a short file of its own: promotion replaces it in the

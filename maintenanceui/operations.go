@@ -160,6 +160,44 @@ func operationReplacementContext(r operationRecord, recordsByID map[string]opera
 	return nil
 }
 
+// operationTracks is what a file's job kept of the source's audio and subtitle
+// tracks: the report the final validation gives, else the one the preflight
+// stored when it chose them. It is nil when the goal kept every track.
+func operationTracks(r operationRecord) map[string]any {
+	if r.inst.ActionName != "transcode_media" {
+		return nil
+	}
+	for _, key := range []string{"tracks", "track_report"} {
+		if report := operationMap(operationValue(r, key)); report != nil {
+			return report
+		}
+	}
+	return nil
+}
+
+// operationGoalKeys are the inputs that make up a file job's goal, the ones a
+// new job for the same file needs to run the same goal: Choose tracks starts one
+// from them. Paths, receipts and profiles are not among them.
+var operationGoalKeys = []string{"mode", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "media_type", "is_anime"}
+
+// operationGoal is the goal a Save space or Shrink job was submitted with, as
+// the job's inputs hold it. It is nil for any other job.
+func operationGoal(r operationRecord) map[string]any {
+	if r.inst.ActionName != "transcode_media" {
+		return nil
+	}
+	if mode := operationString(r.inputs["mode"]); mode != "size" && mode != "compact" {
+		return nil
+	}
+	goal := map[string]any{}
+	for _, key := range operationGoalKeys {
+		if value, ok := r.inputs[key]; ok && value != nil {
+			goal[key] = value
+		}
+	}
+	return goal
+}
+
 // operationSizeMode summarises what mode=size decided for one file: the
 // sampled output estimate, the final quality measurement and the audio
 // tracks it compacted. It is nil for every other mode.
@@ -770,6 +808,18 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if outcome := operationSizeBudgetOutcome(r); outcome != "" {
 				job["size_budget_outcome"] = outcome
 			}
+			if tracks := operationTracks(r); tracks != nil {
+				// The queue lists the sentence; the lists of tracks belong to the
+				// one job being opened.
+				job["tracks_message"] = operationString(tracks["message"])
+				if selectedID != "" {
+					job["tracks"] = tracks
+					// What Choose tracks needs to run the same goal again.
+					if goal := operationGoal(r); goal != nil {
+						job["goal"] = goal
+					}
+				}
+			}
 			root := roots[r.inst.ID]
 			job["workflow_id"] = root
 			job["archive_id"] = root
@@ -796,6 +846,16 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					if r.savings.SourceBytes == nil {
 						job["savings"] = original.savings
 					}
+				}
+			}
+			if r.inst.ActionName == "promote_transcode_candidate" {
+				// What the person decides on, and where the files end up, come
+				// from the transcode job being replaced and this job's record.
+				if source, ok := recordsByID[operationString(r.inputs["transcode_action_id"])]; ok && source.inst.ActionName == "transcode_media" {
+					job["replacement_facts"] = replacementFactsOf(source)
+				}
+				if where := whereOf(r); where != nil {
+					job["where"] = where
 				}
 			}
 			if recordsByID[root].inst.ActionName != "transcode_batch" && len(members[root]) > 1 {
@@ -838,6 +898,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 						}
 					}
 				}
+				// A candidate in the batch's prepared replacement plan is replaced
+				// by that plan; it offers no replacement of its own.
+				if parent := recordsByID[operationString(r.inputs["parent_action_id"])]; parent.inst.ActionName == "transcode_batch" && existingReplacements[r.inst.ID] == "" {
+					if plan := replacementPlanState(parent.state, r.inst.ID); plan != "" {
+						job["replacement_plan"], job["candidate_ready"] = plan, false
+					}
+				}
 				if context := operationReplacementContext(r, recordsByID); context != nil {
 					job["replacement_context"] = context
 				}
@@ -867,6 +934,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 				job["batch_files"] = batchQueueFeedback(items)
+				if progress := s.batchReplacementProgress(r, recordsByID, existingReplacements); progress != nil {
+					job["replacement"] = progress
+				}
 				remaining, replacedFiles := 0, 0
 				for _, item := range items {
 					child := recordsByID[item.ChildActionID]
