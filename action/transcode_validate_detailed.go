@@ -128,6 +128,13 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		}
 		return waitDecision(fmt.Sprintf("Audio stream lost: original=%d output=%d missing=%s", len(origAudio), len(outRep.Audio), strings.Join(missing, ","))), nil
 	}
+	// A converted track's bitrate is measured from the candidate's packets,
+	// as the worker's pre-publish check measured it, and only once. A scan
+	// that fails refuses the candidate; audio_bitrate says "packets" once one
+	// succeeded.
+	audioBitrate := "not_applicable"
+	var packets map[int]mediainspect.AudioPacketSpan
+	measured := false
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
 		out := transcode.AudioOutputFor(plan.AudioMode, audioTrackOf(a, origDur))
@@ -152,8 +159,33 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			if !strings.EqualFold(b.Profile, wantProfile) {
 				return waitDecision(fmt.Sprintf("Audio profile mismatch at stream %d: expected %s, output is %q", i, wantProfile, b.Profile)), nil
 			}
-			if b.BitRate > 0 && b.BitRate > transcode.AudioBitrateCeilingBps(out.Kbps) {
-				return waitDecision(fmt.Sprintf("Audio bitrate mismatch at stream %d: planned %d kbps, output is %d kbps", i, out.Kbps, b.BitRate/1000)), nil
+			// ffprobe's per-stream bit_rate is no evidence here: Matroska
+			// stores none for AAC, so ffprobe's figure comes from the
+			// statistics tags (BPS, NUMBER_OF_BYTES), which may be the source
+			// track's, copied over with the metadata. The packets are what
+			// was encoded.
+			if !measured {
+				measured = true
+				var err error
+				packets, err = mediainspect.MeasureAudioPackets(ctx, e.deps.Ffprobe, outputPath)
+				if _, probeFailed := mediainspect.AsProbeError(err); err != nil && !probeFailed {
+					return StepResult{}, err
+				}
+				if err != nil {
+					// Fail closed: the worker measured these same bytes with
+					// the same parser, so an unreadable scan is a real problem
+					// (or a stalled read, which a retry clears), never a pass.
+					return waitDecision(fmt.Sprintf("Audio bitrate not measured at stream %d: %v", i, err)), nil
+				}
+				audioBitrate = "packets"
+			}
+			span, ok := packets[b.Index]
+			if !ok {
+				return waitDecision(fmt.Sprintf("Audio stream %d has no measurable packets", i)), nil
+			}
+			// The worker's threshold: a short track's padding is not a rate.
+			if bps := span.BitsPerSecond(); span.Seconds() > minMeasuredAudioSeconds && bps > float64(transcode.AudioBitrateCeilingBps(out.Kbps)) {
+				return waitDecision(fmt.Sprintf("Audio bitrate mismatch at stream %d: planned %d kbps, output is %d kbps", i, out.Kbps, int64(bps)/1000)), nil
 			}
 		}
 		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {
@@ -253,7 +285,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if plan.ExpectedBitDepth > 0 {
 		bitDepthStatus = "ok"
 	}
-	validation := map[string]any{"duration": "ok", "video_streams": "ok", "resolution": "ok", "bit_depth": bitDepthStatus, "audio_streams": "ok", "subtitle_streams": "ok", "attachments": "ok", "chapters": "ok", "original_sha256_pending": "accept_result"}
+	validation := map[string]any{"duration": "ok", "video_streams": "ok", "resolution": "ok", "bit_depth": bitDepthStatus, "audio_streams": "ok", "audio_bitrate": audioBitrate, "subtitle_streams": "ok", "attachments": "ok", "chapters": "ok", "original_sha256_pending": "accept_result"}
 	ec.State["validation"] = validation
 	ec.State["result"] = result
 	ec.State["size_saved_bytes"] = saved
@@ -262,6 +294,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	addTrackReport(outputs, ec.State)
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
+
+// minMeasuredAudioSeconds is the shortest measured track whose bitrate is
+// checked: the worker packet check's threshold.
+const minMeasuredAudioSeconds = 10
 
 func expectedVideoCodec(codec string) string {
 	switch normCodec(codec) {

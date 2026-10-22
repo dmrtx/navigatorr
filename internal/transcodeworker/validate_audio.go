@@ -1,25 +1,19 @@
 package transcodeworker
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"math"
-	"os/exec"
-	"strconv"
-	"strings"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
+// audioPacketSpan is one audio stream's measured packets, as
+// mediainspect.MeasureAudioPackets measures them.
 type audioPacketSpan struct {
 	start, end float64
 	bytes      int64
-	// Matroska stores no per-packet duration for some codecs (TrueHD): such a
-	// packet ends where the next one starts, so the stream's last packet is
-	// extended by the last positive gap between packets.
-	lastPTS, gap float64
-	openEnd      bool
 }
 
 // needsAudioPacketValidation reports whether the plan re-encodes audio, so
@@ -32,86 +26,29 @@ func needsAudioPacketValidation(plan *transcode.Plan, src SourceProbe) bool {
 	return false
 }
 
-// Read actual packet timing/size, not inherited Matroska DURATION/BPS tags.
-// Streaming output keeps memory bounded even for feature-length files.
+// audioPacketSpans reads actual packet timing/size, not inherited Matroska
+// DURATION/BPS tags. The scan is mediainspect.MeasureAudioPackets, the one
+// promotion runs too, so both measure the same bytes the same way. Its
+// failures keep the worker's own wording and classification: a ProbeError
+// would otherwise reclassify them as media_probe_failed.
 func audioPacketSpans(ctx context.Context, ffprobe, path string) (map[int]audioPacketSpan, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", "a", "-show_packets", "-show_entries", "packet=stream_index,pts_time,duration_time,size", "-of", "compact=p=0", path)
-	pipe, err := cmd.StdoutPipe()
+	measured, err := mediainspect.MeasureAudioPackets(ctx, ffprobe, path)
 	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = newTailBuffer(4096)
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	out := map[int]audioPacketSpan{}
-	scanner := bufio.NewScanner(pipe)
-	var parseErr error
-	for scanner.Scan() {
-		fields := map[string]string{}
-		for _, part := range strings.Split(scanner.Text(), "|") {
-			k, v, ok := strings.Cut(part, "=")
-			if ok {
-				fields[k] = v
-			}
-		}
-		if fields["stream_index"] == "" {
-			continue
-		}
-		index, e1 := strconv.Atoi(fields["stream_index"])
-		pts, e2 := strconv.ParseFloat(fields["pts_time"], 64)
-		duration, e3 := 0.0, error(nil)
-		if fields["duration_time"] != "N/A" {
-			duration, e3 = strconv.ParseFloat(fields["duration_time"], 64)
-			if e3 == nil && (!isFiniteQuality(duration) || duration <= 0) {
-				e3 = fmt.Errorf("invalid duration")
-			}
-		}
-		size, e4 := strconv.ParseInt(fields["size"], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !isFiniteQuality(pts) || size <= 0 || index < 0 || len(out) > 128 {
-			parseErr = fmt.Errorf("audio packet timing/size unavailable")
-			break
-		}
-		span, exists := out[index]
-		if !exists {
-			span.start, span.end = pts, pts
-		} else if gap := pts - span.lastPTS; gap > 0 {
-			span.gap = gap
-		}
-		span.start = math.Min(span.start, pts)
-		if end := pts + duration; end > span.end || (end == span.end && duration == 0) {
-			span.end, span.openEnd = end, duration == 0
-		}
-		span.lastPTS = pts
-		span.bytes += size
-		out[index] = span
-	}
-	if parseErr == nil {
-		parseErr = scanner.Err()
-	}
-	if parseErr == nil {
-		for index, span := range out {
-			if span.openEnd {
-				if span.gap <= 0 {
-					parseErr = fmt.Errorf("audio packet timing/size unavailable")
-					break
-				}
-				span.end += span.gap
-				out[index] = span
-			}
+		pe, ok := mediainspect.AsProbeError(err)
+		switch {
+		case !ok:
+			return nil, err
+		case (pe.Kind == mediainspect.ProbeBadOutput || pe.Kind == mediainspect.ProbeUnavailable) && pe.Err != nil:
+			return nil, pe.Err
+		case pe.Kind == mediainspect.ProbeToolExit:
+			return nil, fmt.Errorf("audio packet probe failed: %w", pe.Err)
+		default:
+			return nil, fmt.Errorf("audio packet probe failed: %s", pe.Error())
 		}
 	}
-	if parseErr != nil {
-		cancel()
-	}
-	waitErr := cmd.Wait()
-	if parseErr != nil {
-		return nil, parseErr
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("audio packet probe failed: %w", waitErr)
+	out := make(map[int]audioPacketSpan, len(measured))
+	for index, s := range measured {
+		out[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes}
 	}
 	return out, nil
 }

@@ -41,6 +41,9 @@ type SourceStream struct {
 	// carries both; they are reused when the cover is re-attached.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// StatisticsTags are the stream's muxer statistics tag names as the probe
+	// reports them, language-suffixed variants ("BPS-eng") included.
+	StatisticsTags []string `json:"-"`
 }
 
 // AudioTrack is the stream as the audio policy reads it.
@@ -154,6 +157,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
 			Filename: filename, MimeType: mimeType, BitrateKbps: bitrateKbps,
+			StatisticsTags: statisticsTagKeys(st.Tags),
 		})
 	}
 	return SourceProbe{Path: filePath, Streams: out, DurationSec: duration, Chapters: len(probe.Chapters)}, nil
@@ -227,6 +231,9 @@ type StreamAction struct {
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// StatisticsTags are the source stream's statistics tag names, cleared on
+	// a re-encoded stream (see clearStatisticsTags).
+	StatisticsTags []string `json:"-"`
 }
 type ExecutionPlan struct {
 	Plan        *transcode.Plan              `json:"plan"`
@@ -358,7 +365,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		}
 		switch s.Kind {
 		case "video":
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "video", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: plan.VideoCodec, StatisticsTags: s.StatisticsTags})
 		case "audio":
 			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
 			target, bitrate := out.Codec, out.Kbps
@@ -366,7 +373,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			if plan.Tracks != nil {
 				disposition, seenKept[s.Index] = kept[s.Index], true
 			}
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, StatisticsTags: s.StatisticsTags})
 			outAudio++
 			if target != "copy" {
 				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
@@ -408,7 +415,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 					disposition = kept[s.Index]
 				}
 			}
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outSubtitle, Codec: s.Codec, TargetCodec: target, Disposition: disposition})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outSubtitle, Codec: s.Codec, TargetCodec: target, Disposition: disposition, StatisticsTags: s.StatisticsTags})
 			outSubtitle++
 			seenSubs[s.TypeIndex] = true
 			if norm(a.Operation) == "transcode" {

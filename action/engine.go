@@ -453,6 +453,9 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
 	}
+	if err := e.batchPromotionRetryOwner(inst, ec, tmpl); err != nil {
+		return nil, err
+	}
 	// Retry checks and the execution they lead into are one continuous run.
 	ctx = withPromotionVerifiedFiles(ctx, ec)
 	if inst.ActionName == "clean_podcast_ads" {
@@ -500,6 +503,33 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	)
 
 	return e.execute(ctx, inst, ec, tmpl)
+}
+
+// batchPromotionRetryOwner refuses a direct retry of a batch replacement that
+// has not been approved yet while its batch has failed. Its approval comes
+// only from a batch that is running, so such a retry would fail again at
+// approve_promotion and leave the replacement past the step at which the
+// batch's own retry re-runs it. The batch's retry is the way: it resumes at
+// its replacement step without encoding, reuses the approved plan, and
+// retries each replacement that failed in plan_promotion, which re-checks the
+// candidate's SHA-256 and streams before approve_promotion re-checks the plan
+// digest and the candidate against the approved plan.
+func (e *Engine) batchPromotionRetryOwner(inst *store.ActionInstance, ec *ExecutionContext, tmpl ActionTemplate) error {
+	if inst.ActionName != "promote_transcode_candidate" || inst.CurrentStep > actionStepIndex(tmpl, "approve_promotion") {
+		return nil
+	}
+	parentID := strings.TrimSpace(getString(ec.Inputs, "batch_promote_parent_id"))
+	if parentID == "" {
+		return nil
+	}
+	// A parent that cannot be read lets the retry through: this guard only
+	// steers the user to the better path, and approve_promotion still refuses
+	// a replacement whose batch is not running and approved.
+	parent, err := e.deps.Store.GetActionInstance(parentID)
+	if err != nil || parent == nil || parent.Status != StatusFailed {
+		return nil
+	}
+	return fmt.Errorf("this replacement belongs to batch %s, which has failed; retry the batch instead (it retries this replacement's checks without encoding again)", parentID)
 }
 
 // Resume re-activates a paused or waiting action instance.
