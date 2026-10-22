@@ -80,7 +80,7 @@ func TestDetailedValidationHoldsTheOutputToTheKeptTracks(t *testing.T) {
 			}
 			probe := `{"streams": [` + streams + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
 			ffprobe := filepath.Join(dir, "ffprobe")
-			if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			plan := &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy", ModePolicyVersion: transcode.ModePolicyV6, Tracks: sel,

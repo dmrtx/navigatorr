@@ -86,7 +86,9 @@ func (e *Engine) batchPromotionNotice(ctx context.Context, plan *batchPromotionP
 	if !e.batchPromotionCompact(plan) {
 		return nil
 	}
-	notice := map[string]any{"regrab_warning": CompactRegrabWarning}
+	// plan_digest ties the notice to the plan it was computed for, so a review
+	// can refuse one left over from an earlier plan.
+	notice := map[string]any{"regrab_warning": CompactRegrabWarning, "plan_digest": plan.Digest}
 	if planService(plan) == "sonarr" && plan.SeriesID > 0 && e.deps.Registry != nil {
 		if svc, err := e.deps.Registry.Get("sonarr"); err == nil {
 			t := readArrTracking(ctx, svc, "/api/v3/series/"+strconv.Itoa(plan.SeriesID))

@@ -193,6 +193,7 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 			recordBatchReviewDecision(ctx, ec, plan)
 			stateObject(ec.State, "batch_review_history")[plan.Digest] = plan
 			delete(ec.State, "batch_promotion_plan")
+			delete(ec.State, "batch_promotion_notice")
 			delete(ec.Outputs, "batch_promotion_plan")
 			delete(ec.State, "post_batch_promotion")
 			if err := e.persistExecutionState(ctx, ec); err != nil {

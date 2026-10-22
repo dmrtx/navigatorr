@@ -5302,6 +5302,37 @@ test("a re-grab warning that appears after preparing is shown before anything is
   assert.match(textOf(h.elements.get("batch-review-notice")), /download the original again/);
 });
 
+test("the one-click approval needs a re-grab notice it could verify for the plan it approves", async () => {
+  const run = async (readNotice, planReads) => {
+    const h = batchReviewHarness({ planReads });
+    h.context.readNotice = readNotice;
+    h.run("tool = async () => readNotice();");
+    await h.run('reviewBatchReplacement("batch-a")');
+    return h;
+  };
+  const approvals = (h) => commandCalls(h).filter((c) => c[2].decision === "approve").length;
+  const reads = () => [{ prepared: false }, { prepared: false }, preparedPlan(threeMembers())];
+  // The server stored none (the key is not found): a batch that is not compact.
+  let h = await run(async () => { throw new Error('key "batch_promotion_notice" not found in section state (available keys: [x])'); }, reads());
+  await click(h, "approve-batch-review");
+  assert.equal(approvals(h), 1);
+  // Any other failure to read it stops the approval instead of passing unwarned.
+  h = await run(async () => { throw new Error("network down"); }, reads());
+  await click(h, "approve-batch-review");
+  assert.match(h.elements.get("notice").textContent, /Cannot verify the re-grab warning/);
+  assert.equal(approvals(h), 0);
+  // A notice computed for another plan is stale, however it reads.
+  h = await run(async () => ({ data: { regrab_warning: "Old.", plan_digest: "sha256:earlier" } }), reads());
+  await click(h, "approve-batch-review");
+  assert.match(h.elements.get("notice").textContent, /earlier plan/);
+  assert.equal(approvals(h), 0);
+  // The notice for this plan is shown before anything is approved.
+  h = await run(async () => ({ data: { regrab_warning: "May download the original again.", plan_digest: "sha256:new" } }), reads());
+  await click(h, "approve-batch-review");
+  assert.equal(approvals(h), 0);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /download the original again/);
+});
+
 test("replacement stays disabled in the dialog when the server setting is off", async () => {
   const h = batchReviewHarness({ planReads: [{ prepared: false }] });
   h.run("state.info = {allow_destructive:false};");
