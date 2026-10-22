@@ -131,9 +131,6 @@ func ValidatePlan(p *transcode.Plan) error {
 	if err := p.Tracks.Validate(); err != nil {
 		return fmt.Errorf("%w (fail closed)", err)
 	}
-	if p.Tracks != nil && len(p.Tracks.KeepAudio) == 0 {
-		return fmt.Errorf("a track selection must keep an audio stream (fail closed)")
-	}
 	if norm(p.SubtitleMode) != "preserve" {
 		return fmt.Errorf("unsupported subtitle mode %q (fail closed)", p.SubtitleMode)
 	}

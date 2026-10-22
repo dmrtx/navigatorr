@@ -322,6 +322,15 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	seenKept := map[int]bool{}
 	outAudio, outSubtitle := 0, 0
 	if plan.Tracks != nil {
+		// A selection with no audio is a source with none (only its subtitles
+		// are dropped); a source that has audio never loses all of it.
+		if len(plan.Tracks.KeepAudio) == 0 {
+			for _, s := range streams {
+				if s.Kind == "audio" {
+					return nil, sourceChanged(fmt.Errorf("resolved plan keeps no audio stream but the source has audio stream %d (source changed; fail closed)", s.Index))
+				}
+			}
+		}
 		keptAudio, keptSubs, _, _ := plan.Tracks.Partition(trackInfos(streams))
 		for _, t := range append(keptAudio, keptSubs...) {
 			kept[t.Index] = t.Disposition

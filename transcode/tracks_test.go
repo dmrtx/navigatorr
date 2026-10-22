@@ -110,6 +110,31 @@ func TestSelectTracksRules(t *testing.T) {
 			wantAudio: []int{1, 2}, wantSubs: []int{},
 		},
 		{
+			name:      "audio in the original language stays with the original: a Korean original, its commentary and English",
+			policy:    policy("spa", "eng", "jpn"),
+			tracks:    []TrackInfo{video(0), aud(1, "kor", "original"), aud(2, "kor"), aud(3, "eng")},
+			wantNoop:  true,
+			wantAudio: nil,
+		},
+		{
+			name:      "an original-language commentary survives while other unwanted audio goes",
+			policy:    policy("spa", "eng", "jpn"),
+			tracks:    []TrackInfo{video(0), aud(1, "kor", "original"), aud(2, "eng"), aud(3, "kor"), aud(4, "fre"), sub(5, "kor"), sub(6, "fre")},
+			wantAudio: []int{1, 2, 3}, wantSubs: []int{5},
+		},
+		{
+			name:      "the original language is spelled either way",
+			policy:    policy("eng"),
+			tracks:    []TrackInfo{video(0), aud(1, "fre"), aud(2, "eng"), aud(3, "fra"), aud(4, "ger")},
+			wantAudio: []int{1, 2, 3}, wantSubs: []int{},
+		},
+		{
+			name:     "original-language audio is no match for the list: with nothing wanted present, all audio stays",
+			policy:   policy("spa"),
+			tracks:   []TrackInfo{video(0), aud(1, "kor", "original"), aud(2, "kor"), aud(3, "fre")},
+			wantNoop: true,
+		},
+		{
 			name:      "no audio in the list keeps all audio",
 			policy:    policy("spa"),
 			tracks:    []TrackInfo{video(0), aud(1, "jpn"), aud(2, "fre"), sub(3, "jpn"), sub(4, "fre"), sub(5, "spa")},
@@ -260,6 +285,51 @@ func TestPartitionReassignsDefaults(t *testing.T) {
 	if tracks[2].Disposition["default"] != 0 || tracks[5].Disposition["default"] != 0 {
 		t.Error("Partition changed the source's dispositions")
 	}
+}
+
+// A dropped default subtitle that was forced does not hand the flag to a full
+// subtitle: a kept forced track takes it, and with none the output has no
+// default subtitle.
+func TestPartitionForcedDefaultSubtitle(t *testing.T) {
+	subDefaults := func(sel *TrackSelection, tracks []TrackInfo) []int {
+		_, ks, _, _ := sel.Partition(tracks)
+		var out []int
+		for _, s := range ks {
+			if s.Disposition["default"] > 0 {
+				out = append(out, s.Index)
+			}
+		}
+		return out
+	}
+	forcedDefault := sub(4, "fre", "default", "forced")
+	t.Run("a kept forced subtitle takes the default", func(t *testing.T) {
+		tracks := []TrackInfo{video(0), aud(1, "spa"), forcedDefault, sub(5, "spa"), sub(6, "spa", "forced")}
+		got := subDefaults(&TrackSelection{KeepAudio: []int{1}, KeepSubtitles: []int{5, 6}}, tracks)
+		if !reflect.DeepEqual(got, []int{6}) {
+			t.Fatalf("default subtitles %v, want the forced track 6", got)
+		}
+		if tracks[4].Disposition["default"] != 0 {
+			t.Fatal("Partition changed the source's dispositions")
+		}
+	})
+	t.Run("without a kept forced subtitle there is no default", func(t *testing.T) {
+		tracks := []TrackInfo{video(0), aud(1, "spa"), forcedDefault, sub(5, "spa"), sub(6, "eng")}
+		if got := subDefaults(&TrackSelection{KeepAudio: []int{1}, KeepSubtitles: []int{5, 6}}, tracks); len(got) != 0 {
+			t.Fatalf("default subtitles %v, want none", got)
+		}
+	})
+	t.Run("a dropped full default still passes to the first kept subtitle", func(t *testing.T) {
+		tracks := []TrackInfo{video(0), aud(1, "spa"), sub(4, "fre", "default"), sub(5, "spa", "forced"), sub(6, "spa")}
+		if got := subDefaults(&TrackSelection{KeepAudio: []int{1}, KeepSubtitles: []int{5, 6}}, tracks); !reflect.DeepEqual(got, []int{5}) {
+			t.Fatalf("default subtitles %v, want the first kept track 5", got)
+		}
+	})
+	t.Run("a kept default is left alone", func(t *testing.T) {
+		tracks := []TrackInfo{video(0), aud(1, "spa"), sub(4, "spa", "default", "forced"), sub(5, "fre"), sub(6, "spa")}
+		if got := subDefaults(&TrackSelection{KeepAudio: []int{1}, KeepSubtitles: []int{4, 6}}, tracks); !reflect.DeepEqual(got, []int{4}) {
+			t.Fatalf("default subtitles %v, want 4", got)
+		}
+	})
 }
 
 func TestPartitionLeavesDefaultsAlone(t *testing.T) {

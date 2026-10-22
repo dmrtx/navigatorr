@@ -434,6 +434,44 @@ func TestSizeBudgetPlanStepUsesTheSelection(t *testing.T) {
 	}
 }
 
+// A source without audio can still lose subtitles. The selection keeps no
+// audio, the budget is planned from the video and the kept subtitles, the plan
+// is v6 and matches the frozen policy: the job goes on to the worker, which
+// accepts such a plan only for a source that has no audio.
+func TestSelectionOfASourceWithoutAudio(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"size_budget_bytes": 1_500_000_000.0, "allow_hardware": false}, nil)
+	rep := trackFixtureReport()
+	// The fixture's eight audio tracks take 144 MB each; the silent file is
+	// the same file without them.
+	rep.Audio = nil
+	silent := int64(levelSourceBytes - 8*144_000_000)
+	c.ec.State["source_report"], c.ec.State["original_size"] = rep, silent
+	sel, err := resolveTrackSelection(c.snapshot, rep)
+	if err != nil || sel == nil || len(sel.KeepAudio) != 0 || len(sel.KeepSubtitles) == 0 || len(sel.KeepSubtitles) >= len(rep.Subtitles) {
+		t.Fatalf("selection %+v: %v", sel, err)
+	}
+	c.ec.State[trackSelectionKey] = sel
+	base := getPlan(c.ec.State["plan"])
+	for i, s := range rep.Subtitles {
+		base.SubtitleActions = append(base.SubtitleActions, transcode.SubtitleAction{TypeIndex: i, SourceStreamIndex: s.Index})
+	}
+	if err := applyTrackSelection(base, sel); err != nil {
+		t.Fatal(err)
+	}
+	planRecipe(t, c)
+	plan := getPlan(c.ec.State["plan"])
+	rec := sizeBudgetOf(c.ec.State)
+	if plan == nil || rec == nil || getBool(c.ec.State, "skip_transcode") {
+		t.Fatalf("not planned: %+v skip=%v reason=%v note=%v", rec, c.ec.State["skip_transcode"], c.ec.State["reason_code"], c.ec.State["plan_note"])
+	}
+	if plan.ModePolicyVersion != transcode.ModePolicyV6 || plan.Tracks == nil || len(plan.Tracks.KeepAudio) != 0 || !trackSelectionMatches(c.snapshot, c.ec.State, plan) {
+		t.Fatalf("plan %s tracks %+v", plan.ModePolicyVersion, plan.Tracks)
+	}
+	if report := trackSelectionReport(c.snapshot.Tracks, sel, rep, silent); report.Audio.Total != 0 || len(report.Audio.Kept) != 0 || report.Message == "" {
+		t.Fatalf("report %+v", report)
+	}
+}
+
 // A plan that keeps only some tracks needs a worker that follows the selection:
 // the submit step, the size-budget ladder and the final-validation request all
 // refuse an old one, and none reach it.

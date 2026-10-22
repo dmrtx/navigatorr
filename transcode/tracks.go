@@ -174,8 +174,10 @@ func OriginalAudioTrack(tracks []TrackInfo) (TrackInfo, bool) {
 // for the language list L of the policy:
 //
 //   - Audio: the original-language track is always kept, and so is any track
-//     tagged in L or untagged / "und". When no audio track is tagged in L the
-//     file keeps all its audio.
+//     tagged in L, tagged in the original track's language (a commentary in
+//     the original language stays with it) or untagged / "und". When no audio
+//     track is tagged in L the file keeps all its audio; that test looks at L
+//     only, never at the original language.
 //   - Subtitles: a subtitle is kept when its language is in L, is the
 //     original audio track's language, or is untagged / "und". Forced
 //     subtitles follow the same rule.
@@ -222,7 +224,7 @@ func SelectTracks(p *TrackPolicy, tracks []TrackInfo) (*TrackSelection, error) {
 		original, _ := OriginalAudioTrack(tracks)
 		for _, t := range audio {
 			lang := CanonicalLanguage(t.Language)
-			if !matched || t.Index == original.Index || lang == LanguageUndetermined || wanted[lang] {
+			if !matched || t.Index == original.Index || lang == originalLanguage || lang == LanguageUndetermined || wanted[lang] {
 				keepAudio = append(keepAudio, t.Index)
 			}
 		}
@@ -310,8 +312,10 @@ func (s *TrackSelection) Partition(tracks []TrackInfo) (keptAudio, keptSubtitles
 		}
 	}
 	if s != nil {
-		reassignDefault(keptAudio, hasDefault(keptAudio) || hasDefault(droppedAudio))
-		reassignDefault(keptSubtitles, hasDefault(keptSubtitles) || hasDefault(droppedSubtitles))
+		reassignDefault(keptAudio, hasDefault(keptAudio) || hasDefault(droppedAudio), false)
+		// A default subtitle that was forced is a track for foreign-language
+		// parts only; a full subtitle never takes its place.
+		reassignDefault(keptSubtitles, hasDefault(keptSubtitles) || hasDefault(droppedSubtitles), droppedDefaultForced(keptSubtitles, droppedSubtitles))
 	}
 	return keptAudio, keptSubtitles, droppedAudio, droppedSubtitles
 }
@@ -325,19 +329,45 @@ func hasDefault(tracks []TrackInfo) bool {
 	return false
 }
 
-// reassignDefault marks the first track default when the source had a default
-// of this kind and none of the kept tracks is. The disposition map is copied,
-// never changed in place.
-func reassignDefault(kept []TrackInfo, sourceHadDefault bool) {
+// droppedDefaultForced reports whether the default subtitle the selection
+// removed was a forced one (and no kept track is a default).
+func droppedDefaultForced(kept, dropped []TrackInfo) bool {
+	if hasDefault(kept) {
+		return false
+	}
+	for _, t := range dropped {
+		if t.Disposition["default"] > 0 && t.Disposition["forced"] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// reassignDefault marks a kept track default when the source had a default of
+// this kind and none of the kept tracks is: the first kept track, or, when
+// forcedOnly, the first kept forced track (none at all when there is no such
+// track, so the output has no default of this kind). The disposition map is
+// copied, never changed in place.
+func reassignDefault(kept []TrackInfo, sourceHadDefault, forcedOnly bool) {
 	if !sourceHadDefault || len(kept) == 0 || hasDefault(kept) {
 		return
 	}
-	d := make(map[string]int, len(kept[0].Disposition)+1)
-	for k, v := range kept[0].Disposition {
+	target := -1
+	for i := range kept {
+		if !forcedOnly || kept[i].Disposition["forced"] > 0 {
+			target = i
+			break
+		}
+	}
+	if target < 0 {
+		return
+	}
+	d := make(map[string]int, len(kept[target].Disposition)+1)
+	for k, v := range kept[target].Disposition {
 		d[k] = v
 	}
 	d["default"] = 1
-	kept[0].Disposition = d
+	kept[target].Disposition = d
 }
 
 // LanguageLabel is a track's language as shown to people: the tag, or "und".

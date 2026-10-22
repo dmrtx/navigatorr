@@ -99,11 +99,12 @@ a single `transcode_media` job only) pick tracks by hand, exactly.
 | Rule | Behaviour |
 | --- | --- |
 | Original audio | The track with disposition `original`, else the first audio track, is always kept. |
-| Audio match | Audio in a listed language is kept; untagged and `und` audio is kept. |
-| No audio matches | Every audio track is kept. |
+| Audio match | Audio in a listed language is kept; so is any other audio in the original track's language (a commentary stays with its film), and untagged and `und` audio. |
+| No audio matches | Every audio track is kept. "Matches" looks at the list only, not at the original language. |
 | Subtitles | Kept when in a listed language, in the original track's language, or untagged / `und`. Forced subtitles follow the same rule. No match drops them. |
 | Never dropped | Video, attachments (fonts) and chapters. |
-| Defaults | When the default audio track is dropped, the first kept audio track becomes the default; the same for subtitles only if a default subtitle existed. |
+| Defaults | When the default audio track is dropped, the first kept audio track becomes the default. For subtitles, only if a default subtitle existed: its replacement is the first kept subtitle, or, when the dropped default was a forced subtitle, a kept forced subtitle (none at all if there is none: a full subtitle never replaces a forced default). |
+| No audio in the source | Only subtitles can be dropped; the plan keeps no audio and the worker accepts that for a source that has none (never for one that has audio). |
 | Nothing to drop | The plan is the same as before, with no selection recorded. |
 
 **Frozen, versioned, gated.** The selection is part of the job's frozen policy
@@ -115,6 +116,14 @@ track. The worker advertises `track_selection`; the server refuses to submit,
 to plan a size budget, or to request final validation of a selection to a
 worker that lacks it ("needs a worker that follows the selection"), and an
 older worker rejects the v6 plan on its own.
+
+A goal change of a batch (a new budget, size to compact) keeps the languages
+the batch was created with: its own `keep_languages` (`[]` included), else the
+list it froze at creation. Only a batch frozen before this setting existed has
+no record of its languages and reads the global list as it is at the change;
+likewise, work that was created but not yet frozen when this version is
+deployed takes the list in force when it is frozen (`spa`, `eng`, `jpn` unless
+changed), which is expected and not a regression.
 
 **Size accounting.** The budget counts only the kept tracks: dropped audio
 bytes stay out of the audio levels and the video allowance, and dropped

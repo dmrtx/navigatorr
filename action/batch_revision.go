@@ -172,8 +172,10 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		// A new goal freezes the global list of languages to keep as it is now.
-		tracks, err := trackPolicyFor(mode, trackInput{}, e.KeepLanguages())
+		// The batch keeps the languages it was created with (its own
+		// keep_languages, else the list it froze); only a batch that predates
+		// the setting reads the global list as it is now.
+		tracks, err := e.reconfiguredTrackPolicy(mode, ec)
 		if err != nil {
 			return nil, err
 		}

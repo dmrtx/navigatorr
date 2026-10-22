@@ -323,3 +323,47 @@ func TestTrackSelectionRealEncode(t *testing.T) {
 		t.Errorf("the whole file does not validate against the plan that keeps it: %v", err)
 	}
 }
+
+// A file with no audio can still lose subtitles. The plan keeps no audio, the
+// worker builds and encodes it, and validation accepts exactly the kept
+// subtitle; the same plan against a source that has audio is refused.
+func TestTrackSelectionRealEncodeWithoutAudio(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	f := buildRealTrackFixture(t, ctx, dir)
+	silent := filepath.Join(dir, "silent.mkv")
+	if out, err := exec.CommandContext(ctx, f.ffmpeg, "-nostdin", "-v", "error", "-y", "-i", f.path, "-map", "0", "-map", "-0:a", "-c", "copy", silent).CombinedOutput(); err != nil {
+		t.Fatalf("remux without audio: %v %s", err, out)
+	}
+	probe, err := ProbeSourceDetails(ctx, f.ffprobe, silent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(streamsOfKind(probe.Streams, "audio")) != 0 || len(streamsOfKind(probe.Streams, "subtitle")) != 3 {
+		t.Fatalf("the silent fixture has %d audio and %d subtitle streams", len(streamsOfKind(probe.Streams, "audio")), len(streamsOfKind(probe.Streams, "subtitle")))
+	}
+	quiet := &realTrackFixture{path: silent, probe: probe, ffmpeg: f.ffmpeg, ffprobe: f.ffprobe}
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: f.ffmpeg, FFprobe: f.ffprobe})
+
+	plan := trackSelectionPlan(t, probe, []string{"spa"}, nil, nil)
+	if plan.Tracks == nil || len(plan.Tracks.KeepAudio) != 0 || len(plan.Tracks.KeepSubtitles) != 1 {
+		t.Fatalf("selection %+v", plan.Tracks)
+	}
+	ep, candidate := quiet.encode(t, ctx, dir, "silent", plan)
+	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, probe, 0); err != nil {
+		t.Fatalf("validation of the silent output: %v", err)
+	}
+	cand, err := ProbeSourceDetails(ctx, f.ffprobe, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subs := streamsOfKind(cand.Streams, "subtitle")
+	if len(streamsOfKind(cand.Streams, "audio")) != 0 || len(subs) != 1 || subs[0].Language != "spa" || subs[0].Disposition["forced"] != 1 {
+		t.Fatalf("output has %d audio and subtitles %+v", len(streamsOfKind(cand.Streams, "audio")), subs)
+	}
+	// The same plan must not build against a source that has audio.
+	if _, err := BuildExecutionPlan(plan, f.probe.Streams, f.probe.DurationSec); err == nil {
+		t.Error("a plan that keeps no audio was built for a source that has audio")
+	}
+}

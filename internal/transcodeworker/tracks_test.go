@@ -76,7 +76,6 @@ func TestTrackSelectionPlanVersion(t *testing.T) {
 		"v6 without a selection":           func(p *transcode.Plan) { p.Tracks = nil },
 		"a selection on v5":                func(p *transcode.Plan) { p.ModePolicyVersion = transcode.ModePolicyV5 },
 		"a selection on v3":                func(p *transcode.Plan) { p.ModePolicyVersion = transcode.ModePolicyV3 },
-		"a selection without audio":        func(p *transcode.Plan) { p.Tracks.KeepAudio = []int{} },
 		"unsorted streams":                 func(p *transcode.Plan) { p.Tracks.KeepAudio = []int{3, 1} },
 		"one stream as both":               func(p *transcode.Plan) { p.Tracks.KeepSubtitles = []int{1} },
 		"a quality goal":                   func(p *transcode.Plan) { p.Mode = "quality" },
@@ -219,6 +218,67 @@ func TestTrackSelectionMovesTheDefaultSubtitle(t *testing.T) {
 	}
 	if joined := " " + strings.Join(args, " ") + " "; !strings.Contains(joined, " -disposition:s:0 default ") {
 		t.Fatalf("the first kept subtitle is not the default: %s", joined)
+	}
+}
+
+// A dropped default subtitle that was forced never hands the flag to a full
+// subtitle: a kept forced track takes it, and with none there is no default.
+func TestTrackSelectionForcedDefaultSubtitle(t *testing.T) {
+	build := func(src []SourceStream, sel *transcode.TrackSelection) string {
+		ep, err := BuildExecutionPlan(tracksPlan(sel), src, 1800)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args, err := BuildFFmpegArgs(ep, "source.mkv", "candidate.mkv", "progress")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return " " + strings.Join(args, " ") + " "
+	}
+	// The French subtitle is a forced default; the Spanish one is forced too.
+	src := tracksSource()
+	src[6].Disposition = map[string]int{"default": 1, "forced": 1}
+	kept := &transcode.TrackSelection{KeepAudio: []int{1, 4}, KeepSubtitles: []int{5, 7}}
+	if joined := build(src, kept); !strings.Contains(joined, " -disposition:s:1 default+forced ") || strings.Contains(joined, " -disposition:s:0 ") {
+		t.Fatalf("the kept forced subtitle did not take the default: %s", joined)
+	}
+	// Only full subtitles are kept: nothing becomes the default.
+	src = tracksSource()
+	src[6].Disposition = map[string]int{"default": 1, "forced": 1}
+	src[7].Disposition = nil
+	full := &transcode.TrackSelection{KeepAudio: []int{1, 4}, KeepSubtitles: []int{5, 7}}
+	if joined := build(src, full); strings.Contains(joined, " -disposition:s:") {
+		t.Fatalf("a full subtitle became the default of a dropped forced one: %s", joined)
+	}
+}
+
+// A source with no audio can still lose subtitles: its plan keeps no audio and
+// builds. A source that has audio can never lose all of it.
+func TestTrackSelectionOnASourceWithoutAudio(t *testing.T) {
+	var silent []SourceStream
+	for _, s := range tracksSource() {
+		if s.Kind != "audio" {
+			silent = append(silent, s)
+		}
+	}
+	sel := &transcode.TrackSelection{KeepAudio: []int{}, KeepSubtitles: []int{5, 7}}
+	plan := tracksPlan(sel)
+	if err := ValidatePlan(plan); err != nil {
+		t.Fatalf("a plan that keeps subtitles of a silent source was rejected: %v", err)
+	}
+	ep, err := BuildExecutionPlan(plan, silent, 1800)
+	if err != nil {
+		t.Fatalf("silent source: %v", err)
+	}
+	args, err := BuildFFmpegArgs(ep, "source.mkv", "candidate.mkv", "progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maps := mapsOf(args); !slices.Equal(maps, []string{"0:v?", "0:5", "0:7", "0:t?"}) {
+		t.Fatalf("maps %v", maps)
+	}
+	if _, err := BuildExecutionPlan(plan, tracksSource(), 1800); err == nil {
+		t.Fatal("a plan that keeps no audio was built for a source that has audio")
 	}
 }
 

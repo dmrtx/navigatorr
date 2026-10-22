@@ -34,6 +34,9 @@ const (
 	inputKeepSubtitleStreams = "keep_subtitle_streams"
 	trackSelectionKey        = "track_selection"
 	trackReportKey           = "track_report"
+	// trackLanguagesKey holds the languages a goal froze (state of the job or
+	// batch that created it), kept even when the list is empty.
+	trackLanguagesKey = "track_languages"
 )
 
 // KeepLanguages is the global list of languages the size and compact goals keep
@@ -208,7 +211,61 @@ func trackPolicyOf(ec *ExecutionContext, mode string) (*transcode.TrackPolicy, e
 	if ec != nil {
 		engine = ec.Engine
 	}
-	return trackPolicyFor(mode, in, engine.KeepLanguages())
+	policy, err := trackPolicyFor(mode, in, engine.KeepLanguages())
+	if err == nil && ec != nil && ec.State != nil && (mode == "size" || mode == "compact") {
+		// Remember the languages this goal froze, an empty list included (it
+		// leaves no policy in the snapshot), so that a later goal change of a
+		// batch keeps them instead of reading the global list again.
+		languages := engine.KeepLanguages()
+		if in.languages != nil {
+			languages = *in.languages
+		}
+		ec.State[trackLanguagesKey] = append([]string{}, languages...)
+	}
+	return policy, err
+}
+
+// reconfiguredTrackPolicy is the policy a batch freezes when its goal changes.
+// The batch keeps its own choice of languages: its keep_languages input if it
+// has one ([] included), else the languages it froze when it was created,
+// else (a batch frozen before this setting existed) the global list as it is
+// now.
+func (e *Engine) reconfiguredTrackPolicy(mode string, ec *ExecutionContext) (*transcode.TrackPolicy, error) {
+	if mode != "size" && mode != "compact" {
+		return nil, nil
+	}
+	in, err := modeTrackInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	if in.languages == nil {
+		if frozen, ok := stringList(ec.State[trackLanguagesKey]); ok && ec.State[trackLanguagesKey] != nil {
+			in.languages = &frozen
+		} else if snapshot := stateModePolicy(ec.State); snapshot != nil && snapshot.Tracks != nil {
+			languages := slices.Clone(snapshot.Tracks.Languages)
+			in.languages = &languages
+		}
+	}
+	return trackPolicyFor(mode, in, e.KeepLanguages())
+}
+
+// stateModePolicy is the goal snapshot stored in an action's state, if any.
+func stateModePolicy(state map[string]any) *ModePolicySnapshot {
+	raw := state["mode_policy"]
+	if raw == nil {
+		return nil
+	}
+	if p, ok := raw.(*ModePolicySnapshot); ok {
+		return p
+	}
+	if v, ok := raw.(ModePolicySnapshot); ok {
+		return &v
+	}
+	var p ModePolicySnapshot
+	if !reencode(raw, &p) || p.Mode == "" {
+		return nil
+	}
+	return &p
 }
 
 // trackInfosOf lists a source's audio and subtitle streams for selection, in
