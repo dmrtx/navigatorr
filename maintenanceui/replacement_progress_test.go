@@ -81,6 +81,18 @@ func TestOriginalStateIsDecidedFromThePromotionsOwnState(t *testing.T) {
 		// Move-aside mode makes no copy: before the move the original is simply
 		// where it was, and a failure there must not point at a recovery copy.
 		{"move-aside mode, failed importing before any move", record(importStep, moveAside(nil), nil), originalInPlace},
+		// Sonarr and Radarr may remove the old file themselves while importing, and
+		// in move-aside mode no recovery copy exists yet.
+		{"move-aside mode, arr import sent (snapshot flag), failed importing", record(importStep, moveAside(map[string]any{"service": "sonarr", "import_sent": true}), nil), originalUnclear},
+		{"move-aside mode, arr import sent (full command), failed importing", record(importStep, moveAside(map[string]any{"service": "radarr", "commands": map[string]any{"import": map[string]any{"id": 7, "sent_at": "2026-01-01T00:00:00Z"}}}), nil), originalUnclear},
+		{"move-aside mode, arr import not sent, failed importing", record(importStep, moveAside(map[string]any{"service": "sonarr", "commands": map[string]any{}}), nil), originalInPlace},
+		// A refused move-aside switches to copy; until its fallback copy is
+		// verified the original is still in place and no recovery copy holds it.
+		{"copy after a refused move-aside, fallback copy not verified", record(importStep, copyMode(map[string]any{"move_aside_refused": "rename not permitted", "recovery_verified": false}), nil), originalUnclear},
+		{"copy after a refused move-aside, fallback copy verified", record(importStep, copyMode(map[string]any{"move_aside_refused": "rename not permitted", "recovery_verified": true}), nil), originalInRecovery},
+		// Once the recovery copy started to be removed it may be gone.
+		{"recovery copy removal started", record(s.promotionStep("finalize_promotion"), copyMode(map[string]any{"recovery_cleanup_started": true}), nil), originalUnclear},
+		{"recovery copy removal started, moved aside", record(s.promotionStep("finalize_promotion"), moveAside(map[string]any{"moved_aside": true, "recovery_cleanup_started": true}), nil), originalUnclear},
 		{"move-aside mode, move started", record(importStep, moveAside(map[string]any{"move_aside_started_at": "2026-01-01T00:00:00Z"}), nil), originalUnclear},
 		{"move-aside mode, moved aside", record(remove, moveAside(map[string]any{"moved_aside": true}), nil), originalInRecovery},
 		{"move-aside mode, past import without a marker", record(remove, moveAside(nil), nil), originalUnclear},

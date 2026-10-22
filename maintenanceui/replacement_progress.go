@@ -160,33 +160,45 @@ func (s *Server) promotionStep(name string) int {
 }
 
 // originalState says where the original is after a replacement stopped, from
-// the promotion's own state and never from the failure text.
-//   - In place: nothing moved, published or removed. In copy mode the workflow
-//     had not gone past preserve_original, which only copies. In move-aside mode
-//     preserve_original makes no copy and the original moves only at publish or
-//     removal, so it is still in place until import_candidate has finished
-//     without a move marker.
+// the promotion's own state and never from the failure text. "In place" and
+// "in recovery" each need positive evidence; anything else is unclear.
+//   - In place: nothing moved, published or removed, and nothing could have
+//     removed it. In copy mode the workflow had not gone past preserve_original,
+//     which only copies. In move-aside mode preserve_original makes no copy and
+//     the original moves only at publish or removal, so it is in place before
+//     import_candidate, and at import_candidate only while no library import was
+//     sent: Sonarr and Radarr may remove the old file themselves during an
+//     import, and no recovery copy exists yet.
 //   - In recovery: copy mode past preserve_original (a same-name publish renames
 //     the candidate over the original without setting any older flag, so the
-//     step decides), or the original was moved aside into its recovery entry.
-//   - Unclear: anything else. It is never reported as in place.
+//     step decides), unless a refused move-aside left its fallback copy
+//     unverified; or the original was moved aside into its recovery entry.
+//   - Unclear: anything else, including once the recovery copy started to be
+//     removed.
 func (s *Server) originalState(r operationRecord) string {
 	p := operationMap(operationValue(r, "promotion"))
 	if p == nil {
 		return originalInPlace
 	}
 	preserve, importStep := s.promotionStep("preserve_original"), s.promotionStep("import_candidate")
-	if preserve < 0 {
+	if preserve < 0 || importStep < 0 || p["recovery_cleanup_started"] == true {
 		return originalUnclear
 	}
 	step, mode := r.inst.CurrentStep, operationString(p["recovery_mode"])
 	changed := p["old_removed"] == true || p["moved_aside"] == true || operationString(p["delete_sent_at"]) != "" || operationString(p["move_aside_started_at"]) != "" || r.state["filesystem_publish_started"] == true || r.state["filesystem_published"] == true
 	if !changed {
-		if step <= preserve || (mode == "move_aside" && importStep >= 0 && step <= importStep) {
+		importSent := p["import_sent"] == true || operationMap(p["commands"])["import"] != nil
+		switch {
+		case mode != "move_aside" && step <= preserve:
+			return originalInPlace
+		case mode == "move_aside" && (step < importStep || step == importStep && !importSent):
 			return originalInPlace
 		}
 	}
-	if p["moved_aside"] == true || (mode == "copy" && step > preserve) {
+	if p["moved_aside"] == true {
+		return originalInRecovery
+	}
+	if mode == "copy" && step > preserve && (operationString(p["move_aside_refused"]) == "" || p["recovery_verified"] == true) {
 		return originalInRecovery
 	}
 	return originalUnclear

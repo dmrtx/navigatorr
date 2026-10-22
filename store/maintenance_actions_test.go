@@ -259,6 +259,37 @@ func TestMaintenanceSnapshotKeepsTheSizeBudgetSummary(t *testing.T) {
 	}
 }
 
+// A failed replacement's page needs to know whether the library import was sent
+// (the library may then have removed the original itself), never the command.
+func TestMaintenanceSnapshotSaysWhetherTheLibraryImportWasSentWithoutTheCommand(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sent := `{"promotion":{"service":"sonarr","recovery_mode":"move_aside","commands":{"import":{"id":7,"sent_at":"2026-01-01T00:00:00Z","payload":{"files":[{"path":"/media/.c/secret.mkv"}]}}}}}`
+	notSent := `{"promotion":{"service":"sonarr","recovery_mode":"move_aside","commands":{}}}`
+	for id, state := range map[string]string{"sent": sent, "not-sent": notSent} {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "promote_transcode_candidate", Status: ActionStatusFailed, InputsJSON: `{}`, OutputsJSON: state, StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	for _, row := range rows {
+		for _, got := range []string{row.OutputsJSON, row.StateJSON} {
+			if strings.Contains(got, "commands") || strings.Contains(got, "secret.mkv") {
+				t.Fatalf("%s kept the command: %s", row.ID, got)
+			}
+			if has := strings.Contains(got, `"import_sent":true`); has != (row.ID == "sent") {
+				t.Fatalf("%s import_sent=%v: %s", row.ID, has, got)
+			}
+		}
+	}
+}
+
 // The queue needs to know which candidates a prepared plan covers and whether
 // it was approved; the candidate paths and hashes stay in the batch.
 func TestMaintenanceSnapshotKeepsThePlanMembersWithoutCandidatePathsOrHashes(t *testing.T) {

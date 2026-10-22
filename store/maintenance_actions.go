@@ -93,6 +93,15 @@ func maintenanceJSON(raw string, keys []string) string {
 			case "promotion":
 				delete(nested, "quality")
 				delete(nested, "languages")
+				// The command bodies stay in the action history; whether the
+				// library import was sent is all the page needs, to know the
+				// library may already have removed the original.
+				var commands map[string]json.RawMessage
+				if raw, exists := nested["commands"]; exists && json.Unmarshal(raw, &commands) == nil {
+					if _, sent := commands["import"]; sent {
+						nested["import_sent"] = json.RawMessage("true")
+					}
+				}
 				delete(nested, "commands")
 				value, _ = json.Marshal(nested)
 			case "quality_evidence":
