@@ -2487,7 +2487,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 
 /* Replacement progress: a headline, finished files, and one line per file. */
 .job-footer > .replacement-progress, #detail-summary > .replacement-progress { flex: 1 1 100%; max-width: none; max-height: none; overflow: visible; flex-direction: column; align-items: stretch; gap: 6px; }
-.replacement-progress progress { order: 0; width: 100%; max-width: 420px; }
+.replacement-progress progress { order: 0; flex: 0 0 auto; width: 100%; max-width: 420px; height: 6px; }
 .replacement-headline { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .replacement-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
 .replacement-file { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: 12px; }
@@ -2506,3 +2506,56 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .replacement-where { margin: 8px 0; }
 .replacement-where p { margin: 2px 0; overflow-wrap: anywhere; }
 .replacement-where-row { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; }
+
+/* Languages to keep: the chips are shared by Settings and the goal form, the
+   track list by the goal form, the report by job details. */
+.language-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; padding: 0; list-style: none; }
+.language-chips[hidden] { display: none; }
+.language-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; padding: 0 2px 0 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--subtle); color: var(--ink); font-size: 13px; }
+.language-chip .metadata { display: inline; font-size: 11px; }
+.chip-remove { display: inline-grid; place-items: center; width: 28px; min-width: 28px; height: 28px; min-height: 28px; padding: 0; border: 0; border-radius: 50%; color: var(--muted); font-size: 16px; line-height: 1; }
+.chip-remove:hover { background: var(--hover); color: var(--ink); }
+.language-add { margin: 0; }
+.language-add input { width: 12rem; max-width: 100%; }
+.language-settings .settings-row { border-bottom: 0; }
+.keep-tracks { margin: 1rem 0; padding: 0 .85rem; border: 1px solid var(--line); border-radius: 8px; }
+.keep-tracks[hidden] { display: none; }
+.keep-tracks > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; list-style: none; }
+.keep-tracks > summary::-webkit-details-marker { display: none; }
+.keep-tracks > summary::before { content: "▸"; color: var(--muted); }
+.keep-tracks[open] > summary::before { content: "▾"; }
+.keep-tracks-title { flex: none; font-weight: 600; }
+.keep-tracks > summary .metadata { flex: 1; min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.keep-tracks .segmented label { white-space: nowrap; }
+.keep-tracks[open] { padding-bottom: .85rem; }
+.keep-tracks-body { display: grid; gap: .85rem; }
+.keep-tracks-body > p { margin: 0; }
+.track-group { margin: 0; padding: 0; border: 0; min-width: 0; }
+.track-group[hidden] { display: none; }
+.track-group legend { padding: 0; margin-bottom: 2px; font-size: .78rem; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+.track-list { max-height: 24rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.track-row + .track-row { border-top: 1px solid var(--line); }
+.track-label { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0; padding: 4px 0; font-size: 13px; cursor: pointer; }
+.track-label:has(input:disabled) { cursor: default; }
+.track-text { display: grid; flex: 1 1 0; min-width: 0; gap: 1px; }
+/* The badges stay on the track's row: side by side, stacked when it is narrow. */
+.track-badges { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.track-badge { white-space: nowrap; }
+@media (max-width: 480px) { .track-badges { flex-direction: column; align-items: flex-end; } }
+.track-name { font-weight: 600; }
+.track-facts { overflow-wrap: anywhere; }
+.track-badge { margin: 0; padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 11px; }
+.track-report { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--forest); border-radius: 4px; background: var(--paper); font-size: 13px; }
+.track-report p { margin: 0; }
+.track-report-details { margin-top: 6px; font-size: 12px; }
+.track-report-details > summary { min-height: var(--control-size); display: flex; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; list-style: none; }
+.track-report-details > summary::-webkit-details-marker { display: none; }
+.track-report-details > summary::before { content: "▸"; color: var(--muted); }
+.track-report-details[open] > summary::before { content: "▾"; }
+.track-report-details h4 { margin: 8px 0 2px; font-size: 12px; color: var(--muted); }
+.track-report-list { margin: 0; padding: 0; list-style: none; }
+.track-report-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 5px 0; border-top: 1px solid var(--line); }
+.track-report-row .metadata { display: inline; }
+.track-report-row.dropped strong { font-weight: 400; color: var(--muted); }
+.track-report-row.kept .track-badge { border-color: var(--forest); color: var(--forest); }
+.batch-file-tracks { flex-basis: 100%; }
