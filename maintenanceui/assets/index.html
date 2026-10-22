@@ -1134,13 +1134,16 @@
     </dialog>
     <dialog id="file-review" aria-labelledby="file-review-title">
       <div class="dialog-heading">
-        <h2 id="file-review-title">Review replacement</h2>
+        <h2 id="file-review-title">Replace file</h2>
         <button id="dismiss-file-review" class="icon-button" aria-label="Close">×</button>
       </div>
       <p class="dialog-connection muted" role="status" hidden>Server unavailable. Approval is paused until it responds.</p>
       <div id="file-review-data"></div>
+      <p id="file-review-total" class="review-total" role="status"></p>
       <p class="muted">The original is kept as a recovery copy until the replacement is verified, then removed.</p>
       <div class="submit-actions">
+        <button id="dismiss-file-review-action">Cancel</button>
+        <button id="reject-file-review" hidden>Keep original</button>
         <button id="approve-file-review" class="primary">Replace file</button>
       </div>
     </dialog>
@@ -1166,20 +1169,23 @@
       </div>
     </dialog>
     <dialog id="batch-review" aria-labelledby="batch-review-title">
-      <h2 id="batch-review-title">Review replacements</h2>
+      <div class="dialog-heading">
+        <h2 id="batch-review-title">Replace files</h2>
+        <button id="close-batch-review" class="icon-button" aria-label="Close">×</button>
+      </div>
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Approval is paused until it responds.
       </p>
-      <p class="muted">
-        Replaces every file below after verification, with recovery copies.
-      </p>
+      <div id="batch-review-notice" role="status"></div>
       <div id="batch-review-data"></div>
+      <p id="batch-review-total" class="review-total" role="status"></p>
+      <p class="muted">
+        Each original is kept as a recovery copy until its new file is verified, then removed.
+      </p>
       <div class="submit-actions">
-        <button id="dismiss-batch-review">Back</button
-        ><button id="reject-batch-review">Keep originals</button
-        ><button id="approve-batch-review" class="primary">
-          Approve replacements
-        </button>
+        <button id="dismiss-batch-review">Cancel</button>
+        <button id="reject-batch-review" hidden>Keep originals</button>
+        <button id="approve-batch-review" class="primary">Replace files</button>
       </div>
     </dialog>
   </body>

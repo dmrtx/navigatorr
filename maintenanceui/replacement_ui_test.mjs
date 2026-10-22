@@ -121,7 +121,7 @@ test("an agent's durable Sonarr child uses its parent integration without browse
   h.context.resumes = [];
   h.run('jobControl=async(...args)=>resumes.push(args)');
   await h.elements.get("approve-file-review").listeners.get("click")();
-  assert.deepEqual(JSON.parse(JSON.stringify(h.context.resumes)), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, {}]]);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.resumes)), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, { decision: { label: "Replace file", verb: "Replacing file", failure: "Replacement failed" } }]]);
 });
 
 test("unknown history offers an explicit local or library choice before creating a plan", async () => {
