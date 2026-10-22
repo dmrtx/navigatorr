@@ -784,6 +784,8 @@ function selectTab(tab, fromRoute = false) {
   if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   writeNavigation();
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
+  // The node's job settings come from the worker activity report.
+  if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     clearTimeout(state.folderSizesTimer);
@@ -4233,17 +4235,19 @@ $("worker-slot-form").addEventListener("submit", event => {
 });
 $("worker-slot-share").addEventListener("click", () => void saveWorkerSlots(0, 0));
 for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; });
-// How many jobs the node runs at once. Shown whenever the worker is connected;
-// editable when the worker reports a limit (older workers only show it).
+// How many jobs the node runs at once, in the Transcode node block of
+// Settings. Shown whenever the worker is connected; editable when the worker
+// reports a limit (older workers only show it).
 function renderParallelJobs(activity) {
   const slots = activity.slots, ceiling = slots?.ceiling || activity.worker_slots_total;
   const limit = Number(slots?.ceiling_limit) || 0;
   state.workerSlots = slots || null;
-  $("worker-parallel").hidden = !ceiling;
-  $("worker-parallel-summary").textContent = `Parallel jobs on this node: ${ceiling}`;
+  $("settings-node").hidden = !ceiling;
+  $("worker-parallel-summary").hidden = Boolean(limit);
+  $("worker-parallel-summary").textContent = String(ceiling);
   $("worker-parallel-form").hidden = !limit;
   $("worker-parallel-limit").textContent = !limit ? "The video worker predates setting this here. Update it to change parallel jobs from this page."
-    : `Choose 1 to ${limit}. ${slots.ceiling_source === "override" ? "Set here; overrides the worker config." : "From the worker config."}`;
+    : `1–${limit} · ${slots.ceiling_source === "override" ? "Set here; overrides the worker config" : "From the worker config"}`;
   // Never overwrite what is being typed or has been edited and not saved.
   if (limit && !state.parallelFormDirty && !$("worker-parallel-form").contains(document.activeElement)) {
     $("parallel-jobs").value = slots.ceiling;
@@ -4280,14 +4284,16 @@ $("parallel-jobs").addEventListener("input", () => {
   state.parallelFormDirty = true;
   $("worker-parallel-note").textContent = parallelSplitNote(Number($("parallel-jobs").value));
 });
+$("worker-open-settings").addEventListener("click", () => selectTab("advanced"));
 function renderWorkerActivity(data) {
   $("worker-slots").replaceChildren();
   if (!serverReachable || !data?.available) {
     $("worker-capacity").textContent = "Worker slots · Unknown";
     $("activity-checked").textContent = "";
     $("worker-slot-usage").hidden = true;
-    $("worker-parallel").hidden = true;
+    $("settings-node").hidden = true;
     $("worker-slot-split").hidden = true;
+    $("worker-open-settings").hidden = true;
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
     return;
   }
@@ -4296,6 +4302,8 @@ function renderWorkerActivity(data) {
   $("activity-checked").textContent = "Updated now · Job reservations";
   renderParallelJobs(activity);
   renderSlotUsage(activity);
+  // Activity only reports; the editors live in Settings.
+  $("worker-open-settings").hidden = $("worker-parallel-form").hidden && $("worker-slot-split").hidden;
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
   const shown = Math.min(16, pools.total);
