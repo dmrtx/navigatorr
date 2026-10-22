@@ -57,6 +57,9 @@ type SourceProbe struct {
 	Streams     []SourceStream
 	DurationSec float64
 	Chapters    int
+	// audioSpans is the source's measured audio packet timing, taken before
+	// the encode when the plan re-encodes audio.
+	audioSpans map[int]audioPacketSpan
 }
 
 func ProbeSourceStreams(ctx context.Context, ffprobePath, filePath string) ([]SourceStream, float64, error) {

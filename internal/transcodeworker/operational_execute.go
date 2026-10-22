@@ -186,6 +186,14 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	probeStart := time.Now()
 	probeCPU := &cpuMeter{}
 	srcProbe, probeErr := w.probeSourceDetailsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput)
+	if probeErr == nil && needsAudioPacketValidation(job.Plan, srcProbe) {
+		// Measured before the encode: a source whose audio cannot be timed
+		// fails in minutes instead of after hours of encoding, and the
+		// candidate check reuses the measurement.
+		if srcProbe.audioSpans, probeErr = audioPacketSpans(withCPUMeter(ctx, probeCPU), w.ffprobePath, r.effectiveInput); probeErr != nil {
+			probeErr = fmt.Errorf("source audio validation: %w", probeErr)
+		}
+	}
 	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{ActiveComputeMs: probeCPU.activeComputeMs()})
 	if srcProbe.DurationSec > 0 {
 		job.DurationSec = srcProbe.DurationSec

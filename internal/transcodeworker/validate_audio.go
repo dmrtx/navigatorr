@@ -15,6 +15,21 @@ import (
 type audioPacketSpan struct {
 	start, end float64
 	bytes      int64
+	// Matroska stores no per-packet duration for some codecs (TrueHD): such a
+	// packet ends where the next one starts, so the stream's last packet is
+	// extended by the last positive gap between packets.
+	lastPTS, gap float64
+	openEnd      bool
+}
+
+// needsAudioPacketValidation reports whether the plan re-encodes audio, so
+// the candidate's audio timing and bitrate are measured against the source.
+func needsAudioPacketValidation(plan *transcode.Plan, src SourceProbe) bool {
+	switch plan.AudioMode {
+	case "compact", "he_aac", transcode.AudioModeCompactLossless:
+		return countStreams(src.Streams, "audio") > 0
+	}
+	return false
 }
 
 // Read actual packet timing/size, not inherited Matroska DURATION/BPS tags.
@@ -47,24 +62,46 @@ func audioPacketSpans(ctx context.Context, ffprobe, path string) (map[int]audioP
 		}
 		index, e1 := strconv.Atoi(fields["stream_index"])
 		pts, e2 := strconv.ParseFloat(fields["pts_time"], 64)
-		duration, e3 := strconv.ParseFloat(fields["duration_time"], 64)
+		duration, e3 := 0.0, error(nil)
+		if fields["duration_time"] != "N/A" {
+			duration, e3 = strconv.ParseFloat(fields["duration_time"], 64)
+			if e3 == nil && (!isFiniteQuality(duration) || duration <= 0) {
+				e3 = fmt.Errorf("invalid duration")
+			}
+		}
 		size, e4 := strconv.ParseInt(fields["size"], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !isFiniteQuality(pts) || !isFiniteQuality(duration) || duration <= 0 || size <= 0 || index < 0 || len(out) > 128 {
+		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !isFiniteQuality(pts) || size <= 0 || index < 0 || len(out) > 128 {
 			parseErr = fmt.Errorf("audio packet timing/size unavailable")
 			break
 		}
 		span, exists := out[index]
 		if !exists {
-			span.start, span.end = pts, pts+duration
-		} else {
-			span.start = math.Min(span.start, pts)
-			span.end = math.Max(span.end, pts+duration)
+			span.start, span.end = pts, pts
+		} else if gap := pts - span.lastPTS; gap > 0 {
+			span.gap = gap
 		}
+		span.start = math.Min(span.start, pts)
+		if end := pts + duration; end > span.end || (end == span.end && duration == 0) {
+			span.end, span.openEnd = end, duration == 0
+		}
+		span.lastPTS = pts
 		span.bytes += size
 		out[index] = span
 	}
 	if parseErr == nil {
 		parseErr = scanner.Err()
+	}
+	if parseErr == nil {
+		for index, span := range out {
+			if span.openEnd {
+				if span.gap <= 0 {
+					parseErr = fmt.Errorf("audio packet timing/size unavailable")
+					break
+				}
+				span.end += span.gap
+				out[index] = span
+			}
+		}
 	}
 	if parseErr != nil {
 		cancel()
@@ -80,9 +117,12 @@ func audioPacketSpans(ctx context.Context, ffprobe, path string) (map[int]audioP
 }
 
 func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan, source, candidate string, src, dst SourceProbe) error {
-	a, err := audioPacketSpans(ctx, w.ffprobePath, source)
-	if err != nil {
-		return fmt.Errorf("source audio validation: %w", err)
+	a := src.audioSpans
+	if a == nil {
+		var err error
+		if a, err = audioPacketSpans(ctx, w.ffprobePath, source); err != nil {
+			return fmt.Errorf("source audio validation: %w", err)
+		}
 	}
 	b, err := audioPacketSpans(ctx, w.ffprobePath, candidate)
 	if err != nil {

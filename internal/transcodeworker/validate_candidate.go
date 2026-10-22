@@ -158,7 +158,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
 		return attest, err
 	}
-	if (execPlan.Plan.AudioMode == "compact" || execPlan.Plan.AudioMode == "he_aac" || execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless) && countStreams(srcProbe.Streams, "audio") > 0 {
+	if needsAudioPacketValidation(execPlan.Plan, srcProbe) {
 		if err := w.validateAudioPackets(ctx, execPlan.Plan, srcProbe.Path, localCandidate, srcProbe, candProbe); err != nil {
 			return attest, err
 		}
