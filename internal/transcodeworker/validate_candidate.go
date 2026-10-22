@@ -302,9 +302,9 @@ func pixelFormatCompatible(expected, actual string, expectedBitDepth int) error 
 }
 
 func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) error {
-	srcAudio, candAudio := streamsOfKind(src, "audio"), streamsOfKind(cand, "audio")
+	srcAudio, candAudio := plannedStreams(plan, src, "audio"), streamsOfKind(cand, "audio")
 	if len(candAudio) != len(srcAudio) {
-		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candAudio), len(srcAudio)))
+		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != %s %d (fail closed, never publish)", ErrSourceInvalid, len(candAudio), plannedLabel(plan), len(srcAudio)))
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
@@ -347,9 +347,9 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 }
 
 func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream) error {
-	srcSubs, candSubs := streamsOfKind(src, "subtitle"), streamsOfKind(cand, "subtitle")
+	srcSubs, candSubs := plannedStreams(plan, src, "subtitle"), streamsOfKind(cand, "subtitle")
 	if len(candSubs) != len(srcSubs) {
-		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != source %d (fail closed, never publish)", ErrSourceInvalid, len(candSubs), len(srcSubs)))
+		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != %s %d (fail closed, never publish)", ErrSourceInvalid, len(candSubs), plannedLabel(plan), len(srcSubs)))
 	}
 	actions := map[int]transcode.SubtitleAction{}
 	for _, a := range plan.SubtitleActions {
@@ -383,6 +383,45 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 		}
 	}
 	return nil
+}
+
+// plannedStreams are the source's streams of a kind the output must carry, in
+// source order: every one, or, when the plan keeps only some tracks
+// (Plan.Tracks), exactly those, each with the disposition the output must
+// have (the default moves to the first kept track when the source's was
+// dropped). The candidate's streams of the kind are checked against them
+// one by one, so an output with a track the plan dropped, or without one it
+// kept, fails on the count or on the first pair that differs.
+func plannedStreams(plan *transcode.Plan, src []SourceStream, kind string) []SourceStream {
+	all := streamsOfKind(src, kind)
+	if plan == nil || plan.Tracks == nil {
+		return all
+	}
+	keptAudio, keptSubtitles, _, _ := plan.Tracks.Partition(trackInfos(src))
+	kept := keptAudio
+	if kind == "subtitle" {
+		kept = keptSubtitles
+	}
+	dispositions := map[int]map[string]int{}
+	for _, t := range kept {
+		dispositions[t.Index] = t.Disposition
+	}
+	out := make([]SourceStream, 0, len(kept))
+	for _, s := range all {
+		if d, ok := dispositions[s.Index]; ok {
+			s.Disposition = d
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// plannedLabel names what the candidate's track counts are compared with.
+func plannedLabel(plan *transcode.Plan) string {
+	if plan != nil && plan.Tracks != nil {
+		return "planned"
+	}
+	return "source"
 }
 
 func streamsOfKind(streams []SourceStream, kind string) []SourceStream {

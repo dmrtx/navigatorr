@@ -16,10 +16,19 @@ const ModePolicyV3 = "transcode-modes-v3"
 // frozen under it; the worker applies v3's rules to everything else in the plan.
 const ModePolicyV5 = "transcode-modes-v5"
 
-// IsSizePolicyVersion reports a size mode policy version: v3, or v5 which adds
-// the audio levels.
+// ModePolicyV6 is the plan version of a size or compact plan that keeps only
+// some of the source's audio and subtitle tracks (Plan.Tracks). The plan
+// otherwise follows the rules of the version it extends: a size plan carries
+// v3's compact_lossless audio mode or v5's levels, a compact plan v2's compact
+// audio. A plan that removes nothing keeps its earlier version, so only the
+// plans that need the track capability require it, and a worker that predates
+// it refuses a v6 plan at its first gate.
+const ModePolicyV6 = "transcode-modes-v6"
+
+// IsSizePolicyVersion reports a size mode policy version: v3, v5 which adds
+// the audio levels, or v6 which adds the track selection.
 func IsSizePolicyVersion(version string) bool {
-	return version == ModePolicyV3 || version == ModePolicyV5
+	return version == ModePolicyV3 || version == ModePolicyV5 || version == ModePolicyV6
 }
 
 // CompactMinimumSavingsPercent is the measured savings compact mode requires.
@@ -46,6 +55,15 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 // ModeMinimumSavings is shared by the planner and full-plan admission,
 // including historical plans.
 func ModeMinimumSavings(mode, version string) (int, bool) {
+	if version == ModePolicyV6 {
+		switch mode {
+		case "size":
+			return 15, true
+		case "compact":
+			return CompactMinimumSavingsPercent, true
+		}
+		return 0, false
+	}
 	if IsSizePolicyVersion(version) {
 		if mode != "size" {
 			return 0, false

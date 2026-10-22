@@ -228,6 +228,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Size policy v5 converts per track to AAC-LC or HE-AAC, so it needs both
 	// encoders.
 	caps.SizeAudioLevels = caps.CompactAudio && caps.HEAACAudio
+	// Track selection maps explicit streams and validates the output against
+	// them; it needs no encoder of its own.
+	caps.TrackSelection = true
 	// Search-only flags, kept for fingerprint stability; they go when the
 	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.

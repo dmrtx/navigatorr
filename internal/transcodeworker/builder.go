@@ -465,10 +465,9 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		"-nostats",
 		"-i", sourcePath,
 		"-map", videoMap,
-		"-map", "0:a?",
-		"-map", "0:s?",
-		"-map", "0:t?",
 	}
+	args = append(args, trackMaps(execPlan)...)
+	args = append(args, "-map", "0:t?")
 
 	if execPlan.Plan.PreserveMetadata {
 		args = append(args, "-map_metadata", "0")
@@ -496,20 +495,13 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	// Keep every audio stream; compact only selected source codecs, never
 	// downmix or remove languages. Already compact/unknown formats are copied.
 	args = append(args, "-c:a", "copy")
+	plan := execPlan.Plan
 	for _, stream := range execPlan.Streams {
+		// The per-stream options address the output's streams, which are the
+		// source's unless the plan drops tracks.
+		out := outputIndex(plan, stream)
 		if stream.Kind == "audio" && stream.Disposition != nil {
-			var flags []string
-			for name, value := range stream.Disposition {
-				if value > 0 {
-					flags = append(flags, name)
-				}
-			}
-			sort.Strings(flags)
-			disposition := strings.Join(flags, "+")
-			if disposition == "" {
-				disposition = "0"
-			}
-			args = append(args, fmt.Sprintf("-disposition:a:%d", stream.TypeIndex), disposition)
+			args = append(args, fmt.Sprintf("-disposition:a:%d", out), dispositionFlags(stream.Disposition))
 		}
 		if stream.Kind == "audio" && stream.TargetCodec != "copy" {
 			if stream.TargetCodec != "aac" || stream.BitrateKbps < 1 {
@@ -519,22 +511,22 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 			switch {
 			case stream.HEAAC:
 				encoder = "aac_at"
-				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "4")
+				args = append(args, fmt.Sprintf("-profile:a:%d", out), "4")
 			case stream.AudioToolbox:
 				// AAC-LC of the size goal's levels: profile 2 is AAC-LC.
 				encoder = "aac_at"
-				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "2")
+				args = append(args, fmt.Sprintf("-profile:a:%d", out), "2")
 			}
-			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), encoder, fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
+			args = append(args, fmt.Sprintf("-c:a:%d", out), encoder, fmt.Sprintf("-b:a:%d", out), strconv.Itoa(stream.BitrateKbps)+"k")
 			// Source muxer bitrate/size tags no longer describe an encoded track.
-			args = append(args, clearStatisticsTags("a", stream.TypeIndex)...)
+			args = append(args, clearStatisticsTags("a", out)...)
 			if title, ok := convertedAudioTitle(stream.Title, stream.Layout, stream.Channels); ok {
-				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "title="+title)
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", out), "title="+title)
 			}
 			// Size mode flattens lossless Atmos and DTS:X to their bed; a
 			// handler still naming them would describe the old track.
 			if (execPlan.Plan.AudioMode == transcode.AudioModeCompactLossless || transcode.IsAudioLevelMode(execPlan.Plan.AudioMode)) && transcode.ObjectAudioText(stream.Handler) {
-				args = append(args, fmt.Sprintf("-metadata:s:a:%d", stream.TypeIndex), "handler_name=")
+				args = append(args, fmt.Sprintf("-metadata:s:a:%d", out), "handler_name=")
 			}
 		}
 	}
@@ -542,7 +534,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	// Subtitle streams: specify explicitly per subtitle stream index
 	for _, stream := range execPlan.Streams {
 		if stream.Kind == "subtitle" {
-			args = append(args, fmt.Sprintf("-c:s:%d", stream.TypeIndex), stream.TargetCodec)
+			out := outputIndex(plan, stream)
+			args = append(args, fmt.Sprintf("-c:s:%d", out), stream.TargetCodec)
+			if stream.Disposition != nil {
+				args = append(args, fmt.Sprintf("-disposition:s:%d", out), dispositionFlags(stream.Disposition))
+			}
 		}
 	}
 
@@ -562,4 +558,41 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	args = append(args, candidatePath)
 
 	return args, nil
+}
+
+// dispositionFlags is the -disposition value for a set of flags: the names set,
+// joined, or "0" for none (which also stops ffmpeg from marking a stream default
+// on its own).
+func dispositionFlags(disposition map[string]int) string {
+	var flags []string
+	for name, value := range disposition {
+		if value > 0 {
+			flags = append(flags, name)
+		}
+	}
+	sort.Strings(flags)
+	if len(flags) == 0 {
+		return "0"
+	}
+	return strings.Join(flags, "+")
+}
+
+// trackMaps maps the audio and subtitle streams of the output: all of them in
+// source order, or, when the plan keeps only some (Plan.Tracks), exactly those
+// by source stream index, audio then subtitles, each in source order. The
+// output's streams of a kind are then in the order of the source's.
+func trackMaps(execPlan *ExecutionPlan) []string {
+	if execPlan.Plan.Tracks == nil {
+		return []string{"-map", "0:a?", "-map", "0:s?"}
+	}
+	var audio, subtitles []string
+	for _, s := range execPlan.Streams {
+		switch s.Kind {
+		case "audio":
+			audio = append(audio, "-map", fmt.Sprintf("0:%d", s.SourceIndex))
+		case "subtitle":
+			subtitles = append(subtitles, "-map", fmt.Sprintf("0:%d", s.SourceIndex))
+		}
+	}
+	return append(audio, subtitles...)
 }

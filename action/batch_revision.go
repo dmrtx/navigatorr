@@ -172,7 +172,12 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		policy, err := modePolicyWithBudget(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget)
+		// A new goal freezes the global list of languages to keep as it is now.
+		tracks, err := trackPolicyFor(mode, trackInput{}, e.KeepLanguages())
+		if err != nil {
+			return nil, err
+		}
+		policy, err := modePolicyWithTracks(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget, tracks)
 		if err != nil {
 			return nil, err
 		}

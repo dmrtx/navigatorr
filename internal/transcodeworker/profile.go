@@ -117,11 +117,22 @@ func ValidatePlan(p *transcode.Plan) error {
 	if norm(p.AudioMode) != "copy" && norm(p.AudioMode) != "compact" && norm(p.AudioMode) != "he_aac" && norm(p.AudioMode) != transcode.AudioModeCompactLossless && !transcode.IsAudioLevelMode(norm(p.AudioMode)) {
 		return fmt.Errorf("unsupported audio mode %q (fail closed)", p.AudioMode)
 	}
-	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV3) {
+	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV3 && p.ModePolicyVersion != transcode.ModePolicyV6) {
 		return fmt.Errorf("compact_lossless audio requires size mode policy v3 (fail closed)")
 	}
-	if transcode.IsAudioLevelMode(norm(p.AudioMode)) && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV5) {
+	if transcode.IsAudioLevelMode(norm(p.AudioMode)) && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV5 && p.ModePolicyVersion != transcode.ModePolicyV6) {
 		return fmt.Errorf("%s audio requires size mode policy v5 (fail closed)", p.AudioMode)
+	}
+	// A track selection is exactly what makes a plan v6, and the subtitle
+	// actions are those of the kept subtitles only.
+	if (p.Tracks != nil) != (p.ModePolicyVersion == transcode.ModePolicyV6) || p.Tracks != nil && p.Mode != "size" && p.Mode != "compact" {
+		return fmt.Errorf("a track selection requires mode policy v6, and v6 requires a track selection (fail closed)")
+	}
+	if err := p.Tracks.Validate(); err != nil {
+		return fmt.Errorf("%w (fail closed)", err)
+	}
+	if p.Tracks != nil && len(p.Tracks.KeepAudio) == 0 {
+		return fmt.Errorf("a track selection must keep an audio stream (fail closed)")
 	}
 	if norm(p.SubtitleMode) != "preserve" {
 		return fmt.Errorf("unsupported subtitle mode %q (fail closed)", p.SubtitleMode)
@@ -286,6 +297,17 @@ func modeAudioMode(mode, version string) string {
 func modeAudioModeAllowed(mode, version, audioMode string) bool {
 	if mode == "size" && version == transcode.ModePolicyV5 {
 		return transcode.IsAudioLevelMode(audioMode)
+	}
+	// v6 extends whichever of the others the goal froze: a size plan carries
+	// v3's mode or one of v5's levels, a compact plan compact's.
+	if version == transcode.ModePolicyV6 {
+		switch mode {
+		case "size":
+			return audioMode == transcode.AudioModeCompactLossless || transcode.IsAudioLevelMode(audioMode)
+		case "compact":
+			return audioMode == "compact"
+		}
+		return false
 	}
 	return audioMode == modeAudioMode(mode, version)
 }

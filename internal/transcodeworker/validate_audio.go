@@ -132,7 +132,7 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 	if sv == nil || cv == nil || sv.StartTime == nil || cv.StartTime == nil {
 		return fmt.Errorf("audio/video start timing unavailable (fail closed, never publish)")
 	}
-	sa, ca := streamsOfKind(src.Streams, "audio"), streamsOfKind(dst.Streams, "audio")
+	sa, ca := plannedStreams(plan, src.Streams, "audio"), streamsOfKind(dst.Streams, "audio")
 	if len(sa) != len(ca) {
 		return fmt.Errorf("audio track count changed")
 	}

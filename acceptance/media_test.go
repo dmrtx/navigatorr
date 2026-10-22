@@ -36,6 +36,13 @@ type srcSpec struct {
 	hdr bool
 	// hevc makes an SDR 8-bit HEVC source.
 	hevc bool
+	// langs makes one audio track per language (ISO 639-2 tags, in this
+	// order, the first the default) from the same stereo signal; subs adds
+	// one SRT subtitle track per language and forcedSub marks the last one
+	// forced. Both leave a font attachment in the file.
+	langs     []string
+	subs      []string
+	forcedSub bool
 }
 
 // noiseAudio is the sources' stereo track: two independent channels of quiet
@@ -105,6 +112,15 @@ func (s *suite) makeSource(t *testing.T, spec srcSpec) string {
 	}
 	args := []string{"-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", pic,
 		"-f", "lavfi", "-i", noiseAudio(spec.secs)}
+	for i, lang := range spec.subs {
+		srt := filepath.Join(s.root, fmt.Sprintf(".sub-%s-%d.srt", spec.name, i))
+		body := fmt.Sprintf("1\n00:00:01,000 --> 00:00:03,000\n%s one\n\n2\n00:00:05,000 --> 00:00:07,000\n%s two\n", lang, lang)
+		if err := os.WriteFile(srt, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(srt)
+		args = append(args, "-i", srt)
+	}
 	switch {
 	case spec.hdr:
 		args = append(args, "-vf", "format=yuv420p10le", "-c:v", "libx265", "-preset", "veryfast", "-crf", "16",
@@ -129,7 +145,37 @@ func (s *suite) makeSource(t *testing.T, spec srcSpec) string {
 	default:
 		args = append(args, "-c:a", "flac", "-ac", "2")
 	}
-	args = append(args, "-map_metadata", "-1", "-map", "0:v:0", "-map", "1:a:0", raw)
+	args = append(args, "-map_metadata", "-1", "-map", "0:v:0", "-map", "1:a:0")
+	if len(spec.langs) > 0 {
+		// The same signal once per language: the first -map above is the
+		// first track, so map it again for each further one.
+		for i, lang := range spec.langs {
+			if i > 0 {
+				args = append(args, "-map", "1:a:0")
+			}
+			args = append(args, fmt.Sprintf("-metadata:s:a:%d", i), "language="+lang)
+			if i == 0 {
+				args = append(args, "-disposition:a:0", "default")
+			} else {
+				args = append(args, fmt.Sprintf("-disposition:a:%d", i), "0")
+			}
+		}
+	}
+	for i, lang := range spec.subs {
+		args = append(args, "-map", fmt.Sprintf("%d:s:0", 2+i), fmt.Sprintf("-metadata:s:s:%d", i), "language="+lang)
+		if spec.forcedSub && i == len(spec.subs)-1 {
+			args = append(args, fmt.Sprintf("-disposition:s:%d", i), "forced")
+		}
+	}
+	if len(spec.subs) > 0 {
+		font := filepath.Join(s.root, ".font-"+spec.name+".ttf")
+		if err := os.WriteFile(font, []byte(strings.Repeat("synthetic font ", 64)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(font)
+		args = append(args, "-c:s", "srt", "-attach", font, "-metadata:s:t:0", "mimetype=application/x-truetype-font", "-metadata:s:t:0", "filename=synthetic.ttf")
+	}
+	args = append(args, raw)
 	s.run(t, s.ffmpeg, args...)
 
 	if spec.untagged {
@@ -196,6 +242,7 @@ type probeStream struct {
 	ColorSpace     string            `json:"color_space"`
 	Channels       int               `json:"channels"`
 	Tags           map[string]string `json:"tags"`
+	Disposition    map[string]int    `json:"disposition"`
 }
 
 func (s *suite) probe(t *testing.T, path string) probeInfo {

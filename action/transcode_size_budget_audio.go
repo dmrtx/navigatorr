@@ -206,7 +206,8 @@ func sizeAudioOnlyLevelMatches(snapshot *ModePolicySnapshot, state map[string]an
 	}
 	policy := snapshot.Size.SizeBudget
 	original := getInt64(state, "original_size")
-	mode, _, ok := sizeBudgetAudioOnlyLevel(policy, getSourceReport(state["source_report"]), original, policy.BudgetBytes(original, siblingEvidenceOf(state)))
+	keptRep, keptBytes := keptViewOf(state, getSourceReport(state["source_report"]), original)
+	mode, _, ok := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, policy.BudgetBytes(original, siblingEvidenceOf(state)))
 	return ok && mode == plan.AudioMode
 }
 
