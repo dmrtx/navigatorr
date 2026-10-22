@@ -83,7 +83,7 @@ func (e *Engine) checkKnownAds(ctx context.Context, s podcastSession) error {
 	if s.Matches == nil || len(s.Known) == 0 {
 		return nil
 	}
-	_, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
+	_, ok := e.podcastExecutor().(transcode.PodcastAdExecutor)
 	if !ok {
 		return fmt.Errorf("ad catalog API unavailable")
 	}
@@ -126,7 +126,7 @@ func (e *Engine) PodcastAdLibrary(ctx context.Context, scope, revoke string) (po
 	if _, err := e.deps.Config.Podcasts.Policy(scope); err != nil {
 		return podcast.AdCatalog{}, err
 	}
-	client, ok := e.deps.Transcode.(transcode.PodcastAdExecutor)
+	client, ok := e.podcastExecutor().(transcode.PodcastAdExecutor)
 	if !ok {
 		return podcast.AdCatalog{}, fmt.Errorf("ad catalog API unavailable")
 	}

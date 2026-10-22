@@ -845,7 +845,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					job["replacement_action_id"] = existing
 				}
 			}
-			_, httpWorker := s.engine.Deps().Transcode.(*httpclient.HTTPExecutor)
+			_, httpWorker := s.engine.ActionWorkerExecutor(r.state).(*httpclient.HTTPExecutor)
+			if worker := operationString(r.state["worker"]); worker != "" {
+				job["worker"] = worker
+			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
 				if r.inputs["dry_run"] == true && r.inst.Status == store.ActionStatusCompleted {

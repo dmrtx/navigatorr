@@ -45,7 +45,7 @@ func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.R
 // with a nil mStore this is a no-op and the server behaves exactly as before.
 // The returned engine lets the process own its reconciler lifecycle independently
 // of MCP clients. Callers that only register tools may ignore the return value.
-func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeExec ...transcode.Executor) *action.Engine {
+func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, qbClient *qbit.Client, mStore *store.Store, transcodeWorkers ...*transcode.WorkerSet) *action.Engine {
 	if mStore == nil {
 		return nil
 	}
@@ -66,9 +66,9 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
 
-	var tc transcode.Executor
-	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
-		tc = transcodeExec[0]
+	var workers *transcode.WorkerSet
+	if len(transcodeWorkers) > 0 {
+		workers = transcodeWorkers[0]
 	}
 
 	actEngine := action.NewEngine(action.EngineDeps{
@@ -78,7 +78,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		Qbit:      qbClient,
 		Fs:        resolver,
 		Ffprobe:   ffprobe,
-		Transcode: tc,
+		Workers:   workers,
 		StartTime: time.Now(),
 	})
 	registerActionTools(s, actEngine)
@@ -88,10 +88,10 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 }
 
 // RegisterDiagnostics registers the diagnostics and action audit log tools.
-func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store, transcodeExec ...transcode.Executor) {
-	var tc transcode.Executor
-	if len(transcodeExec) > 0 && transcodeExec[0] != nil {
-		tc = transcodeExec[0]
+func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, mStore *store.Store, transcodeWorkers ...*transcode.WorkerSet) {
+	var workers *transcode.WorkerSet
+	if len(transcodeWorkers) > 0 {
+		workers = transcodeWorkers[0]
 	}
 
 	registerDiagnosticsTools(s, DiagnosticsDeps{
@@ -102,6 +102,6 @@ func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrs
 		QbClient:  qbClient,
 		SabClient: sabClient,
 		Store:     mStore,
-		Transcode: tc,
+		Workers:   workers,
 	})
 }

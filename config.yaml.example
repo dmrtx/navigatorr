@@ -156,9 +156,31 @@ transcode:
   default_action: "manual_approval"
   default_profile: "hevc-vt-balanced"
   min_savings_percent: 15.0
-  # Batch fan-out. 0 follows the worker's parallel jobs (set per node in the
+  # Batch fan-out. 0 follows the workers' parallel jobs (set per node in the
   # maintenance UI, Workers); a positive value caps each batch below that.
   max_parallel_jobs: 0
+
+  # Workers. A single worker can be set with an http: block (base_url, token or
+  # token_file, path_mappings); it is named video-worker. Several workers are
+  # listed by name instead (never both forms). Each job stays on the worker it
+  # was assigned: a new conversion goes to the ready worker with the most free
+  # video slots, the first listed on a tie. Podcast work runs on the worker
+  # marked podcast: true (default: the first), which keeps the ad catalog.
+  # A name is the worker's identity: renaming one strands its running jobs.
+  # workers:
+  #   - name: m1
+  #     base_url: "http://192.0.2.10:8097"
+  #     token_file: "/run/secrets/worker-token"
+  #     path_mappings:
+  #       - local_prefix: "/media"
+  #         remote_prefix: "/Volumes/media"
+  #   - name: m4
+  #     base_url: "http://192.0.2.11:8097"
+  #     token_file: "/run/secrets/worker-token"
+  #     max_parallel_jobs: 0   # caps the jobs assigned here; 0 follows the worker
+  #     path_mappings:
+  #       - local_prefix: "/media"
+  #         remote_prefix: "/Volumes/media"
 
   recipes:
     # Zero-config safe default. The embedded bundle currently provides:

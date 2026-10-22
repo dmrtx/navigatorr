@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
@@ -31,7 +32,7 @@ type DiagnosticsDeps struct {
 	QbClient  *qbit.Client
 	SabClient *sabnzbd.Client
 	Store     *store.Store
-	Transcode transcode.Executor
+	Workers   *transcode.WorkerSet
 }
 
 func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
@@ -55,10 +56,10 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			// cannot starve readiness. Deep diagnostics are explicitly requested
 			// and never decide whether the executor is available.
 			var workerDone chan map[string]any
-			if checkConn && d.Transcode != nil {
+			if checkConn && d.Workers.Len() > 0 {
 				workerDone = make(chan map[string]any, 1)
 				go func() {
-					workerDone <- inspectTranscodeAvailability(ctx, d.Transcode, checkDeep)
+					workerDone <- inspectWorkersAvailability(ctx, d.Workers, checkDeep)
 				}()
 			}
 
@@ -241,7 +242,7 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			// 6. Transcode executor. Execution is HTTP-only; the SSH
 			// executor has been removed.
 			var tcInfo map[string]any
-			if d.Transcode != nil {
+			if d.Workers.Len() > 0 {
 				tcInfo = map[string]any{
 					"configured": true,
 					"executor":   "http",
@@ -305,6 +306,56 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			}), nil
 		},
 	)
+}
+
+// inspectWorkersAvailability probes every worker at once, so one offline
+// worker never delays the others' results. Each worker's result is listed
+// under workers; the top level is that result for a single worker, and for
+// several: status ok when all are, can_accept_jobs when any can.
+func inspectWorkersAvailability(ctx context.Context, workers *transcode.WorkerSet, deep bool) map[string]any {
+	all := workers.All()
+	results := make([]map[string]any, len(all))
+	var wg sync.WaitGroup
+	for i, w := range all {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = inspectTranscodeAvailability(ctx, w.Executor, deep)
+		}()
+	}
+	wg.Wait()
+	list := make([]map[string]any, len(all))
+	for i, w := range all {
+		entry := map[string]any{"name": w.Name, "podcast": w.Podcast}
+		for k, v := range results[i] {
+			entry[k] = v
+		}
+		list[i] = entry
+	}
+	out := map[string]any{}
+	if len(results) == 1 {
+		for k, v := range results[0] {
+			out[k] = v
+		}
+	} else {
+		status, accept := "ok", any(false)
+		for _, r := range results {
+			if r["status"] != "ok" {
+				status = "degraded"
+			}
+			switch r["can_accept_jobs"] {
+			case true:
+				accept = true
+			case nil:
+				if accept == false {
+					accept = nil
+				}
+			}
+		}
+		out["status"], out["can_accept_jobs"] = status, accept
+	}
+	out["workers"] = list
+	return out
 }
 
 // inspectTranscodeAvailability keeps process health, submit readiness and deep

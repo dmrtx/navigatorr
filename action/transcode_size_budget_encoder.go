@@ -177,7 +177,7 @@ func sizeBudgetVideo(snapshot *ModePolicySnapshot, rep *mediainspect.DetailedRep
 // the source and the record, and reports whether the plan carries exactly that.
 func sizeBudgetPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *SizeBudgetRecord) bool {
 	policy := snapshot.Size.SizeBudget
-	if policy == nil || rec == nil || plan == nil {
+	if policy == nil || rec == nil || plan == nil || !recordWorkerMatches(rec.Worker, state) {
 		return false
 	}
 	original := getInt64(state, "original_size")

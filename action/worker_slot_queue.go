@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Worker slot queue.
@@ -58,7 +59,18 @@ const waitingForWorkerPhase = "waiting_for_worker"
 type slotWaiter struct {
 	id       string
 	parentID string
-	since    time.Time
+	// worker is the waiter's worker; each worker has its own queue.
+	worker string
+	since  time.Time
+}
+
+// slotQueueWorker is the worker whose queue an action stands in: its assigned
+// worker, video-worker for an action from before workers had names.
+func slotQueueWorker(name string) string {
+	if name == "" {
+		return transcode.DefaultWorkerName
+	}
+	return name
 }
 
 func slotTicket(state map[string]any) (time.Time, bool) {
@@ -122,7 +134,7 @@ func (e *Engine) workerSlotWaiters() ([]slotWaiter, error) {
 		if updated, err := time.Parse(time.RFC3339, row.UpdatedAt); err == nil && time.Since(updated) > slotWaiterStaleAfter {
 			continue
 		}
-		out = append(out, slotWaiter{id: row.ID, parentID: row.ParentID, since: since})
+		out = append(out, slotWaiter{id: row.ID, parentID: row.ParentID, worker: slotQueueWorker(row.Worker), since: since})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].aheadOf(out[j].since, out[j].id) })
 	return out, nil
@@ -170,16 +182,18 @@ func (e *Engine) slotWaitRecent(polledAt string, since time.Time) bool {
 }
 
 // slotQueuePosition stores and returns this action's place among the live
-// slot waiters (1 = next). Without a ticket every other waiter is ahead.
+// slot waiters for its worker (1 = next). Without a ticket every other waiter
+// is ahead.
 func (e *Engine) slotQueuePosition(ec *ExecutionContext) (int, error) {
 	waiters, err := e.workerSlotWaiters()
 	if err != nil {
 		return 0, err
 	}
 	since, ticketed := slotTicket(ec.State)
+	worker := slotQueueWorker(assignedWorker(ec.State))
 	ahead := 0
 	for _, w := range waiters {
-		if w.id == ec.InstanceID {
+		if w.id == ec.InstanceID || w.worker != worker {
 			continue
 		}
 		if !ticketed || w.aheadOf(since, ec.InstanceID) {
@@ -228,7 +242,8 @@ func clearWaitingForWorker(ec *ExecutionContext) {
 
 // foreignSlotWaiter reports whether an action outside batchID is waiting for
 // a worker slot. A batch must not start another child then: the freed slot
-// belongs to the older waiter.
+// belongs to the older waiter. Any worker's waiter counts, since the batch
+// does not know which worker its next child will be assigned.
 func (e *Engine) foreignSlotWaiter(batchID string) bool {
 	if e.deps.Store == nil {
 		return false

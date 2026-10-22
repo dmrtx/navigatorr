@@ -72,7 +72,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if fi.IsDir() {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("path %q is a directory, not a media file", cleanPath)}, nil
 	}
-	if e.deps.Transcode == nil {
+	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
 
@@ -182,10 +182,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	ephemeralProfile, ephemeralDigest, hasProfileConfig := req.ProfileConfig, req.ProfileDigest, req.HasProfileConfig
-	gateRep := coverArtGateReport(&rep, func() bool { return e.workerSupportsCoverArt(ctx) })
+	gateRep := coverArtGateReport(&rep, func() bool { return workerSupportsCoverArt(ctx, e.actionWorker(ec)) })
 	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
-		hfrSupported, err := (&hfrQualitySupport{e: e}).forSource(ctx, gateRep)
+		hfrSupported, err := (&hfrQualitySupport{e: e, worker: e.actionWorker(ec)}).forSource(ctx, gateRep)
 		if err != nil {
 			return hfrCapabilityLookupResult(err), nil
 		}
@@ -305,7 +305,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	if modeSnapshot != nil {
 		if video := rep.MainVideo(); modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10 && len(video) > 0 && video[0].BitDepth == 8 {
-			caps, err := e.deps.Transcode.Capabilities(ctx)
+			caps, err := e.actionWorker(ec).Capabilities(ctx)
 			if err != nil {
 				return workerCapabilityLookupResult(err, "size Main10"), nil
 			}

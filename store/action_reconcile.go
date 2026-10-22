@@ -84,6 +84,7 @@ type WorkerSlotWaiterRow struct {
 	WaitSince        string // worker_slot_wait_since
 	PolledAt         string // worker_slot_polled_at
 	Paused           bool
+	Worker           string // the assigned worker, '' before workers had names
 }
 
 // ListWorkerSlotWaiters returns the live transcode actions whose
@@ -97,7 +98,8 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 		COALESCE(json_extract(inputs_json, '$.parent_action_id'), json_extract(state_json, '$.parent_action_id'), ''),
 		json_extract(state_json, '$.worker_slot_wait_since'),
 		COALESCE(json_extract(state_json, '$.worker_slot_polled_at'), ''),
-		CASE WHEN json_extract(state_json, '$.paused') IN (1, 'true') THEN 1 ELSE 0 END
+		CASE WHEN json_extract(state_json, '$.paused') IN (1, 'true') THEN 1 ELSE 0 END,
+		COALESCE(json_extract(state_json, '$.worker'), '')
 		FROM action_instances
 		WHERE status IN ('pending', 'waiting_external', 'running')
 		AND action_name = 'transcode_media'
@@ -111,12 +113,77 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 	for rows.Next() {
 		var w WorkerSlotWaiterRow
 		if err := rows.Scan(&w.ID, &w.Status, &w.WaitingCondition, &w.UpdatedAt,
-			&w.ParentID, &w.WaitSince, &w.PolledAt, &w.Paused); err != nil {
+			&w.ParentID, &w.WaitSince, &w.PolledAt, &w.Paused, &w.Worker); err != nil {
 			return nil, err
 		}
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// CountActiveWorkerActions counts the unfinished actions of one kind by the
+// worker they were assigned. Actions without a worker yet are not counted.
+func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT json_extract(state_json, '$.worker'), COUNT(*)
+		FROM action_instances
+		WHERE status IN ('pending', 'waiting_external', 'running')
+		AND action_name = ?
+		AND json_valid(state_json)
+		AND json_type(state_json, '$.worker') = 'text'
+		GROUP BY 1`, actionName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
+	}
+	return out, rows.Err()
+}
+
+// AssignUnnamedWorker records worker as the worker of every worker action and
+// batch item that holds a worker job but names no worker: work started before
+// workers had names, all of it on the one worker there was. The slot settings
+// stored under legacyNode move to worker unless it has its own. It returns
+// how many rows it assigned and changes nothing once none are left.
+func (s *Store) AssignUnnamedWorker(worker, legacyNode string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE action_instances SET state_json = json_set(state_json, '$.worker', ?)
+		WHERE action_name IN ('transcode_media', 'clean_podcast_ads')
+		AND json_valid(state_json)
+		AND json_type(state_json, '$.worker') IS NULL
+		AND (COALESCE(json_extract(state_json, '$.job_id'), '') != ''
+			OR COALESCE(json_extract(state_json, '$.external_reference'), '') != ''
+			OR json_extract(state_json, '$.transcode_submitted') IN (1, 'true')
+			OR json_extract(state_json, '$.transcode_reconcile') IN (1, 'true'))`, worker)
+	if err != nil {
+		return 0, err
+	}
+	actions, _ := res.RowsAffected()
+	res, err = tx.Exec(`UPDATE transcode_batch_items SET worker = ? WHERE worker = '' AND job_id != ''`, worker)
+	if err != nil {
+		return 0, err
+	}
+	items, _ := res.RowsAffected()
+	if _, err := tx.Exec(`UPDATE worker_slot_settings SET node = ?
+		WHERE node = ? AND NOT EXISTS (SELECT 1 FROM worker_slot_settings WHERE node = ?)`, worker, legacyNode, worker); err != nil {
+		return 0, err
+	}
+	return actions + items, tx.Commit()
 }
 
 // ClaimPromotionOriginal reserves the original file for one approved promotion.

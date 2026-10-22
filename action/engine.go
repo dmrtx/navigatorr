@@ -22,12 +22,12 @@ import (
 
 // Engine manages declarative, persistent, multi-step actions.
 type Engine struct {
-	podcastCatalogMu    sync.Mutex
-	workerObservationMu sync.Mutex
-	workerObservation   transcode.WorkerObservation
-	// workerPool caches the worker's video pool that sizes batch fan-out.
-	workerPoolMu sync.Mutex
-	workerPool   workerPoolReading
+	podcastCatalogMu sync.Mutex
+	// workerStates caches each worker's observation and video pool.
+	workerStatesMu sync.Mutex
+	workerStates   map[string]*workerState
+	// bindMu serialises worker assignment, so each pick counts the last.
+	bindMu sync.Mutex
 
 	mu             sync.RWMutex
 	deps           EngineDeps
@@ -71,6 +71,9 @@ type Engine struct {
 
 // NewEngine creates a new Action Engine.
 func NewEngine(deps EngineDeps) *Engine {
+	if deps.Transcode != nil {
+		deps.Workers, deps.Transcode = transcode.SingleWorker(deps.Transcode), nil
+	}
 	e := &Engine{
 		deps:           deps,
 		templates:      make(map[string]ActionTemplate),
@@ -755,8 +758,8 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 				// Fail-safe for a partially persisted batch relation: if a worker
 				// job identity was saved but its child action ID was not, still stop
 				// the remote job rather than orphaning active work.
-				if item.JobID != "" && e.deps.Transcode != nil {
-					if cerr := e.cancelTranscodeJobConfirmed(ctx, item.JobID); cerr != nil {
+				if item.JobID != "" && e.workersConfigured() {
+					if cerr := e.cancelTranscodeJobConfirmed(ctx, e.executorFor(item.Worker), item.JobID); cerr != nil {
 						cancelErrors = append(cancelErrors, fmt.Sprintf("cancelling orphan batch job %s: %v", item.JobID, cerr))
 					}
 				}
@@ -794,10 +797,11 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 // It recovers a transcode job ID from the batch-item relation when an older or
 // partially-persisted child row does not carry job_id in its state.
 func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContext) error {
-	if e.deps.Transcode == nil || ec == nil {
+	if !e.workersConfigured() || ec == nil {
 		return nil
 	}
 	var errs []string
+	worker := assignedWorker(ec.State)
 
 	jobID := getString(ec.State, "job_id")
 	if jobID == "" {
@@ -815,10 +819,13 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 			errs = append(errs, fmt.Sprintf("recovering worker job identity: %v", err))
 		} else if item != nil {
 			jobID = item.JobID
+			if worker == "" {
+				worker = item.Worker
+			}
 		}
 	}
 	if jobID != "" && !noRemoteJob(ec, "transcode_submitted", "transcode_reconcile", transcodeRejectedKey) {
-		if err := e.cancelTranscodeJobConfirmed(ctx, jobID); err != nil {
+		if err := e.cancelTranscodeJobConfirmed(ctx, e.executorFor(worker), jobID); err != nil {
 			errs = append(errs, fmt.Sprintf("transcode %s: %v", jobID, err))
 		}
 	}
@@ -829,12 +836,13 @@ func (e *Engine) cancelRemoteActionWork(ctx context.Context, ec *ExecutionContex
 	return nil
 }
 
-// cancelTranscodeJobConfirmed sends cancel once. Only when the HTTP result is
-// transport-uncertain do we reconcile with Status before deciding whether a
-// second idempotent cancel is needed. This preserves the existing no-blind-
-// retry rule while making cancellation operationally reliable.
-func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) error {
-	err := e.deps.Transcode.Cancel(ctx, jobID)
+// cancelTranscodeJobConfirmed sends cancel once, to the job's own worker. Only
+// when the HTTP result is transport-uncertain do we reconcile with Status
+// before deciding whether a second idempotent cancel is needed. This preserves
+// the existing no-blind-retry rule while making cancellation operationally
+// reliable.
+func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, worker transcode.Executor, jobID string) error {
+	err := worker.Cancel(ctx, jobID)
 	if err == nil {
 		return nil
 	}
@@ -842,7 +850,7 @@ func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) 
 		return err
 	}
 
-	st, serr := e.deps.Transcode.Status(ctx, jobID)
+	st, serr := worker.Status(ctx, jobID)
 	if serr != nil {
 		return fmt.Errorf("cancel result uncertain (%v); status reconciliation failed: %w", err, serr)
 	}
@@ -850,7 +858,7 @@ func (e *Engine) cancelTranscodeJobConfirmed(ctx context.Context, jobID string) 
 	case transcode.StatusCancelled, transcode.StatusCompleted, transcode.StatusFailed:
 		return nil
 	case transcode.StatusQueued, transcode.StatusRunning:
-		if rerr := e.deps.Transcode.Cancel(ctx, jobID); rerr != nil {
+		if rerr := worker.Cancel(ctx, jobID); rerr != nil {
 			return fmt.Errorf("cancel result uncertain; worker still reports %s and confirmed retry failed: %w", st.Status, rerr)
 		}
 		return nil
@@ -902,7 +910,11 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		}
 
 		start := time.Now()
-		res, err := step.Run(ctx, ec)
+		res, waiting := e.ensureWorkerAssigned(ctx, ec)
+		var err error
+		if !waiting {
+			res, err = step.Run(ctx, ec)
+		}
 		inst.InputsJSON = toJSON(ec.Inputs)
 		durationMs := time.Since(start).Milliseconds()
 

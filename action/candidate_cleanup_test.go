@@ -497,7 +497,7 @@ func TestLeftoverCandidateListingIsReadOnlyAndOwnershipBased(t *testing.T) {
 }
 
 // discardEngine's worker reports every job completed unless a test swaps
-// e.deps.Transcode.
+// e.deps.Workers.
 func discardEngine(t *testing.T, st *store.Store, root string) *Engine {
 	t.Helper()
 	resolver, err := fsop.NewResolver([]string{root}, []string{root})
@@ -817,9 +817,9 @@ func TestDiscardLeftoverCandidateAsksTheWorker(t *testing.T) {
 			st := setupTestStore(t)
 			e := discardEngine(t, st, root)
 			mock := &mockTranscodeExecutor{statusFunc: tc.worker}
-			e.deps.Transcode = mock
+			e.deps.Workers = transcode.SingleWorker(mock)
 			if tc.noWorker {
-				e.deps.Transcode = nil
+				e.deps.Workers = nil
 			}
 			original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
 			writeCandidateFile(t, original, "original")
@@ -879,7 +879,7 @@ func TestDiscardAfterAnUnconfirmedCancelWaitsForTheWorker(t *testing.T) {
 			return transcode.JobStatus{ID: jobID, Status: workerStatus}, nil
 		},
 	}
-	e.deps.Transcode = mock
+	e.deps.Workers = transcode.SingleWorker(mock)
 	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
 	writeCandidateFile(t, original, "original")
 	candidate := seedCandidateAttempt(t, st, "attempt", StatusWaitingExternal, original, "job-attempt", nil, nil)

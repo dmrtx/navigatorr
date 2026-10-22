@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // errCoverArtWorker is returned wherever a source with cover art would reach
@@ -12,11 +13,8 @@ const errCoverArtWorker = "worker does not keep cover art out of the video encod
 
 // workerSupportsCoverArt reports whether the worker advertises the cover_art
 // capability. Any lookup failure counts as unsupported (fail closed).
-func (e *Engine) workerSupportsCoverArt(ctx context.Context) bool {
-	if e.deps.Transcode == nil {
-		return false
-	}
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+func workerSupportsCoverArt(ctx context.Context, worker transcode.Executor) bool {
+	caps, err := worker.Capabilities(ctx)
 	return err == nil && caps.CoverArt
 }
 
@@ -47,13 +45,17 @@ func coverArtGateReport(rep *mediainspect.DetailedReport, supported func() bool)
 	return &legacy
 }
 
-// cachedCoverArtSupport asks the worker at most once, for loops over many
-// sources.
+// cachedCoverArtSupport asks the workers at most once, for loops over many
+// sources before any of them is assigned a worker: every configured worker
+// must support cover art, since any of them may be assigned the file.
 func (e *Engine) cachedCoverArtSupport(ctx context.Context) func() bool {
 	asked, supported := false, false
 	return func() bool {
 		if !asked {
-			asked, supported = true, e.workerSupportsCoverArt(ctx)
+			asked, supported = true, e.workersConfigured()
+			for _, w := range e.deps.Workers.All() {
+				supported = supported && workerSupportsCoverArt(ctx, w.Executor)
+			}
 		}
 		return supported
 	}

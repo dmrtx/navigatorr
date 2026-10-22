@@ -72,7 +72,7 @@ func TestHFRQualitySupportAsksOnlyForHFRAndReturnsLookupErrors(t *testing.T) {
 		calls++
 		return hfrModeCapabilities(), nil
 	}}
-	h := &hfrQualitySupport{e: &Engine{deps: EngineDeps{Transcode: mock}}}
+	h := &hfrQualitySupport{e: NewEngine(EngineDeps{Transcode: mock})}
 	at := func(fps float64) *mediainspect.DetailedReport {
 		return &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: fps}}}
 	}
@@ -96,21 +96,21 @@ func TestHFRQualitySupportAsksOnlyForHFRAndReturnsLookupErrors(t *testing.T) {
 		t.Fatalf("HFR source with cover art not recognised: %v %v", ok, err)
 	}
 
-	old := &hfrQualitySupport{e: &Engine{deps: EngineDeps{Transcode: &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+	old := &hfrQualitySupport{e: NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
 		return modeTestCapabilities(), nil
-	}}}}}
+	}}})}
 	if ok, err := ask(old, 50); ok || err != nil {
 		t.Fatalf("worker without decimation capability admitted HFR: %v %v", ok, err)
 	}
 
 	failures := 1
-	flaky := &hfrQualitySupport{e: &Engine{deps: EngineDeps{Transcode: &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+	flaky := &hfrQualitySupport{e: NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
 		if failures > 0 {
 			failures--
 			return transcode.WorkerCapabilities{}, &httpclient.UncertainError{Op: "capabilities", Err: errors.New("timeout")}
 		}
 		return hfrModeCapabilities(), nil
-	}}}}}
+	}}})}
 	if ok, err := ask(flaky, 50); ok || err == nil {
 		t.Fatalf("lookup failure must be returned, not answered: %v %v", ok, err)
 	}

@@ -70,10 +70,14 @@ transcode:
 	if cfg.Transcode.Executor != "http" {
 		t.Fatalf("executor=%q", cfg.Transcode.Executor)
 	}
-	built, err := cfg.Transcode.BuildHTTPExecutorConfig()
+	workers, err := cfg.Transcode.BuildWorkerConfigs()
 	if err != nil {
-		t.Fatalf("BuildHTTPExecutorConfig: %v", err)
+		t.Fatalf("BuildWorkerConfigs: %v", err)
 	}
+	if len(workers) != 1 || workers[0].Name != "video-worker" || !workers[0].Podcast {
+		t.Fatalf("the single http block is one podcast worker named video-worker: %+v", workers)
+	}
+	built := workers[0].HTTP
 	if built.BaseURL != "http://192.0.2.10:8097" {
 		t.Errorf("base=%q", built.BaseURL)
 	}
@@ -158,7 +162,7 @@ transcode:
 	if cfg.Transcode.Executor != "http" {
 		t.Fatalf("omitted executor must default to http, got %q", cfg.Transcode.Executor)
 	}
-	if _, err := cfg.Transcode.BuildHTTPExecutorConfig(); err != nil {
+	if _, err := cfg.Transcode.BuildWorkerConfigs(); err != nil {
 		t.Fatalf("defaulted http executor must build: %v", err)
 	}
 }

@@ -612,8 +612,13 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 // source actually needs decimation. A failed lookup is returned, never
 // cached as "unsupported": callers wait on retryable errors and fail closed
 // on the rest.
+//
+// worker is the action's own worker. Without one (a batch classifying its
+// files before any child is assigned a worker) every configured worker must
+// support it, since a child may be assigned any of them.
 type hfrQualitySupport struct {
 	e         *Engine
+	worker    transcode.Executor
 	checked   bool
 	supported bool
 }
@@ -632,15 +637,26 @@ func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.Det
 	if h.checked {
 		return h.supported, nil
 	}
-	if h.e == nil || h.e.deps.Transcode == nil {
+	if h.e == nil || !h.e.workersConfigured() {
 		h.checked = true
 		return false, nil
 	}
-	caps, err := h.e.deps.Transcode.Capabilities(ctx)
-	if err != nil {
-		return false, err
+	workers := []transcode.Executor{h.worker}
+	if h.worker == nil {
+		workers = workers[:0]
+		for _, w := range h.e.deps.Workers.All() {
+			workers = append(workers, w.Executor)
+		}
 	}
-	h.checked, h.supported = true, caps.SupportsHFRQuality()
+	supported := true
+	for _, w := range workers {
+		caps, err := w.Capabilities(ctx)
+		if err != nil {
+			return false, err
+		}
+		supported = supported && caps.SupportsHFRQuality()
+	}
+	h.checked, h.supported = true, supported
 	return h.supported, nil
 }
 

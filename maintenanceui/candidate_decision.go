@@ -107,7 +107,8 @@ func (s *Server) candidateDecision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Decision == "accept_loss" {
-		if err := s.engine.CheckWorkerAdmission(r.Context()); err != nil {
+		inst, _ := s.engine.Deps().Store.GetActionInstance(body.ID)
+		if err := s.engine.CheckInstanceWorkerAdmission(r.Context(), inst); err != nil {
 			fail(w, 409, err.Error())
 			return
 		}

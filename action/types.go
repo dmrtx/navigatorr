@@ -146,12 +146,18 @@ type ActionResult struct {
 
 // EngineDeps bundles dependencies needed by the Action Engine
 type EngineDeps struct {
-	Store     *store.Store
-	Config    *config.Config
-	Registry  *arrservice.Registry
-	Qbit      *qbit.Client
-	Fs        *fsop.Resolver
-	Ffprobe   string
+	Store    *store.Store
+	Config   *config.Config
+	Registry *arrservice.Registry
+	Qbit     *qbit.Client
+	Fs       *fsop.Resolver
+	Ffprobe  string
+	// Workers are the transcode workers, by name. Every worker call goes to
+	// the worker an action was assigned (see worker_affinity.go).
+	Workers *transcode.WorkerSet
+	// Transcode is shorthand for one worker named
+	// transcode.DefaultWorkerName. When set, NewEngine replaces Workers with
+	// it and clears it, so the engine itself only ever reads Workers.
 	Transcode transcode.Executor
 	StartTime time.Time
 	// Now and ReconcileInterval are optional clock/scheduling overrides.

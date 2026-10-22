@@ -107,11 +107,11 @@ func TestWorkerSupportsCoverArtFailsClosed(t *testing.T) {
 		}, false},
 	} {
 		e := NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{capabilitiesFunc: tc.caps}})
-		if got := e.workerSupportsCoverArt(context.Background()); got != tc.want {
+		if got := e.cachedCoverArtSupport(context.Background())(); got != tc.want {
 			t.Fatalf("%s: got %v", tc.name, got)
 		}
 	}
-	if NewEngine(EngineDeps{}).workerSupportsCoverArt(context.Background()) {
+	if NewEngine(EngineDeps{}).cachedCoverArtSupport(context.Background())() {
 		t.Fatal("no worker configured but cover art supported")
 	}
 	calls := 0

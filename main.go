@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -103,10 +104,10 @@ func main() {
 		internal.Logf("sabnzbd client configured: %s", cfg.SABnzbd.URL)
 	}
 
-	// Build the automatic transcode executor. Only the HTTP daemon transport
-	// is valid; the SSH executor has been removed.
+	// Build the transcode workers. Only the HTTP daemon transport is valid;
+	// the SSH executor has been removed.
 	// Construction failures are fatal rather than logged-and-ignored.
-	transcodeExecutor, err := buildAutomaticTranscodeExecutor(cfg.Transcode)
+	transcodeWorkers, err := buildTranscodeWorkers(cfg.Transcode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -181,8 +182,14 @@ func main() {
 
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
-	actEngine := tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeExecutor)
+	actEngine := tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeWorkers)
 	if actEngine != nil {
+		// Jobs from before workers had names keep their worker; this runs
+		// before anything polls them.
+		if err := actEngine.AssignEarlierWorkerActions(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		reconcileCtx, stopReconciler := context.WithCancel(context.Background())
 		reconcilerDone := actEngine.StartReconciler(reconcileCtx)
 		// Join before the deferred database close. Polling belongs to the
@@ -192,7 +199,7 @@ func main() {
 			<-reconcilerDone
 		}()
 	}
-	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeExecutor)
+	tools.RegisterDiagnostics(s, cfg, registry, specStore, txClient, qbClient, sabClient, mStore, transcodeWorkers)
 	var webUI *maintenanceui.Server
 	if cfg.Web.Enabled {
 		webUI, err = maintenanceui.New(cfg, registry, actEngine, s)
@@ -261,27 +268,36 @@ func main() {
 	}
 }
 
-// buildAutomaticTranscodeExecutor constructs the executor used for automatic
-// (agent-initiated) transcode execution. Only the HTTP daemon transport is
-// valid; the SSH executor has been removed. It fails closed on
-// blank or unknown executor values and never falls back between transports.
-func buildAutomaticTranscodeExecutor(tc config.TranscodeConfig) (transcode.Executor, error) {
+// buildTranscodeWorkers constructs the workers used for automatic
+// (agent-initiated) transcode execution, one executor per configured worker.
+// Only the HTTP daemon transport is valid; the SSH executor has been removed.
+// It fails closed on blank or unknown executor values and never falls back
+// between transports.
+func buildTranscodeWorkers(tc config.TranscodeConfig) (*transcode.WorkerSet, error) {
 	if !tc.Enabled {
 		return nil, nil
 	}
 
 	switch strings.ToLower(strings.TrimSpace(tc.Executor)) {
 	case "http":
-		httpCfg, err := tc.BuildHTTPExecutorConfig()
+		configs, err := tc.BuildWorkerConfigs()
 		if err != nil {
-			return nil, fmt.Errorf("automatic transcode executor: http configuration: %w", err)
+			return nil, fmt.Errorf("transcode workers: %w", err)
 		}
-		exec, err := httpclient.NewHTTPExecutor(httpCfg)
-		if err != nil {
-			return nil, fmt.Errorf("automatic transcode executor: http executor: %w", err)
+		workers := make([]transcode.NamedWorker, 0, len(configs))
+		for _, wc := range configs {
+			exec, err := httpclient.NewHTTPExecutor(wc.HTTP)
+			if err != nil {
+				return nil, fmt.Errorf("transcode worker %q: http executor: %w", wc.Name, err)
+			}
+			address := ""
+			if u, err := url.Parse(exec.BaseURL()); err == nil {
+				address = u.Host
+			}
+			internal.Logf("transcode worker configured: %s http base=%s", wc.Name, exec.BaseURL())
+			workers = append(workers, transcode.NamedWorker{Name: wc.Name, Executor: exec, Address: address, Podcast: wc.Podcast, MaxParallelJobs: wc.MaxParallelJobs})
 		}
-		internal.Logf("automatic transcode executor configured: http base=%s", exec.BaseURL())
-		return exec, nil
+		return transcode.NewWorkerSet(workers)
 	case "ssh":
 		return nil, fmt.Errorf("automatic transcode execution over ssh is retired and the ssh executor was removed; configure executor=http")
 	case "":

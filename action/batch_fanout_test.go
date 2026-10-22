@@ -36,7 +36,7 @@ func TestBatchFanOutFollowsTheWorkerPoolUnderTheConfiguredCap(t *testing.T) {
 	worker := &slotReportingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}, slots: sharedSlots(3)}
 	fanOut := func(cap int) int {
 		e := NewEngine(EngineDeps{Transcode: worker, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: cap}}})
-		return e.batchMaxParallel(context.Background())
+		return e.batchAvailableSlots(context.Background(), nil, 0)
 	}
 	if got := fanOut(0); got != 3 {
 		t.Errorf("0 follows the worker's 3 parallel jobs: %d", got)
@@ -61,7 +61,7 @@ func TestBatchFanOutFollowsTheWorkerPoolUnderTheConfiguredCap(t *testing.T) {
 		t.Errorf("no pool keeps the configured cap: %d", got)
 	}
 	e := NewEngine(EngineDeps{Transcode: &mockTranscodeExecutor{}, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 2}}})
-	if got := e.batchMaxParallel(context.Background()); got != 2 {
+	if got := e.batchAvailableSlots(context.Background(), nil, 0); got != 2 {
 		t.Errorf("an executor without slots keeps the configured cap: %d", got)
 	}
 }
@@ -70,21 +70,21 @@ func TestBatchFanOutCachesTheWorkerPoolAndKeepsItThroughAFailedRead(t *testing.T
 	worker := &slotReportingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}, slots: sharedSlots(2)}
 	e := NewEngine(EngineDeps{Transcode: worker, Config: &config.Config{}})
 	ctx := context.Background()
-	if got := e.batchMaxParallel(ctx); got != 2 {
+	if got := e.batchAvailableSlots(ctx, nil, 0); got != 2 {
 		t.Fatalf("first read: %d", got)
 	}
-	e.batchMaxParallel(ctx)
+	e.batchAvailableSlots(ctx, nil, 0)
 	if worker.reads != 1 {
 		t.Fatalf("each batch step must not ask the worker: %d reads", worker.reads)
 	}
 	worker.slots = sharedSlots(4)
-	e.workerPool.at = time.Now().Add(-time.Hour)
-	if got := e.batchMaxParallel(ctx); got != 4 {
+	e.workerStateFor(transcode.DefaultWorkerName).pool.at = time.Now().Add(-time.Hour)
+	if got := e.batchAvailableSlots(ctx, nil, 0); got != 4 {
 		t.Fatalf("a raised ceiling is picked up once the cache expires: %d", got)
 	}
 	worker.err = errors.New("connection refused")
-	e.workerPool.at = time.Now().Add(-time.Hour)
-	if got := e.batchMaxParallel(ctx); got != 4 {
+	e.workerStateFor(transcode.DefaultWorkerName).pool.at = time.Now().Add(-time.Hour)
+	if got := e.batchAvailableSlots(ctx, nil, 0); got != 4 {
 		t.Fatalf("an unreachable worker keeps the last pool it reported: %d", got)
 	}
 }

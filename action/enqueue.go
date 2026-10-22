@@ -47,7 +47,7 @@ func (e *Engine) EnqueueWorker(ctx context.Context, name string, inputs map[stri
 			return nil, err
 		}
 	}
-	if err := e.CheckWorkerAdmission(ctx); err != nil {
+	if err := e.CheckWorkerAdmissionFor(ctx, name); err != nil {
 		return nil, err
 	}
 	return e.Enqueue(ctx, name, inputs, key)

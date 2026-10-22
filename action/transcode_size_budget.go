@@ -346,6 +346,9 @@ type SizeBudgetRecord struct {
 	// Rung is the VideoToolbox ladder step being encoded (see
 	// transcode_size_budget_ladder.go); zero, and omitted, otherwise.
 	Rung int `json:"vt_rung,omitempty"`
+	// Worker is the worker the ladder was planned for: its rungs follow that
+	// worker's encoders. Empty on records from before workers had names.
+	Worker string `json:"worker,omitempty"`
 
 	// Set after the encode.
 	Outcome        string               `json:"outcome,omitempty"`

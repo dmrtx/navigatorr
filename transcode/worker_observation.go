@@ -30,6 +30,9 @@ type SchedulerObservation struct {
 }
 type WorkerObservation struct {
 	SchedulerObservation
+	// Name is the worker observed; empty on the summary of several workers.
+	Name       string    `json:"name,omitempty"`
+	Podcast    bool      `json:"podcast,omitempty"`
 	Configured bool      `json:"configured"`
 	Reachable  bool      `json:"reachable"`
 	Ready      bool      `json:"ready"`
@@ -38,6 +41,9 @@ type WorkerObservation struct {
 	// AdmissionNote states what the readiness result means for job
 	// submission when the deep checks failed or did not finish.
 	AdmissionNote string `json:"admission_note,omitempty"`
+	// Workers is each configured worker's own observation, in config order.
+	// The fields above summarise them: reachable and ready when any worker is.
+	Workers []WorkerObservation `json:"workers,omitempty"`
 }
 
 // Admission notes are shared by diagnostics and the worker observation, so

@@ -219,6 +219,16 @@ type QualityLadderRecord struct {
 	// RetryWithoutHardware is set when every VideoToolbox rung missed the
 	// quality limits: the file may be run again with the media engine off.
 	RetryWithoutHardware bool `json:"retry_without_hardware,omitempty"`
+	// Worker is the worker the ladder was planned for. Empty on records from
+	// before workers had names.
+	Worker string `json:"worker,omitempty"`
+}
+
+// recordWorkerMatches reports whether a ladder planned for worker may run on
+// the action's worker: the same one, or a record from before workers had
+// names. A record planned for another worker is never run.
+func recordWorkerMatches(worker string, state map[string]any) bool {
+	return worker == "" || worker == assignedWorker(state)
 }
 
 // ladderRecipe is the ladder the record runs: the frozen recipe, or its
@@ -342,7 +352,7 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 		return StepResult{}, false
 	}
 	r := snapshot.Recipe
-	caps, err := e.deps.Transcode.Capabilities(ctx)
+	caps, err := e.actionWorker(ec).Capabilities(ctx)
 	if err != nil {
 		return workerCapabilityLookupResult(err, "goal encoder"), true
 	}
@@ -380,7 +390,7 @@ func (e *Engine) startQualityLadder(ctx context.Context, ec *ExecutionContext, c
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the first encode of the goal: %v", err)}, true
 	}
-	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding, Choice: choice}
+	rec := &QualityLadderRecord{VideoCodec: r.VideoCodec, Preset: r.Preset, Values: slices.Clone(r.QualityValues), Outcome: QualityLadderEncoding, Choice: choice, Worker: assignedWorker(ec.State)}
 	rec.Message = qualityLadderStartMessage(rec)
 	if choice != nil {
 		rec.Message = choice.Message + " " + rec.Message
@@ -568,7 +578,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 // and final validation pinned to the stored request.
 func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *QualityLadderRecord) bool {
 	r := ladderRecipe(snapshot, rec)
-	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !slices.Equal(rec.Values, r.QualityValues) {
+	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || !recordWorkerMatches(rec.Worker, state) || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !slices.Equal(rec.Values, r.QualityValues) {
 		return false
 	}
 	if plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != 0 || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != getString(state, "benchmark_request_digest") {

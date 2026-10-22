@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 12
+const SchemaVersion = 13
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -355,6 +355,11 @@ var migrations = []migration{
 	}},
 	{version: 12, statements: []string{
 		`ALTER TABLE worker_slot_settings ADD COLUMN ceiling INTEGER NOT NULL DEFAULT 0`,
+	}},
+	{version: 13, statements: []string{
+		// The worker a batch item's child was assigned. '' on earlier rows,
+		// which belong to video-worker (see action/worker_affinity.go).
+		`ALTER TABLE transcode_batch_items ADD COLUMN worker TEXT NOT NULL DEFAULT ''`,
 	}},
 }
 
