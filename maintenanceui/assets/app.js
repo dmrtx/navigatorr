@@ -2776,7 +2776,7 @@ function replacementStepText(member) {
     case "swap": return "Swapping in the new file";
     case "final_check": return "Checking the new file";
     case "done": return `Done${freed}`;
-    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure?.original_intact ? " · original kept" : ""}`;
+    case "failed": return `Stopped${member.failure ? `: ${member.failure.reason}` : ""}${member.failure ? (member.failure.original_intact ? " · original kept" : " · original in Recovery") : ""}`;
     default: return "Waiting";
   }
 }
@@ -2788,7 +2788,9 @@ function replacementHeadline(job) {
   if (r.failed > 0) {
     const failures = (r.members || []).filter((m) => m.failure).map((m) => m.failure);
     const reasons = [...new Set(failures.map((f) => f.reason))];
-    const kept = failures.length && failures.every((f) => f.original_intact) ? (failures.length === 1 ? " · original kept" : " · originals kept") : "";
+    // "Kept" is only said when every failure stopped before anything touched the
+    // original; otherwise the original is safe in its recovery copy.
+    const kept = !failures.length ? "" : failures.every((f) => f.original_intact) ? (failures.length === 1 ? " · original kept" : " · originals kept") : failures.every((f) => !f.original_intact) ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · see Recovery";
     if (!settled) return `Replacing ${fileCount(r.total)} · ${r.failed} failed`;
     return `${r.done} of ${r.total} replaced · ${r.failed} failed${reasons.length === 1 ? `: ${reasons[0]}` : ""}${kept}`;
   }
@@ -3920,7 +3922,7 @@ function jobControls(job, detail = false) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode")
       add("Choose a goal", () => openGoalForm(job.source_path));
-    else add("Retry", () => jobControl(job.id, "action_retry"));
+    else if (!(job.replacement?.failed > 0)) add("Retry", () => jobControl(job.id, "action_retry")); // failed replacements are retried per file below
   }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
@@ -5221,7 +5223,10 @@ async function refreshDetail() {
       technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
       summary.append(technical);
     }
-    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job));
+    // An approved replacement says replaced and failed in its own headline; a chip
+    // of completed encodes beside "1 failed" would contradict it, so only the
+    // other counts (skipped, rejected, ...) stay.
+    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job), job.replacement?.approved ? ["completed", "failed"] : []);
     const where = whereBlock(job.where);
     if (where) summary.append(where);
     if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
@@ -5299,21 +5304,18 @@ async function replaceBatchFile(batchID, childID) {
   if (!job || job.parent_action_id !== batchID || !job.candidate_ready || job.replacement_action_id) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
   await prepareReplacement(job);
 }
-// Tries a failed file's replacement again. The server re-checks it against the
-// plan that was approved and does not encode again; the other files are not
-// touched.
-async function retryFileReplacement(item) {
-  const name = item.display_label || (item.file_path || "").split("/").pop();
-  await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: `Retry replacement of ${name}`, verb: "Retrying replacement", failure: "Retry failed"}});
+// What a replacement Retry does. Retrying through the batch re-runs every failed
+// file that stopped before approval, so the button says how many; a file's own
+// retry re-runs just that file.
+function retryReplacementLabel(item, batchID, name) {
+  const count = item.retry_action_id === batchID ? state.detailJob?.replacement?.batch_retry_count || 0 : 0;
+  return count > 1 ? {button: `Retry ${count} failed replacements`, confirm: `Retry ${count} failed replacements`} : {button: "Retry replacement", confirm: `Retry replacement of ${name}`};
 }
-// Keeps a failed file's original and discards its candidate. The server offers
-// this only when it can (item.can_keep_original). The request names the file
-// and quotes the plan's digest, as the body of a batch-candidates request:
-// {id, item_key, decision: "keep_original", digest}.
-async function keepFileOriginal(batchID, item) {
-  const plan = await readBatchPlan(batchID);
-  if (!plan.prepared) throw new Error("The replacement plan is no longer available. Refresh the batch.");
-  await commandRequest("batch-candidates", {id: batchID, item_key: item.item_key, decision: "keep_original", digest: plan.digest}, undefined, {label: "Keep original", verb: "Keeping the original", failure: "Decision failed"});
+// Tries a failed file's replacement again. The server re-checks it against the
+// plan that was approved and does not encode again.
+async function retryFileReplacement(item, batchID) {
+  const name = item.display_label || (item.file_path || "").split("/").pop();
+  await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
 }
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
@@ -5345,7 +5347,7 @@ async function loadBatchItems(id, revision) {
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
     const add = (label, fn, {navigation = false, target = id} = {}) => {
-      const control = button(label, fn, label === "Replace file" || label === "Retry replacement" ? "primary" : "");
+      const control = button(label, fn, label === "Replace file" ? "primary" : "");
       control.dataset.jobControl = target;
       control.dataset.batchItemKey = item.item_key;
       if (navigation) control.dataset.navigation = "true";
@@ -5356,18 +5358,17 @@ async function loadBatchItems(id, revision) {
     if (failure) {
       const card = node("div", "", "replacement-failure");
       card.setAttribute("role", "group");
-      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", failure.original_intact ? "Your original file is intact." : "The original was moved to a recovery copy. Check Recovery before trying again.", "metadata"));
+      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", failure.original_intact ? "Your original file is intact." : "Your original is safe in its recovery copy. Check Recovery before trying again.", "metadata"));
       const options = node("div", "", "batch-file-actions");
       const choose = (label, fn, opts = {}) => {
-        const control = button(label, fn, label === "Retry replacement" ? "primary" : "");
+        const control = button(label, fn, opts.primary ? "primary" : "");
         control.dataset.jobControl = opts.target || id;
         control.dataset.batchItemKey = item.item_key;
         if (opts.navigation) control.dataset.navigation = "true";
         control.disabled = jobControlDisabled(control);
         options.append(control);
       };
-      if (item.retry_action_id) choose("Retry replacement", () => retryFileReplacement(item), {target: item.retry_action_id});
-      if (item.can_keep_original) choose("Keep original", () => keepFileOriginal(id, item));
+      if (item.retry_action_id) choose(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
       if (item.replacement_action_id) choose("View details", () => openJob(item.replacement_action_id), {navigation: true});
       card.append(options);
       if (failure.detail) {
@@ -5516,14 +5517,14 @@ async function loadDetail() {
   );
 }
 
-function renderBatchCounts(container, batch) {
+function renderBatchCounts(container, batch, omit = []) {
   const counts = node("div", "", "batch-counts");
   if (batch.policy > 0) counts.append(statusBadge(`${batch.policy} Below minimum savings`, "neutral"));
   if (batch.rejected > 0) counts.append(statusBadge(`${batch.rejected} Rejected`, "rejected"));
   for (const [key, label, status] of [["completed","Completed","completed"],["running","Active","running"],["queued","Queued","queued"],["waiting_for_slot","Waiting for slot","queued"],["waiting_decision","Needs decision","waiting_decision"],["review","Needs review","review"],["failed","Failed","failed"],["skip","Skipped","skip"],["cancelled","Cancelled","cancelled"]]) {
-    if (batch[key] > 0) counts.append(statusBadge(`${batch[key]} ${label}`, status));
+    if (batch[key] > 0 && !omit.includes(key)) counts.append(statusBadge(`${batch[key]} ${label}`, status));
   }
-  container.append(counts);
+  if (counts.children.length) container.append(counts);
 }
 // The steps as the job dialog shows them, with batch and rejected-candidate
 // outcomes folded into the stored stage that reports them.

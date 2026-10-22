@@ -133,29 +133,73 @@ type replacementFailure struct {
 	OriginalIntact bool   `json:"original_intact"`
 }
 
-func failureOf(r operationRecord) *replacementFailure {
-	detail := batchReasonText(r.inst.ErrorJSON, true)
+// promotionStep is the index of a named step of the replacement workflow, or
+// -1 when the template is not known.
+func (s *Server) promotionStep(name string) int {
+	tmpl, ok := s.engine.GetTemplate("promote_transcode_candidate")
+	if !ok {
+		return -1
+	}
+	for i, step := range tmpl.Steps {
+		if step.Name == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// originalIntact says whether a replacement that stopped left the original
+// where it was. It is true only while the replacement had not gone past
+// preserve_original, which only copies, and none of the markers that something
+// was moved, published or removed is set. A same-name publish renames the
+// candidate over the original without setting any of the older flags, so the
+// step and the publish markers are what count. Anything else is treated as
+// changed: the original is then in its recovery copy.
+func (s *Server) originalIntact(r operationRecord) bool {
 	p := operationMap(operationValue(r, "promotion"))
-	// The original is still where it was until the library file is removed or
-	// the original is moved into the recovery directory.
-	intact := p == nil || (p["old_removed"] != true && p["moved_aside"] != true && operationString(p["delete_sent_at"]) == "")
+	if p == nil {
+		return true
+	}
+	preserve := s.promotionStep("preserve_original")
+	if preserve < 0 || r.inst.CurrentStep > preserve {
+		return false
+	}
+	if p["old_removed"] == true || p["moved_aside"] == true || operationString(p["delete_sent_at"]) != "" || operationString(p["move_aside_started_at"]) != "" {
+		return false
+	}
+	return r.state["filesystem_publish_started"] != true && r.state["filesystem_published"] != true
+}
+
+func (s *Server) failureOf(r operationRecord) *replacementFailure {
+	detail := batchReasonText(r.inst.ErrorJSON, true)
 	reason := plainReplacementReason(detail)
 	if r.inst.Status == store.ActionStatusCancelled {
 		reason = "replacement was cancelled"
 	}
-	return &replacementFailure{Reason: reason, Detail: detail, OriginalIntact: intact}
+	return &replacementFailure{Reason: reason, Detail: detail, OriginalIntact: s.originalIntact(r)}
 }
 
-// replacementRetryTarget names the action whose Retry re-runs a failed
-// replacement. It is always the failed batch: the batch resumes at its
-// promotion step, reuses the approved plan and retries only the failed files
-// after re-checking them against that plan. A file's own promotion refuses a
-// direct retry. Nothing is encoded again and no worker is needed.
-func replacementRetryTarget(batch, promotion store.ActionInstance) string {
+// replacementRetryTarget names the action whose Retry can re-run a failed
+// replacement, or "" when none can. It follows the engine's retry guard:
+//   - A replacement that stopped at or before approve_promotion belongs to its
+//     failed batch, which refuses a direct retry. Retrying the batch resumes it
+//     at its replacement step without encoding, reuses the approved plan and
+//     retries every replacement of the batch that is in that state.
+//   - A replacement that stopped later is retried on its own.
+//
+// A batch that has not failed has nothing to retry yet.
+func (s *Server) replacementRetryTarget(batch, promotion store.ActionInstance) string {
 	if promotion.Status != store.ActionStatusFailed || batch.Status != store.ActionStatusFailed {
 		return ""
 	}
-	return batch.ID
+	approve := s.promotionStep("approve_promotion")
+	if approve < 0 {
+		return ""
+	}
+	if promotion.CurrentStep <= approve {
+		return batch.ID
+	}
+	return promotion.ID
 }
 
 // batchPromotionFailure finds a file's failure in the batch's own promotion
@@ -223,9 +267,11 @@ type replacementProgress struct {
 	Failed   int  `json:"failed"`
 	// FreesBytes is what the whole plan frees once replaced; FreedBytes is what
 	// the finished files have freed so far.
-	FreesBytes int64                   `json:"frees_bytes,omitempty"`
-	FreedBytes int64                   `json:"freed_bytes,omitempty"`
-	Members    []replacementMemberView `json:"members"`
+	FreesBytes int64 `json:"frees_bytes,omitempty"`
+	FreedBytes int64 `json:"freed_bytes,omitempty"`
+	// BatchRetryCount is how many failed files one Retry of the batch re-runs.
+	BatchRetryCount int                     `json:"batch_retry_count,omitempty"`
+	Members         []replacementMemberView `json:"members"`
 }
 
 // batchReplacementProgress is nil when the batch has no prepared plan.
@@ -259,7 +305,10 @@ func (s *Server) batchReplacementProgress(batch operationRecord, byID map[string
 					}
 				case phaseFailed:
 					out.Failed++
-					view.Failure = failureOf(pr)
+					view.Failure = s.failureOf(pr)
+					if s.replacementRetryTarget(batch.inst, pr.inst) == batch.inst.ID {
+						out.BatchRetryCount++
+					}
 				}
 			}
 		}

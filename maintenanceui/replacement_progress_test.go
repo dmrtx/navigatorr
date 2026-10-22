@@ -8,20 +8,72 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-func TestReplacementRetryTargetIsAlwaysTheFailedBatch(t *testing.T) {
-	failedBatch := store.ActionInstance{ID: "batch-a", Status: store.ActionStatusFailed}
-	for _, step := range []int{0, 3} {
-		failedMember := store.ActionInstance{ID: "promotion-a", Status: store.ActionStatusFailed, CurrentStep: step}
-		if got := replacementRetryTarget(failedBatch, failedMember); got != "batch-a" {
-			t.Fatalf("step %d: a member's retry must go through the batch, got %q", step, got)
+// The target follows the engine's retry guard: a replacement that stopped at or
+// before approve_promotion is retried through its failed batch (a direct retry
+// is refused), one that stopped later is retried on its own.
+func TestReplacementRetryTargetFollowsTheEnginesRetryGuard(t *testing.T) {
+	s, _ := testUI(t)
+	approve, preserve := s.promotionStep("approve_promotion"), s.promotionStep("preserve_original")
+	if approve != 1 || preserve != 2 {
+		t.Fatalf("the replacement workflow changed: approve %d preserve %d", approve, preserve)
+	}
+	failed, running := store.ActionStatusFailed, store.ActionStatusRunning
+	for _, tc := range []struct {
+		name      string
+		batch     string
+		promotion string
+		step      int
+		want      string
+	}{
+		{"failed before approval", failed, failed, 0, "batch-a"},
+		{"failed at approval", failed, failed, approve, "batch-a"},
+		{"failed while preserving the original", failed, failed, preserve, "promotion-a"},
+		{"failed importing", failed, failed, s.promotionStep("import_candidate"), "promotion-a"},
+		{"failed rescanning", failed, failed, s.promotionStep("rescan_library"), "promotion-a"},
+		{"batch still running", running, failed, preserve, ""},
+		{"member not failed", failed, store.ActionStatusCompleted, preserve, ""},
+		{"member cancelled", failed, store.ActionStatusCancelled, 0, ""},
+	} {
+		got := s.replacementRetryTarget(store.ActionInstance{ID: "batch-a", Status: tc.batch}, store.ActionInstance{ID: "promotion-a", Status: tc.promotion, CurrentStep: tc.step})
+		if got != tc.want {
+			t.Errorf("%s: retry target %q, want %q", tc.name, got, tc.want)
 		}
 	}
-	running := store.ActionInstance{ID: "batch-a", Status: store.ActionStatusRunning}
-	if got := replacementRetryTarget(running, store.ActionInstance{ID: "promotion-a", Status: store.ActionStatusFailed}); got != "" {
-		t.Fatalf("a batch that is still running cannot be retried, got %q", got)
+}
+
+// "Your original file is intact" is only said while the replacement had not
+// gone past preserve_original and nothing was moved, published or removed.
+func TestOriginalIntactOnlyBeforeAnythingChangesTheOriginal(t *testing.T) {
+	s, _ := testUI(t)
+	preserve, importStep := s.promotionStep("preserve_original"), s.promotionStep("import_candidate")
+	record := func(step int, promotion, state map[string]any) operationRecord {
+		return operationRecord{inst: store.ActionInstance{ID: "p", Status: store.ActionStatusFailed, CurrentStep: step}, outputs: map[string]any{"promotion": promotion}, state: state}
 	}
-	if got := replacementRetryTarget(failedBatch, store.ActionInstance{ID: "promotion-a", Status: store.ActionStatusCompleted}); got != "" {
-		t.Fatalf("a finished replacement has nothing to retry, got %q", got)
+	for _, tc := range []struct {
+		name string
+		r    operationRecord
+		want bool
+	}{
+		{"no promotion record", operationRecord{inst: store.ActionInstance{Status: store.ActionStatusFailed, CurrentStep: importStep}, outputs: map[string]any{}}, true},
+		{"stopped while copying the backup", record(preserve, map[string]any{"original_path": "/media/a.mkv"}, nil), true},
+		{"stopped at the first step", record(0, map[string]any{"original_path": "/media/a.mkv"}, nil), true},
+		// A same-name publish renames the candidate over the original and none of
+		// the older flags is set; the step and the publish marker say so.
+		{"same-name publish then a failed check", record(importStep, map[string]any{"original_path": "/media/a.mkv", "new_path": "/media/a.mkv"}, map[string]any{"filesystem_publish_started": true, "filesystem_published": true}), false},
+		{"publish started but not finished", record(preserve, map[string]any{"original_path": "/media/a.mkv"}, map[string]any{"filesystem_publish_started": true}), false},
+		{"past preserve without any marker", record(importStep, map[string]any{"original_path": "/media/a.mkv"}, nil), false},
+		{"move aside started", record(preserve, map[string]any{"move_aside_started_at": "2026-01-01T00:00:00Z"}, nil), false},
+		{"moved aside", record(preserve, map[string]any{"moved_aside": true}, nil), false},
+		{"old file removed", record(preserve, map[string]any{"old_removed": true}, nil), false},
+		{"delete sent", record(preserve, map[string]any{"delete_sent_at": "2026-01-01T00:00:00Z"}, nil), false},
+	} {
+		if got := s.originalIntact(tc.r); got != tc.want {
+			t.Errorf("%s: intact %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	failure := s.failureOf(record(importStep, map[string]any{"original_path": "/media/a.mkv"}, map[string]any{"filesystem_published": true}))
+	if failure == nil || failure.OriginalIntact {
+		t.Fatal("a published replacement must not be reported as leaving the original intact")
 	}
 }
 
@@ -135,11 +187,75 @@ func TestBatchItemsReportReplacementStateInPlainWords(t *testing.T) {
 		t.Fatalf("queued file: %+v", b)
 	}
 	c := byKey["file-c"]
-	if c.ReplacementFailure == nil || c.ReplacementFailure.Reason != "final check before replacing found an audio mismatch" || !c.ReplacementFailure.OriginalIntact || c.RetryActionID != "batch" || c.CandidateReady || c.CanKeepOriginal {
+	if c.ReplacementFailure == nil || c.ReplacementFailure.Reason != "final check before replacing found an audio mismatch" || !c.ReplacementFailure.OriginalIntact || c.RetryActionID != "" || c.CandidateReady {
 		t.Fatalf("failed file: %+v", c)
 	}
 	if strings.Contains(c.ReplacementFailure.Reason, "file-c") {
 		t.Fatal("the reason must not name the item key")
+	}
+}
+
+// One Retry on the batch re-runs only the files that stopped at or before
+// approval; the count the screen quotes ("Retry 2 failed replacements") must be
+// exactly those, not every failed file.
+func TestBatchRetryCountCountsOnlyFilesTheBatchRetryReruns(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	members := []any{}
+	for _, key := range []string{"file-a", "file-b", "file-c", "file-d"} {
+		members = append(members, map[string]any{"item_key": key, "episode": "Sample Show " + key, "transcode_action_id": "t-" + key, "original_path": "/media/" + key + ".mkv", "candidate_path": "/media/.candidates/" + key + ".mkv", "candidate_sha256": "sha-" + key})
+	}
+	state := map[string]any{"batch_promotion_approved": true, "batch_promotion_plan": map[string]any{"members": members, "digest": "sha256:plan"}}
+	seedOperation(t, st, "batch", "transcode_batch", "failed", map[string]any{"mode": "size"}, nil, state)
+	steps := map[string]struct {
+		status string
+		step   int
+	}{"file-a": {"failed", 0}, "file-b": {"failed", 1}, "file-c": {"failed", 3}, "file-d": {"completed", 7}}
+	for key, want := range steps {
+		seedOperation(t, st, "t-"+key, "transcode_media", "completed", map[string]any{"parent_action_id": "batch", "path": "/media/" + key + ".mkv"}, map[string]any{"original_intact": true}, nil)
+		if err := st.CreateActionInstance(store.ActionInstance{ID: "promotion-" + key, ActionName: "promote_transcode_candidate", Status: want.status, CurrentStep: want.step, InputsJSON: `{"transcode_action_id":"t-` + key + `"}`, OutputsJSON: "{}", StateJSON: "{}", IdempotencyKey: "promote:filesystem:t-" + key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/operations?id=batch", "", true)
+	var page struct {
+		Jobs []struct {
+			Replacement *replacementProgress `json:"replacement"`
+		} `json:"jobs"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 || page.Jobs[0].Replacement == nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if r := page.Jobs[0].Replacement; r.Failed != 3 || r.Done != 1 || r.BatchRetryCount != 2 {
+		t.Fatalf("failed %d done %d batch retry %d, want 3 failed, 1 done, 2 retried by the batch", r.Failed, r.Done, r.BatchRetryCount)
+	}
+}
+
+// While the batch holds a prepared replacement plan its files are replaced by
+// that plan: they offer no Change goal and no retry-pending override.
+func TestBatchWithAPreparedPlanOffersChildrenNoGoalChange(t *testing.T) {
+	s, h := testUI(t)
+	seedActionableFiles(t, s)
+	st := s.engine.Deps().Store
+	read := func() map[string]any {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/operations?id=wait", "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page.Jobs[0]
+	}
+	if read()["parent_item_key"] != "wait" {
+		t.Fatal("a batch without a plan must let the file change its goal")
+	}
+	parent, _ := st.GetActionInstance("batch")
+	parent.StateJSON = `{"batch_promotion_plan":{"members":[{"item_key":"ready","transcode_action_id":"ready"}],"digest":"sha256:plan"}}`
+	if err := st.UpdateActionInstance(*parent); err != nil {
+		t.Fatal(err)
+	}
+	if key, ok := read()["parent_item_key"]; ok {
+		t.Fatalf("a batch with a prepared plan offered Change goal for %v", key)
 	}
 }
 

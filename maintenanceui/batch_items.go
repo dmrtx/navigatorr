@@ -32,15 +32,13 @@ type batchItemView struct {
 	// original is intact; Where says where the new file and any backup are.
 	ReplacementFailure *replacementFailure `json:"replacement_failure,omitempty"`
 	Where              *replacementWhere   `json:"where,omitempty"`
-	// RetryActionID is the action whose Retry re-runs only this file's
-	// replacement, without encoding again. Empty when no retry applies.
-	RetryActionID string `json:"retry_action_id,omitempty"`
-	// CanKeepOriginal would say the server can discard the candidate of a
-	// failed replacement. It cannot while the approved plan references the
-	// candidate, so it stays false.
-	CanKeepOriginal bool   `json:"can_keep_original,omitempty"`
-	CanReconfigure  bool   `json:"can_reconfigure,omitempty"`
-	Mode            string `json:"mode,omitempty"`
+	// RetryActionID is the action whose Retry can re-run this file's
+	// replacement without encoding again: the batch while the file stopped at
+	// or before approval, the file's own replacement once it stopped later.
+	// Empty when no retry applies.
+	RetryActionID  string `json:"retry_action_id,omitempty"`
+	CanReconfigure bool   `json:"can_reconfigure,omitempty"`
+	Mode           string `json:"mode,omitempty"`
 	// MaxHeight is the frozen compact output height, so the goal label
 	// names the size actually produced.
 	MaxHeight int `json:"max_height,omitempty"`
@@ -153,8 +151,8 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								view.ReplacementActionID, view.ReplacementStatus = prior.ID, prior.Status
 								pr := operationRecord{inst: *prior, inputs: decodeOperationJSON(prior.InputsJSON), outputs: decodeOperationJSON(prior.OutputsJSON), state: decodeOperationJSON(prior.StateJSON)}
 								if prior.Status == store.ActionStatusFailed || prior.Status == store.ActionStatusCancelled {
-									view.ReplacementFailure = failureOf(pr)
-									view.RetryActionID = replacementRetryTarget(*inst, *prior)
+									view.ReplacementFailure = s.failureOf(pr)
+									view.RetryActionID = s.replacementRetryTarget(*inst, *prior)
 								}
 								view.Where = whereOf(pr)
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
@@ -166,10 +164,10 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			}
 			if view.ReplacementActionID == "" && inst.Status == store.ActionStatusFailed {
 				// A file whose promotion never produced an action of its own is
-				// reported only in the batch's promotion output.
+				// reported only in the batch's promotion output. Retrying the batch
+				// would reproduce that error, so no retry is offered.
 				if detail := batchPromotionFailure(decodeOperationJSON(inst.OutputsJSON), item.ItemKey); detail != "" {
 					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalIntact: true}
-					view.RetryActionID = inst.ID
 				}
 			}
 			if view.ReplacementActionID == "" && view.ReplacementFailure == nil && item.ChildActionID != "" {
