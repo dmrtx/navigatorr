@@ -5037,7 +5037,8 @@ function notConvertedJob(extra = {}) {
     stages: stagesAt(7, "completed"), current_step: 7,
     savings: { source_bytes: 2790000000, estimated_saved_bytes: 1820000000 },
     benchmark: { outcome: "size_rejected", message: sizeRejectedMessage, user_next_step: sizeRejectedNextStep },
-    transcode: { message: "" }, size_mode: undefined,
+    transcode: { message: "" },
+    size_mode: { expected_bytes: 970000000, encoder: "libx265", size_budget: { budget_bytes: 1000000000 } },
     ...extra,
   });
 }
@@ -5061,6 +5062,11 @@ test("a size-rejected file is Not converted, says why and shows no savings", asy
   assert.match(text, /At least 1\.20 GB would be needed/);
   assert.match(text, /Next step:\s*Raise the size budget/);
   assert.doesNotMatch(text, /estimated savings/);
+  // The chips name what is known, not an encode that never ran.
+  const chips = (d) => nodesWithClass(d.elements.get("detail-summary"), "detail-fact").map((n) => n.textContent);
+  assert.deepEqual(chips(detail), ["2.79 GB", "Limit ≤ 1.00 GB"]);
+  const measured = await openDetail(notConvertedJob({ savings: { source_bytes: 2790000000, candidate_bytes: 2000000000 } }));
+  assert.deepEqual(chips(measured), ["2.79 GB", "Limit ≤ 1.00 GB"]);
 });
 
 test("a reason code the UI has never heard of still reads as a sentence", () => {
@@ -5079,6 +5085,22 @@ test("a reason code the UI has never heard of still reads as a sentence", () => 
   assert.match(h.run("queuePresentation(nothing)").summary, /No converted file was made/);
 });
 
+test("a long reason is trimmed at a boundary, keeps its numbers and the original-kept suffix", () => {
+  const h = harness();
+  const reason = (message) => { h.context.probe = notConvertedJob({ benchmark: { outcome: "quality_rejected", message } }); return h.run("queuePresentation(probe).summary"); };
+  const long = "The encoded result did not meet the quality requirements on the whole file: VMAF mean 91.2 is below the minimum 93.0; VMAF 5th percentile 71.4 is below the minimum 80.0; the worst 10 second window scored 52.5 against a floor of 60.0. Original preserved.";
+  const text = reason(long);
+  assert.match(text, /…; original kept/);
+  assert.match(text, /minimum 93\.0…; original kept/, "cut at a clause, numbers whole");
+  assert.ok(text.length < 210, text);
+  // A sentence that already says so is not repeated.
+  assert.match(reason("The goal was not met; original preserved. Raise the budget."), /preserved · 2\.79 GB source$/);
+  assert.doesNotMatch(reason("The goal was not met; original preserved. Raise the budget."), /original kept/i);
+  assert.equal((reason("Nothing met the goal; original kept.").match(/original kept/gi) || []).length, 1);
+  // An abbreviation does not end the sentence.
+  assert.match(reason("The file needs approx. 5.00 GB for this goal. Raise the budget."), /approx\. 5\.00 GB for this goal; original kept/);
+});
+
 test("only a job that left no file and replaced nothing is Not converted", () => {
   const h = harness();
   const status = (patch) => { h.context.probe = notConvertedJob(patch); return h.run("queuePresentation(probe).status"); };
@@ -5092,6 +5114,9 @@ test("only a job that left no file and replaced nothing is Not converted", () =>
   assert.equal(status({ status: "failed", error: "ffmpeg exited with status 1" }), "Failed");
   assert.equal(status({ status: "cancelled" }), "Cancelled");
   assert.equal(status({ action_name: "promote_transcode_candidate" }), "Completed");
+  // A job with a retired candidate is not Not converted, but keeps its reason in the details.
+  h.context.retired = notConvertedJob({ benchmark: undefined, reason_code: "quality_not_met", candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } });
+  assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.
