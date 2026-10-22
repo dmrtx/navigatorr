@@ -25,6 +25,9 @@ type Engine struct {
 	podcastCatalogMu    sync.Mutex
 	workerObservationMu sync.Mutex
 	workerObservation   transcode.WorkerObservation
+	// workerPool caches the worker's video pool that sizes batch fan-out.
+	workerPoolMu sync.Mutex
+	workerPool   workerPoolReading
 
 	mu             sync.RWMutex
 	deps           EngineDeps

@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 11
+const SchemaVersion = 12
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -352,6 +352,9 @@ var migrations = []migration{
 	}},
 	{version: 11, statements: []string{
 		`CREATE TABLE worker_slot_settings (node TEXT PRIMARY KEY, video_slots INTEGER NOT NULL, podcast_slots INTEGER NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+	}},
+	{version: 12, statements: []string{
+		`ALTER TABLE worker_slot_settings ADD COLUMN ceiling INTEGER NOT NULL DEFAULT 0`,
 	}},
 }
 

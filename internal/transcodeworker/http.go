@@ -438,7 +438,8 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	maxParallel := 1
 	if s.worker != nil && s.worker.cfg != nil {
 		stateDir = s.worker.cfg.StateDir
-		maxParallel = s.worker.cfg.MaxParallelJobs
+		// The effective ceiling: what the worker admits now, not the boot default.
+		maxParallel = s.worker.slotCeiling()
 	}
 	if strings.TrimSpace(stateDir) == "" {
 		writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorUnavailable, map[string]any{"ready": false, "error": "state_dir is not configured"})
@@ -768,12 +769,13 @@ func ResolveServeConfig(cfg *WorkerConfig, listenFlag, tokenFlag, tokenFileFlag,
 	return ServeConfig{Listen: listen, Token: resolved, SelfExe: selfExe, ConfigPath: configPath}, nil
 }
 
-// maxHTTPSlotsBodyBytes bounds a slot split request: two small integers.
+// maxHTTPSlotsBodyBytes bounds a slot split request: three small integers.
 const maxHTTPSlotsBodyBytes = 1 << 10
 
-// handleSlots serves GET /v1/slots (the split and its use) and PUT /v1/slots
-// (set the split, or clear it with both values zero). The change applies at
-// the next admission and never interrupts a running job.
+// handleSlots serves GET /v1/slots (the ceiling, the split and their use) and
+// PUT /v1/slots (set the split, or clear it with both values zero; an
+// optional positive "ceiling" also sets how many jobs run at once). The
+// change applies at the next admission and never interrupts a running job.
 func (s *Server) handleSlots(w http.ResponseWriter, r *http.Request) {
 	if s.worker == nil {
 		writeHTTPError(w, http.StatusServiceUnavailable, "worker unavailable")

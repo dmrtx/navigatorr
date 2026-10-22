@@ -32,10 +32,13 @@ func (s *Server) slotController() (workerSlotController, bool) {
 	return c, ok
 }
 
+// Configured is about the split; Ceiling 0 means the node follows its own
+// max_parallel_jobs.
 type workerSlotSettingsView struct {
 	Configured   bool   `json:"configured"`
 	VideoSlots   int    `json:"video_slots"`
 	PodcastSlots int    `json:"podcast_slots"`
+	Ceiling      int    `json:"ceiling"`
 	Revision     int64  `json:"revision"`
 	UpdatedAt    string `json:"updated_at,omitempty"`
 }
@@ -44,21 +47,35 @@ func slotSettingsView(row *store.WorkerSlotSettings) workerSlotSettingsView {
 	if row == nil {
 		return workerSlotSettingsView{}
 	}
-	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
+	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Ceiling: row.Ceiling, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
 }
 
-// slotsMatch reports whether the worker runs the stored split.
+// slotsMatch reports whether the worker runs the stored ceiling and split. A
+// worker that cannot take a ceiling is only compared on the split.
 func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) bool {
+	if row != nil && row.Ceiling > 0 && worker.CeilingAdjustable() && worker.Ceiling != row.Ceiling {
+		return false
+	}
 	if row == nil || row.Shared() {
 		return !worker.Split
 	}
 	return worker.Split && worker.Video.Total == row.VideoSlots && worker.Podcast.Total == row.PodcastSlots
 }
 
-// workerSlots serves GET (the stored split, what the worker runs and whether
-// they agree) and POST (validate against the worker's ceiling and CPUs, store,
-// push). The worker applies a split at its next admission and never
-// interrupts a running job.
+// slotPush is what the server sends for a stored row: the ceiling only to a
+// worker that accepts it, since an older one refuses the unknown field.
+func slotPush(row store.WorkerSlotSettings, worker transcode.WorkerSlots) transcode.SlotSplit {
+	split := transcode.SlotSplit{VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots}
+	if worker.CeilingAdjustable() {
+		split.Ceiling = row.Ceiling
+	}
+	return split
+}
+
+// workerSlots serves GET (the stored ceiling and split, what the worker runs
+// and whether they agree) and POST (validate against the worker's limits and
+// CPUs, store, push). The worker applies a change at its next admission and
+// never interrupts a running job.
 func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 	ctrl, ok := s.slotController()
 	if !ok {
@@ -81,9 +98,13 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, httpclient.ErrSlotsUnsupported):
 		view["available"], view["message"] = false, "The video worker predates slot assignment. Update it to divide its slots."
 	case err != nil:
-		view["available"], view["message"] = false, "Worker unreachable. The stored split is applied when it returns."
+		view["available"], view["message"] = false, "Worker unreachable. The stored settings are applied when it returns."
 	default:
 		view["available"], view["worker"], view["applied"] = true, worker, slotsMatch(row, worker)
+		view["ceiling_adjustable"] = worker.CeilingAdjustable()
+		if !worker.CeilingAdjustable() {
+			view["ceiling_message"] = "The video worker predates setting parallel jobs here. Update it to change them."
+		}
 		if msg := s.slotSyncError(); msg != "" && !slotsMatch(row, worker) {
 			view["sync_error"] = msg
 		}
@@ -91,10 +112,15 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, view)
 }
 
+// setWorkerSlots stores and pushes a split and, with a positive ceiling, the
+// node's parallel jobs. Without a ceiling the stored one is kept. A split that
+// does not fit a ceiling set in the same request returns to shared slots
+// (transcode.FitSlotSplit); a split over an unchanged ceiling is refused.
 func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl workerSlotController) {
 	var body struct {
 		VideoSlots   int `json:"video_slots"`
 		PodcastSlots int `json:"podcast_slots"`
+		Ceiling      int `json:"ceiling"`
 	}
 	if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid slot assignment")
@@ -103,6 +129,10 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 	split := transcode.SlotSplit{VideoSlots: body.VideoSlots, PodcastSlots: body.PodcastSlots}
 	if (split.VideoSlots == 0) != (split.PodcastSlots == 0) {
 		fail(w, 400, "set both video and podcast slots, or clear both to share the worker's slots")
+		return
+	}
+	if body.Ceiling < 0 {
+		fail(w, 400, "parallel jobs must be at least 1")
 		return
 	}
 	current, err := ctrl.Slots(r.Context())
@@ -114,20 +144,47 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 		fail(w, 503, "Worker unreachable; its slot ceiling is needed to validate the split.")
 		return
 	}
-	warnings, err := transcode.ValidateSlotSplit(split, current.Ceiling, current.HostCPUs)
+	st := s.engine.Deps().Store
+	previous, _ := st.GetWorkerSlotSettings(videoWorkerNode)
+	ceiling := 0
+	if previous != nil {
+		ceiling = previous.Ceiling
+	}
+	var notes []string
+	if body.Ceiling > 0 {
+		switch {
+		case current.CeilingAdjustable():
+			if err := transcode.ValidateSlotCeiling(body.Ceiling, current.CeilingLimit); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+			ceiling = body.Ceiling
+			var reset bool
+			if split, reset = transcode.FitSlotSplit(split, ceiling); reset {
+				notes = append(notes, transcode.SlotSplitResetNote(ceiling))
+			}
+		case body.Ceiling != current.Ceiling:
+			fail(w, 409, "The video worker predates setting parallel jobs here. Update it first.")
+			return
+		}
+	}
+	target := current.Ceiling
+	if ceiling > 0 && current.CeilingAdjustable() {
+		target = ceiling
+	}
+	warnings, err := transcode.ValidateSlotSplit(split, target, current.HostCPUs)
 	if err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
-	st := s.engine.Deps().Store
-	previous, _ := st.GetWorkerSlotSettings(videoWorkerNode)
-	row, err := st.SetWorkerSlotSettings(videoWorkerNode, split.VideoSlots, split.PodcastSlots)
+	warnings = append(notes, warnings...)
+	row, err := st.SetWorkerSlotSettings(videoWorkerNode, split.VideoSlots, split.PodcastSlots, ceiling)
 	if err != nil {
 		fail(w, 500, "worker slot settings not saved")
 		return
 	}
 	out := map[string]any{"supported": true, "node": videoWorkerNode, "settings": slotSettingsView(&row), "warnings": warnings}
-	applied, pushed, err := ctrl.SetSlots(r.Context(), split)
+	applied, pushed, err := ctrl.SetSlots(r.Context(), slotPush(row, current))
 	var rejected *httpclient.SlotSplitRejectedError
 	switch {
 	case errors.As(err, &rejected):
@@ -137,7 +194,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 		// "shared" row would make the resync clear a split the worker runs.
 		var revertErr error
 		if previous != nil {
-			_, revertErr = st.SetWorkerSlotSettings(videoWorkerNode, previous.VideoSlots, previous.PodcastSlots)
+			_, revertErr = st.SetWorkerSlotSettings(videoWorkerNode, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling)
 		} else {
 			revertErr = st.DeleteWorkerSlotSettings(videoWorkerNode)
 		}
@@ -153,7 +210,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, ctrl wor
 		s.noteSlotSync(nil)
 		out["available"], out["worker"], out["applied"] = true, applied, slotsMatch(&row, applied)
 		if len(pushed) > 0 {
-			out["warnings"] = pushed
+			out["warnings"] = append(notes, pushed...)
 		}
 	}
 	writeJSON(w, 200, out)
@@ -171,14 +228,15 @@ func (s *Server) noteSlotSync(err error) {
 	s.slotSync.last = time.Now()
 	s.slotSync.err = ""
 	if err != nil {
-		s.slotSync.err = "The worker did not accept the stored split."
+		s.slotSync.err = "The worker did not accept the stored slot settings."
 	}
 }
 
-// syncWorkerSlots pushes the stored split when the worker reports something
-// else (restarted with a wiped state directory, or a save that could not reach
-// it). The stored row wins; a node never configured is left alone. Rate
-// limited, and called with the activity the worker just reported.
+// syncWorkerSlots pushes the stored ceiling and split when the worker reports
+// something else (restarted with a wiped state directory, a save that could
+// not reach it, or a redeploy that changed max_parallel_jobs). The stored row
+// wins; a node never configured is left alone. Rate limited, and called with
+// the activity the worker just reported.
 func (s *Server) syncWorkerSlots(ctx context.Context, observed *transcode.WorkerSlots) {
 	ctrl, ok := s.slotController()
 	if !ok || observed == nil {
@@ -195,6 +253,6 @@ func (s *Server) syncWorkerSlots(ctx context.Context, observed *transcode.Worker
 	}
 	s.slotSync.last = time.Now()
 	s.slotSync.mu.Unlock()
-	_, _, err = ctrl.SetSlots(ctx, transcode.SlotSplit{VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots})
+	_, _, err = ctrl.SetSlots(ctx, slotPush(*row, *observed))
 	s.noteSlotSync(err)
 }

@@ -156,7 +156,9 @@ transcode:
   default_action: "manual_approval"
   default_profile: "hevc-vt-balanced"
   min_savings_percent: 15.0
-  max_parallel_jobs: 1
+  # Batch fan-out. 0 follows the worker's parallel jobs (set per node in the
+  # maintenance UI, Workers); a positive value caps each batch below that.
+  max_parallel_jobs: 0
 
   recipes:
     # Zero-config safe default. The embedded bundle currently provides:

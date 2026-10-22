@@ -32,13 +32,20 @@ type WorkerConfig struct {
 	FFprobe                  string   `json:"ffprobe" yaml:"ffprobe"`
 	StateDir                 string   `json:"state_dir" yaml:"state_dir"`
 	AllowedRoots             []string `json:"allowed_roots" yaml:"allowed_roots"`
-	MaxParallelJobs          int      `json:"max_parallel_jobs" yaml:"max_parallel_jobs"`
+	// MaxParallelJobs is how many jobs the worker runs at once until the
+	// operator sets another value from the maintenance UI (stored in the state
+	// directory, see slots.go). MaxParallelJobsLimit bounds that override;
+	// zero means the host CPU count. The limit never falls below
+	// MaxParallelJobs.
+	MaxParallelJobs      int `json:"max_parallel_jobs" yaml:"max_parallel_jobs"`
+	MaxParallelJobsLimit int `json:"max_parallel_jobs_limit" yaml:"max_parallel_jobs_limit"`
 	// MetricThreads is the libvmaf n_threads per VMAF/CAMBI invocation. Zero
 	// divides the host CPUs among concurrent metric invocations. Thread count
 	// never changes metric values, only wall time.
 	MetricThreads int `json:"metric_threads" yaml:"metric_threads"`
 	// X265Pools is the libx265 thread-pool size per encode. Zero splits the
-	// host CPUs evenly across max_parallel_jobs (no partition with one job),
+	// host CPUs evenly across the video jobs running together, at most the
+	// video pool of the effective ceiling (no partition with one job),
 	// -1 disables partitioning. The worker pins x265's own frame-thread
 	// choice for the whole host alongside it, so the bitstream never changes.
 	// A positive value below 4 or not below the host CPU count is ignored
@@ -114,6 +121,9 @@ func LoadWorkerConfig(configPath string) (*WorkerConfig, error) {
 	}
 	if cfg.Quality <= 0 {
 		cfg.Quality = 65
+	}
+	if cfg.MaxParallelJobsLimit < 0 {
+		return nil, fmt.Errorf("parsing worker config %s: max_parallel_jobs_limit %d must be >= 0", configPath, cfg.MaxParallelJobsLimit)
 	}
 	if cfg.MetricThreads < 0 {
 		return nil, fmt.Errorf("parsing worker config %s: metric_threads %d must be >= 0", configPath, cfg.MetricThreads)
@@ -230,10 +240,12 @@ type Worker struct {
 	// x265Partition is the startup self-check's verdict on the x265 pool
 	// partition; x265CheckRun replaces its ffmpeg invocation in tests.
 	x265Partition x265PartitionState
-	// slotSplit caches the stored per-kind slot split; videoInUse caches the
-	// running video job count that sizes thread pools; videoInUseFn replaces
-	// that count in tests.
+	// slotSplit caches the stored ceiling override and per-kind slot split,
+	// and slotWrite serializes changes to them; videoInUse caches the running
+	// video job count that sizes thread pools; videoInUseFn replaces that
+	// count in tests.
 	slotSplit       slotSplitCache
+	slotWrite       sync.Mutex
 	x265Recheck     sync.Mutex
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache

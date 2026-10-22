@@ -1680,6 +1680,55 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   assert.equal(h.elements.get("worker-slot-split").hidden,true);
 });
 
+test("parallel jobs on the node are always shown and editable from one, and a lower value says the split resets", async () => {
+  const h=harness();
+  h.context.calls=[];
+  h.run('api=async(path,body)=>{calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[],
+    slots:{ceiling:1,ceiling_limit:10,ceiling_source:"config",host_cpus:10,split:false,video:{total:1,used:1},podcast:{total:1,used:0}}}};
+  h.run('renderWorkerActivity(activity)');
+  // One job: the editor is visible, not tucked away; only the split needs two.
+  assert.equal(h.elements.get("worker-parallel").hidden,false);
+  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 1");
+  assert.equal(h.elements.get("worker-parallel-form").hidden,false);
+  assert.equal(h.elements.get("parallel-jobs").value,1);
+  assert.equal(h.elements.get("parallel-jobs").max,10);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/Choose 1 to 10\. From the worker config\./);
+  assert.equal(h.elements.get("worker-slot-split").hidden,true);
+  await h.run('saveParallelJobs(2)');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:0,podcast_slots:0,ceiling:2}]);
+  assert.match(h.elements.get("worker-parallel-note").textContent,/Applied\. Takes effect as the next job starts/);
+  // Raised and split: the split editor appears and a lower value warns before saving.
+  h.run('activity.activity.worker_slots_total=3;activity.activity.slots={ceiling:3,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:true,video:{total:2,used:1},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slot-split").hidden,false);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/Set here; overrides the worker config\./);
+  assert.equal(h.elements.get("parallel-jobs").value,3);
+  h.elements.get("parallel-jobs").value=2;
+  h.elements.get("parallel-jobs").listeners.get("input")();
+  assert.match(h.elements.get("worker-parallel-note").textContent,/split \(2 \+ 1\) does not fit 2 parallel jobs, so all slots will be shared again/);
+  // An unsaved edit survives the next poll.
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("parallel-jobs").value,2);
+  h.elements.get("parallel-jobs").value=3;
+  h.elements.get("parallel-jobs").listeners.get("input")();
+  assert.equal(h.elements.get("worker-parallel-note").textContent,"");
+  await h.run('saveParallelJobs(4)');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[1][1])),{video_slots:2,podcast_slots:1,ceiling:4});
+  // A worker that predates the setting shows the value read-only and says why.
+  h.run('activity.activity.slots={ceiling:2,split:false,video:{total:2,used:0},podcast:{total:2,used:0}};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 2");
+  assert.equal(h.elements.get("worker-parallel-form").hidden,true);
+  assert.match(h.elements.get("worker-parallel-limit").textContent,/predates setting this here\. Update it/);
+  // One that predates slots altogether still shows its total.
+  h.run('activity.activity.slots=undefined;activity.activity.worker_slots_total=1;renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-parallel").hidden,false);
+  assert.equal(h.elements.get("worker-parallel-summary").textContent,"Parallel jobs on this node: 1");
+  assert.equal(h.elements.get("worker-parallel-form").hidden,true);
+  // Disconnected: nothing to show.
+  h.run('renderWorkerActivity({available:false})');
+  assert.equal(h.elements.get("worker-parallel").hidden,true);
+});
+
 test("changing a root blocks old continuation controls until the new first page loads", async () => {
   const h = harness(),
     pending = deferred();

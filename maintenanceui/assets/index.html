@@ -543,6 +543,16 @@
             <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span id="activity-checked" class="metadata"></span></div>
             <p id="worker-slot-usage" class="metadata" role="status" hidden></p>
+            <div id="worker-parallel" class="worker-parallel" hidden>
+              <strong id="worker-parallel-summary"></strong>
+              <form id="worker-parallel-form">
+                <label>Parallel jobs on this node<input id="parallel-jobs" type="number" min="1" step="1" inputmode="numeric" required /></label>
+                <button id="worker-parallel-apply" type="submit" class="primary">Apply</button>
+              </form>
+              <p id="worker-parallel-limit" class="metadata"></p>
+              <p class="muted">x265 jobs share the CPUs, so two at once are not faster in total; VideoToolbox encodes and quality checks overlap well.</p>
+              <p id="worker-parallel-note" class="metadata" role="status"></p>
+            </div>
             <details id="worker-slot-split" class="worker-slot-split" hidden>
               <summary>Assign slots to video and podcast</summary>
               <form id="worker-slot-form">

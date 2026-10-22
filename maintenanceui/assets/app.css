@@ -571,6 +571,12 @@ main {
 #backup-progress:not([hidden]) { color: var(--forest); padding: 6px 0; }
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
 .activity-heading { display:flex; justify-content:space-between; gap:8px; font-size:11px; }
+.worker-parallel { margin-top:8px; font-size:12px; }
+.worker-parallel > strong { display:block; font-size:12px; }
+.worker-parallel form { display:flex; align-items:flex-end; gap:8px; max-width:420px; }
+.worker-parallel form label { flex:1; }
+.worker-parallel form button { margin:5px 0; }
+.worker-parallel p { margin:4px 0 0; }
 .worker-slot-split { margin-top:8px; font-size:12px; }
 .worker-slot-split[open] form { margin-top:8px; }
 .worker-slot-split .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; max-width:420px; }

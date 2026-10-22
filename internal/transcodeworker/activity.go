@@ -14,7 +14,7 @@ import (
 // not a CPU utilization measurement.
 func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 	slots := w.slotsStatus()
-	activity := transcode.WorkerActivity{SlotsTotal: max(1, w.cfg.MaxParallelJobs), Slots: &slots, CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
+	activity := transcode.WorkerActivity{SlotsTotal: slots.Ceiling, Slots: &slots, CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		return activity, fmt.Errorf("worker activity unavailable")

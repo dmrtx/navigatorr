@@ -14,14 +14,17 @@ import (
 
 // Per-kind worker slots.
 //
-// max_parallel_jobs stays the hard ceiling and the boot default: with nothing
-// else configured every kind draws on one shared pool of that size, as before.
-// An operator can divide the ceiling between video work (full conversions) and
-// podcast work (transcription, ad detection and rendering); the server pushes
-// the split to /v1/slots and the worker stores it in the state directory,
-// where the daemon and every spawned job process read it. A change applies at
-// the next admission: a running job is never interrupted, so a pool lowered
-// below its current use simply admits nothing until it drains.
+// The ceiling is how many jobs the worker runs at once. max_parallel_jobs is
+// its boot default: with nothing else configured every kind draws on one
+// shared pool of that size, as before. An operator can override the ceiling
+// (1 up to max_parallel_jobs_limit, else the host CPU count) and divide it
+// between video work (full conversions) and podcast work (transcription, ad
+// detection and rendering); the server pushes both to /v1/slots and the
+// worker stores them in the state directory, where the daemon and every
+// spawned job process read them. A change applies at the next admission: a
+// running job is never interrupted, so a ceiling or pool lowered below its
+// current use simply admits nothing until it drains. Lowering the ceiling
+// below a split's total returns the split to one shared pool.
 
 const slotSplitFile = "worker-slots.json"
 
@@ -48,10 +51,12 @@ func jobSlotKind(job *JobRecord) slotKind {
 	return slotKindVideo
 }
 
-// slotSplitRecord is the stored split.
+// slotSplitRecord is the stored ceiling override and split. Ceiling zero (or
+// absent, in a file written before overrides existed) follows the config.
 type slotSplitRecord struct {
 	VideoSlots   int       `json:"video_slots"`
 	PodcastSlots int       `json:"podcast_slots"`
+	Ceiling      int       `json:"ceiling,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -104,11 +109,40 @@ type slotSplitCache struct {
 // same length).
 const slotSplitRereadAfter = 2 * time.Second
 
-func (w *Worker) slotCeiling() int {
+// configCeiling is max_parallel_jobs, the boot default.
+func (w *Worker) configCeiling() int {
 	if w == nil || w.cfg == nil {
 		return 1
 	}
 	return max(1, w.cfg.MaxParallelJobs)
+}
+
+// slotCeilingLimit is the most parallel jobs an override may set:
+// max_parallel_jobs_limit when configured, else the host CPU count, and never
+// less than the configured default.
+func (w *Worker) slotCeilingLimit() int {
+	limit := hostCPUCount()
+	if w != nil && w.cfg != nil && w.cfg.MaxParallelJobsLimit > 0 {
+		limit = w.cfg.MaxParallelJobsLimit
+	}
+	return max(limit, w.configCeiling())
+}
+
+// ceilingFrom is the effective ceiling and its source given the stored
+// record. An override outside 1..limit (the limit was lowered since) is
+// ignored and the config applies.
+func (w *Worker) ceilingFrom(rec slotSplitRecord, ok bool) (int, string) {
+	if ok && rec.Ceiling >= 1 && rec.Ceiling <= w.slotCeilingLimit() {
+		return rec.Ceiling, transcode.SlotCeilingFromOverride
+	}
+	return w.configCeiling(), transcode.SlotCeilingFromConfig
+}
+
+// slotCeiling is the effective ceiling: the stored override, else
+// max_parallel_jobs.
+func (w *Worker) slotCeiling() int {
+	ceiling, _ := w.ceilingFrom(w.storedSlots())
+	return ceiling
 }
 
 func (w *Worker) slotSplitPath() string {
@@ -118,16 +152,12 @@ func (w *Worker) slotSplitPath() string {
 	return filepath.Join(w.cfg.StateDir, slotSplitFile)
 }
 
-// slotLimits returns the split in force: the stored one when it is valid for
-// the current ceiling, else one shared pool of the ceiling. A stored split
-// that no longer fits (the ceiling was lowered) is ignored rather than
-// scaled, so a worker never admits more than its ceiling.
-func (w *Worker) slotLimits() slotLimits {
-	ceiling := w.slotCeiling()
-	shared := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling}
+// storedSlots returns the stored record, re-read only when the file changes.
+// ok is false without a readable record.
+func (w *Worker) storedSlots() (slotSplitRecord, bool) {
 	path := w.slotSplitPath()
 	if path == "" {
-		return shared
+		return slotSplitRecord{}, false
 	}
 	c := &w.slotSplit
 	c.mu.Lock()
@@ -135,7 +165,7 @@ func (w *Worker) slotLimits() slotLimits {
 	fi, err := os.Stat(path)
 	if err != nil {
 		c.valid, c.modTime, c.size, c.readAt = false, time.Time{}, 0, time.Time{}
-		return shared
+		return slotSplitRecord{}, false
 	}
 	if !c.modTime.Equal(fi.ModTime()) || c.size != fi.Size() || time.Since(c.readAt) > slotSplitRereadAfter {
 		c.valid, c.modTime, c.size, c.readAt = false, fi.ModTime(), fi.Size(), time.Now()
@@ -146,13 +176,25 @@ func (w *Worker) slotLimits() slotLimits {
 			}
 		}
 	}
-	if !c.valid {
+	return c.rec, c.valid
+}
+
+// slotLimits returns the limits in force: the effective ceiling, split the
+// stored way when that split is valid for it, else one shared pool of the
+// ceiling. A stored split that no longer fits (max_parallel_jobs was lowered)
+// is ignored rather than scaled, so a worker never admits more than its
+// ceiling.
+func (w *Worker) slotLimits() slotLimits {
+	rec, ok := w.storedSlots()
+	ceiling, _ := w.ceilingFrom(rec, ok)
+	shared := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling}
+	if !ok {
 		return shared
 	}
-	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: c.rec.VideoSlots, PodcastSlots: c.rec.PodcastSlots}, ceiling, 0); err != nil || (c.rec.VideoSlots == 0 && c.rec.PodcastSlots == 0) {
+	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: rec.VideoSlots, PodcastSlots: rec.PodcastSlots}, ceiling, 0); err != nil || (rec.VideoSlots == 0 && rec.PodcastSlots == 0) {
 		return shared
 	}
-	return slotLimits{Ceiling: ceiling, Video: c.rec.VideoSlots, Podcast: c.rec.PodcastSlots, Split: true}
+	return slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true}
 }
 
 // slotSplitInvalidError is an operator mistake in a split, as opposed to the
@@ -163,24 +205,50 @@ func (e *slotSplitInvalidError) Error() string { return e.err.Error() }
 func (e *slotSplitInvalidError) Unwrap() error { return e.err }
 
 // SetSlotSplit validates and stores a split, or clears it when both values are
-// zero. It returns warnings about the CPU budget for a split that was applied.
+// zero. A positive split.Ceiling also sets the ceiling (the config value
+// clears the override); zero keeps the ceiling in force. A split that does not
+// fit a ceiling set in the same call returns to one shared pool (see
+// transcode.FitSlotSplit). It returns notes about that and warnings about the
+// CPU budget for what was applied.
 func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
 	path := w.slotSplitPath()
 	if path == "" {
 		return nil, errors.New("worker has no state_dir to store the slot split")
 	}
-	warnings, err := transcode.ValidateSlotSplit(split, w.slotCeiling(), hostCPUCount())
+	w.slotWrite.Lock()
+	defer w.slotWrite.Unlock()
+	ceiling, source := w.ceilingFrom(w.storedSlots())
+	override := 0
+	if source == transcode.SlotCeilingFromOverride {
+		override = ceiling
+	}
+	var notes []string
+	if split.Ceiling != 0 {
+		if err := transcode.ValidateSlotCeiling(split.Ceiling, w.slotCeilingLimit()); err != nil {
+			return nil, &slotSplitInvalidError{err}
+		}
+		ceiling, override = split.Ceiling, split.Ceiling
+		if override == w.configCeiling() {
+			override = 0
+		}
+		var reset bool
+		if split, reset = transcode.FitSlotSplit(split, ceiling); reset {
+			notes = append(notes, transcode.SlotSplitResetNote(ceiling))
+		}
+	}
+	warnings, err := transcode.ValidateSlotSplit(split, ceiling, hostCPUCount())
 	if err != nil {
 		return nil, &slotSplitInvalidError{err}
 	}
-	if split.Shared() {
+	warnings = append(notes, warnings...)
+	if split.Shared() && override == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 		w.noteSlotSplitChanged()
-		return nil, nil
+		return warnings, nil
 	}
-	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, UpdatedAt: time.Now().UTC()}, "", "  ")
+	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: override, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +321,8 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 // slotsStatus reports the limits and current use for /v1/ready.
 func (w *Worker) slotsStatus() transcode.WorkerSlots {
 	l := w.slotLimits()
-	out := transcode.WorkerSlots{Ceiling: l.Ceiling, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}}
+	_, source := w.ceilingFrom(w.storedSlots())
+	out := transcode.WorkerSlots{Ceiling: l.Ceiling, CeilingLimit: w.slotCeilingLimit(), CeilingSource: source, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}}
 	if use, err := w.observeSlotUse(false); err == nil {
 		out.Video.Used, out.Podcast.Used = use.Video, use.Podcast
 	}
