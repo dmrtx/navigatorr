@@ -104,14 +104,19 @@ func caseSizeHardwareNoBudget(k *kase) {
 	k.expectNoSampleTest(r)
 }
 
-// expectLadder asserts a hardware size goal was met on the VideoToolbox ladder:
-// a planned budget with a rung, not the x265 encode a worker without the media
-// engine falls back to.
+// expectLadder asserts a hardware size goal was met on the VideoToolbox ladder,
+// not the x265 encode a worker without the media engine falls back to. Which
+// rung fits depends on the node's media engine: the first (best picture) rung
+// fits on some nodes and comes out over the budget on others, so any rung of
+// the ladder passes.
 func (k *kase) expectLadder(r *result) {
 	k.T.Helper()
 	k.require(r.skipReason() == "", "the size budget was not used: %s (%s)", r.skipReason(), pickStr(r.res, "size_budget_skip_message"))
 	k.require(r.budget != nil, "the result has no size budget record: %s", r.describe())
-	k.require(r.goal.Hardware && r.budget.Rung > 0, "the budget did not use a VideoToolbox rung (encoder %q, rung %d)", r.goal.Encoder, r.budget.Rung)
+	k.require(r.budget.Trigger == "budget_first", "the budget was planned by %q, want budget_first", r.budget.Trigger)
+	k.require(r.budget.Choice != nil && r.budget.Choice.VideoCodec == "hevc_videotoolbox" && r.budget.Choice.Reason == action.SizeBudgetChoiceLadder,
+		"the budget encoder choice is %+v, want the VideoToolbox ladder", r.budget.Choice)
+	k.require(r.goal.Hardware && r.goal.Encoder == "hevc_videotoolbox", "the budget encoded with %q, want hevc_videotoolbox", r.goal.Encoder)
 	k.expectNoSampleTest(r)
 }
 
@@ -131,7 +136,7 @@ func (k *kase) expectBudgetX265(r *result) {
 	k.require(r.budget.Trigger == "budget_first", "the budget was planned by %q, want budget_first", r.budget.Trigger)
 	k.require(r.budget.Choice != nil && r.budget.Choice.VideoCodec == "libx265" && r.budget.Choice.Reason == action.SizeBudgetChoiceHardwareOff,
 		"the budget encoder choice is %+v, want libx265 because the media engine is off", r.budget.Choice)
-	k.require(r.budget.Rung == 0, "an x265 budget used VideoToolbox rung %d", r.budget.Rung)
+	k.require(r.goal.Encoder == "libx265", "an x265 budget encoded with %q", r.goal.Encoder)
 	k.expectNoSampleTest(r)
 }
 
