@@ -620,7 +620,8 @@ test("batch rows show a smoothed encode ETA and the files left, only while speed
   h.run('progressJob.worker.speed=0;');
   text = progressText(h.run('batchProgress(progressJob)'));
   assert.doesNotMatch(text, / left/);
-  assert.match(text, /Estimated workflow progress · Not time remaining/);
+  // No estimate line appears unless a time was measured.
+  assert.doesNotMatch(text, /Estimated workflow progress|Not time remaining/);
   // Files that finished are forgotten; the smoothing map stays bounded.
   h.run('for(let i=0;i<100;i++)encodeEta("old-"+i,{transcode_phase:"encoding",speed:1},600);');
   assert.ok(h.run('encodeEtas.size') <= 64);
@@ -1265,7 +1266,7 @@ test("reconnection refreshes monitoring without discarding a prepared transcode"
 test("expired session closes stale approval dialogs and exposes sign-in", async () => {
   const h = harness();
   h.run(
-    "controls = () => {}; state.detail = 'old'; state.batchApproval = 'old';",
+    "controls = () => {}; state.detail = 'old'; state.batchReview = {id:'old'};",
   );
   h.document.getElementById("job-detail").open = true;
   h.document.getElementById("batch-review").open = true;
@@ -1278,7 +1279,7 @@ test("expired session closes stale approval dialogs and exposes sign-in", async 
   assert.equal(h.elements.get("job-detail").open, false);
   assert.equal(h.elements.get("batch-review").open, false);
   assert.equal(h.elements.get("login").hidden, false);
-  assert.equal(h.run("state.batchApproval"), null);
+  assert.equal(h.run("state.batchReview"), null);
   assert.equal(h.run("state.authRevision"), 1);
 });
 
@@ -1298,20 +1299,16 @@ test("session invalidation prevents a delayed batch approval from reopening", as
   const h = harness(),
     plan = deferred();
   h.context.plan = plan.promise;
-  h.run("tool = async () => plan; controls = () => {};");
-  const pending = h.run('reviewBatchPromotion("batch-a")');
-  h.context.fetch = async () => ({
-    ok: false,
-    status: 401,
-    json: async () => ({ error: "sign in to Navigatorr" }),
-  });
-  await assert.rejects(h.run('api("bootstrap")'), /sign in/);
+  h.run("api = async () => plan; controls = () => {};");
+  const pending = h.run('reviewBatchReplacement("batch-a")');
+  h.run("invalidateAuthentication()");
   plan.resolve({
-    data: {
-      batch_id: "batch-a",
-      digest: "verified",
-      members: [{ item_key: "file" }],
-    },
+    prepared: true,
+    id: "batch-a",
+    digest: "verified",
+    approved: false,
+    waiting: true,
+    members: [{ item_key: "file" }],
   });
   await pending;
   assert.equal(h.elements.get("batch-review").open, false);
@@ -1362,8 +1359,11 @@ test("batch approval first shows the concrete plan without resuming", async () =
   const h = harness(),
     calls = [];
   h.context.plan = {
-    batch_id: "batch-a",
+    prepared: true,
+    id: "batch-a",
     digest: "sha256:plan",
+    approved: false,
+    waiting: true,
     members: [
       {
         item_key: "episode-1",
@@ -1373,13 +1373,15 @@ test("batch approval first shows the concrete plan without resuming", async () =
     ],
   };
   h.context.record = (name) => calls.push(name);
-  h.run("tool = async (name) => {record(name); return {data:plan};};");
+  h.run("api = async (path) => {record(path); return plan;}; tool = async (name) => {record(name); return {data:null};};");
   const controls = h.run(
     'jobControls({id:"batch-a",status:"waiting_decision",action_name:"transcode_batch",batch:{promotion_plan_ready:true},waiting_options:[{decision:"approve",description:"Aprobar"}]})',
   );
   await controls.children[0].listeners.get("click")();
-  assert.deepEqual(calls, ["action_detail", "action_detail"]);
+  // The plan is read from the server's own list; nothing is resumed.
+  assert.deepEqual(calls, ["batch-candidates?id=batch-a&plan=1", "action_detail"]);
   assert.equal(h.elements.get("batch-review").open, true);
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
   assert.match(JSON.stringify(h.elements.get("batch-review-data").children), /\/source.mkv/);
   assert.match(
     JSON.stringify(h.elements.get("batch-review-data").children),
@@ -2515,14 +2517,14 @@ test("compact replacement reviews warn about re-grabs and show read-only trackin
   assert.match(text(first), /download the original again/);
   assert.match(text(first), /Monitored · Quality profile: Any/);
   h.context.notice = {regrab_warning:"May download the original again.",arr_monitored:false};
-  h.context.plan = {batch_id:"batch-a",digest:"sha256:plan",members:[{item_key:"e1",original_path:"/source.mkv",candidate_path:"/candidate.mkv"}]};
-  h.run('tool = async (name, args) => ({data: args.key === "batch_promotion_notice" ? notice : plan});');
-  await h.run('reviewBatchPromotion("batch-a")');
-  const batch = h.elements.get("batch-review-data").children[0];
+  h.context.plan = {prepared:true,id:"batch-a",digest:"sha256:plan",approved:false,waiting:true,members:[{item_key:"e1",original_path:"/source.mkv",candidate_path:"/candidate.mkv"}]};
+  h.run('api = async () => plan; tool = async (name, args) => ({data: args.key === "batch_promotion_notice" ? notice : null});');
+  await h.run('reviewBatchReplacement("batch-a")');
+  const batch = h.elements.get("batch-review-notice").children[0];
   assert.match(text(batch), /Not monitored/);
   h.context.notice = null;
-  await h.run('reviewBatchPromotion("batch-a")');
-  assert.doesNotMatch(text(h.elements.get("batch-review-data")), /download the original again/);
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.doesNotMatch(text(h.elements.get("batch-review-notice")), /download the original again/);
 });
 
 test("an all-skipped retry selects the saved files and requires another profile without sending work",async()=>{
@@ -5118,6 +5120,517 @@ test("only a job that left no file and replaced nothing is Not converted", () =>
   // A job with a retired candidate is not Not converted, but keeps its reason in the details.
   h.context.retired = notConvertedJob({ benchmark: undefined, reason_code: "quality_not_met", candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } });
   assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
+});
+
+// ---- One-step batch replacement approval ----
+const flatten = (el) => [el, ...(el.children || []).flatMap(flatten)];
+const textOf = (el) => flatten(el).map((e) => e.textContent).filter(Boolean).join(" ");
+const sampleMember = (key, name, extra = {}) => ({ item_key: key, episode: name, transcode_action_id: `t-${key}`, original_path: `/media/${name}.mkv`, candidate_path: `/media/.candidates/${name}.mkv`, candidate_sha256: `sha-${key}`, ...extra });
+const sampleFacts = (source, candidate, extra = {}) => ({ source_bytes: source, candidate_bytes: candidate, saved_bytes: source - candidate, vmaf_mean: 93.4, vmaf_worst_window: 90.2, tracks_message: "Kept English and Japanese audio", ...extra });
+const threeMembers = () => [sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02"), sampleMember("c", "Sample Show S01E03")];
+const threeFacts = () => ({ "t-a": sampleFacts(4e9, 2.4e9), "t-b": sampleFacts(3e9, 1.8e9), "t-c": sampleFacts(2e9, 1.2e9, { size_budget_outcome: "below_quality_target_within_budget" }) });
+const preparedPlan = (members, digest = "sha256:new", extra = {}) => ({ prepared: true, id: "batch-a", digest, approved: false, waiting: true, service: "filesystem", members, member_facts: threeFacts(), ...extra });
+// A review harness: plan reads come from a queue, every command is recorded.
+function batchReviewHarness({ planReads, members = threeMembers(), notice = null }) {
+  const h = harness();
+  h.run("state.info = {allow_destructive:true};");
+  h.context.calls = [];
+  h.context.planReads = planReads;
+  h.context.review = { id: "batch-a", version: "v1", service: "filesystem", excluded: 0, members, member_facts: threeFacts() };
+  h.context.notice = notice;
+  h.run(`api = async (path) => { calls.push(["api", path]); if (path.includes("plan=1")) return planReads.shift(); return review; };
+    tool = async () => ({data: notice});
+    commandRequest = async (path, body, onAccepted, decision) => { calls.push(["command", path, JSON.parse(JSON.stringify(body)), JSON.parse(JSON.stringify(decision))]); onAccepted?.(); return {id: body.id}; };`);
+  return h;
+}
+const commandCalls = (h) => plain(h.context.calls.filter((c) => c[0] === "command"));
+const click = (h, id) => h.elements.get(id).listeners.get("click")();
+
+test("one dialog shows each file's sizes, savings, quality and tracks, and the total it frees", async () => {
+  const h = batchReviewHarness({ planReads: [{ prepared: false }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("batch-review").open, true);
+  const rows = h.elements.get("batch-review-data").children;
+  // Select all, then one row per file.
+  assert.equal(rows.length, 4);
+  const first = textOf(rows[1]);
+  assert.match(first, /Sample Show S01E01/);
+  assert.match(first, /4\.00 GB → 2\.40 GB · Saves 1\.60 GB \(40%\)/);
+  assert.match(first, /Quality VMAF 93 · worst 90/);
+  assert.match(first, /Kept English and Japanese audio/);
+  assert.match(textOf(rows[3]), /Below quality target — within size budget/);
+  // Paths are behind a disclosure that is closed by default.
+  const paths = flatten(rows[1]).find((e) => /replacement-paths/.test(e.className));
+  assert.ok(paths);
+  assert.equal(flatten(paths).find((e) => e.textContent === "Show paths") !== undefined, true);
+  assert.equal(paths.open, false);
+  assert.equal(h.elements.get("batch-review-total").textContent, "Frees 3.60 GB across 3 files");
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 3 files");
+  assert.equal(h.elements.get("approve-batch-review").disabled, false);
+  // Nothing to reject yet: the secondary button appears only for a prepared plan.
+  assert.equal(h.elements.get("reject-batch-review").hidden, true);
+  // No per-row lookups of the transcode jobs.
+  assert.equal(h.context.calls.some((c) => /operations\?id=/.test(c[1] || "")), false);
+});
+
+test("one click prepares the checked files, reads the plan back, verifies it and approves its digest", async () => {
+  const prepared = preparedPlan(threeMembers());
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, prepared] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  const commands = commandCalls(h);
+  assert.equal(commands.length, 2);
+  assert.deepEqual(commands[0].slice(1, 3), ["batch-candidates", { id: "batch-a", version: "v1", item_keys: ["a", "b", "c"] }]);
+  assert.equal(commands[0][3].label, "Prepare replacement of 3 files");
+  assert.equal(commands[0][3].verb, "Preparing replacement of 3 files");
+  assert.deepEqual(commands[1].slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:new", decision: "approve" }]);
+  assert.deepEqual(commands[1][3], { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" });
+  // The plan was read before preparing and after it, never approved unread.
+  const order = h.context.calls.map((c) => (c[0] === "command" ? c[2].decision || "prepare" : "read"));
+  assert.deepEqual(order.filter((x) => x !== "read"), ["prepare", "approve"]);
+  assert.ok(order.lastIndexOf("read") < order.indexOf("approve"));
+  assert.equal(h.elements.get("batch-review").open, false);
+});
+
+test("only the checked files are prepared and the button and total follow the checks", async () => {
+  const prepared = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("c", "Sample Show S01E03")]);
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, prepared] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  const rows = h.elements.get("batch-review-data").children;
+  const input = flatten(rows[2]).find((e) => e.listeners?.has("change"));
+  input.checked = false;
+  input.listeners.get("change")();
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 2 files");
+  assert.equal(h.elements.get("batch-review-total").textContent, "Frees 2.40 GB across 2 files");
+  await click(h, "approve-batch-review");
+  const commands = commandCalls(h);
+  assert.deepEqual(commands[0][2].item_keys, ["a", "c"]);
+  assert.equal(commands[1][2].decision, "approve");
+  assert.equal(commands[1][3].label, "Replace 2 files");
+  // Nothing selected cannot be sent.
+  const input2 = flatten(h.elements.get("batch-review-data").children[1]).find((e) => e.listeners?.has("change"));
+  input2.checked = false;
+  input2.listeners.get("change")();
+  const input3 = flatten(h.elements.get("batch-review-data").children[3]).find((e) => e.listeners?.has("change"));
+  input3.checked = false;
+  input3.listeners.get("change")();
+  assert.equal(h.elements.get("approve-batch-review").disabled, true);
+});
+
+test("a prepared list that differs from what was shown is not approved; the difference is shown and asks again", async () => {
+  const different = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02"), sampleMember("d", "Sample Show S01E04")], "sha256:other");
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, different, different] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  // Prepared once, never approved.
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.equal(h.elements.get("batch-review").open, true);
+  const notice = textOf(h.elements.get("batch-review-notice"));
+  assert.match(notice, /Not in the prepared list: Sample Show S01E03/);
+  assert.match(notice, /Added to the prepared list: Sample Show S01E04/);
+  assert.match(textOf(h.elements.get("batch-review-data")), /Sample Show S01E04/);
+  assert.doesNotMatch(textOf(h.elements.get("batch-review-data")), /Sample Show S01E03/);
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
+  // The person sees the server's list and confirms it: approved with its digest.
+  await click(h, "approve-batch-review");
+  const last = commandCalls(h).at(-1);
+  assert.deepEqual(last.slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:other", decision: "approve" }]);
+});
+
+test("a changed candidate path or hash under the same file is a difference", async () => {
+  const swapped = threeMembers().map((m) => (m.item_key === "b" ? { ...m, candidate_sha256: "sha-changed" } : m));
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, preparedPlan(swapped)] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /Changed since you reviewed it: Sample Show S01E02/);
+});
+
+test("a plan that already exists for another selection is shown, not replaced or approved", async () => {
+  const existing = preparedPlan([sampleMember("a", "Sample Show S01E01")], "sha256:existing");
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, existing] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.equal(commandCalls(h).length, 0);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /Not in the prepared list: Sample Show S01E02/);
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 1 file");
+});
+
+test("a plan opened from the queue shows the same dialog and approves only the digest it showed", async () => {
+  const plan = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02")], "sha256:d1");
+  const h = batchReviewHarness({ planReads: [plan, { ...plan }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("approve-batch-review").textContent, "Replace 2 files");
+  assert.equal(h.elements.get("reject-batch-review").hidden, false);
+  assert.equal(h.elements.get("batch-review-data").children.length, 2);
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision), ["approve"]);
+  assert.equal(commandCalls(h)[0][2].digest, "sha256:d1");
+  // A plan whose digest changed while the dialog was open is shown again.
+  const h2 = batchReviewHarness({ planReads: [plan, { ...plan, digest: "sha256:d2" }] });
+  await h2.run('reviewBatchReplacement("batch-a")');
+  await click(h2, "approve-batch-review");
+  assert.equal(commandCalls(h2).length, 0);
+  assert.match(textOf(h2.elements.get("batch-review-notice")), /list changed while this review was open/);
+});
+
+test("an approved or not-waiting plan does not open the dialog", async () => {
+  const h = batchReviewHarness({ planReads: [preparedPlan(threeMembers(), "sha256:x", { approved: true, waiting: false })] });
+  await assert.rejects(h.run('reviewBatchReplacement("batch-a")'), /already approved/);
+  assert.equal(h.elements.get("batch-review").open, false);
+  const h2 = batchReviewHarness({ planReads: [preparedPlan(threeMembers(), "sha256:x", { waiting: false })] });
+  await assert.rejects(h2.run('reviewBatchReplacement("batch-a")'), /not waiting for approval/);
+});
+
+test("Keep originals rejects the prepared plan by digest and names the decision", async () => {
+  const plan = preparedPlan([sampleMember("a", "Sample Show S01E01"), sampleMember("b", "Sample Show S01E02")], "sha256:d1");
+  const h = batchReviewHarness({ planReads: [plan, { ...plan }] });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "reject-batch-review");
+  const command = commandCalls(h)[0];
+  assert.deepEqual(command.slice(1, 3), ["batch-candidates", { id: "batch-a", digest: "sha256:d1", decision: "reject" }]);
+  assert.equal(command[3].label, "Keep 2 originals");
+  assert.equal(command[3].verb, "Keeping 2 originals");
+});
+
+test("a re-grab warning that appears after preparing is shown before anything is approved", async () => {
+  const notice = { regrab_warning: "May download the original again.", arr_monitored: true };
+  const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, preparedPlan(threeMembers())], notice });
+  await h.run('reviewBatchReplacement("batch-a")');
+  await click(h, "approve-batch-review");
+  assert.deepEqual(commandCalls(h).map((c) => c[2].decision || "prepare"), ["prepare"]);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /download the original again/);
+});
+
+test("replacement stays disabled in the dialog when the server setting is off", async () => {
+  const h = batchReviewHarness({ planReads: [{ prepared: false }] });
+  h.run("state.info = {allow_destructive:false};");
+  await h.run('reviewBatchReplacement("batch-a")');
+  assert.equal(h.elements.get("approve-batch-review").disabled, true);
+  assert.match(textOf(h.elements.get("batch-review-notice")), /disabled in the server settings/);
+});
+
+// ---- Decisions named in chips and history ----
+test("chips and the history name the decision that was sent", () => {
+  const now = 5_000_000;
+  const h = commandHarness([
+    { command_id: "r1", id: "batch-a", kind: "review_batch_promotion", status: "running", started: now - 4_000, decision: { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" } },
+    { command_id: "p1", id: "batch-p", kind: "prepare_batch_promotion", status: "pending", started: now - 4_000, decision: { label: "Prepare replacement of 3 files", verb: "Preparing replacement of 3 files", failure: "Preparation failed" } },
+    { command_id: "k1", id: "batch-k", kind: "review_batch_promotion", status: "running", started: now - 4_000, decision: { label: "Keep 3 originals", verb: "Keeping 3 originals", failure: "Keeping originals failed" } },
+    { command_id: "f1", id: "batch-f", kind: "review_batch_promotion", status: "failed", error: "x", started: now - 4_000, decision: { label: "Replace 3 files", verb: "Replacing 3 files", failure: "Replacement failed" } },
+  ]);
+  assert.equal(chipOf(h, "batch-a", now).text, "Replacing 3 files");
+  assert.equal(chipOf(h, "batch-p", now).text, "Preparing replacement of 3 files");
+  assert.equal(chipOf(h, "batch-k", now).text, "Keeping 3 originals");
+  assert.equal(chipOf(h, "batch-f", now).text, "Replacement failed");
+  h.run(`state.detail="batch-a";renderCommandHistory(${now});`);
+  assert.match(textOf(h.elements.get("detail-command-list").children[0]), /^Replace 3 files\s+· Applying/);
+  // A command with no named decision keeps its generic wording.
+  const plain = commandHarness([{ command_id: "z1", id: "job-z", kind: "retry", label: "Retrying job", status: "running", started: now - 1_000 }]);
+  assert.equal(chipOf(plain, "job-z", now).text, "Retrying");
+});
+
+test("a command request stores the decision it was sent for", async () => {
+  const h = harness();
+  const stored = {};
+  h.context.crypto = { getRandomValues: (b) => b.fill(7) };
+  h.context.sessionStorage = { getItem: (k) => stored[k] ?? null, setItem: (k, v) => { stored[k] = v; }, removeItem() {} };
+  h.run('api = async () => ({command_id:"cmd-1", id:"batch-a"}); waitCommand = async () => ({id:"batch-a"}); notify = () => {};');
+  await h.run('commandRequest("batch-candidates", {id:"batch-a", digest:"d", decision:"approve"}, undefined, {label:"Replace 3 files", verb:"Replacing 3 files", failure:"Replacement failed"})');
+  const receipts = JSON.parse(stored.navigatorr_commands);
+  assert.equal(Object.values(receipts)[0].decision.label, "Replace 3 files");
+});
+
+// ---- Queue row, progress and members of an approved replacement ----
+const replacingBatch = (extra = {}) => ({
+  id: "batch-a", action_name: "transcode_batch", status: "running", batch: { total: 3, completed: 3, promotion_plan_ready: true },
+  replacement: {
+    approved: true, total: 3, done: 1, failed: 0, frees_bytes: 5160000000, freed_bytes: 1600000000,
+    members: [
+      { item_key: "k-a", name: "Sample Show S01E01", phase: "done", freed_bytes: 1600000000 },
+      { item_key: "k-b", name: "Sample Show S01E02", phase: "backup", percent: 55 },
+      { item_key: "k-c", name: "Sample Show S01E03", phase: "waiting" },
+    ],
+  },
+  ...extra,
+});
+
+test("the queue row names what is being replaced and what it frees", () => {
+  const h = harness();
+  h.context.job = replacingBatch();
+  const presentation = JSON.parse(h.run("JSON.stringify(queuePresentation(job))"));
+  assert.equal(presentation.status, "Replacing");
+  assert.match(presentation.summary, /Replacing 3 files · frees 5\.16 GB/);
+  assert.doesNotMatch(presentation.summary, /approval required/);
+  assert.equal(h.run("replacementHeadline(job)"), "Replacing 3 files · frees 5.16 GB");
+  h.run('job.replacement.done = 3; job.replacement.members.forEach(m => { m.phase = "done"; }); job.replacement.freed_bytes = 5160000000;');
+  assert.equal(h.run("replacementHeadline(job)"), "Replaced 3 files · freed 5.16 GB");
+});
+
+test("the progress headline and one line per file describe the real stage, with no estimate", () => {
+  const h = harness();
+  h.context.job = replacingBatch();
+  const block = h.run("replacementProgressBlock(job)");
+  const text = textOf(block);
+  assert.match(text, /Replacing 3 files · 1 of 3 done/);
+  assert.match(text, /Sample Show S01E01 Done · freed 1\.60 GB/);
+  assert.match(text, /Sample Show S01E02 Backing up the original \(55%\)/);
+  assert.match(text, /Sample Show S01E03 Waiting/);
+  assert.doesNotMatch(text, /Estimated workflow progress|Not time remaining|%\s*$/);
+  // Each stage reads as a plain step.
+  const steps = JSON.parse(h.run(`JSON.stringify(["checking","backup","backup_check","swap","final_check","done","waiting"].map(phase => replacementStepText({phase})))`));
+  assert.deepEqual(steps, ["Checking the files", "Backing up the original", "Checking the backup", "Swapping in the new file", "Checking the new file", "Done", "Waiting"]);
+  // The batch progress block is this block while a replacement runs.
+  assert.match(textOf(h.run("batchProgress(job)")), /1 of 3 done/);
+});
+
+const failedReplacement = () => replacingBatch({
+  status: "failed", error: "1 batch promotion(s) need attention: item-key-9: promotion validation failed: audio bitrate mismatch (truncated",
+  replacement: {
+    approved: true, total: 3, done: 2, failed: 1, frees_bytes: 5160000000, freed_bytes: 2800000000,
+    members: [
+      { item_key: "k-a", name: "Sample Show S01E01", phase: "done", freed_bytes: 1600000000 },
+      { item_key: "k-b", name: "Sample Show S01E02", phase: "done", freed_bytes: 1200000000 },
+      { item_key: "k-c", name: "Sample Show S01E03", phase: "failed", failure: { reason: "final check before replacing found an audio mismatch", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" } },
+    ],
+  },
+});
+
+test("a batch with one failed replacement says so in plain words, without item keys", () => {
+  const h = harness();
+  h.context.job = failedReplacement();
+  const summary = h.run("queuePresentation(job).summary");
+  assert.match(summary, /2 of 3 replaced · 1 failed: final check before replacing found an audio mismatch · original kept/);
+  assert.doesNotMatch(summary, /item-key|need attention|truncated/);
+  const text = textOf(h.run("batchProgress(job)"));
+  assert.match(text, /2 of 3 replaced · 1 failed/);
+  assert.match(text, /Sample Show S01E03 Stopped: final check before replacing found an audio mismatch · original kept/);
+  assert.doesNotMatch(text, /item-key/);
+});
+
+test("the batch headline says 'original kept' only when every failure left the original untouched", () => {
+  const h = harness();
+  const headline = (failures) => {
+    const members = failures.map((f, i) => ({ item_key: `k-${i}`, name: `File ${i}`, phase: "failed", failure: { reason: "the library did not accept the new file", ...f } }));
+    h.context.job = { replacement: { approved: true, total: failures.length + 1, done: 1, failed: failures.length, members } };
+    return h.run("replacementHeadline(job)");
+  };
+  const inPlace = { original_state: "in_place", original_intact: true }, recovery = { original_state: "recovery", original_intact: false }, unclear = { original_state: "unclear", original_intact: false };
+  assert.match(headline([inPlace]), /original kept$/);
+  assert.match(headline([inPlace, inPlace]), /originals kept$/);
+  const safe = headline([recovery]);
+  assert.match(safe, /original in Recovery$/);
+  assert.doesNotMatch(safe, /kept|intact/);
+  assert.match(headline([inPlace, recovery]), /check Recovery$/);
+  assert.match(headline([unclear]), /check Recovery$/);
+  const step = (f) => h.run(`replacementStepText({phase:"failed", failure:${JSON.stringify({ reason: "x", ...f })}})`);
+  assert.match(step(recovery), /original in Recovery/);
+  assert.match(step(inPlace), /original kept/);
+  assert.match(step(unclear), /check Recovery/);
+});
+
+async function batchItemsHarness(items, { detailJob = { status: "completed", batch: {} }, destructive = true } = {}) {
+  const h = harness();
+  h.context.items = items;
+  h.context.detailJob = detailJob;
+  h.run(`state.info={allow_destructive:${destructive}};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob=detailJob;api=async()=>({items,total:items.length});`);
+  await h.run('loadBatchItems("batch-a",2)');
+  return h;
+}
+const itemRows = (h) => h.elements.get("batch-items-list").children;
+const buttonLabels = (row) => flatten(row).filter((e) => e.type === "button").map((e) => e.textContent);
+
+test("a member of the approved plan that has not started is queued, with no way to replace it again", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_plan: "queued", mode: "size", reason_code: "eligible" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", replacement_plan: "queued" },
+  ];
+  const h = await batchItemsHarness(items, { detailJob: { status: "running", batch: {}, replacement: { approved: true, total: 2, members: [] } } });
+  const row = textOf(itemRows(h)[0]);
+  assert.match(row, /Sample Show S01E01/);
+  assert.match(row, /Replacement queued \(approved\)/);
+  assert.doesNotMatch(row, /Replace file|awaiting approval|View replacement|Candidate verified/);
+  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => /Replace|replacement/i.test(l)), []);
+});
+
+test("a candidate waiting for a plan decision says so, and a candidate still unplanned offers Replace file", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_plan: "review" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", candidate_ready: true },
+  ];
+  const h = await batchItemsHarness(items);
+  assert.match(textOf(itemRows(h)[0]), /Replacement awaiting approval/);
+  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => l === "Replace file"), []);
+  assert.deepEqual(buttonLabels(itemRows(h)[1]).filter((l) => l === "Replace file"), ["Replace file"]);
+});
+
+test("buttons that only open something are not disabled by a busy batch, and none show before they can work", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_action_id: "p-a", replacement_status: "running" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "completed", child_action_id: "t-b", replacement_plan: "queued" },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};state.busyJobs.add("batch-a");api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const viewReplacement = flatten(itemRows(h)[0]).find((e) => e.textContent === "View replacement");
+  assert.ok(viewReplacement);
+  assert.equal(viewReplacement.disabled, false);
+  // The queued file has no replacement yet, so no such button exists for it.
+  assert.equal(buttonLabels(itemRows(h)[1]).includes("View replacement"), false);
+  // The same rule holds when the connection returns: navigation stays usable.
+  h.run("setConnection(false); setConnection(true);");
+  assert.equal(flatten(itemRows(h)[0]).find((e) => e.textContent === "View replacement").disabled, false);
+});
+
+test("the single-file job view offers no Replace file while the batch plan covers the candidate", () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  const labels = (job) => JSON.stringify(h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`));
+  const base = { id: "t-a", action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "batch-a" };
+  assert.match(labels(base), /Replace file/);
+  assert.doesNotMatch(labels({ ...base, replacement_plan: "queued" }), /Replace file/);
+  assert.doesNotMatch(labels({ ...base, replacement_plan: "review" }), /Replace file/);
+});
+
+const failedItem = (extra = {}) => ({
+  item_key: "k-c", display_label: "Sample Show S01E03", status: "completed", child_action_id: "t-c", replacement_action_id: "p-c", replacement_status: "failed",
+  replacement_failure: { reason: "final check before replacing found an audio mismatch", original_state: "in_place", original_intact: true, detail: "promotion validation failed: audio bitrate mismatch" },
+  retry_action_id: "batch-a", reason_code: "eligible", ...extra,
+});
+
+test("a failed replacement row says why, that the original is still in place, and offers retry and details", async () => {
+  const h = await batchItemsHarness([failedItem()], { detailJob: { status: "failed", batch: {} } });
+  const row = itemRows(h)[0];
+  const text = textOf(row);
+  assert.match(text, /Replacement failed/);
+  assert.match(text, /Replacement stopped: final check before replacing found an audio mismatch/);
+  assert.match(text, /Your original file is still in place\./);
+  assert.deepEqual(buttonLabels(row).filter((l) => ["Retry replacement", "Keep original", "View details"].includes(l)), ["Retry replacement", "View details"]);
+  assert.doesNotMatch(text, /recovery copy/);
+  // Technical detail is behind a disclosure; the key and the recipe reason are not shown.
+  const technical = flatten(row).find((e) => /technical-reason/.test(e.className));
+  assert.match(textOf(technical), /audio bitrate mismatch/);
+  assert.doesNotMatch(text, /k-c|eligible/);
+  // Retry goes to the action that re-runs only that replacement, naming the file.
+  h.context.retries = [];
+  h.run("jobControl = async (...args) => retries.push(JSON.parse(JSON.stringify(args)));");
+  await flatten(row).find((e) => e.textContent === "Retry replacement").listeners.get("click")();
+  const retry = plain(h.context.retries[0]);
+  assert.deepEqual(retry.slice(0, 3), ["batch-a", "action_retry", {}]);
+  assert.equal(retry[3].decision.label, "Retry replacement of Sample Show S01E03");
+});
+
+test("the failure text says where the original is, from the server's state, and never calls it intact when it may have changed", async () => {
+  const row = async (original_state) => {
+    const h = await batchItemsHarness([failedItem({ replacement_failure: { reason: "the library did not accept the new file", original_state, original_intact: original_state === "in_place", detail: "library did not accept the new file" }, retry_action_id: "p-c" })], { detailJob: { status: "failed", batch: {} } });
+    return textOf(itemRows(h)[0]);
+  };
+  const safe = await row("recovery");
+  assert.match(safe, /Your original is safe in its recovery copy\. Check Recovery before trying again\./);
+  assert.doesNotMatch(safe, /intact|in place|original kept/i);
+  const unclear = await row("unclear");
+  assert.match(unclear, /Check Recovery to see where your original is before trying again\./);
+  assert.doesNotMatch(unclear, /intact|in place|safe in its recovery|original kept/i);
+  assert.match(await row("in_place"), /Your original file is still in place\./);
+});
+
+test("Retry goes to the batch for a file that stopped early, to the file itself for one that stopped later, and to nobody when it cannot change", async () => {
+  const retries = async (item, detailJob) => {
+    const h = await batchItemsHarness([item], { detailJob });
+    h.context.calls = [];
+    h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+    const button = flatten(itemRows(h)[0]).find((e) => e.type === "button" && /^Retry/.test(e.textContent));
+    if (!button) return { label: null, calls: [] };
+    await button.listeners.get("click")();
+    return { label: button.textContent, calls: plain(h.context.calls) };
+  };
+  const failedBatch = { status: "failed", batch: {}, replacement: { approved: true, failed: 1, batch_retry_count: 1, members: [] } };
+  const early = await retries(failedItem({ retry_action_id: "batch-a" }), failedBatch);
+  assert.equal(early.label, "Retry replacement");
+  assert.deepEqual(early.calls[0].slice(0, 2), ["batch-a", "action_retry"]);
+  assert.equal(early.calls[0][3].decision.label, "Retry replacement of Sample Show S01E03");
+  const late = await retries(failedItem({ retry_action_id: "p-c" }), failedBatch);
+  assert.equal(late.label, "Retry replacement");
+  assert.deepEqual(late.calls[0].slice(0, 2), ["p-c", "action_retry"]);
+  // A failure only the batch recorded would fail the same way again: nothing to retry, the reason still shows.
+  const recorded = await retries(failedItem({ replacement_action_id: undefined, replacement_status: undefined, retry_action_id: undefined }), failedBatch);
+  assert.equal(recorded.label, null);
+});
+
+test("one batch Retry that re-runs several failed files says how many", async () => {
+  const detailJob = { status: "failed", batch: {}, replacement: { approved: true, failed: 3, batch_retry_count: 2, members: [] } };
+  const h = await batchItemsHarness([failedItem({ retry_action_id: "batch-a" }), failedItem({ item_key: "k-d", display_label: "Sample Show S01E04", retry_action_id: "batch-a" })], { detailJob });
+  h.context.calls = [];
+  h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+  const button = flatten(itemRows(h)[0]).find((e) => /^Retry/.test(e.textContent));
+  assert.equal(button.textContent, "Retry 2 failed replacements");
+  await button.listeners.get("click")();
+  assert.equal(plain(h.context.calls)[0][3].decision.label, "Retry 2 failed replacements");
+  // A file's own retry is never described as retrying more than that file.
+  const own = await batchItemsHarness([failedItem({ retry_action_id: "p-c" })], { detailJob });
+  assert.deepEqual(buttonLabels(itemRows(own)[0]).filter((l) => /^Retry/.test(l)), ["Retry replacement"]);
+});
+
+test("a batch with failed replacements has one Retry, on each file, and no second batch-level button unless only the batch recorded the failure", () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  const labels = (job) => plain(h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`));
+  const batch = { id: "batch-a", action_name: "transcode_batch", status: "failed", batch: { total: 3, promotion_plan_ready: true } };
+  assert.ok(labels(batch).includes("Retry"));
+  // A file with a retry of its own, or a failure no retry can fix (approve_promotion), leaves only the per-file button.
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, retryable: 1 } }).includes("Retry"));
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 1 } }).includes("Retry"));
+  // Only the batch recorded the failure: no file can retry, so a transient error is retried from the batch.
+  assert.ok(labels({ ...batch, replacement: { approved: true, total: 3, failed: 1, batch_recorded_failed: 1 } }).includes("Retry"));
+  assert.ok(!labels({ ...batch, replacement: { approved: true, total: 3, failed: 2, retryable: 1, batch_recorded_failed: 1 } }).includes("Retry"));
+});
+
+test("an approved replacement drops the completed and failed chips its headline already states", () => {
+  const h = harness();
+  const chips = (batch, omit) => textOf(h.run(`(() => { const c = document.createElement("div"); renderBatchCounts(c, ${JSON.stringify(batch)}, ${JSON.stringify(omit)}); return c; })()`));
+  const batch = { completed: 3, failed: 1, skip: 2 };
+  assert.match(chips(batch, []), /3 Completed/);
+  const honest = chips(batch, ["completed", "failed"]);
+  assert.doesNotMatch(honest, /Completed|Failed/);
+  assert.match(honest, /2 Skipped/);
+});
+
+test("a file that was replaced shows no recipe reason, and a failed encode still does", async () => {
+  const items = [
+    { item_key: "k-a", display_label: "Sample Show S01E01", status: "completed", child_action_id: "t-a", replacement_action_id: "p-a", replacement_status: "completed", replaced: true, reason_code: "quality_not_met" },
+    { item_key: "k-b", display_label: "Sample Show S01E02", status: "skip", child_action_id: "t-b", reason_code: "already_hevc" },
+  ];
+  const h = await batchItemsHarness(items);
+  assert.doesNotMatch(textOf(itemRows(h)[0]), /quality target/);
+  assert.match(textOf(itemRows(h)[1]), /Already HEVC/);
+});
+
+test("Where shows the new file and the backup with copy buttons, short by default", () => {
+  const h = harness();
+  const where = h.run('whereBlock({new_path:"/media/Sample Show/S01E01.mkv", backup_path:"/recovery/S01E01.mkv.bak"})');
+  const text = textOf(where);
+  assert.match(text, /Where/);
+  assert.match(text, /New file:\s+\/media\/Sample Show\/S01E01\.mkv/);
+  assert.match(text, /Original backup:\s+\/recovery\/S01E01\.mkv\.bak/);
+  assert.match(text, /removed|stays until you remove it from Recovery/);
+  assert.equal(flatten(where).filter((e) => e.textContent === "Copy").length, 2);
+  assert.match(textOf(h.run('whereBlock({new_path:"/media/x.mkv", backup_removed:true})')), /Original backup:\s+removed after the new file was verified/);
+  assert.equal(h.run("whereBlock(null)"), null);
+  assert.equal(h.run("whereBlock({})"), null);
+});
+
+test("the single-file review uses the same card, the total it frees and a Keep original option", async () => {
+  const h = harness();
+  h.context.current = { id: "replace", status: "waiting_decision", waiting_options: [{ decision: "approve" }, { decision: "reject" }], replacement_facts: sampleFacts(4e9, 2.4e9), promotion: { original_path: "/media/Sample Show S01E01.mkv", candidate_path: "/media/.candidates/Sample Show S01E01.mkv", original_sha256: "o", candidate_sha256: "c", plan_digest: "sha256:plan" } };
+  h.run("api = async () => ({jobs:[current]});");
+  await h.run('reviewFilePromotion("replace")');
+  const text = textOf(h.elements.get("file-review-data"));
+  assert.match(text, /Sample Show S01E01/);
+  assert.match(text, /4\.00 GB → 2\.40 GB · Saves 1\.60 GB \(40%\)/);
+  assert.match(text, /Quality VMAF 93 · worst 90/);
+  assert.equal(h.elements.get("file-review-total").textContent, "Frees 1.60 GB");
+  assert.equal(h.elements.get("reject-file-review").hidden, false);
 });
 
 // Languages to keep: the Settings editor, the goal form's track picker, and the

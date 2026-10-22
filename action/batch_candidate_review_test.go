@@ -418,3 +418,37 @@ func TestPostBatchReviewCanReplaceSubsetsInSuccessiveReviews(t *testing.T) {
 		})
 	}
 }
+
+// The plan read is the list an approval is checked against: the digest it
+// shows is the one the approval needs, and it is empty before preparing and
+// after a rejection.
+func TestBatchPromotionPlanReadMatchesWhatApprovalChecks(t *testing.T) {
+	h := newPromotionHarness(t)
+	id := seedFinishedReviewBatch(t, h, "filesystem")
+	if plan, err := h.engine.BatchPromotionPlan(context.Background(), id); err != nil || plan != nil {
+		t.Fatalf("nothing is prepared yet: %+v %v", plan, err)
+	}
+	review, err := h.engine.BatchCandidates(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.engine.PrepareBatchPromotion(context.Background(), id, review.Version, "request-one", []string{"epfile-101"}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := h.engine.BatchPromotionPlan(context.Background(), id)
+	if err != nil || plan == nil || !plan.Waiting || plan.Approved || len(plan.Members) != 1 || plan.Members[0].ItemKey != "epfile-101" {
+		t.Fatalf("prepared plan: %+v %v", plan, err)
+	}
+	if plan.Digest == "" {
+		t.Fatal("the prepared plan has no digest")
+	}
+	if _, err := h.engine.ResumeReviewedBatch(context.Background(), id, "sha256:not-the-plan", "approve", "decision-wrong"); err == nil {
+		t.Fatal("approval with a digest that is not the plan's was accepted")
+	}
+	if _, err := h.engine.ResumeReviewedBatch(context.Background(), id, plan.Digest, "reject", "decision-reject"); err != nil {
+		t.Fatal(err)
+	}
+	if plan, err := h.engine.BatchPromotionPlan(context.Background(), id); err != nil || plan != nil {
+		t.Fatalf("a rejected plan is gone: %+v %v", plan, err)
+	}
+}
