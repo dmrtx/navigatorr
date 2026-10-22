@@ -4353,19 +4353,34 @@ function renderSlotUsage(activity) {
 function workerSlotsPath() {
   return state.slotNode ? `worker-slots?node=${encodeURIComponent(state.slotNode)}` : "worker-slots";
 }
-// The node Settings edits: the one picked if it still reports, else the
-// first that does.
-function settingsNode(live) {
-  return live.find(n => n.name && n.name === state.slotNode) || live[0];
+// The node Settings edits. With several nodes it is always named, so a save
+// goes to the node shown: the one picked, else the first that reports. A
+// picked node that stops reporting stays picked, its editors hidden, rather
+// than Settings moving to another node under an open edit.
+function settingsNode(nodes, live) {
+  if (nodes.length < 2) return live[0];
+  if (!nodes.some(n => n.name === state.slotNode)) state.slotNode = live[0].name;
+  return nodes.find(n => n.name === state.slotNode);
 }
-function renderNodePicker(live, selected) {
+function renderNodePicker(nodes, selected) {
   const pick = $("settings-node-pick");
-  $("settings-node-pick-label").hidden = live.length < 2;
-  $("settings-node-title").textContent = live.length < 2 ? "Transcode node" : `Transcode node · ${selected.name}`;
-  if (live.length < 2) return;
-  const names = live.map(n => n.name);
-  if ([...pick.options].map(o => o.value).join() !== names.join()) pick.replaceChildren(...names.map(name => { const option = node("option", name); option.value = name; return option; }));
+  $("settings-node-pick-label").hidden = nodes.length < 2;
+  $("settings-node-title").textContent = nodes.length < 2 ? "Transcode node" : `Transcode node · ${selected.name}`;
+  if (nodes.length < 2) return;
+  const labels = nodes.map(n => n.available && n.activity ? n.name : `${n.name} (unavailable)`);
+  if ([...pick.options].map(o => o.textContent).join() !== labels.join()) pick.replaceChildren(...nodes.map((n, i) => { const option = node("option", labels[i]); option.value = n.name; return option; }));
   pick.value = selected.name;
+}
+// A picked node that does not report: its settings cannot be read or saved.
+function renderUnavailableNode(selected) {
+  state.workerSlots = null;
+  state.slotFormDirty = state.parallelFormDirty = false;
+  $("settings-node").hidden = false;
+  $("worker-parallel-summary").hidden = true;
+  $("worker-parallel-form").hidden = true;
+  $("worker-slot-split").hidden = true;
+  $("worker-slot-usage").hidden = true;
+  $("worker-parallel-limit").textContent = `${selected.name} is unavailable. Its settings can be changed once it reports again.`;
 }
 $("settings-node-pick").addEventListener("change", () => {
   state.slotNode = $("settings-node-pick").value;
@@ -4471,11 +4486,14 @@ function renderWorkerActivity(data) {
   const missing = nodes.length - live.length;
   $("worker-capacity").textContent = `Worker slots · ${used}/${total} occupied${missing ? ` · ${missing} of ${nodes.length} nodes unavailable` : ""}`;
   $("activity-checked").textContent = "Updated now · Job reservations";
-  const selected = settingsNode(live);
-  if (live.length > 1) state.slotNode = selected.name;
-  renderNodePicker(live, selected);
-  renderParallelJobs(selected.activity);
-  renderSlotUsage(selected.activity);
+  const selected = settingsNode(nodes, live);
+  renderNodePicker(nodes, selected);
+  if (selected.available && selected.activity) {
+    renderParallelJobs(selected.activity);
+    renderSlotUsage(selected.activity);
+  } else {
+    renderUnavailableNode(selected);
+  }
   // With several nodes each one's split shows under its own heading.
   if (nodes.length > 1) $("worker-slot-usage").hidden = true;
   // Activity only reports; the editors live in Settings.

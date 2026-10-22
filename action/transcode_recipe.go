@@ -224,13 +224,6 @@ type QualityLadderRecord struct {
 	Worker string `json:"worker,omitempty"`
 }
 
-// recordWorkerMatches reports whether a ladder planned for worker may run on
-// the action's worker: the same one, or a record from before workers had
-// names. A record planned for another worker is never run.
-func recordWorkerMatches(worker string, state map[string]any) bool {
-	return worker == "" || worker == assignedWorker(state)
-}
-
 // ladderRecipe is the ladder the record runs: the frozen recipe, or its
 // fallback when the record chose it.
 func ladderRecipe(snapshot *ModePolicySnapshot, rec *QualityLadderRecord) *ModeRecipe {
@@ -578,7 +571,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 // and final validation pinned to the stored request.
 func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *QualityLadderRecord) bool {
 	r := ladderRecipe(snapshot, rec)
-	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || !recordWorkerMatches(rec.Worker, state) || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !slices.Equal(rec.Values, r.QualityValues) {
+	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !slices.Equal(rec.Values, r.QualityValues) {
 		return false
 	}
 	if plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != 0 || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != getString(state, "benchmark_request_digest") {

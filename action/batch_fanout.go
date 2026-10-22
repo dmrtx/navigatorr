@@ -67,12 +67,19 @@ func (e *Engine) batchAvailableSlots(ctx context.Context, items []store.Transcod
 			running[it.Worker]++
 		}
 	}
-	// An item from before workers had names belongs to video-worker.
-	if _, ok := e.deps.Workers.Get(transcode.DefaultWorkerName); ok {
-		running[transcode.DefaultWorkerName] += running[""]
-		delete(running, "")
+	// An item with no worker is a child not yet assigned one (earlier items
+	// that hold a job are stamped at startup): it takes room on whichever
+	// worker it is given, so it counts against the total. An item counts on
+	// its worker by its resolved name.
+	unassigned := running[""]
+	delete(running, "")
+	for name, n := range running {
+		if resolved := e.resolveWorker(name); resolved != name {
+			delete(running, name)
+			running[resolved] += n
+		}
 	}
-	available := -running[""]
+	available := -unassigned
 	for i, w := range workers {
 		if ready[i] {
 			available += max(0, e.workerVideoCapacity(ctx, w)-running[w.Name])

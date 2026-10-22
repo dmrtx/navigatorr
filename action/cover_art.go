@@ -46,14 +46,14 @@ func coverArtGateReport(rep *mediainspect.DetailedReport, supported func() bool)
 }
 
 // cachedCoverArtSupport asks the workers at most once, for loops over many
-// sources before any of them is assigned a worker: every configured worker
-// must support cover art, since any of them may be assigned the file.
+// sources before any of them is assigned a worker: every worker that may be
+// assigned the file now must support cover art (see assignableWorkers).
 func (e *Engine) cachedCoverArtSupport(ctx context.Context) func() bool {
 	asked, supported := false, false
 	return func() bool {
 		if !asked {
 			asked, supported = true, e.workersConfigured()
-			for _, w := range e.deps.Workers.All() {
+			for _, w := range e.assignableWorkers(ctx) {
 				supported = supported && workerSupportsCoverArt(ctx, w.Executor)
 			}
 		}

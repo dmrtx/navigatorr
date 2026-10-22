@@ -104,7 +104,7 @@ func (e *Engine) CheckInstanceWorkerAdmission(ctx context.Context, inst *store.A
 	}
 	var state map[string]any
 	_ = json.Unmarshal([]byte(inst.StateJSON), &state)
-	name := assignedWorker(state)
+	name := e.instanceWorker(state)
 	if name == "" {
 		return e.CheckWorkerAdmissionFor(ctx, inst.ActionName)
 	}

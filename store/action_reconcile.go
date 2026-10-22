@@ -149,12 +149,12 @@ func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, err
 	return out, rows.Err()
 }
 
-// AssignUnnamedWorker records worker as the worker of every worker action and
-// batch item that holds a worker job but names no worker: work started before
-// workers had names, all of it on the one worker there was. The slot settings
-// stored under legacyNode move to worker unless it has its own. It returns
-// how many rows it assigned and changes nothing once none are left.
-func (s *Store) AssignUnnamedWorker(worker, legacyNode string) (int64, error) {
+// AssignLegacyWorker stamps worker on every worker action and batch item that
+// holds a worker job and names no worker, or names legacyNode while worker is
+// another name; legacyNode's slot settings then become worker's unless worker
+// already has its own. With worker == legacyNode it only names the unnamed.
+// It reports how many actions and items it stamped, and is idempotent.
+func (s *Store) AssignLegacyWorker(worker, legacyNode string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -165,16 +165,18 @@ func (s *Store) AssignUnnamedWorker(worker, legacyNode string) (int64, error) {
 	res, err := tx.Exec(`UPDATE action_instances SET state_json = json_set(state_json, '$.worker', ?)
 		WHERE action_name IN ('transcode_media', 'clean_podcast_ads')
 		AND json_valid(state_json)
-		AND json_type(state_json, '$.worker') IS NULL
-		AND (COALESCE(json_extract(state_json, '$.job_id'), '') != ''
-			OR COALESCE(json_extract(state_json, '$.external_reference'), '') != ''
-			OR json_extract(state_json, '$.transcode_submitted') IN (1, 'true')
-			OR json_extract(state_json, '$.transcode_reconcile') IN (1, 'true'))`, worker)
+		AND (COALESCE(json_extract(state_json, '$.worker'), '') = ''
+				AND (COALESCE(json_extract(state_json, '$.job_id'), '') != ''
+					OR COALESCE(json_extract(state_json, '$.external_reference'), '') != ''
+					OR json_extract(state_json, '$.transcode_submitted') IN (1, 'true')
+					OR json_extract(state_json, '$.transcode_reconcile') IN (1, 'true'))
+			OR (json_extract(state_json, '$.worker') = ? AND ? != ?))`, worker, legacyNode, worker, legacyNode)
 	if err != nil {
 		return 0, err
 	}
 	actions, _ := res.RowsAffected()
-	res, err = tx.Exec(`UPDATE transcode_batch_items SET worker = ? WHERE worker = '' AND job_id != ''`, worker)
+	res, err = tx.Exec(`UPDATE transcode_batch_items SET worker = ?
+		WHERE (worker = '' AND job_id != '') OR (worker = ? AND ? != ?)`, worker, legacyNode, worker, legacyNode)
 	if err != nil {
 		return 0, err
 	}

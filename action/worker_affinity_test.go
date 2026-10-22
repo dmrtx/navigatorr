@@ -50,8 +50,8 @@ func TestWorkerAssignmentFillsFreeSlotsInConfigOrder(t *testing.T) {
 		want  []string
 	}{
 		{"equal pools alternate, m1 first on a tie", 0, []string{"m1", "m4", "m1", "m4", "m1"}},
-		// m1 capped at one job: m4 has more room until both are full.
-		{"a worker cap counts", 1, []string{"m4", "m1", "m4", "m1", "m4"}},
+		// m1 capped at one job: never past it, so m4 queues the rest.
+		{"a worker cap is a hard cap", 1, []string{"m4", "m1", "m4", "m4", "m4"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: twoWorkers(t, poolWorker(2), poolWorker(2), tc.m1Max)})
@@ -67,6 +67,52 @@ func TestWorkerAssignmentFillsFreeSlotsInConfigOrder(t *testing.T) {
 				t.Fatalf("assigned %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWorkersAtTheirCapMakeTheJobWait(t *testing.T) {
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: "m1", Executor: poolWorker(2), MaxParallelJobs: 1},
+		{Name: "m4", Executor: poolWorker(2), MaxParallelJobs: 1, Podcast: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
+	for i, want := range []string{"m1", "m4"} {
+		if name, _, waiting := assignNew(t, e, fmt.Sprintf("conv-%d", i), "transcode_media"); waiting || name != want {
+			t.Fatalf("conv-%d: assigned %q (waiting %v), want %s", i, name, waiting, want)
+		}
+	}
+	name, res, waiting := assignNew(t, e, "conv-full", "transcode_media")
+	if !waiting || name != "" || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("both workers at their cap: assigned %q, %+v", name, res)
+	}
+}
+
+// A job from before workers had names stays on video-worker while one of that
+// name is configured, however much room another worker has, and admission
+// checks that worker.
+func TestAnEarlierJobStaysOnVideoWorker(t *testing.T) {
+	video := poolWorker(1)
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: transcode.DefaultWorkerName, Executor: video},
+		{Name: "m4", Executor: poolWorker(4), Podcast: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}, Workers: set})
+	seedActionInstance(t, st, "earlier", "transcode_media", StatusRunning, 3, "", map[string]any{}, map[string]any{"job_id": "job-1", "transcode_reconcile": true})
+	ec := parseExecutionContextMust(t, e, "earlier")
+	if _, waiting := e.ensureWorkerAssigned(context.Background(), ec); waiting || assignedWorker(ec.State) != transcode.DefaultWorkerName {
+		t.Fatalf("an earlier job moved to %v", ec.State[workerStateKey])
+	}
+	video.doctorFunc = func(context.Context) error { return errors.New("connection refused") }
+	inst := &store.ActionInstance{ActionName: "transcode_media", StateJSON: toJSON(map[string]any{"job_id": "job-1"})}
+	if err := e.CheckInstanceWorkerAdmission(context.Background(), inst); err == nil {
+		t.Fatal("an earlier job was admitted while video-worker is offline")
 	}
 }
 
@@ -178,9 +224,12 @@ func TestAJobWhoseWorkerIsNoLongerConfiguredWaitsForIt(t *testing.T) {
 	if m1.cancelCalls != 0 || m1.statusCalls != 0 {
 		t.Fatal("another worker was asked about m9's job")
 	}
-	// An action from before workers had names belongs to video-worker.
-	if _, err := e.executorFor("").Status(context.Background(), "job"); !errors.As(err, &missing) || missing.Name != transcode.DefaultWorkerName {
-		t.Fatalf("unnamed: %v", err)
+	// An action from before workers had names, or one named video-worker,
+	// belongs to the first worker once no worker has that name.
+	for _, name := range []string{"", transcode.DefaultWorkerName} {
+		if e.executorFor(name) != m1 {
+			t.Fatalf("%q does not reach m1", name)
+		}
 	}
 }
 
@@ -252,14 +301,19 @@ func TestEarlierJobsAreAssignedTheFirstNamedWorker(t *testing.T) {
 	if _, err := st.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 3); err != nil {
 		t.Fatal(err)
 	}
-	// The single base_url form keeps the name: nothing to do.
+	// The single base_url form names earlier jobs video-worker, as running a
+	// step on that config does; the move to a named list below rewrites both.
 	legacy := NewEngine(EngineDeps{Store: st, Transcode: &mockTranscodeExecutor{}})
 	if err := legacy.AssignEarlierWorkerActions(); err != nil {
 		t.Fatal(err)
 	}
-	if assignedWorker(parseExecutionContextMust(t, legacy, "legacy-job").State) != "" {
-		t.Fatal("the legacy config must leave earlier jobs unnamed")
+	if got := assignedWorker(parseExecutionContextMust(t, legacy, "legacy-job").State); got != transcode.DefaultWorkerName {
+		t.Fatalf("the legacy config named an earlier job %q", got)
 	}
+	if row, _ := st.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil {
+		t.Fatal("the legacy config must keep video-worker's slot settings")
+	}
+	seedActionInstance(t, st, "stepped", "transcode_media", StatusWaitingExternal, 3, "", map[string]any{}, map[string]any{"job_id": "job-3", workerStateKey: transcode.DefaultWorkerName})
 
 	e := NewEngine(EngineDeps{Store: st, Workers: twoWorkers(t, poolWorker(2), poolWorker(2), 0)})
 	for range 2 {
@@ -267,7 +321,7 @@ func TestEarlierJobsAreAssignedTheFirstNamedWorker(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for id, want := range map[string]string{"legacy-job": "m1", "legacy-podcast": "m1", "not-sent": "", "named": "m4"} {
+	for id, want := range map[string]string{"legacy-job": "m1", "legacy-podcast": "m1", "stepped": "m1", "not-sent": "", "named": "m4"} {
 		if got := assignedWorker(parseExecutionContextMust(t, e, id).State); got != want {
 			t.Errorf("%s: worker %q, want %q", id, got, want)
 		}
@@ -364,10 +418,46 @@ func TestWorkerObservationListsEveryWorkerAndOneOfflineDoesNotBlock(t *testing.T
 }
 
 func TestLadderRecordsRunOnlyOnTheirWorker(t *testing.T) {
-	state := map[string]any{workerStateKey: "m4"}
-	for worker, want := range map[string]bool{"": true, "m4": true, "m1": false} {
-		if got := recordWorkerMatches(worker, state); got != want {
-			t.Errorf("record for %q on m4: %v", worker, got)
+	e := NewEngine(EngineDeps{Workers: twoWorkers(t, poolWorker(1), poolWorker(1), 0)})
+	for _, tc := range []struct {
+		record, action string
+		want           bool
+	}{
+		{"", "m4", true},
+		{"m4", "m4", true},
+		{"m1", "m4", false},
+		// Planned under the single http block: video-worker is now m1.
+		{transcode.DefaultWorkerName, "m1", true},
+		{transcode.DefaultWorkerName, "m4", false},
+	} {
+		if got := e.workerMatches(tc.record, map[string]any{workerStateKey: tc.action}); got != tc.want {
+			t.Errorf("record for %q on %s: %v", tc.record, tc.action, got)
 		}
+	}
+}
+
+// Checks made before a file has a worker ask only the workers it could be
+// assigned now: an offline worker does not decide them.
+func TestAnOfflineWorkerDoesNotDecideCoverArt(t *testing.T) {
+	coverArt := func(ok bool) func(context.Context) (transcode.WorkerCapabilities, error) {
+		return func(context.Context) (transcode.WorkerCapabilities, error) {
+			return transcode.WorkerCapabilities{CoverArt: ok}, nil
+		}
+	}
+	m1, m4 := poolWorker(1), poolWorker(1)
+	m1.capabilitiesFunc = coverArt(true)
+	m4.doctorFunc = func(context.Context) error { return errors.New("connection refused") }
+	m4.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {
+		return transcode.WorkerCapabilities{}, errors.New("connection refused")
+	}
+	e := NewEngine(EngineDeps{Config: &config.Config{}, Workers: twoWorkers(t, m1, m4, 0)})
+	if !e.cachedCoverArtSupport(context.Background())() {
+		t.Fatal("offline m4 made cover art unsupported")
+	}
+	// Once m4 is ready, it may be assigned the file and must support it too.
+	m4.doctorFunc, m4.capabilitiesFunc = nil, coverArt(false)
+	e.workerStateFor("m4").obs.CheckedAt = time.Time{}
+	if e.cachedCoverArtSupport(context.Background())() {
+		t.Fatal("ready m4 without cover art was ignored")
 	}
 }

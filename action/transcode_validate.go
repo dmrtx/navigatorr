@@ -81,13 +81,15 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 				// the frozen policy, the source and the record, not read back
 				// from the plan, and must match exactly.
 				expectedQuality = sizeBudgetFloorQuality(snapshot)
-				if expectedQuality == nil || !sizeBudgetPlanMatches(snapshot, ec.State, plan, sizeBudgetOf(ec.State)) {
+				budget := sizeBudgetOf(ec.State)
+				if expectedQuality == nil || budget == nil || !e.workerMatches(budget.Worker, ec.State) || !sizeBudgetPlanMatches(snapshot, ec.State, plan, budget) {
 					return StepResult{Status: StepFailed, Error: "size budget plan does not match the frozen budget; original preserved"}, nil
 				}
 			} else {
 				// An encode is a rung of the frozen recipe, rebuilt from the
 				// policy and the source.
-				if snapshot.Recipe == nil || getString(ec.State, "plan_source") != qualityLadderPlanSource || !qualityLadderPlanMatches(snapshot, ec.State, plan, QualityLadderOf(ec.State)) {
+				ladder := QualityLadderOf(ec.State)
+				if snapshot.Recipe == nil || getString(ec.State, "plan_source") != qualityLadderPlanSource || ladder == nil || !e.workerMatches(ladder.Worker, ec.State) || !qualityLadderPlanMatches(snapshot, ec.State, plan, ladder) {
 					return StepResult{Status: StepFailed, Error: "encode does not match the goal's frozen recipe; original preserved"}, nil
 				}
 			}

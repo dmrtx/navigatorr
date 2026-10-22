@@ -167,14 +167,17 @@ transcode:
   # video slots, the first listed on a tie. Podcast work runs on the worker
   # marked podcast: true (default: the first), which keeps the ad catalog.
   # A name is the worker's identity: renaming one strands its running jobs.
+  # Moving from the http: block to a list, the first worker listed takes over
+  # video-worker's jobs and slot settings. max_parallel_jobs on a worker is a
+  # hard cap: at it, new conversions wait for that worker or go to another.
   # workers:
-  #   - name: m1
+  #   - name: node-a
   #     base_url: "http://192.0.2.10:8097"
   #     token_file: "/run/secrets/worker-token"
   #     path_mappings:
   #       - local_prefix: "/media"
   #         remote_prefix: "/Volumes/media"
-  #   - name: m4
+  #   - name: node-b
   #     base_url: "http://192.0.2.11:8097"
   #     token_file: "/run/secrets/worker-token"
   #     max_parallel_jobs: 0   # caps the jobs assigned here; 0 follows the worker

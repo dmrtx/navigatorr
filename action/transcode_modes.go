@@ -644,7 +644,7 @@ func (h *hfrQualitySupport) forSource(ctx context.Context, rep *mediainspect.Det
 	workers := []transcode.Executor{h.worker}
 	if h.worker == nil {
 		workers = workers[:0]
-		for _, w := range h.e.deps.Workers.All() {
+		for _, w := range h.e.assignableWorkers(ctx) {
 			workers = append(workers, w.Executor)
 		}
 	}

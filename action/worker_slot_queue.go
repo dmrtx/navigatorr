@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
-	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Worker slot queue.
@@ -62,15 +61,6 @@ type slotWaiter struct {
 	// worker is the waiter's worker; each worker has its own queue.
 	worker string
 	since  time.Time
-}
-
-// slotQueueWorker is the worker whose queue an action stands in: its assigned
-// worker, video-worker for an action from before workers had names.
-func slotQueueWorker(name string) string {
-	if name == "" {
-		return transcode.DefaultWorkerName
-	}
-	return name
 }
 
 func slotTicket(state map[string]any) (time.Time, bool) {
@@ -134,7 +124,7 @@ func (e *Engine) workerSlotWaiters() ([]slotWaiter, error) {
 		if updated, err := time.Parse(time.RFC3339, row.UpdatedAt); err == nil && time.Since(updated) > slotWaiterStaleAfter {
 			continue
 		}
-		out = append(out, slotWaiter{id: row.ID, parentID: row.ParentID, worker: slotQueueWorker(row.Worker), since: since})
+		out = append(out, slotWaiter{id: row.ID, parentID: row.ParentID, worker: e.resolveWorker(row.Worker), since: since})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].aheadOf(out[j].since, out[j].id) })
 	return out, nil
@@ -190,7 +180,7 @@ func (e *Engine) slotQueuePosition(ec *ExecutionContext) (int, error) {
 		return 0, err
 	}
 	since, ticketed := slotTicket(ec.State)
-	worker := slotQueueWorker(assignedWorker(ec.State))
+	worker := e.resolveWorker(assignedWorker(ec.State))
 	ahead := 0
 	for _, w := range waiters {
 		if w.id == ec.InstanceID || w.worker != worker {
