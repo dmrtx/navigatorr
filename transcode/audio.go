@@ -19,17 +19,19 @@ const AudioModeCompactLossless = "compact_lossless"
 // Level 0, AudioModeCompactLossless, is what size operations froze before the
 // levels existed and is never chosen for a new one.
 //
-//	level 1  AudioModeSizeAAC    lossless to AAC-LC (stereo 192, 5.1 384, 7.1 512
-//	                             kbps); a lossy track above its AAC-LC target is
-//	                             re-encoded at it
-//	level 2  AudioModeSizeHEAAC  every track of up to 6 channels above its HE-AAC
-//	                             target becomes HE-AAC (stereo 64, 3 to 6
-//	                             channels 160 kbps); the rest as level 1
+//	level 1  AudioModeSizeAAC    a track at least 1.25 times its AAC-LC target
+//	                             (stereo 192, mono 128, 5.1 384, 7.1 512 kbps)
+//	                             becomes AAC-LC at it
+//	level 2  AudioModeSizeHEAAC  a track of up to 6 channels at least 1.25 times
+//	                             its HE-AAC target becomes HE-AAC (stereo or
+//	                             mono 64, 3 to 6 channels 160 kbps); the rest as
+//	                             level 1
 //
-// At every level a track at or below its target is copied, and so are E-AC-3
-// JOC (Atmos), layouts AAC cannot keep, more than 8 channels, and a lossy track
-// whose source bitrate is unknown. Track count, order, languages, titles,
-// dispositions and channel layouts never change.
+// At every level any other track is copied: one below 1.25 times its target
+// (lossless included, when it states its bitrate), E-AC-3 JOC (Atmos), layouts
+// AAC cannot keep, more than 8 channels, and a lossy track whose source bitrate
+// is unknown. A lossless track of unknown bitrate is converted. Track count,
+// order, languages, titles, dispositions and channel layouts never change.
 const (
 	AudioModeSizeAAC   = "size_aac"
 	AudioModeSizeHEAAC = "size_he_aac"
@@ -98,11 +100,14 @@ func AudioBitrateCeilingBps(kbps int) int64 {
 }
 
 // AudioOutput is what the audio policy makes of one source track: copied, or
-// AAC at Kbps (HE-AAC when HEAAC, else AAC-LC).
+// AAC at Kbps (HE-AAC when HEAAC, else AAC-LC). AudioToolbox says the track is
+// encoded with aac_at rather than FFmpeg's native encoder: always for HE-AAC,
+// and for AAC-LC only in the size goal's levels.
 type AudioOutput struct {
-	Codec string
-	Kbps  int
-	HEAAC bool
+	Codec        string
+	Kbps         int
+	HEAAC        bool
+	AudioToolbox bool
 }
 
 var audioCopy = AudioOutput{Codec: "copy"}
@@ -197,11 +202,24 @@ func heAACKbps(channels int) int {
 	return 160
 }
 
+// sizeLevelMinGain is how much larger than the level's target a track must be
+// to be re-encoded, as a ratio (5/4): a second lossy generation is not worth a
+// saving smaller than a fifth of the track (AC-3 5.1 at 448 kbps against the
+// 384 kbps target stays as it is).
+const sizeLevelMinGainNum, sizeLevelMinGainDen = 5, 4
+
 // sizeLevelOutput is one track under the size goal's audio levels. A track is
-// converted only when it is above the target of the level, so a conversion
-// never raises its bitrate, and only when its bitrate is known: a lossy track
-// of unknown bitrate is copied, never guessed. Lossless is always larger than
-// any target, so it converts even when its bitrate is unknown.
+// converted only when its bitrate is known and at least 1.25 times the target
+// of the level for its layout, so a conversion never raises a bitrate and
+// always saves a meaningful amount; any other track with a known bitrate,
+// lossless included (a quiet or mono FLAC can be smaller than the target), is
+// copied. A lossy track of unknown bitrate is copied, never guessed. A
+// lossless track of unknown bitrate is converted: PCM and FLAC in a remux
+// often state none and are nearly always far above any target.
+//
+// AAC-LC is encoded with AudioToolbox (aac_at) where it keeps the track's
+// layout, else with FFmpeg's native encoder; HE-AAC always is, so a layout
+// aac_at cannot keep is left at the level before.
 func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 	channels := t.Channels
 	if channels < 1 || channels > 8 || !aacKeepsLayout(t.Layout, channels) {
@@ -211,14 +229,39 @@ func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 	if !lossless && (t.BitrateKbps <= 0 || ObjectAudio(t)) {
 		return audioCopy
 	}
-	out := AudioOutput{Codec: "aac", Kbps: aacLCKbps(channels)}
-	if mode == AudioModeSizeHEAAC && channels <= 6 {
+	toolbox := audioToolboxKeepsLayout(t.Layout, channels)
+	out := AudioOutput{Codec: "aac", Kbps: aacLCKbps(channels), AudioToolbox: toolbox}
+	if mode == AudioModeSizeHEAAC && channels <= 6 && toolbox {
 		out.Kbps, out.HEAAC = heAACKbps(channels), true
 	}
-	if t.BitrateKbps > 0 && t.BitrateKbps <= out.Kbps {
+	if t.BitrateKbps > 0 && t.BitrateKbps*sizeLevelMinGainDen < out.Kbps*sizeLevelMinGainNum {
 		return audioCopy
 	}
 	return out
+}
+
+// audioToolboxLayouts are the layouts AudioToolbox's AAC encoder (aac_at)
+// writes back unchanged, keyed to their channel count (checked against the
+// encoder: 2.1, 3.0(back), 3.1, 4.1, hexagonal, 7.1, 7.1(wide) and 5.1.2(back)
+// come out with a different layout or channel count, 7.1 without its LFE).
+var audioToolboxLayouts = map[string]int{
+	"mono": 1, "stereo": 2, "3.0": 3, "4.0": 4, "quad": 4, "quad(side)": 4, "5.0": 5, "5.0(side)": 5,
+	"5.1": 6, "5.1(side)": 6, "6.1(back)": 7, "7.0": 7, "octagonal": 8,
+}
+
+// audioToolboxKeepsLayout reports a track aac_at encodes without changing its
+// layout. An unspecified layout is the channel count's default one.
+func audioToolboxKeepsLayout(layout string, channels int) bool {
+	layout = strings.ToLower(strings.TrimSpace(layout))
+	if layout == "" {
+		switch channels {
+		case 1, 2, 4, 5, 6:
+			return true
+		}
+		return false
+	}
+	n, ok := audioToolboxLayouts[layout]
+	return ok && n == channels
 }
 
 // losslessAudio reports a lossless track. DTS is lossless only with a

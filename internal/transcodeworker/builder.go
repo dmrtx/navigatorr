@@ -516,9 +516,14 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 				return nil, fmt.Errorf("invalid compact audio action")
 			}
 			encoder := "aac"
-			if stream.HEAAC {
+			switch {
+			case stream.HEAAC:
 				encoder = "aac_at"
 				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "4")
+			case stream.AudioToolbox:
+				// AAC-LC of the size goal's levels: profile 2 is AAC-LC.
+				encoder = "aac_at"
+				args = append(args, fmt.Sprintf("-profile:a:%d", stream.TypeIndex), "2")
 			}
 			args = append(args, fmt.Sprintf("-c:a:%d", stream.TypeIndex), encoder, fmt.Sprintf("-b:a:%d", stream.TypeIndex), strconv.Itoa(stream.BitrateKbps)+"k")
 			// Source muxer bitrate/size tags no longer describe an encoded track.

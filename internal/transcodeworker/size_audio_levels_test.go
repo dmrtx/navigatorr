@@ -91,20 +91,21 @@ func levelSource() []SourceStream {
 	}
 }
 
-// The execution plan and the ffmpeg arguments follow the level: AAC-LC through
-// ffmpeg's native encoder, HE-AAC through AudioToolbox's with the HE profile,
-// and a track within its target or E-AC-3 JOC copied. Track order is the
-// source's.
+// The execution plan and the ffmpeg arguments follow the level: AAC-LC and
+// HE-AAC through AudioToolbox's encoder (profile 2 and 4) where it keeps the
+// layout, FFmpeg's native encoder for 7.1, and a track under 1.25 times its
+// target or E-AC-3 JOC copied. Track order is the source's.
 func TestSizeAudioLevelsExecutionPlanAndArguments(t *testing.T) {
 	type want struct {
 		target  string
 		kbps    int
 		heaac   bool
 		encoder string
+		profile string // the -profile:a value, empty for the native encoder
 	}
 	for mode, tracks := range map[string][]want{
-		transcode.AudioModeSizeAAC:   {{"aac", 384, false, "aac"}, {"copy", 0, false, ""}, {"aac", 512, false, "aac"}, {"copy", 0, false, ""}},
-		transcode.AudioModeSizeHEAAC: {{"aac", 160, true, "aac_at"}, {"aac", 64, true, "aac_at"}, {"aac", 512, false, "aac"}, {"copy", 0, false, ""}},
+		transcode.AudioModeSizeAAC:   {{"aac", 384, false, "aac_at", "2"}, {"copy", 0, false, "", ""}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
+		transcode.AudioModeSizeHEAAC: {{"aac", 160, true, "aac_at", "4"}, {"aac", 64, true, "aac_at", "4"}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
 	} {
 		ep, err := BuildExecutionPlan(sizeV5TestPlan(mode), levelSource(), 1800)
 		if err != nil {
@@ -138,8 +139,10 @@ func TestSizeAudioLevelsExecutionPlanAndArguments(t *testing.T) {
 			if !strings.Contains(joined, fmt.Sprintf(" -c:a:%d %s ", i, w.encoder)) || !strings.Contains(joined, fmt.Sprintf(" -b:a:%d %dk ", i, w.kbps)) {
 				t.Errorf("%s track %d: %s", mode, i, joined)
 			}
-			if got := strings.Contains(joined, fmt.Sprintf(" -profile:a:%d 4 ", i)); got != w.heaac {
-				t.Errorf("%s track %d HE-AAC profile flag %v, want %v: %s", mode, i, got, w.heaac, joined)
+			for _, profile := range []string{"2", "4"} {
+				if got := strings.Contains(joined, fmt.Sprintf(" -profile:a:%d %s ", i, profile)); got != (profile == w.profile) {
+					t.Errorf("%s track %d profile %s flag %v, want %q: %s", mode, i, profile, got, w.profile, joined)
+				}
 			}
 		}
 		if strings.Contains(joined, " -ac ") || strings.Contains(joined, " -ar ") {

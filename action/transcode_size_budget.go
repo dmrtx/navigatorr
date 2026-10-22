@@ -443,7 +443,7 @@ func sizeBudgetOtherStreamBytes(rep *mediainspect.DetailedReport, sourceBytes in
 			total += int64(kbps) * 1000 * int64(math.Ceil(rep.DurationSec)) / 8
 			continue
 		}
-		n := audioStreamBytes(a, rep.DurationSec, sourceBytes)
+		n := audioTrackBytes(a, rep.DurationSec, sourceBytes)
 		if n <= 0 {
 			return 0, false
 		}

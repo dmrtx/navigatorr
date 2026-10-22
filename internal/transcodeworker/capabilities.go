@@ -37,10 +37,10 @@ func ValidateEncoderCapabilities(ctx context.Context, ffmpegPath string, plan *t
 	if plan == nil {
 		return fmt.Errorf("encoder_capability_unsupported: transcode plan is nil")
 	}
-	if norm(plan.AudioMode) == "he_aac" || norm(plan.AudioMode) == transcode.AudioModeSizeHEAAC {
+	if norm(plan.AudioMode) == "he_aac" || transcode.IsAudioLevelMode(norm(plan.AudioMode)) {
 		available, err := ProbeAvailableEncoders(ctx, ffmpegPath)
 		if err != nil || !available["aac_at"] {
-			return fmt.Errorf("encoder_capability_unsupported: HE-AAC requires AudioToolbox aac_at: %v", err)
+			return fmt.Errorf("encoder_capability_unsupported: %s audio requires AudioToolbox aac_at: %v", norm(plan.AudioMode), err)
 		}
 	}
 	if norm(plan.AudioMode) == "compact" || norm(plan.AudioMode) == transcode.AudioModeCompactLossless || transcode.IsAudioLevelMode(norm(plan.AudioMode)) {

@@ -207,16 +207,25 @@ the planner and the worker:
 
 | Level | Mode | What it does to a track |
 | --- | --- | --- |
-| 1 | `size_aac` | Lossless becomes AAC-LC. A lossy track above its AAC-LC target becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
-| 2 | `size_he_aac` | Every track of up to 6 channels above its HE-AAC target becomes HE-AAC: stereo or mono 64, 3 to 6 channels 160 kbps. 7.1 stays AAC-LC at 512 kbps. |
+| 1 | `size_aac` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
+| 2 | `size_he_aac` | A track of up to 6 channels at least 1.25 times its HE-AAC target becomes HE-AAC: stereo or mono 64, 3 to 6 channels 160 kbps. 7.1 stays AAC-LC at 512 kbps. |
 
-At both levels a track at or below its target is copied, and so are E-AC-3
-Atmos (JOC), a layout AAC cannot keep, more than 8 channels, and a lossy track
-whose bitrate the probe could not read. Track count, order, languages, titles,
+The 1.25 factor is a minimum gain: AC-3 5.1 at 448 kbps is copied at level 1
+(it would save 14% for a second lossy generation) while E-AC-3 5.1 at 640 kbps
+is converted, and AAC 5.1 at 384 kbps becomes HE-AAC at 160 at level 2. At both
+levels any other track is copied: one under the factor, lossless included when
+it states its bitrate (a quiet or mono FLAC can already be smaller than the
+target), E-AC-3 Atmos (JOC), a layout AAC cannot keep, more than 8 channels, and
+a lossy track whose bitrate the probe could not read. A lossless track that
+states no bitrate is converted. Track count, order, languages, titles,
 dispositions and channel layout never change, and subtitles and attachments are
-never touched. Level 1 is the minimum for a new goal: lossy tracks above the
-AAC-LC target are always converted (the old behaviour, level 0, converted only
+never touched. Level 1 is the minimum for a new goal: lossy tracks over the
+factor are always converted (the old behaviour, level 0, converted only
 lossless tracks and survives only in snapshots frozen before the levels).
+AAC-LC is encoded with AudioToolbox's `aac_at` (profile 2) where it keeps the
+track's layout, and with FFmpeg's native encoder for the layouts it changes
+(7.1 loses its LFE, 2.1, 3.1, 4.1 and hexagonal come out different); HE-AAC is
+always `aac_at`, so a layout `aac_at` cannot keep stays AAC-LC at level 2.
 
 The level is chosen once per source. The least aggressive level that leaves
 the video at least a good bitrate wins, where good is 0.04 bits per pixel per

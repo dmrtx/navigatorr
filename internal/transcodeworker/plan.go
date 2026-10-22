@@ -210,6 +210,9 @@ type StreamAction struct {
 	BitrateKbps int            `json:"bitrate_kbps,omitempty"`
 	// HEAAC is set on an audio track converted to HE-AAC rather than AAC-LC.
 	HEAAC bool `json:"he_aac,omitempty"`
+	// AudioToolbox is set on a converted audio track that aac_at encodes
+	// (HE-AAC always; AAC-LC in the size goal's levels), else the native encoder.
+	AudioToolbox bool `json:"aac_at,omitempty"`
 	// Audio only: the source title, handler, channels and layout, used to
 	// retitle a converted track whose title or handler names its old format.
 	Title    string `json:"title,omitempty"`
@@ -324,7 +327,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "audio":
 			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
 			target, bitrate := out.Codec, out.Kbps
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: s.Disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout})
 			if target != "copy" {
 				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)
 				if out.HEAAC {

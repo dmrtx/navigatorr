@@ -205,7 +205,7 @@ func TestSizeBudgetAudioRecordCopiesWhatIsWithinTarget(t *testing.T) {
 	}
 	// A level that converts nothing says so.
 	only := &mediainspect.DetailedReport{DurationSec: 1800, Audio: []mediainspect.DetailedStream{{Index: 1, Codec: "aac", Channels: 2, ChannelLayout: "stereo", BitRate: 128_000}}}
-	if s := sizeBudgetAudioSentence(sizeBudgetAudioRecord(only, transcode.AudioModeSizeAAC, 1, 1990, 0)); !strings.Contains(s, "already within their targets") {
+	if s := sizeBudgetAudioSentence(sizeBudgetAudioRecord(only, transcode.AudioModeSizeAAC, 1, 1990, 0)); !strings.Contains(s, "already within 25% of their targets") {
 		t.Errorf("sentence %q", s)
 	}
 }
@@ -379,5 +379,78 @@ func TestSizeBudgetNeedsAWorkerWithAudioLevels(t *testing.T) {
 				t.Fatalf("submitted %d jobs", c.executor.submitCalls)
 			}
 		})
+	}
+}
+
+// A track is re-encoded only when it is at least 1.25 times its level's target:
+// AC-3 5.1 at 448 kbps stays at level 1 and is HE-AAC at level 2, E-AC-3 5.1 at
+// 640 kbps is converted at both, and a FLAC track that states a low bitrate
+// (a quiet or mono one) is copied while one that states none is converted.
+func TestSizeBudgetAudioRecordMinimumGain(t *testing.T) {
+	rep := levelReport()
+	rep.Audio = []mediainspect.DetailedStream{
+		{Index: 1, Codec: "ac3", Channels: 6, ChannelLayout: "5.1", BitRate: 448_000},
+		{Index: 2, Codec: "eac3", Channels: 6, ChannelLayout: "5.1(side)", BitRate: 640_000},
+		{Index: 3, Codec: "aac", Profile: "LC", Channels: 6, ChannelLayout: "5.1", BitRate: 384_000},
+		{Index: 4, Codec: "flac", Channels: 2, ChannelLayout: "stereo", BitRate: 133_000},
+		{Index: 5, Codec: "flac", Channels: 2, ChannelLayout: "stereo"},
+	}
+	type out struct {
+		output string
+		kbps   int
+	}
+	for mode, want := range map[string][]out{
+		transcode.AudioModeSizeAAC:   {{"copy", 0}, {"aac", 384}, {"copy", 0}, {"copy", 0}, {"aac", 192}},
+		transcode.AudioModeSizeHEAAC: {{"he_aac", 160}, {"he_aac", 160}, {"he_aac", 160}, {"he_aac", 64}, {"he_aac", 64}},
+	} {
+		r := sizeBudgetAudioRecord(rep, mode, 1, 1990, 0)
+		for i, tr := range r.Tracks {
+			if tr.Output != want[i].output || tr.Kbps != want[i].kbps {
+				t.Errorf("%s track %d (%s %d kbps): %+v, want %+v", mode, i, tr.Codec, tr.SourceKbps, tr, want[i])
+			}
+		}
+	}
+}
+
+// The budget sweep for the eight-track episode: the least compressed level that
+// leaves the picture its good bitrate (about 1990 kbps) wins, else level 2.
+func TestSizeBudgetAudioLevelSweep(t *testing.T) {
+	rep := levelReport()
+	for _, tc := range []struct {
+		budget    int64
+		mode      string
+		videoKbps int
+	}{
+		{600_000_000, transcode.AudioModeSizeHEAAC, 648},
+		{800_000_000, transcode.AudioModeSizeHEAAC, 1511},
+		{1_000_000_000, transcode.AudioModeSizeHEAAC, 2373},
+		{1_200_000_000, transcode.AudioModeSizeHEAAC, 3235},
+		{1_500_000_000, transcode.AudioModeSizeAAC, 2736},
+		{2_000_000_000, transcode.AudioModeSizeAAC, 4892},
+	} {
+		enc := planSizeBudgetEncode(levelPolicy(t, float64(tc.budget)), rep, levelSourceBytes, tc.budget)
+		if enc.Reason != "" || enc.AudioMode != tc.mode || enc.X265.BitrateKbps != tc.videoKbps {
+			t.Errorf("%d bytes: %q at %d kbps (%q), want %q at %d kbps", tc.budget, enc.AudioMode, enc.X265.BitrateKbps, enc.Reason, tc.mode, tc.videoKbps)
+		}
+	}
+}
+
+// The decision to convert a track and the estimate of what it saves read the
+// same bitrate: bit_rate (or BPS) first, then NUMBER_OF_BYTES over the duration.
+func TestAudioTrackBytesReadsTheBitrateTheDecisionReads(t *testing.T) {
+	const file = int64(3_000_000_000)
+	both := mediainspect.DetailedStream{BitRate: 640_000, Tags: map[string]string{"NUMBER_OF_BYTES": "100000000"}}
+	if got := audioTrackBytes(both, 1800, file); got != 144_000_000 {
+		t.Errorf("bit_rate and NUMBER_OF_BYTES: %d, want the bit_rate's 144000000", got)
+	}
+	if got := transcode.SourceAudioKbps(both.BitRate, both.Tags, 1800); got != 640 {
+		t.Errorf("the decision reads %d kbps", got)
+	}
+	onlyBytes := mediainspect.DetailedStream{Tags: map[string]string{"NUMBER_OF_BYTES": "144000000"}}
+	if got := audioTrackBytes(onlyBytes, 1800, file); got != 144_000_000 {
+		t.Errorf("NUMBER_OF_BYTES alone: %d", got)
+	}
+	if got := audioTrackBytes(mediainspect.DetailedStream{BitRate: 640_000}, 1800, 100); got != 0 {
+		t.Errorf("a size larger than the file: %d, want unknown", got)
 	}
 }

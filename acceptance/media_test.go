@@ -38,6 +38,16 @@ type srcSpec struct {
 	hevc bool
 }
 
+// noiseAudio is the sources' stereo track: two independent channels of quiet
+// pink noise, which no codec can shrink. Measured with the local ffmpeg
+// (ffprobe packet sizes), FLAC encodes it at about 1170 kbps. The track's first
+// version, a 330 Hz sine, came to 133 kbps: under 1.25 times the size goal's
+// AAC-LC target of 192, which the audio levels copy rather than convert.
+func noiseAudio(secs int) string {
+	return fmt.Sprintf("anoisesrc=color=pink:amplitude=0.001:sample_rate=48000:duration=%d:seed=1[l];"+
+		"anoisesrc=color=pink:amplitude=0.001:sample_rate=48000:duration=%d:seed=2[r];[l][r]amerge=inputs=2", secs, secs)
+}
+
 func (s *suite) run(t *testing.T, bin string, args ...string) string {
 	t.Helper()
 	var out bytes.Buffer
@@ -94,7 +104,7 @@ func (s *suite) makeSource(t *testing.T, spec srcSpec) string {
 		pic += `,settb=1/1000,setpts='if(lt(N,288),N/24,if(lt(N,672),12+(N-288)/48,20+(N-672)/24))/TB'`
 	}
 	args := []string{"-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", pic,
-		"-f", "lavfi", "-i", fmt.Sprintf("sine=frequency=330:sample_rate=48000:duration=%d", spec.secs)}
+		"-f", "lavfi", "-i", noiseAudio(spec.secs)}
 	switch {
 	case spec.hdr:
 		args = append(args, "-vf", "format=yuv420p10le", "-c:v", "libx265", "-preset", "veryfast", "-crf", "16",

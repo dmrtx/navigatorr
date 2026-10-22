@@ -150,7 +150,7 @@ func sizeBudgetAudioSentence(r *SizeBudgetAudioRecord) string {
 		return ""
 	}
 	if r.converted() == 0 {
-		return fmt.Sprintf(" Audio level %d of %d: all %d tracks are already within their targets and are copied.", r.Level, len(transcode.AudioLevelModes), len(r.Tracks))
+		return fmt.Sprintf(" Audio level %d of %d: all %d tracks are already within 25%% of their targets and are copied.", r.Level, len(transcode.AudioLevelModes), len(r.Tracks))
 	}
 	what := "AAC-LC (stereo 192 kbps, 5.1 384 kbps)"
 	if r.Mode == transcode.AudioModeSizeHEAAC {

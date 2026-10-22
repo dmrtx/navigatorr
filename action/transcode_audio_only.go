@@ -33,7 +33,7 @@ func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64, audi
 			continue
 		}
 		e.Compacted++
-		source := audioStreamBytes(a, rep.DurationSec, sourceBytes)
+		source := audioTrackBytes(a, rep.DurationSec, sourceBytes)
 		if source <= 0 {
 			e.Unknown++
 			continue
@@ -44,6 +44,22 @@ func estimateAudioOnly(rep *mediainspect.DetailedReport, sourceBytes int64, audi
 	}
 	e.CandidateBytes = sourceBytes - saved
 	return e
+}
+
+// audioTrackBytes is an audio track's size read the way the audio policy reads
+// its bitrate (transcode.SourceAudioKbps): the stream bitrate (ffprobe's
+// bit_rate, or the BPS tag folded into it) first, then the NUMBER_OF_BYTES
+// statistic. The decision to convert a track and the estimate of what that
+// saves therefore read the same value. A size larger than the whole file is
+// unknown.
+func audioTrackBytes(a mediainspect.DetailedStream, duration float64, fileBytes int64) int64 {
+	if a.BitRate > 0 {
+		if n := a.BitRate * int64(duration) / 8; n <= fileBytes {
+			return n
+		}
+		return 0
+	}
+	return audioStreamBytes(a, duration, fileBytes)
 }
 
 // audioStreamBytes is a track's size from its Matroska statistics, else its

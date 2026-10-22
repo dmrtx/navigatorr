@@ -2,9 +2,11 @@ package transcode
 
 import "testing"
 
-// The size goal's levels are one per-track rule each. A track at or below its
-// level's target is copied; E-AC-3 JOC, layouts AAC cannot keep, more than 8
-// channels and a lossy track of unknown bitrate are copied at every level.
+// The size goal's levels are one per-track rule each. A track is converted only
+// when it states a bitrate of at least 1.25 times its level's target (lossless
+// included); any other is copied, and so are E-AC-3 JOC, layouts AAC cannot
+// keep, more than 8 channels and a lossy track of unknown bitrate at every
+// level. A lossless track of unknown bitrate is converted.
 func TestSizeAudioLevelsPerTrackRule(t *testing.T) {
 	type want struct {
 		out  string // copy, aac, he_aac
@@ -16,17 +18,30 @@ func TestSizeAudioLevelsPerTrackRule(t *testing.T) {
 		l1, l2 want
 	}{
 		{"E-AC-3 5.1 640", AudioTrack{Codec: "eac3", Channels: 6, Layout: "5.1(side)", BitrateKbps: 640}, want{"aac", 384}, want{"he_aac", 160}},
-		{"AC-3 5.1 448", AudioTrack{Codec: "ac3", Channels: 6, Layout: "5.1", BitrateKbps: 448}, want{"aac", 384}, want{"he_aac", 160}},
+		{"AC-3 5.1 448 is under 1.25 x 384", AudioTrack{Codec: "ac3", Channels: 6, Layout: "5.1", BitrateKbps: 448}, want{"copy", 0}, want{"he_aac", 160}},
+		{"AC-3 5.1 479", AudioTrack{Codec: "ac3", Channels: 6, Layout: "5.1", BitrateKbps: 479}, want{"copy", 0}, want{"he_aac", 160}},
+		{"AC-3 5.1 480 is exactly 1.25 x 384", AudioTrack{Codec: "ac3", Channels: 6, Layout: "5.1", BitrateKbps: 480}, want{"aac", 384}, want{"he_aac", 160}},
 		{"AC-3 5.1 384 is at its target", AudioTrack{Codec: "ac3", Channels: 6, Layout: "5.1", BitrateKbps: 384}, want{"copy", 0}, want{"he_aac", 160}},
 		{"AAC 5.1 256", AudioTrack{Codec: "aac", Profile: "LC", Channels: 6, Layout: "5.1", BitrateKbps: 256}, want{"copy", 0}, want{"he_aac", 160}},
-		{"AC-3 stereo 224", AudioTrack{Codec: "ac3", Channels: 2, Layout: "stereo", BitrateKbps: 224}, want{"aac", 192}, want{"he_aac", 64}},
+		{"AAC 5.1 384 is HE-AAC at level 2", AudioTrack{Codec: "aac", Profile: "LC", Channels: 6, Layout: "5.1", BitrateKbps: 384}, want{"copy", 0}, want{"he_aac", 160}},
+		{"AAC 5.1 199 is under 1.25 x 160", AudioTrack{Codec: "aac", Profile: "LC", Channels: 6, Layout: "5.1", BitrateKbps: 199}, want{"copy", 0}, want{"copy", 0}},
+		{"AAC 5.1 200 is exactly 1.25 x 160", AudioTrack{Codec: "aac", Profile: "LC", Channels: 6, Layout: "5.1", BitrateKbps: 200}, want{"copy", 0}, want{"he_aac", 160}},
+		{"AC-3 stereo 224 is under 1.25 x 192", AudioTrack{Codec: "ac3", Channels: 2, Layout: "stereo", BitrateKbps: 224}, want{"copy", 0}, want{"he_aac", 64}},
+		{"AC-3 stereo 256", AudioTrack{Codec: "ac3", Channels: 2, Layout: "stereo", BitrateKbps: 256}, want{"aac", 192}, want{"he_aac", 64}},
 		{"AAC stereo 128", AudioTrack{Codec: "aac", Profile: "LC", Channels: 2, Layout: "stereo", BitrateKbps: 128}, want{"copy", 0}, want{"he_aac", 64}},
 		{"AAC stereo 64 is at the HE-AAC target", AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo", BitrateKbps: 64}, want{"copy", 0}, want{"copy", 0}},
+		{"AAC stereo 79", AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo", BitrateKbps: 79}, want{"copy", 0}, want{"copy", 0}},
+		{"AAC stereo 80 is exactly 1.25 x 64", AudioTrack{Codec: "aac", Channels: 2, Layout: "stereo", BitrateKbps: 80}, want{"copy", 0}, want{"he_aac", 64}},
 		{"AAC mono 96", AudioTrack{Codec: "aac", Channels: 1, Layout: "mono", BitrateKbps: 96}, want{"copy", 0}, want{"he_aac", 64}},
 		{"TrueHD 7.1", AudioTrack{Codec: "truehd", Channels: 8, Layout: "7.1", BitrateKbps: 4000}, want{"aac", 512}, want{"aac", 512}},
 		{"TrueHD 5.1", AudioTrack{Codec: "truehd", Channels: 6, Layout: "5.1(side)", BitrateKbps: 3000}, want{"aac", 384}, want{"he_aac", 160}},
+		{"FLAC stereo of 133 kbps is already under the target", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo", BitrateKbps: 133}, want{"copy", 0}, want{"he_aac", 64}},
+		{"FLAC stereo of 240 kbps is exactly 1.25 x 192", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo", BitrateKbps: 240}, want{"aac", 192}, want{"he_aac", 64}},
+		{"FLAC stereo of 1100 kbps", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo", BitrateKbps: 1100}, want{"aac", 192}, want{"he_aac", 64}},
 		{"FLAC stereo of unknown bitrate", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo"}, want{"aac", 192}, want{"he_aac", 64}},
 		{"lossy 7.1 1024", AudioTrack{Codec: "eac3", Channels: 8, Layout: "7.1", BitrateKbps: 1024}, want{"aac", 512}, want{"aac", 512}},
+		{"lossy 7.1 639 is under 1.25 x 512", AudioTrack{Codec: "eac3", Channels: 8, Layout: "7.1", BitrateKbps: 639}, want{"copy", 0}, want{"copy", 0}},
+		{"lossy 7.1 640 is exactly 1.25 x 512", AudioTrack{Codec: "eac3", Channels: 8, Layout: "7.1", BitrateKbps: 640}, want{"aac", 512}, want{"aac", 512}},
 		{"lossy 7.1 at its target", AudioTrack{Codec: "ac3", Channels: 8, Layout: "7.1", BitrateKbps: 512}, want{"copy", 0}, want{"copy", 0}},
 		{"E-AC-3 JOC", AudioTrack{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 6, Layout: "5.1", BitrateKbps: 768}, want{"copy", 0}, want{"copy", 0}},
 		{"lossy of unknown bitrate", AudioTrack{Codec: "eac3", Channels: 6, Layout: "5.1"}, want{"copy", 0}, want{"copy", 0}},
@@ -56,6 +71,40 @@ func TestSizeAudioLevelsPerTrackRule(t *testing.T) {
 	}
 	if !IsAudioLevelMode(AudioModeSizeAAC) || !IsAudioLevelMode(AudioModeSizeHEAAC) || IsAudioLevelMode(AudioModeCompactLossless) || IsAudioLevelMode("compact") {
 		t.Error("IsAudioLevelMode")
+	}
+}
+
+// AAC-LC of the levels is encoded with AudioToolbox where aac_at keeps the
+// layout, else with the native encoder; HE-AAC always is AudioToolbox. Layouts
+// aac_at changes (checked against the encoder: 7.1 loses its LFE) stay native.
+func TestSizeAudioLevelsEncoder(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		track       AudioTrack
+		level       string
+		toolbox, he bool
+		kbps        int
+	}{
+		{"stereo", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo", BitrateKbps: 900}, AudioModeSizeAAC, true, false, 192},
+		{"mono", AudioTrack{Codec: "flac", Channels: 1, Layout: "mono", BitrateKbps: 500}, AudioModeSizeAAC, true, false, 128},
+		{"5.1 (side)", AudioTrack{Codec: "eac3", Channels: 6, Layout: "5.1(side)", BitrateKbps: 640}, AudioModeSizeAAC, true, false, 384},
+		{"5.1 of an unspecified layout", AudioTrack{Codec: "flac", Channels: 6, BitrateKbps: 2000}, AudioModeSizeAAC, true, false, 384},
+		{"7.1 stays native", AudioTrack{Codec: "truehd", Channels: 8, Layout: "7.1", BitrateKbps: 4000}, AudioModeSizeAAC, false, false, 512},
+		{"7.1 stays native at level 2", AudioTrack{Codec: "truehd", Channels: 8, Layout: "7.1", BitrateKbps: 4000}, AudioModeSizeHEAAC, false, false, 512},
+		{"7.1 of an unspecified layout stays native", AudioTrack{Codec: "flac", Channels: 8, BitrateKbps: 4000}, AudioModeSizeAAC, false, false, 512},
+		{"octagonal", AudioTrack{Codec: "flac", Channels: 8, Layout: "octagonal", BitrateKbps: 4000}, AudioModeSizeAAC, true, false, 512},
+		{"HE-AAC", AudioTrack{Codec: "eac3", Channels: 6, Layout: "5.1", BitrateKbps: 640}, AudioModeSizeHEAAC, true, true, 160},
+		{"2.1 stays AAC-LC at level 2", AudioTrack{Codec: "ac3", Channels: 3, Layout: "2.1", BitrateKbps: 640}, AudioModeSizeHEAAC, false, false, 384},
+		{"hexagonal stays AAC-LC at level 2", AudioTrack{Codec: "ac3", Channels: 6, Layout: "hexagonal", BitrateKbps: 640}, AudioModeSizeHEAAC, false, false, 384},
+	} {
+		out := AudioOutputFor(tc.level, tc.track)
+		if out.Codec != "aac" || out.AudioToolbox != tc.toolbox || out.HEAAC != tc.he || out.Kbps != tc.kbps {
+			t.Errorf("%s: %+v, want toolbox %v he %v at %d", tc.name, out, tc.toolbox, tc.he, tc.kbps)
+		}
+	}
+	// The older modes keep the native encoder for AAC-LC.
+	if out := AudioOutputFor("compact", AudioTrack{Codec: "flac", Channels: 2, Layout: "stereo"}); out.AudioToolbox {
+		t.Errorf("compact uses AudioToolbox: %+v", out)
 	}
 }
 
