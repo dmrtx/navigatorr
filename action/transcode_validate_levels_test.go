@@ -55,7 +55,8 @@ func TestDetailedValidationHoldsTracksToTheirAudioLevel(t *testing.T) {
 		{"level 2 stereo not converted", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 1, func(o *out) { o.profile = "LC" }), StepWaitingDecision, "Audio profile mismatch at stream 1"},
 		{"level 1 bitrate far above the plan", transcode.AudioModeSizeAAC, change(good(transcode.AudioModeSizeAAC), 0, func(o *out) { o.bitRate = 900_000 }), StepWaitingDecision, "Audio bitrate mismatch at stream 0"},
 		{"level 2 bitrate far above the plan", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 384_000 }), StepWaitingDecision, "Audio bitrate mismatch at stream 0"},
-		{"level 2 bitrate not stated is the packet check's", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), StepCompleted, ""},
+		{"level 2 packets not measurable leave codec profile and channels", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), StepCompleted, ""},
+		{"level 2 unmeasured packets still need the profile", transcode.AudioModeSizeHEAAC, change(change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.bitRate = 0 }), 0, func(o *out) { o.profile = "LC" }), StepWaitingDecision, "Audio profile mismatch at stream 0"},
 		{"a track missing", transcode.AudioModeSizeAAC, good(transcode.AudioModeSizeAAC)[:2], StepWaitingDecision, "Audio stream lost"},
 		{"swapped languages", transcode.AudioModeSizeHEAAC, change(change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.lang = "spa" }), 1, func(o *out) { o.lang = "eng" }), StepWaitingDecision, "Audio language mismatch at stream 0"},
 		{"channels reduced", transcode.AudioModeSizeHEAAC, change(good(transcode.AudioModeSizeHEAAC), 0, func(o *out) { o.channels, o.layout = 2, "stereo" }), StepWaitingDecision, "Audio channel mismatch at stream 0"},
@@ -71,8 +72,20 @@ func TestDetailedValidationHoldsTracksToTheirAudioLevel(t *testing.T) {
 				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": %q, "profile": %q, "channels": %d, "channel_layout": %q, "bit_rate": "%d", "tags": {"language": %q}}`, i+1, a.codec, a.profile, a.channels, a.layout, a.bitRate, a.lang)
 			}
 			probe := `{"streams": [` + streams + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
+			// The packet scan reads each track at its bitrate over the whole
+			// file; a zero bitrate is a track whose packets cannot be read.
+			packets := ""
+			for i, a := range tc.out {
+				if a.bitRate == 0 {
+					packets = "stream_index=1|pts_time=N/A|duration_time=N/A|size=0\n"
+					break
+				}
+				half := int64(a.bitRate) * 1420 / 16
+				packets += fmt.Sprintf("stream_index=%d|pts_time=0.000000|duration_time=1.000000|size=%d\nstream_index=%d|pts_time=1419.000000|duration_time=1.000000|size=%d\n", i+1, half, i+1, half)
+			}
 			ffprobe := filepath.Join(dir, "ffprobe")
-			if err := os.WriteFile(ffprobe, []byte("#!/bin/sh\ncat <<'JSON'\n"+probe+"\nJSON\n"), 0o700); err != nil {
+			script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) cat <<'PACKETS'\n" + packets + "PACKETS\nexit 0;; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
+			if err := os.WriteFile(ffprobe, []byte(script), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			e := NewEngine(EngineDeps{Ffprobe: ffprobe})

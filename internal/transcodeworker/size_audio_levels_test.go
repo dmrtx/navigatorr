@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -245,7 +246,13 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		"-map", "0:v", "-map", "1:a", "-map", "2:a",
 		"-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p",
 		"-c:a:0", "eac3", "-b:a:0", "640k", "-c:a:1", "aac", "-ac:a:1", "2", "-b:a:1", "128k",
-		"-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn", "-metadata:s:a:1", "BPS=128000", source}
+		"-metadata:s:a:0", "language=eng", "-metadata:s:a:1", "language=jpn", "-metadata:s:a:1", "BPS=128000",
+		// mkvmerge statistics with a tag language, which ffmpeg reads back as
+		// "NAME-eng": the converted track and the re-encoded video must not
+		// keep them.
+		"-metadata:s:a:0", "BPS-eng=640000", "-metadata:s:a:0", "NUMBER_OF_BYTES-eng=1120000", "-metadata:s:a:0", "NUMBER_OF_FRAMES-eng=438",
+		"-metadata:s:a:0", "DURATION-eng=00:00:14.000000000", "-metadata:s:a:0", "_STATISTICS_WRITING_APP-eng=mkvmerge",
+		"-metadata:s:v:0", "BPS-eng=9000000", "-metadata:s:v:0", "NUMBER_OF_BYTES-eng=15750000", source}
 	if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("source fixture: %v %s", err, out)
 	}
@@ -294,6 +301,40 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		}
 		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
 			t.Fatalf("%s: pre-publish validation: %v", mode, err)
+		}
+		// No source statistics on a re-encoded stream (the muxer writes a
+		// fresh DURATION); the track copied at level 1 keeps its own, which
+		// still describe it.
+		rep, err := mediainspect.InspectDetailed(ctx, ffprobe, candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if keys := statisticsTagKeys(rep.Audio[0].Tags); len(keys) != 1 || keys[0] != "DURATION" {
+			t.Errorf("%s: converted track keeps source statistics %v", mode, rep.Audio[0].Tags)
+		}
+		if keys := statisticsTagKeys(rep.Video[0].Tags); len(keys) != 1 || keys[0] != "DURATION" {
+			t.Errorf("%s: re-encoded video keeps source statistics %v", mode, rep.Video[0].Tags)
+		}
+		if mode == transcode.AudioModeSizeAAC && rep.Audio[1].Tags["BPS"] != "128000" {
+			t.Errorf("copied track lost its statistics: %v", rep.Audio[1].Tags)
+		}
+		// The coordinator's promotion check measures the same packets the
+		// same way.
+		spans, err := audioPacketSpans(ctx, ffprobe, candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		measured, err := mediainspect.MeasureAudioPackets(ctx, ffprobe, candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(measured) != len(spans) {
+			t.Fatalf("%s: %d measured streams, worker %d", mode, len(measured), len(spans))
+		}
+		for index, s := range spans {
+			if m := measured[index]; m.Start != s.start || m.End != s.end || m.Bytes != s.bytes {
+				t.Errorf("%s: stream %d measured %+v, worker %+v", mode, index, m, s)
+			}
 		}
 	}
 	// The candidate of one level is not the other level's: the profile and the
