@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
 
@@ -179,7 +180,9 @@ func (k *kase) fill(src string, r *result) {
 		k.row.LadderStep = r.ladder.Rung + 1
 	}
 	if r.budget != nil {
-		k.row.Rung = r.budget.Rung
+		if r.budget.Choice != nil && r.budget.Choice.Reason == action.SizeBudgetChoiceLadder {
+			k.row.Rung = r.budget.Rung + 1
+		}
 		if r.budget.Choice != nil && k.row.Encoder == "" {
 			k.row.Encoder = r.budget.Choice.VideoCodec
 		}

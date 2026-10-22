@@ -24,7 +24,7 @@ type caseReport struct {
 	VMAFP5       float64 `json:"vmaf_p5,omitempty"`
 	VMAFWorst    float64 `json:"vmaf_worst_window,omitempty"`
 	Encoder      string  `json:"encoder,omitempty"`
-	Rung         int     `json:"vt_rung,omitempty"`
+	Rung         int     `json:"vt_rung,omitempty"` // 1-based VideoToolbox budget ladder rung
 	LadderStep   int     `json:"ladder_step,omitempty"`
 	WallSeconds  float64 `json:"wall_seconds"`
 	Passed       bool    `json:"passed"`
