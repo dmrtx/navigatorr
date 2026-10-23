@@ -5117,17 +5117,22 @@ function renderWorkerActivity(data) {
   // Activity only reports; the editors live in Settings.
   $("worker-open-settings").hidden = $("worker-parallel-form").hidden && $("worker-slot-split").hidden;
   for (const n of nodes) {
+    // With several nodes each one is a column of its own: heading over its slots.
+    let target = $("worker-slots");
     if (nodes.length > 1) {
       const slots = n.activity?.slots;
       const heading = !n.available || !n.activity ? `${n.name} · ${n.message || "Unavailable"}`
         : `${n.name} · ${n.activity.worker_slots_used}/${n.activity.worker_slots_total} occupied${slots?.split ? ` · Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total}` : ""}`;
-      $("worker-slots").append(node("p", heading, "worker-node-heading"));
+      const group = node("section", "", "worker-node-group");
+      target = node("div", "", "worker-node-slots");
+      group.append(node("p", heading, "worker-node-heading"), target);
+      $("worker-slots").append(group);
     }
-    if (n.available && n.activity) renderSlotGrid(n.activity, n.name);
+    if (n.available && n.activity) renderSlotGrid(n.activity, n.name, target);
   }
 }
 // One node's slots. Each node keeps its own slot positions.
-function renderSlotGrid(activity, name) {
+function renderSlotGrid(activity, name, target = $("worker-slots")) {
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
   const shown = Math.min(16, pools.total);
@@ -5165,7 +5170,7 @@ function renderSlotGrid(activity, name) {
       const last = activityElapsed(job.last_progress_at);
       row.append(node("p",stale ? "No recent worker heartbeat. Last reported state." : last ? `Last advance ${last} ago` : "Worker connected · Waiting for the next measurement", "metadata"));
     }
-    $("worker-slots").append(row);
+    target.append(row);
   }
 }
 async function refreshWorkerActivity(force) {

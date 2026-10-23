@@ -103,8 +103,14 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		return waitDecision(fmt.Sprintf("Video codec mismatch: expected %s, transcoded output is %s", expected, outVideo[0].Codec)), nil
 	}
 	if len(origVideo) > 0 && origVideo[0].Width > 0 && origVideo[0].Height > 0 {
-		if outVideo[0].Width != origVideo[0].Width || outVideo[0].Height != origVideo[0].Height {
-			return waitDecision(fmt.Sprintf("Video resolution mismatch: original=%dx%d output=%dx%d", origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil
+		wantWidth, wantHeight := origVideo[0].Width, origVideo[0].Height
+		// Compact converts to its planned size on purpose, so the output is held
+		// to that target and not to the source.
+		if c := plan.Compact; c != nil && c.TargetWidth > 0 && c.TargetHeight > 0 {
+			wantWidth, wantHeight = c.TargetWidth, c.TargetHeight
+		}
+		if outVideo[0].Width != wantWidth || outVideo[0].Height != wantHeight {
+			return waitDecision(fmt.Sprintf("Video resolution mismatch: expected=%dx%d original=%dx%d output=%dx%d", wantWidth, wantHeight, origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil
 		}
 	}
 	if origCovers, outCovers := len(mediainspect.CoverArtStreams(origAllVideo)), len(outRep.CoverArt()); outCovers != origCovers {
