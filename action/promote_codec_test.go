@@ -75,7 +75,9 @@ func TestPromotionExpectedCodecReadsTheSourcePlanForOlderCheckpoints(t *testing.
 }
 
 func TestPromotionCodecFamilyAliases(t *testing.T) {
-	for in, want := range map[string]string{"HEVC": "hevc", "x265": "hevc", "libx265": "hevc", " h.265 ": "hevc", "AVC": "h264", "x264": "h264", "h264": "h264", "AV1": "av1", "": ""} {
+	for in, want := range map[string]string{"HEVC": "hevc", "x265": "hevc", "libx265": "hevc", " h.265 ": "hevc", "AVC": "h264", "x264": "h264", "h264": "h264", "AV1": "av1", "": "",
+		// ffprobe and the library service spell these differently.
+		"mpeg2video": "mpeg2", "MPEG2": "mpeg2", "mpeg4": "mpeg4", "XviD": "mpeg4", "DivX": "mpeg4", "vc1": "vc1", "VC-1": "vc1"} {
 		if got := promotionCodecFamily(in); got != want {
 			t.Errorf("promotionCodecFamily(%q) = %q, want %q", in, got, want)
 		}

@@ -935,6 +935,14 @@ func promotionCodecFamily(codec string) string {
 		return "hevc"
 	case "h264", "h.264", "x264", "avc", "avc1", "libx264", "h264_videotoolbox":
 		return "h264"
+	// Sonarr and Radarr name these as formatted labels (MPEG2, XviD) where
+	// ffprobe says mpeg2video and mpeg4.
+	case "mpeg2", "mpeg-2", "mpeg2video":
+		return "mpeg2"
+	case "mpeg4", "mpeg-4", "xvid", "divx":
+		return "mpeg4"
+	case "vc1", "vc-1":
+		return "vc1"
 	default:
 		return c
 	}
