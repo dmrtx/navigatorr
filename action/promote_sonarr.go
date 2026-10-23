@@ -159,8 +159,8 @@ func (e *Engine) promotionAdoptedFile(ctx context.Context, svc *arrservice.Servi
 		if f.Size != p.CandidateBytes {
 			return nil, false, fmt.Errorf("Sonarr imported file size differs from the validated candidate")
 		}
-		if !promotionHEVC(f.MediaInfo.VideoCodec) {
-			return nil, false, fmt.Errorf("Sonarr has not confirmed HEVC streams for the imported file")
+		if want := e.promotionExpectedCodec(p); promotionCodecFamily(f.MediaInfo.VideoCodec) != want {
+			return nil, false, fmt.Errorf("Sonarr has not confirmed %s streams for the imported file", promotionCodecLabel(want))
 		}
 		return &f, true, nil
 	}

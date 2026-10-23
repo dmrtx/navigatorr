@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func (e *Engine) promotionPath(path string, write bool) (string, error) {
@@ -316,6 +317,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(fmt.Errorf("integrity violation: original size changed since transcoding"))
 	}
 	p.OriginalBytes = original.Size()
+	p.ExpectedVideoCodec = promotionPlanCodec(source)
 	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(ctx, p.CandidatePath)
 	if err != nil {
 		return promoteFailed(err)
@@ -910,8 +912,9 @@ func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState,
 		if err != nil {
 			return err
 		}
-		if video := rep.MainVideo(); !rep.Probed || len(video) == 0 || !promotionHEVC(video[0].Codec) {
-			return fmt.Errorf("Sonarr's physical file is not a verified HEVC candidate")
+		want := e.promotionExpectedCodec(p)
+		if video := rep.MainVideo(); !rep.Probed || len(video) == 0 || promotionCodecFamily(video[0].Codec) != want {
+			return fmt.Errorf("Sonarr's physical file is not a verified %s candidate", promotionCodecLabel(want))
 		}
 	}
 	if err := e.verifyPromotionHashStable(ctx, path, p.CandidateSHA); err != nil {
@@ -924,10 +927,63 @@ func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState,
 	return nil
 }
 
-func promotionHEVC(codec string) bool {
-	switch strings.ToLower(strings.TrimSpace(codec)) {
-	case "hevc", "h265", "h.265", "x265":
-		return true
+// promotionCodecFamily names the codec behind the spellings ffprobe, Sonarr
+// and encoder names use for it, so they compare equal.
+func promotionCodecFamily(codec string) string {
+	switch c := strings.ToLower(strings.TrimSpace(codec)); c {
+	case "hevc", "h265", "h.265", "x265", "libx265", "hevc_videotoolbox":
+		return "hevc"
+	case "h264", "h.264", "x264", "avc", "avc1", "libx264", "h264_videotoolbox":
+		return "h264"
+	default:
+		return c
 	}
-	return false
+}
+
+func promotionCodecLabel(family string) string {
+	if family == "hevc" {
+		return "HEVC"
+	}
+	return family
+}
+
+// promotionPlanCodec is the video codec a promoted candidate must carry: the
+// plan's encoder, or the source's own codec when the plan copies the video
+// (the size goal's audio-only plan). A plan that cannot be read keeps the
+// historical HEVC requirement.
+func promotionPlanCodec(source *ExecutionContext) string {
+	plan := getPlan(source.State["plan"])
+	if plan == nil {
+		return "hevc"
+	}
+	codec := expectedVideoCodec(plan.VideoCodec)
+	if transcode.IsSizeAudioOnlyPlan(plan) {
+		origMap, _ := source.State["original"].(map[string]any)
+		codec = getString(origMap, "video_codec")
+		if codec == "" {
+			if video := mediainspect.MainVideoStreams(getStreamsList(origMap, "video")); len(video) > 0 {
+				codec = video[0].Codec
+			}
+		}
+	}
+	if family := promotionCodecFamily(codec); family != "" {
+		return family
+	}
+	return "hevc"
+}
+
+// promotionExpectedCodec returns the family the candidate must carry. A
+// checkpoint saved before the plan recorded it reads the source transcode's
+// plan, so a promotion held at import or removal resumes under the right rule.
+func (e *Engine) promotionExpectedCodec(p *promotionState) string {
+	if p.ExpectedVideoCodec != "" {
+		return p.ExpectedVideoCodec
+	}
+	if e.deps.Store != nil && p.SourceActionID != "" {
+		if inst, err := e.deps.Store.GetActionInstance(p.SourceActionID); err == nil && inst != nil {
+			p.ExpectedVideoCodec = promotionPlanCodec(parseExecutionContext(inst, e))
+			return p.ExpectedVideoCodec
+		}
+	}
+	return "hevc"
 }

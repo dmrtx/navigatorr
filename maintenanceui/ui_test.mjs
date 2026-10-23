@@ -1746,6 +1746,31 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   assert.equal(h.elements.get("settings-node").hidden,true);
 });
 
+test("worker activity puts each node's heading and slots in a column of its own", () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  const job=(id,file)=>({id,file,kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10});
+  const node=(name,jobs)=>({name,available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:jobs.length,jobs,
+    slots:{ceiling:1,split:false,video:{total:1,used:jobs.length},podcast:{total:0,used:0}}}});
+  h.context.activity={available:true,workers:[node("m1",[job("a","one.mkv")]),node("m4",[job("b","two.mkv")])]};
+  h.run('renderWorkerActivity(activity)');
+  const groups=h.elements.get("worker-slots").children;
+  assert.equal(groups.length,2,"one group per node, not a heading and slots mixed in one list");
+  assert.equal(groups[0].className,"worker-node-group");
+  assert.match(groups[0].children[0].textContent,/^m1 · 1\/1 occupied/);
+  assert.equal(groups[0].children[1].className,"worker-node-slots");
+  assert.match(groups[0].children[1].children[0].children[0].textContent,/one\.mkv/);
+  assert.match(groups[1].children[0].textContent,/^m4 · 1\/1 occupied/);
+  assert.match(groups[1].children[1].children[0].children[0].textContent,/two\.mkv/);
+  // A node that is down keeps its column and says why.
+  h.run('activity.workers[1]={name:"m4",available:false,message:"Worker disconnected"};renderWorkerActivity(activity)');
+  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/^m4 · Worker disconnected/);
+  assert.equal(h.elements.get("worker-slots").children[1].children[1].children.length,0);
+  // A single node keeps the flat slot list.
+  h.run('activity={available:true,workers:[activity.workers[0]]};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slots").children[0].className,"worker-slot");
+});
+
 test("activity stays read-only and links to the node settings only when something there is editable", () => {
   const h=harness();
   h.context.selected=[];

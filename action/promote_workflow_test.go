@@ -50,6 +50,7 @@ type promotionHarness struct {
 	stalePathAfterRename               bool
 	permanentStaleFinalPath            bool
 	adoptedPathOverride                string
+	importedCodec                      string // Sonarr's videoCodec for the imported file; HEVC when empty
 	stalePathReads                     int
 	backupSeen                         bool
 	tracking                           map[string]any // monitored/qualityProfileId on the series or movie
@@ -275,6 +276,9 @@ func (h *promotionHarness) serve(w http.ResponseWriter, r *http.Request) {
 					file.MovieID = 1
 				}
 				file.MediaInfo.VideoCodec = "HEVC"
+				if h.importedCodec != "" {
+					file.MediaInfo.VideoCodec = h.importedCodec
+				}
 				h.files[202] = file
 				for i := range h.episodes {
 					h.episodes[i].EpisodeFileID = 202
