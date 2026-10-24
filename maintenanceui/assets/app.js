@@ -3141,7 +3141,7 @@ function batchSegments(batch) {
     segment.style.width = `${part.n / total * 100}%`;
     bar.append(segment);
   }
-  return {bar, legend};
+  return {bar, legend, kinds: parts.length};
 }
 function batchProgress(job, {segments = false} = {}) {
   const replacing = replacementProgressBlock(job);
@@ -5324,7 +5324,8 @@ async function loadJobs(more = false) {
       const menu = [...actions.children].filter(child => child !== main);
       row.append(heading, meta);
       const live = skipped ? null : presentation.showTelemetry ? telemetry(job, {segments: true}) : batchProgress(job, {segments: true});
-      const spread = skipped || live ? null : batchSegments(visibleBatch(job));
+      // A bar of one colour says nothing the summary line has not said (every file replaced, say), so it is left out.
+      const spread = skipped || live ? null : (seg => seg?.kinds > 1 ? seg : null)(batchSegments(visibleBatch(job)));
       let body = skipped ? skippedBatchOutcome(job) : live;
       if (spread) {
         body = node("div", "", "job-progress batch-summary");

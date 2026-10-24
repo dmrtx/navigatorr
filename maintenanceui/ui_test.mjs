@@ -7134,6 +7134,12 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.deepEqual(widths, [["segment-ok", 25], ["segment-err", 8], ["segment-run", 17], ["segment-wait", 50]]);
   h.context.batch = { total: 8, completed: 6, review: 2 };
   assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
+  // A single colour is reported so the queue row can leave the bar out.
+  h.context.batch = { total: 13, completed: 13 };
+  assert.equal(h.run("batchSegments(batch).kinds"), 1);
+  assert.equal(h.run("batchSegments(batch).kinds"), 1);
+  h.context.batch = { total: 8, completed: 6, review: 2 };
+  assert.equal(h.run("batchSegments(batch).kinds"), 2);
   h.context.batch = { total: 1, completed: 1 };
   assert.equal(h.run("batchSegments(batch)"), null);
   h.context.batch = { total: 4, completed: 4, dry_run: true };
