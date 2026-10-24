@@ -6068,6 +6068,31 @@ async function retryFileReplacement(item, batchID) {
   const name = item.display_label || (item.file_path || "").split("/").pop();
   await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
 }
+// A file's actions: the main one stays in view, the others sit under a "..."
+// menu so a row is never a wall of buttons.
+function foldBatchFileActions(actions, itemKey) {
+  const buttons = [...actions.children];
+  if (buttons.length < 2) return;
+  const main = buttons.find(b => /\bprimary\b/.test(b.className)) || buttons[0];
+  const rest = buttons.filter(b => b !== main);
+  const more = node("details", "", "more-actions");
+  more.dataset.menuFor = itemKey || "";
+  const toggle = node("summary", "\u22ef", "more-toggle");
+  toggle.setAttribute("aria-label", "More actions");
+  toggle.title = "More actions";
+  const menu = node("div", "", "more-menu");
+  menu.append(...rest);
+  more.append(toggle, menu);
+  more.addEventListener("click", e => {
+    if (!e.target?.closest?.(".more-menu button")) return;
+    more.open = false;
+    toggle.focus?.({preventScroll: true});
+  }, true);
+  more.addEventListener("focusout", e => {
+    if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
+  });
+  actions.replaceChildren(main, more);
+}
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -6089,7 +6114,17 @@ async function loadBatchItems(id, revision) {
     const failure = item.replacement_failure;
     const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
     const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
-    row.append(node("span", item.display_label || (item.file_path || "").split("/").pop(), "metadata batch-file-name"), statusBadge(label, item.replacement_status || label, review));
+    // The name opens the file, so there is no separate View file button.
+    const fileName = item.display_label || (item.file_path || "").split("/").pop();
+    const nameCell = node("span", item.child_action_id ? "" : fileName, "metadata batch-file-name");
+    if (item.child_action_id) nameCell.append(jobLink(fileName, item.child_action_id));
+    nameCell.title = fileName;
+    // One line per file: name, how much it saves, state, then the main action.
+    const savedCell = item.saved_bytes > 0 ? node("span", `\u2212${bytes(item.saved_bytes)}`, "batch-file-saved") : null;
+    if (savedCell) savedCell.title = "Smaller than the original by this much";
+    row.append(nameCell);
+    if (savedCell) row.append(savedCell);
+    row.append(statusBadge(label, item.replacement_status || label, review));
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
     const add = (label, fn, {navigation = false, target = id, primary = label === "Replace file", requiresWorker = false} = {}) => {
@@ -6101,7 +6136,6 @@ async function loadBatchItems(id, revision) {
       control.disabled = jobControlDisabled(control);
       actions.append(control);
     };
-    if (item.child_action_id) add("View file", () => openJob(item.child_action_id), {navigation: true, target: item.child_action_id});
     if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
     // The encode finished and only saving it failed: one button tries the same
     // file again, on the worker that holds it. No settings change, no re-encode.
@@ -6139,6 +6173,7 @@ async function loadBatchItems(id, revision) {
       add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
     if (filesRouteFor(item.file_path))
       add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
+    foldBatchFileActions(actions, item.item_key);
     if (actions.children.length) row.append(actions);
     const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
@@ -6150,7 +6185,12 @@ async function loadBatchItems(id, revision) {
     }
 
     if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
-    if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    // A finished candidate repeats its batch's goal and its own status, so only
+    // files that still need a look say which goal they follow.
+    const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
+    if (settled) {
+      // Nothing to add.
+    } else if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
@@ -6165,7 +6205,8 @@ async function loadBatchItems(id, revision) {
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
     if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
-    if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
+    // The status already says "Candidate ready"; only a reason it cannot be replaced is added.
+    if (item.candidate_ready && !state.info.allow_destructive) row.append(node("span", "Replacement is disabled in server settings", "muted"));
     for (const control of row.querySelectorAll("button")) {
       control.dataset.batchItemKey = item.item_key;
       // Buttons made without a target only open something.

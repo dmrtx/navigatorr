@@ -19,6 +19,8 @@ type batchItemView struct {
 	WaitingDecisions []string `json:"waiting_decisions,omitempty"`
 	ReasonCode       string   `json:"reason_code,omitempty"`
 	CandidateReady   bool     `json:"candidate_ready,omitempty"`
+	// SavedBytes is how much smaller the finished candidate is than the original.
+	SavedBytes int64 `json:"saved_bytes,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -158,6 +160,9 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 							}
 						}
 						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
+						if saved := projectOperationSavings(r, time.Now()).CandidateSavedBytes; saved != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true {
+							view.SavedBytes = *saved
+						}
 						view.SizeBudgetOutcome = operationSizeBudgetOutcome(r)
 						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {

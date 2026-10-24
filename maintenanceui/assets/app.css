@@ -1714,34 +1714,38 @@ main {
 }
 .batch-item-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
-  column-gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  column-gap: 10px;
   row-gap: 4px;
-  padding: 12px 0;
+  padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
+/* Anything not named below (what a file is doing, why it was skipped) runs
+   under the line at full width. */
 .batch-item-row > * { grid-column: 1 / -1; min-width: 0; margin: 0; }
-.batch-item-row > span:first-child {
+.batch-item-row > .batch-file-name {
   grid-column: 1;
   grid-row: 1;
+  overflow: hidden;
   color: var(--ink);
   font-size: 14px;
   font-weight: 500;
   line-height: 1.35;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.batch-item-row > .badge { grid-column: 2; grid-row: 1; justify-content: center; }
-/* What is happening to the file, then what a person can do, then the small print. */
-.batch-item-row > .batch-file-activity, .batch-item-row > .muted { order: 1; color: var(--ink); font-size: 13px; line-height: 1.4; }
+.batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 1; min-width: 56px; color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
+.batch-item-row > .badge { grid-column: 3; grid-row: 1; min-width: 108px; justify-content: center; white-space: nowrap; }
+.batch-item-row > .batch-file-actions { grid-column: 4; grid-row: 1; display: flex; justify-content: flex-end; gap: 6px; min-width: 150px; margin: 0; }
+.batch-item-row > .batch-file-activity, .batch-item-row > .muted { color: var(--ink); font-size: 13px; line-height: 1.4; }
 .batch-item-row > .batch-file-activity { color: var(--forest); }
-.batch-item-row > .batch-file-actions { order: 2; display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 8px; margin: 4px 0 2px; }
-.batch-item-row > .batch-file-tracks, .batch-item-row > .batch-file-profile { order: 3; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.batch-item-row > .batch-file-tracks, .batch-item-row > .batch-file-profile { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .batch-item-row .batch-file-actions button {
-  min-height: 32px;
+  min-height: 30px;
   padding: 0 14px;
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 15px;
   background: none;
   color: var(--ink);
   font-size: 13px;
@@ -1749,6 +1753,58 @@ main {
 }
 .batch-item-row .batch-file-actions button:hover { background: var(--hover); }
 .batch-item-row .batch-file-actions button.primary { border-color: var(--forest); color: var(--forest); }
+/* The failure card keeps its own button row under the line. */
+.batch-item-row > .replacement-failure .batch-file-actions { grid-column: auto; grid-row: auto; flex-wrap: wrap; }
+@media (max-width: 560px) {
+  /* Narrow screens: name and state on one line, the rest below. */
+  .batch-item-row > .batch-file-name { grid-column: 1; white-space: normal; overflow-wrap: anywhere; }
+  .batch-item-row > .batch-file-saved { grid-column: 1; grid-row: 2; min-width: 0; text-align: left; }
+  .batch-item-row > .badge { grid-column: 2; }
+  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; min-width: 0; }
+  .batch-item-row > .badge { min-width: 0; }
+  .batch-item-row .more-menu { right: auto; left: 0; }
+}
+.batch-item-row .batch-file-name a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
+.batch-item-row .batch-file-name a:hover, .batch-item-row .batch-file-name a:focus-visible { color: var(--forest); border-bottom-color: var(--forest); }
+.batch-item-row .more-actions { position: relative; display: inline-flex; }
+.batch-item-row .more-actions > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  list-style: none;
+}
+.batch-item-row .more-actions > summary::-webkit-details-marker { display: none; }
+.batch-item-row .more-actions > summary:hover, .batch-item-row .more-actions[open] > summary { background: var(--hover); }
+.batch-item-row .more-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 190px;
+  max-width: calc(100vw - 32px);
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 6px 18px var(--shadow);
+}
+.batch-item-row .batch-file-actions .more-menu button {
+  justify-content: flex-start;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  text-align: left;
+}
 
 /* Savings and completed replacement history. */
 .savings-dashboard {
