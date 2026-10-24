@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -209,7 +210,7 @@ func batchReasonText(raw string, details bool) string {
 	return text
 }
 
-func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
+func batchQueueFeedback(items []store.TranscodeBatchItem, roots []string) map[string]any {
 	preview := []batchItemView{}
 	ordered := append([]store.TranscodeBatchItem(nil), items...)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -275,18 +276,136 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 	}
 	context := ""
 	if commonDir != "" && commonDir != "." && commonDir != "/" {
-		context = filepath.Base(commonDir)
-		if strings.HasPrefix(strings.ToLower(context), "season") {
-			context = filepath.Base(filepath.Dir(commonDir)) + " · " + context
+		context = folderLabel(commonDir)
+	}
+	// Files in several folders of one show or movie (seasons, extras) are named
+	// by the folder that holds them all, if that is inside a library rather than
+	// the library itself. Failing that, by the files.
+	name := ""
+	shared := ""
+	if commonDir == "" {
+		if ancestor := commonAncestor(items); insideLibrary(ancestor, roots) {
+			shared = ancestor
+			name = folderLabel(ancestor)
 		}
+	}
+	if name == "" {
+		name = batchNameFromFiles(items)
 	}
 	// Where to look for the files: their shared folder, or the first one's.
 	folder := commonDir
+	if folder == "" {
+		folder = shared
+	}
 	if (folder == "" || folder == ".") && len(items) > 0 {
 		folder = filepath.Dir(items[0].FilePath)
 	}
 	if folder == "." || folder == "/" {
 		folder = ""
 	}
-	return map[string]any{"files": preview, "file_count": len(items), "context": context, "folder": folder, "reasons": reasonViews, "rejected_count": rejected, "policy_count": policy}
+	return map[string]any{"files": preview, "file_count": len(items), "context": context, "name": name, "folder": folder, "reasons": reasonViews, "rejected_count": rejected, "policy_count": policy}
+}
+
+// folderLabel is a folder's name; a season folder is named with its show.
+func folderLabel(dir string) string {
+	label := filepath.Base(dir)
+	if strings.HasPrefix(strings.ToLower(label), "season") {
+		label = filepath.Base(filepath.Dir(dir)) + " · " + label
+	}
+	return label
+}
+
+// commonAncestor is the deepest folder that holds every file, or "".
+func commonAncestor(items []store.TranscodeBatchItem) string {
+	var shared []string
+	for i, item := range items {
+		if item.FilePath == "" || !filepath.IsAbs(item.FilePath) {
+			return ""
+		}
+		parts := strings.Split(strings.Trim(filepath.Dir(item.FilePath), "/"), "/")
+		if i == 0 {
+			shared = parts
+			continue
+		}
+		n := 0
+		for n < len(shared) && n < len(parts) && shared[n] == parts[n] {
+			n++
+		}
+		shared = shared[:n]
+	}
+	if len(shared) == 0 {
+		return ""
+	}
+	return "/" + strings.Join(shared, "/")
+}
+
+// insideLibrary reports whether dir is below one of the library roots, not a
+// root itself or above one, so it names a show or movie rather than a shelf.
+func insideLibrary(dir string, roots []string) bool {
+	for _, root := range roots {
+		root = strings.TrimRight(root, "/")
+		if root != "" && dir != "" && strings.HasPrefix(dir, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+var nameSeparators = " -_.[(]),"
+
+// A trailing season or episode marker names a position in a series, not the series.
+var trailingEpisodeMarker = regexp.MustCompile(`(?i)[\s._\-]*(?:s\d+(?:e\d*)?|season\s*\d*|e\d+|ep\s*\d+)$`)
+
+// batchNameFromFiles names a batch whose files do not share a folder, from the
+// files themselves: the start of their names when they have one in common
+// (the series), otherwise the first file and how many others come with it.
+func batchNameFromFiles(items []store.TranscodeBatchItem) string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		name := filepath.Base(item.FilePath)
+		if item.FilePath == "" || name == "." || name == "/" {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(name, filepath.Ext(name)))
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	if len(names) == 1 {
+		return names[0]
+	}
+	prefix := names[0]
+	for _, name := range names[1:] {
+		n := 0
+		for n < len(prefix) && n < len(name) && prefix[n] == name[n] {
+			n++
+		}
+		prefix = prefix[:n]
+	}
+	// Stop at a word boundary unless every name ends exactly there, so
+	// "Show - S01E0" does not leave a half-written episode number.
+	whole := true
+	for _, name := range names {
+		if len(name) != len(prefix) && !strings.ContainsRune(nameSeparators, rune(name[len(prefix)])) {
+			whole = false
+		}
+	}
+	if !whole {
+		if cut := strings.LastIndexAny(prefix, nameSeparators); cut >= 0 {
+			prefix = prefix[:cut]
+		} else {
+			prefix = ""
+		}
+	}
+	prefix = strings.TrimRight(prefix, nameSeparators)
+	prefix = strings.TrimLeft(strings.TrimRight(trailingEpisodeMarker.ReplaceAllString(prefix, ""), nameSeparators), " -_.")
+	// A release group's tag alone ("[Group]") names nobody's show.
+	if utf8.RuneCountInString(prefix) >= 4 && strings.Count(prefix, "[") == strings.Count(prefix, "]") {
+		return prefix
+	}
+	if others := len(names) - 1; others == 1 {
+		return names[0] + " + 1 more"
+	} else {
+		return fmt.Sprintf("%s + %d more", names[0], others)
+	}
 }

@@ -929,7 +929,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					fail(w, 500, "read batch contents")
 					return
 				}
-				job["batch_files"] = batchQueueFeedback(items)
+				job["batch_files"] = batchQueueFeedback(items, s.cfg.Media.AllowedReadRoots)
 				if progress := s.batchReplacementProgress(r, recordsByID, existingReplacements); progress != nil {
 					job["replacement"] = progress
 				}

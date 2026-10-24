@@ -4645,7 +4645,9 @@ function queuePresentation(job) {
         ? "Benchmark"
         : "File";
   const source = job.source_path || job.promotion?.original_path;
-  const context = job.batch_files?.context || job.batch?.title;
+  // A selection made across folders is called "Selected files"; the server names it from the files instead.
+  const generic = !job.batch?.title || job.batch.title === "Selected files";
+  const context = job.batch_files?.context || (generic && job.batch_files?.name) || job.batch?.title;
   const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
   const title =
     singleFile?.display_label || singleFile?.file_path?.split("/").pop() || context ||

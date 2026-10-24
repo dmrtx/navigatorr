@@ -379,7 +379,7 @@ func TestBatchQueueFailureReasonsDoNotClaimSelectionCriteriaAreErrors(t *testing
 		{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"h264_1080p", "oversized"}, Error: "Worker connection failed"},
 		{FilePath: "/media/two.mkv", Status: "failed", Reasons: []string{"h264_1080p", "oversized"}},
 		{FilePath: "/media/three.mkv", Status: "skip", Reasons: []string{"anime", "No suitable candidate"}},
-	})
+	}, nil)
 	reasons := feedback["reasons"].([]map[string]any)
 	for _, reason := range reasons {
 		if reason["reason"] == "h264_1080p" || reason["reason"] == "oversized" || reason["reason"] == "anime" {
@@ -389,11 +389,11 @@ func TestBatchQueueFailureReasonsDoNotClaimSelectionCriteriaAreErrors(t *testing
 	if len(reasons) != 2 {
 		t.Fatal("missing bounded failure feedback", reasons)
 	}
-	errorFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized"}, Error: "Worker connection failed"}})
+	errorFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized"}, Error: "Worker connection failed"}}, nil)
 	if errorFeedback["reasons"].([]map[string]any)[0]["reason"] != "Worker connection failed" {
 		t.Fatal("file error was lost", errorFeedback)
 	}
-	reasonFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized", "Missing source"}}})
+	reasonFeedback := batchQueueFeedback([]store.TranscodeBatchItem{{FilePath: "/media/one.mkv", Status: "failed", Reasons: []string{"oversized", "Missing source"}}}, nil)
 	if reasonFeedback["reasons"].([]map[string]any)[0]["reason"] != "Missing source" {
 		t.Fatal("recorded failure reason was lost", reasonFeedback)
 	}
@@ -445,7 +445,7 @@ func TestRejectionCountIsIndependentOfTruncatedQueueReasons(t *testing.T) {
 		items = append(items, store.TranscodeBatchItem{Status: "failed", Error: message})
 	}
 	items = append(items, store.TranscodeBatchItem{Status: "failed", Error: `{"step":"validate","error":"transcode candidate rejected by user decision; original file remains untouched"}`})
-	feedback := batchQueueFeedback(items)
+	feedback := batchQueueFeedback(items, nil)
 	if feedback["rejected_count"] != 1 {
 		t.Fatal(feedback)
 	}
@@ -548,5 +548,73 @@ func TestCompletedEarlyExitShowsSkippedStagesAndKeptOriginal(t *testing.T) {
 		if stage["status"] != "completed" {
 			t.Fatalf("stage without a stored row %+v", stage)
 		}
+	}
+}
+
+func TestBatchNameFromFilesNamesASelectionAcrossFolders(t *testing.T) {
+	item := func(path string) store.TranscodeBatchItem { return store.TranscodeBatchItem{FilePath: path} }
+	for _, tc := range []struct {
+		label string
+		paths []string
+		want  string
+	}{
+		{"one file is named by itself", []string{"/a/Demo Show - S01E03 - Pilot.mkv"}, "Demo Show - S01E03 - Pilot"},
+		{"episodes of one show share the show", []string{"/a/Demo Show - S01E01 - One.mkv", "/b/Demo Show - S01E02 - Two.mkv", "/c/Demo Show - S02E10 - Ten.mkv"}, "Demo Show"},
+		{"a release group tag stays with the show", []string{"/a/[Group] Demo Show - 01.mkv", "/b/[Group] Demo Show - 02.mkv"}, "[Group] Demo Show"},
+		{"a half-written number is not left behind", []string{"/a/Demo Show S01E01.mkv", "/b/Demo Show S01E02.mkv"}, "Demo Show"},
+		{"unrelated files are the first one and a count", []string{"/a/Alpha Movie 1080p.mkv", "/b/Beta Film 720p.mkv", "/c/Gamma.mkv"}, "Alpha Movie 1080p + 2 more"},
+		{"a shared release group is not a name", []string{"/a/[Group] Alpha Movie.mkv", "/b/[Group] Beta Film.mkv"}, "[Group] Alpha Movie + 1 more"},
+		{"two unrelated files", []string{"/a/Alpha Movie.mkv", "/b/Beta Film.mkv"}, "Alpha Movie + 1 more"},
+		{"too short a common start is not a name", []string{"/a/Ab one.mkv", "/b/Ab two.mkv"}, "Ab one + 1 more"},
+	} {
+		items := make([]store.TranscodeBatchItem, len(tc.paths))
+		for i, path := range tc.paths {
+			items[i] = item(path)
+		}
+		if got := batchNameFromFiles(items); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.label, got, tc.want)
+		}
+	}
+	if got := batchNameFromFiles(nil); got != "" {
+		t.Errorf("no files should give no name, got %q", got)
+	}
+}
+
+func TestBatchQueueNamesAFolderSelectionByTheFolderThatHoldsEveryFile(t *testing.T) {
+	roots := []string{"/lib/Movies", "/lib/Anime/"}
+	item := func(path string) store.TranscodeBatchItem { return store.TranscodeBatchItem{FilePath: path} }
+	// A folder and a subfolder of it: the movie's folder names the batch and is where Show in Files goes.
+	feedback := batchQueueFeedback([]store.TranscodeBatchItem{
+		item("/lib/Movies/Demo Movie (2001)/extras/Alternate cut.mkv"),
+		item("/lib/Movies/Demo Movie (2001)/Demo Movie.mkv"),
+	}, roots)
+	if feedback["name"] != "Demo Movie (2001)" || feedback["folder"] != "/lib/Movies/Demo Movie (2001)" || feedback["context"] != "" {
+		t.Fatalf("a folder with a subfolder is named by the folder: %#v", feedback)
+	}
+	// Seasons of one show: the show's folder, not "Season 1".
+	feedback = batchQueueFeedback([]store.TranscodeBatchItem{
+		item("/lib/Anime/Demo Show/Season 1/Demo Show - S01E01.mkv"),
+		item("/lib/Anime/Demo Show/Season 2/Demo Show - S02E01.mkv"),
+	}, roots)
+	if feedback["name"] != "Demo Show" {
+		t.Fatalf("seasons are named by their show: %#v", feedback)
+	}
+	// Different shows only share the library: that is not a name, the files are.
+	feedback = batchQueueFeedback([]store.TranscodeBatchItem{
+		item("/lib/Anime/Alpha Show/Alpha Show - 01.mkv"),
+		item("/lib/Anime/Beta Show/Beta Show - 01.mkv"),
+	}, roots)
+	if feedback["name"] != "Alpha Show - 01 + 1 more" {
+		t.Fatalf("a library is not a name: %#v", feedback)
+	}
+	// Without library roots nothing is assumed about the folders.
+	feedback = batchQueueFeedback([]store.TranscodeBatchItem{item("/x/Demo/a.mkv"), item("/x/Demo/b/c.mkv")}, nil)
+	if feedback["name"] == "Demo" {
+		t.Fatalf("no roots, no folder name: %#v", feedback)
+	}
+	// One folder keeps its existing label.
+	feedback = batchQueueFeedback([]store.TranscodeBatchItem{item("/lib/Anime/Demo Show/Season 3/a.mkv"), item("/lib/Anime/Demo Show/Season 3/b.mkv")}, roots)
+	if feedback["context"] != "Demo Show · Season 3" {
+		t.Fatalf("a single folder is labelled as before: %#v", feedback)
 	}
 }
