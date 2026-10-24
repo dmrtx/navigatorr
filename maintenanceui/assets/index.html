@@ -35,7 +35,6 @@
       >
       <div class="masthead-right">
         <button id="worker-status" class="quiet" hidden>Worker · Checking…</button>
-        <button id="install-app" class="quiet" hidden>Install app</button>
       </div>
     </header>
     <main>
@@ -167,27 +166,17 @@
                     <circle cx="10" cy="10" r="6" />
                     <path d="m15 15 5 5" />
                   </svg></button
-                ><button
-                  id="open-path"
-                  class="icon-button"
-                  aria-label="Open a path"
-                  title="Open a path"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.7"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path d="M3 6h7l2 2h9v12H3Z" />
-                    <path d="M12 11v6m-3-3h6" />
-                  </svg></button
-                ><button id="reload-library" class="icon-button" aria-label="Reload files and sizes" title="Reload sizes and order">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12" /></svg>
-                </button>
+                ><details id="library-actions" class="toolbar-menu">
+                  <summary class="icon-button" aria-label="More file actions" title="More">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" />
+                    </svg>
+                  </summary>
+                  <div class="menu-items">
+                    <button id="open-path" class="quiet" type="button">Open a path…</button>
+                    <button id="reload-library" class="quiet" type="button">Reload sizes and order</button>
+                  </div>
+                </details>
               </div>
               <div id="library-search-label" class="toolbar search-row" role="search" hidden>
                 <input
@@ -601,8 +590,9 @@
           </div>
           <div class="queue-meta">
             <p id="jobs-updated" class="metadata" role="status"></p>
-            <button id="podcast-new" class="quiet podcast-new" type="button" aria-haspopup="dialog">Clean podcast…</button>
+            <button id="queue-drain-toggle" class="quiet queue-drain-toggle" type="button" hidden>Pause all</button>
           </div>
+          <p id="queue-drain-status" class="queue-drain" role="status" hidden></p>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span class="activity-heading-end"><span id="activity-checked" class="metadata"></span><button id="worker-open-settings" type="button" class="quiet" hidden>Change in Settings</button></span></div>
@@ -914,6 +904,10 @@
           <p id="backup-progress" class="metadata" role="status" hidden></p>
           <div id="backup-list" hidden></div>
           <button id="backups-more" hidden>Load more</button>
+          <div class="settings-row">
+            <span>This device</span
+            ><button id="install-app" class="quiet" hidden>Install app</button>
+          </div>
           <div id="local-session" class="settings-row" hidden>
             <span>Local session</span
             ><button id="logout" class="quiet" hidden>Sign out</button>
@@ -939,20 +933,6 @@
         Use your browser’s menu to add Navigatorr to your home screen.
       </p>
       <p id="install-status">Use HTTPS to install the app.</p>
-    </dialog>
-    <dialog id="podcast-dialog" aria-labelledby="podcast-title">
-      <div class="dialog-heading">
-        <h2 id="podcast-title">Clean podcast</h2>
-        <button id="close-podcast" class="icon-button" type="button" aria-label="Close clean podcast">×</button>
-      </div>
-      <form id="podcast-form">
-        <p class="muted">Create a separate MP3. The original is kept. Your connected LLM classifies the transcript before cuts are reviewed.</p>
-        <label>Podcast<select id="podcast-id" required></select></label>
-        <label>Original audio path<input id="podcast-source" required placeholder="/media/podcasts/episode.mp3" /></label>
-        <label>Cleaned MP3 path<input id="podcast-output" required placeholder="/media/podcasts/episode.cleaned.mp3" /></label>
-        <button class="primary" type="submit">Start transcription</button>
-        <p id="podcast-create-status" class="muted" role="status"></p>
-      </form>
     </dialog>
     <dialog id="path-dialog" aria-labelledby="path-title">
       <div class="dialog-heading">
@@ -1153,6 +1133,13 @@
         <h2 id="workers-title">Connected nodes</h2>
         <button id="close-workers" class="icon-button" aria-label="Close">×</button>
       </div>
+      <section id="worker-drain" class="worker-drain" aria-labelledby="worker-drain-title" hidden>
+        <h3 id="worker-drain-title">Deploy a worker</h3>
+        <p id="worker-drain-status" role="status"></p>
+        <div id="worker-drain-jobs"></div>
+        <p id="worker-drain-note" class="metadata"></p>
+        <button id="worker-drain-toggle" type="button">Drain workers</button>
+      </section>
       <div id="worker-nodes"></div>
       <p id="workers-checked" class="metadata"></p>
       <button id="refresh-workers">Check connection</button>

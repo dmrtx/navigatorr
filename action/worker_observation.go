@@ -17,6 +17,15 @@ import (
 // admission remains independently live. The result summarises the workers and
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
+	out := e.observeWorkers(ctx)
+	if len(out.Workers) > 0 {
+		drain := e.drainStatus(ctx, out)
+		out.Drain = &drain
+	}
+	return out
+}
+
+func (e *Engine) observeWorkers(ctx context.Context) transcode.WorkerObservation {
 	workers := e.deps.Workers.All()
 	if len(workers) == 0 {
 		return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, CheckedAt: time.Now().UTC(), Message: "Configure a video worker before submitting jobs."}

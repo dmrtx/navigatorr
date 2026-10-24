@@ -3557,34 +3557,16 @@ test("a VideoToolbox winner says why it was chosen next to the encoder line", ()
   assert.doesNotMatch(allText(software), /Chosen because/);
 });
 
-test("the queue comes before podcast cleaning, which opens in its own dialog", () => {
-  const jobs = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
-  assert.ok(jobs.indexOf('class="queue-toolbar"') < jobs.indexOf('id="podcast-new"'));
-  assert.ok(jobs.indexOf('id="podcast-new"') < jobs.indexOf('id="jobs-list"'));
-  assert.doesNotMatch(jobs, /id="podcast-form"|<details id="podcast-new"/);
-  const dialog = markup.slice(markup.indexOf('<dialog id="podcast-dialog"'), markup.indexOf("</dialog>", markup.indexOf('<dialog id="podcast-dialog"')));
-  assert.match(dialog, /id="podcast-form"/);
-  assert.match(dialog, /id="close-podcast"/);
-});
-
-test("clean podcast opens, lists podcasts and closes after starting", async () => {
+test("podcast cleaning is not launched from the main UI, but a podcast job in the queue can still be reviewed", () => {
+  for (const id of ["podcast-new", "podcast-dialog", "podcast-form", "close-podcast", "podcast-id", "podcast-source", "podcast-output"]) assert.doesNotMatch(markup, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(source, /\$\("podcast-(new|form|dialog)"\)|\$\("close-podcast"\)/);
+  assert.match(source, /async function reviewPodcastCuts/);
+  assert.match(source, /async function viewPodcastTranscript/);
+  assert.match(source, /async function viewPodcastAdLibrary/);
   const h = harness();
-  const calls = [];
-  h.context.record = (name, args) => calls.push([name, args]);
-  h.run('api=async(path)=>{record("api",path);return {enabled:true,podcasts:["genwhy"]}}; tool=async(name,args)=>{record(name,args);return {id:"podcast-job"}}; loadJobs=async()=>{}; openJob=async(id)=>record("open",id);');
-  h.elements.get("podcast-new").listeners.get("click")();
-  for (let i = 0; i < 6; i++) await Promise.resolve();
-  assert.equal(h.elements.get("podcast-dialog").open, true);
-  assert.deepEqual(calls[0], ["api", "podcasts"]);
-  assert.equal(h.elements.get("podcast-id").children.length, 1);
-  h.run('$("podcast-id").value="genwhy"; $("podcast-source").value="/media/p/e.mp3"; $("podcast-output").value="/media/p/e.clean.mp3";');
-  h.elements.get("podcast-form").listeners.get("submit")({ preventDefault() {} });
-  for (let i = 0; i < 12; i++) await Promise.resolve();
-  const run = calls.find(([name]) => name === "action_run");
-  assert.equal(run[1].action, "clean_podcast_ads");
-  assert.deepEqual(JSON.parse(run[1].inputs), { podcast_id: "genwhy", path: "/media/p/e.mp3", output_path: "/media/p/e.clean.mp3" });
-  assert.equal(h.elements.get("podcast-dialog").open, false);
-  assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
+  h.run('state.info={allow_destructive:false};');
+  const controls = h.run('jobControls({id:"p-1",status:"waiting_decision",waiting_condition:"podcast_review",podcast:{podcast_id:"x",cuts_digest:"d"}})');
+  assert.ok(flatten(controls).some((c) => c.textContent === "Review cuts"));
 });
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
@@ -6719,6 +6701,170 @@ test("a failed, cancelled or skipped batch row offers Show in Files, and a runni
   h.run("applyNavigation = async (route) => routes.push(route);");
   await control.listeners.get("click")();
   assert.equal(h.context.routes[0].file, "/media/tv/F.mkv");
+});
+
+function drainInfo(drain) {
+  return { ready: true, nodes: [], drain: { enabled: true, revision: 1, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", workers: [], jobs: [], ...drain } };
+}
+
+test("worker drain is hidden until the server reports it, and starts off with a single Drain action", () => {
+  const h = harness();
+  h.run("state.workerInfo = {ready:true,nodes:[]}; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain").hidden, true);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain").hidden, false);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Pause all");
+  assert.doesNotMatch(h.elements.get("worker-status").textContent, /Pausing|Paused/);
+});
+
+test("a draining worker shows its progress, lists open jobs and offers Resume", () => {
+  const h = harness();
+  h.context.info = drainInfo({
+    running: 1, publication_pending: 1, queued: 3, message: "x",
+    workers: [{ name: "alpha", reachable: true, running: 1, publication_pending: 1, ready_for_deploy: false, reason: "1 running" }],
+    jobs: [
+      { action_id: "t-1", worker: "alpha", file: "Running.mkv", state: "running" },
+      { action_id: "t-2", worker: "alpha", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" },
+      { action_id: "t-3", file: "Waiting.mkv", state: "queued" },
+    ],
+  });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 1 file still encoding, 1 file encoded but not saved yet");
+  assert.match(h.elements.get("worker-drain-note").textContent, /alpha: 1 running/);
+  assert.match(h.elements.get("worker-drain-note").textContent, /Paused batches stay paused/);
+  assert.match(h.elements.get("worker-status").textContent, /Pausing$/);
+  // Queued jobs are counted but never listed as open work.
+  const rows = h.elements.get("worker-drain-jobs").children;
+  assert.equal(rows.length, 2);
+  assert.deepEqual(buttonLabels(rows[0]), ["View file"]);
+  assert.deepEqual(buttonLabels(rows[1]), ["Try again", "View file", "Show in Files"]);
+});
+
+test("worker drain reports ready for deploy only when the server says so", () => {
+  const h = harness();
+  h.context.info = drainInfo({ ready_for_deploy: true });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Paused — ready to deploy");
+  assert.match(h.elements.get("worker-status").textContent, /Paused$/);
+});
+
+test("an encode that could not be saved offers Try again through the same recheck as the queue", async () => {
+  const h = harness();
+  h.context.info = drainInfo({ publication_pending: 1, jobs: [{ action_id: "t-2", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" }] });
+  h.run("state.workerInfo = info; renderWorkers();");
+  const retry = flatten(h.elements.get("worker-drain-jobs").children[0]).find((e) => e.textContent === "Try again");
+  assert.equal(retry.dataset.jobControl, "t-2");
+  assert.equal(retry.dataset.requiresWorker, "true");
+  h.context.calls = [];
+  h.run('jobControl = async (...args) => calls.push(args); refreshWorkers = async () => {};');
+  await retry.listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0].slice(0, 3))), ["t-2", "action_resume", { decision: "recheck" }]);
+  assert.equal(h.context.calls[0][3].decision.label, "Try again");
+});
+
+test("Show in Files from the drain list closes the dialog and opens the file's folder", async () => {
+  const h = harness();
+  h.context.info = drainInfo({ publication_pending: 1, jobs: [{ action_id: "t-2", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" }] });
+  h.run('state.info={allow_destructive:true,roots:["/media"]}; state.workerInfo = info; renderWorkers();');
+  h.context.routes = [];
+  h.run("applyNavigation = async (route) => routes.push(route);");
+  h.document.getElementById("workers-dialog").open = true;
+  const files = flatten(h.elements.get("worker-drain-jobs").children[0]).find((e) => e.textContent === "Show in Files");
+  assert.equal(files.dataset.navigation, "true");
+  await files.listeners.get("click")();
+  assert.equal(h.document.getElementById("workers-dialog").open, false);
+  assert.equal(h.context.routes[0].file, "/media/tv/Unsaved.mkv");
+});
+
+test("the drain button turns the drain on, then off, with one request each", async () => {
+  const h = harness();
+  h.context.requests = [];
+  h.run(`state.workerInfo = {ready:true,nodes:[]}; renderWorkers(); notify = () => {}; refreshWorkers = async () => {};
+    api = async (path, body) => { requests.push([path, body]); return { enabled: body.enabled, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", jobs: [], workers: [] }; };`);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.requests[0])), ["worker-drain", { enabled: true }]);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.requests[1])), ["worker-drain", { enabled: false }]);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Pause all");
+});
+
+test("a job held by the drain says it is waiting for a worker deploy", () => {
+  const h = harness();
+  const observed = h.run('workerProgressObservation({status:"waiting_external",waiting_condition:"worker_drain"})');
+  assert.equal(observed.status, "Held for worker deploy");
+  assert.equal(observed.active, false);
+  assert.equal(observed.warning, false);
+});
+
+
+test("Pause all in the Queue, the header and the workers dialog show one state", () => {
+  const h = harness();
+  h.run("state.workerInfo = {ready:true,nodes:[]}; renderWorkers();");
+  assert.equal(h.elements.get("queue-drain-toggle").hidden, true);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("queue-drain-toggle").hidden, false);
+  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Pause all");
+  assert.equal(h.elements.get("queue-drain-status").hidden, true);
+  const states = [
+    [{ running: 2, queued: 8 }, "Pausing — 2 files still encoding · 8 files held back", /Pausing$/],
+    [{ running: 1, publication_pending: 1 }, "Pausing — 1 file still encoding, 1 file encoded but not saved yet", /Pausing$/],
+    [{}, "Pausing — checking the workers", /Pausing$/],
+    [{ ready_for_deploy: true }, "Paused — ready to deploy", /Paused$/],
+  ];
+  for (const [drain, text, header] of states) {
+    h.context.info = drainInfo(drain);
+    h.run("state.workerInfo = info; renderWorkers();");
+    assert.equal(h.elements.get("queue-drain-toggle").textContent, "Resume");
+    assert.equal(h.elements.get("queue-drain-status").hidden, false);
+    assert.equal(h.elements.get("queue-drain-status").textContent, text);
+    assert.equal(h.elements.get("worker-drain-status").textContent, text.split(" · ")[0]);
+    assert.match(h.elements.get("worker-status").textContent, header);
+  }
+  assert.equal(h.elements.get("queue-drain-status").dataset.state, "ready");
+});
+
+test("the Queue button pauses and resumes with the same single request as the dialog", async () => {
+  const h = harness();
+  h.context.requests = [];
+  h.run(`notify = () => {}; refreshWorkers = async () => {};
+    api = async (path, body) => { requests.push([path, body.enabled]); return { enabled: body.enabled, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", jobs: [], workers: [] }; };`);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  await h.elements.get("queue-drain-toggle").listeners.get("click")();
+  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Resume");
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Pause all");
+  assert.equal(JSON.stringify(h.context.requests), '[["worker-drain",true],["worker-drain",false]]');
+});
+
+test("a normal scheduler stays out of the header, a doubtful one is shown", () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",connected:true,scheduler_health:"ok",observed_at:new Date().toISOString(),last_success_at:new Date().toISOString(),sweeps:{queue:{observed_at:new Date().toISOString()}}}]};renderWorkers();');
+  assert.equal(h.elements.get("worker-status").textContent, "Worker · Connected");
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",connected:true,scheduler_health:"ok",observed_at:new Date(Date.now()-600000).toISOString()}]};renderWorkers();');
+  assert.match(h.elements.get("worker-status").textContent, /Scheduler Unknown/);
+});
+
+test("the header keeps only brand and worker status; install, open path and reload live in quieter places", () => {
+  const header = markup.slice(markup.indexOf('<header class="masthead">'), markup.indexOf("</header>"));
+  assert.match(header, /id="worker-status"/);
+  assert.doesNotMatch(header, /id="install-app"/);
+  const settings = markup.slice(markup.indexOf('<section id="advanced"'), markup.indexOf("</main>"));
+  assert.match(settings, /id="install-app"/);
+  const tools = markup.slice(markup.indexOf('id="library-tools"'), markup.indexOf('id="library-search-label"'));
+  const menu = tools.slice(tools.indexOf('id="library-actions"'));
+  assert.match(menu, /id="open-path"/);
+  assert.match(menu, /id="reload-library"/);
+  assert.equal((tools.match(/<button/g) || []).length, 3, "search plus the two menu items");
+  const queue = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
+  assert.ok(queue.indexOf('id="queue-drain-toggle"') < queue.indexOf('id="jobs-list"'));
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.

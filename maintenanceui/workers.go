@@ -79,7 +79,7 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	if len(nodes) == 0 {
 		nodes = append(nodes, workerNode(observation, "", transport))
 	}
-	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "message": observation.Message, "observation": observation, "nodes": nodes})
+	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "message": observation.Message, "observation": observation, "drain": observation.Drain, "nodes": nodes})
 }
 
 func workerNode(o transcode.WorkerObservation, address, transport string) map[string]any {

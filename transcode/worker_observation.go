@@ -44,6 +44,8 @@ type WorkerObservation struct {
 	// Workers is each configured worker's own observation, in config order.
 	// The fields above summarise them: reachable and ready when any worker is.
 	Workers []WorkerObservation `json:"workers,omitempty"`
+	// Drain is the worker drain state, on the summary only.
+	Drain *DrainStatus `json:"drain,omitempty"`
 }
 
 // Admission notes are shared by diagnostics and the worker observation, so

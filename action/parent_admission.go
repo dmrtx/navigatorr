@@ -172,6 +172,10 @@ func (e *Engine) parentPolicy(parentID string) (string, error) {
 // It never waits for a busy parent: a scheduler already executing the parent
 // holds that lease, and waiting would deadlock child -> parent.
 func (e *Engine) beginAdmission(ctx context.Context, ec *ExecutionContext, phase string) (*admissionLease, StepResult, bool) {
+	// Worker drain holds every new worker job, with or without a parent.
+	if held, reason := e.drainHold(); held {
+		return nil, drainBlockedResult(phase, reason), true
+	}
 	parentID, known, err := e.resolveParentBatchID(ec)
 	if err != nil {
 		return nil, stepFailClosed(fmt.Errorf("%s parent link check failed (fail closed): %w", phase, err)), true

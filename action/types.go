@@ -152,6 +152,9 @@ type EngineDeps struct {
 	Qbit     *qbit.Client
 	Fs       *fsop.Resolver
 	Ffprobe  string
+	// DrainSettle overrides how long a new drain is reported not ready (zero
+	// keeps the default; negative means no wait). Tests use it.
+	DrainSettle time.Duration
 	// Workers are the transcode workers, by name. Every worker call goes to
 	// the worker an action was assigned (see worker_affinity.go).
 	Workers *transcode.WorkerSet

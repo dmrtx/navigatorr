@@ -266,6 +266,9 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 	} else {
 		delete(ec.State, "worker_poll_failures")
 	}
+	if condition == drainWaitCondition && delay < drainPollDelay {
+		delay = drainPollDelay
+	}
 	if condition == "worker_busy" && hasSlotTicket(ec.State) {
 		// Waiting for a slot. When the worker refused with Retry-After, the
 		// next poll lands on that hint (+1 s, applied below). Otherwise (a

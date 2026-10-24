@@ -861,6 +861,92 @@ function renderWorkerDetails(host, info) {
   }
   if (!info) host.append(node("p", serverReachable ? "Checking shared worker observation…" : "Server disconnected; worker and scheduler status are unknown. Jobs may continue remotely.", "muted"));
 }
+// Pause all (worker drain): nothing new goes to the workers, files already
+// encoding finish and are saved, and paused batches stay paused after Resume.
+// The header, the Queue and the workers dialog all read this one summary.
+const filesWord = n => `${n} ${n === 1 ? "file" : "files"}`;
+function drainSummary(drain) {
+  if (!drain?.enabled) return null;
+  if (drain.ready_for_deploy) return {state: "ready", label: "Paused", text: "Paused — ready to deploy"};
+  const parts = [];
+  if (drain.running) parts.push(`${filesWord(drain.running)} still encoding`);
+  if (drain.publication_pending) parts.push(`${filesWord(drain.publication_pending)} encoded but not saved yet`);
+  return {state: "pausing", label: "Pausing", text: `Pausing — ${parts.join(", ") || "checking the workers"}`};
+}
+const drainJobLabels = {running: "Encoding", publication_pending: "Not saved yet"};
+function drainJobRow(job) {
+  const row = node("div", "", "worker-drain-job");
+  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
+  const actions = node("div", "", "batch-file-actions");
+  if (job.state === "publication_pending") {
+    const retry = button("Try again", () => jobControl(job.action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}).then(() => refreshWorkers()), "primary");
+    retry.dataset.jobControl = job.action_id;
+    retry.dataset.requiresWorker = "true";
+    retry.disabled = jobControlDisabled(retry);
+    actions.append(retry);
+  }
+  const view = button("View file", () => { $("workers-dialog").close(); return openJob(job.action_id); });
+  view.dataset.jobControl = job.action_id;
+  view.dataset.navigation = "true";
+  actions.append(view);
+  if (job.path) {
+    const files = button("Show in Files", () => { $("workers-dialog").close(); return showInFiles(job.path); });
+    files.dataset.jobControl = job.action_id;
+    files.dataset.navigation = "true";
+    actions.append(files);
+  }
+  row.append(actions);
+  return row;
+}
+function renderWorkerDrain(info) {
+  const drain = serverReachable ? info?.drain : null;
+  const summary = drainSummary(drain);
+  const label = drain?.enabled ? "Resume" : "Pause all";
+  $("queue-drain-toggle").hidden = !drain;
+  $("queue-drain-toggle").textContent = label;
+  $("queue-drain-status").hidden = !summary;
+  $("queue-drain-status").textContent = summary ? `${summary.text}${drain.queued ? ` · ${filesWord(drain.queued)} held back` : ""}` : "";
+  $("queue-drain-status").dataset.state = summary?.state || "";
+  $("worker-drain").hidden = !drain;
+  if (!drain) return;
+  const open = (drain.jobs || []).filter(job => job.state !== "queued");
+  $("worker-drain-status").textContent = summary
+    ? summary.text
+    : "Pause all stops new files from reaching the workers while the ones already encoding finish. Use it before deploying a worker.";
+  $("worker-drain-jobs").replaceChildren(...open.slice(0, 10).map(drainJobRow));
+  if (open.length > 10) $("worker-drain-jobs").append(node("p", `And ${open.length - 10} more.`, "metadata"));
+  const parts = [];
+  if (drain.enabled) {
+    for (const worker of drain.workers || []) parts.push(`${worker.name}: ${worker.ready_for_deploy ? "ready for deploy" : worker.reason || "not ready"}`);
+    parts.push("Paused batches stay paused after Resume.");
+  }
+  $("worker-drain-note").textContent = parts.join(" · ");
+  $("worker-drain-toggle").textContent = label;
+  $("worker-drain-toggle").classList.toggle("primary", Boolean(drain.enabled));
+  $("worker-drain-toggle").disabled = !serverReachable;
+  $("queue-drain-toggle").disabled = !serverReachable;
+}
+// One switch for the whole system, from the Queue or the workers dialog.
+function toggleWorkerDrain() {
+  return safe(async () => {
+    const enabled = !state.workerInfo?.drain?.enabled;
+    const toggles = [$("queue-drain-toggle"), $("worker-drain-toggle")];
+    toggles.forEach(toggle => { toggle.disabled = true; });
+    try {
+      const drain = await api("worker-drain", {enabled});
+      state.workerInfo = {...state.workerInfo, drain};
+      renderWorkers();
+      notify(enabled ? "Paused. Nothing new goes to the workers; files already encoding finish." : "Resumed. Held files start again; paused batches stay paused.");
+      await refreshWorkers();
+    } finally {
+      toggles.forEach(toggle => { toggle.disabled = !serverReachable; });
+    }
+  });
+}
+$("queue-drain-toggle").addEventListener("click", toggleWorkerDrain);
+$("worker-drain-toggle").addEventListener("click", toggleWorkerDrain);
+// A menu of secondary actions closes once one of them is chosen.
+$("library-actions").addEventListener("click", event => { if (event.target?.closest?.("button")) $("library-actions").open = false; });
 function renderWorkers() {
   const info = state.workerInfo;
   document.querySelectorAll('[data-job-control][data-requires-worker="true"]').forEach(button => {
@@ -876,8 +962,13 @@ function renderWorkers() {
     : info.message || info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
   renderWorkerDetails($("worker-nodes"), info);
   renderWorkerDetails($("settings-worker"), info);
+  renderWorkerDrain(info);
   $("activity-scheduler").textContent = schedulerSummary(info);
-  $("worker-status").textContent += ` · ${schedulerSummary(info).replace("Scheduler · ", "Scheduler ")}`;
+  // A normal scheduler is the default and stays in the dialog; only a doubt belongs in the header.
+  const scheduler = schedulerSummary(info);
+  if (serverReachable && info && !scheduler.startsWith("Scheduler · Normal")) $("worker-status").textContent += ` · ${scheduler.replace("Scheduler · ", "Scheduler ")}`;
+  const paused = serverReachable ? drainSummary(info?.drain) : null;
+  if (paused) $("worker-status").textContent += ` · ${paused.label}`;
   $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
 }
 async function refreshWorkers() {
@@ -4221,6 +4312,7 @@ function workerProgressObservation(job) {
     const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
     return {...result, status: "Waiting for a free worker slot", message: `The worker is running as many jobs as it allows. This job continues automatically when a slot is free.${line}`};
   }
+  if (waiting === "worker_drain") return {...result, status: "Held for worker deploy", message: "Worker drain is on, so this job has not started. It continues when the drain is resumed."};
   if (["worker_busy", "parent_busy", "queued", "transcode_retry", "worker_reconciling"].includes(waiting))
     return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
   // A finished worker can leave telemetry behind while the coordinator validates
@@ -7181,9 +7273,6 @@ setInterval(async () => {
 }, 5000);
 if (typeof window !== "undefined") setConnection(serverReachable);
 
-$("close-podcast").addEventListener("click", () => $("podcast-dialog").close());
-$("podcast-new").addEventListener("click", () => { $("podcast-dialog").showModal(); safe(async () => { const data=await api("podcasts"); const select=$("podcast-id"); select.replaceChildren(); for (const id of data.podcasts || []) option(select,id,id); $("podcast-create-status").textContent=data.enabled && data.podcasts?.length ? "" : "Enable a podcast in the server configuration first."; }); });
-$("podcast-form").addEventListener("submit", event => { event.preventDefault(); safe(async () => { const result=await tool("action_run",{action:"clean_podcast_ads",inputs:JSON.stringify({podcast_id:$("podcast-id").value,path:$("podcast-source").value,output_path:$("podcast-output").value})}); $("podcast-dialog").close(); await loadJobs(); await openJob(result.id || result.action?.id); }); });
 async function reviewPodcastCuts(id) {
  const content=[]; let offset=0,review;
  do { review=await tool("podcast_review",{id,offset}); if (!review.digest) throw new Error("Could not read cut review."); for (const b of review.boundaries || []) content.push(node("p",`${(b.cut.start_ms/1000).toFixed(2)}–${(b.cut.end_ms/1000).toFixed(2)} s · ${b.cut.first_id}–${b.cut.last_id}: ${b.first.text} … ${b.last.text}. Before: ${b.before.map(u=>u.text).join(" ")} · After: ${b.after.map(u=>u.text).join(" ")}`,"metadata")); offset=review.next_offset; } while(review.has_more);
