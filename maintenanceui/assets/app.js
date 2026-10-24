@@ -5686,7 +5686,8 @@ function slotProgressBlock(job, alive) {
 // every row start and end in the same place however long a phase name is.
 function slotProgressCells(job, alive) {
   const {label, percent, bar} = slotProgressParts(job, alive);
-  const phase = node("td", label, `slot-phase${alive ? "" : " stale"}`);
+  const phase = node("td", "", `slot-phase${alive ? "" : " stale"}`);
+  phase.append(node("span", label, "slot-phase-name"));
   const cell = node("td", "", `slot-bar${alive ? "" : " stale"}`);
   const track = node("div", "", "slot-bar-track");
   track.append(bar);
@@ -5780,7 +5781,7 @@ function slotTable(groups) {
   }
   if (busy.length) {
     const table = node("table"), head = node("tr");
-    for (const title of ["Slot", "File", "Phase", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
+    for (const title of ["Slot", "File", "Phase", "Progress", "Kind", "Elapsed"]) head.append(node("th", title));
     const thead = node("thead");
     thead.append(head);
     const tbody = node("tbody");
@@ -5789,14 +5790,17 @@ function slotTable(groups) {
       row.append(node("td", slot));
       if (!e.job) {
         const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
-        note.colSpan = 6;
+        note.colSpan = 5;
         row.append(note);
       } else {
         const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
-        const file = node("td", job.file, "slot-file"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        const file = node("td", job.file, "slot-file"), [phase, bar] = slotProgressCells(job, !stale);
         file.title = job.file;
-        encode.title = facts.title;
-        row.append(file, ...slotProgressCells(job, !stale), encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
+        // What the worker is doing sits under the phase's name: encoder and speed while encoding, a short note otherwise.
+        const factsLine = node("span", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        factsLine.title = facts.title;
+        phase.append(factsLine);
+        row.append(file, phase, bar, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
       }
       tbody.append(row);
     }
@@ -5848,13 +5852,16 @@ if (typeof IntersectionObserver !== "undefined") {
   ).observe($("jobs-sentinel"));
 }
 function renderPhaseCosts(host, job) {
+  // A batch only keeps its own bookkeeping here (listing the files, saving the
+  // results); each file's encode times are in that file's details.
+  if (job.batch) return;
   const entries = Object.entries(job.phase_costs || {});
   if (!entries.length) return;
   const detail = node("details", "", "phase-costs detail-row");
   detail.open = Boolean(state.detailCostsOpen);
   detail.addEventListener("toggle", () => { state.detailCostsOpen = detail.open; });
-  detail.append(node("summary", "Phase costs"));
-  detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is the user + system time of the worker's ffmpeg/ffprobe processes where the worker measured it; otherwise CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
+  detail.append(node("summary", "Where the time went"));
+  detail.append(node("p", "Time spent in each part of this file's work. Parts can overlap, so the rows are not a total. CPU time is only shown where the worker measured it.", "metadata"));
   const table = node("table");
   const header = node("tr");
   for (const label of ["Phase", "Wall time", "CPU time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
@@ -6080,11 +6087,6 @@ async function loadBatchItems(id, revision) {
     const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
     const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
     row.append(node("span", item.display_label || (item.file_path || "").split("/").pop(), "metadata batch-file-name"), statusBadge(label, item.replacement_status || label, review));
-    if (item.child_action_id)
-      row.append(
-        button("View file", () => openJob(item.child_action_id), "quiet"),
-      );
-
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
     const add = (label, fn, {navigation = false, target = id, primary = label === "Replace file", requiresWorker = false} = {}) => {
@@ -6096,6 +6098,7 @@ async function loadBatchItems(id, revision) {
       control.disabled = jobControlDisabled(control);
       actions.append(control);
     };
+    if (item.child_action_id) add("View file", () => openJob(item.child_action_id), {navigation: true, target: item.child_action_id});
     if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
     // The encode finished and only saving it failed: one button tries the same
     // file again, on the worker that holds it. No settings change, no re-encode.
@@ -6255,7 +6258,8 @@ function renderDetailRows(job) {
   const location = job.promotion?.new_path || job.promotion?.original_path;
   if (location) paths.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
   // With several workers, say which one runs (or ran) the job.
-  if (job.worker && (state.workerInfo?.nodes?.length || 0) > 1) paths.append(node("p", `Worker: ${job.worker}`, "metadata"));
+  const workerName = job.worker_name || (typeof job.worker === "string" ? job.worker : "");
+  if (workerName && (state.workerInfo?.nodes?.length || 0) > 1) paths.append(node("p", `Worker: ${workerName}`, "metadata"));
   showDetailRow("path", paths.children.length > 0);
   // The log opens itself for a failure no step explains; opening loads it.
   const explained = stages.some(stage => ["failed", "rejected"].includes(stage.status));

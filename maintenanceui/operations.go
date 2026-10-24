@@ -910,7 +910,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			_, httpWorker := s.engine.ActionWorkerExecutor(r.state).(*httpclient.HTTPExecutor)
 			if worker := operationString(r.state["worker"]); worker != "" {
-				job["worker"] = worker
+				job["worker"], job["worker_name"] = worker, worker
 			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
@@ -978,6 +978,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 							job["activity_waiting_condition"] = childJob["waiting_condition"]
 							if worker := operationMap(childJob["worker"]); worker != nil {
 								job["worker"] = worker
+								if name := operationString(child.state["worker"]); name != "" {
+									job["worker_name"] = name
+								}
 								job["activity_file"] = operationString(child.inputs["path"])
 							}
 						}

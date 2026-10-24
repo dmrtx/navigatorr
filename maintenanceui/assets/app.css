@@ -711,8 +711,11 @@ main {
 .slots-table th { padding:4px 12px 4px 0; text-align:left; font-size:11px; font-weight:500; color:var(--muted); }
 .slots-table td { padding:8px 12px 8px 0; border-top:1px solid var(--line); vertical-align:top; }
 .slots-table .slot-file { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.slots-table .slot-phase { white-space:nowrap; color:var(--forest); }
-.slots-table .slot-phase.stale, .slots-table .slot-bar.stale { color:var(--muted); }
+.slots-table .slot-phase { max-width:240px; }
+.slots-table .slot-phase-name { display:block; white-space:nowrap; color:var(--forest); }
+.slots-table .slot-phase .slot-facts { display:block; margin-top:2px; font-size:11px; color:var(--muted); }
+.slots-table .slot-phase .slot-facts.warn { color:var(--warning); }
+.slots-table .slot-phase.stale .slot-phase-name, .slots-table .slot-bar.stale { color:var(--muted); }
 .slots-table .slot-bar { width:210px; min-width:210px; color:var(--forest); font-variant-numeric:tabular-nums; }
 .slots-table .slot-bar-track { display:inline-flex; align-items:center; width:140px; height:1.4em; vertical-align:top; }
 .slots-table .slot-bar-track > progress, .slots-table .slot-bar-track > .slot-progress-bar { flex:1 1 auto; width:100%; max-width:none; min-width:0; }
@@ -1710,21 +1713,27 @@ main {
   overflow: visible;
 }
 .batch-item-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px 330px;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 6px 0;
+  column-gap: 10px;
+  row-gap: 3px;
+  padding: 8px 0;
   border-bottom: 1px solid var(--line);
 }
+.batch-item-row > * { grid-column: 1 / -1; min-width: 0; }
 .batch-item-row > span:first-child {
-  flex: 1 1 180px;
-  min-width: 0;
+  grid-column: 1;
+  grid-row: 1;
+  overflow-wrap: anywhere;
 }
-.batch-item-row > .badge { flex: 0 0 auto; min-width: 68px; justify-content: center; }
-.batch-item-row > .muted {
-  flex-basis: 100%;
+.batch-item-row > .badge { grid-column: 2; grid-row: 1; min-width: 68px; justify-content: center; }
+.batch-item-row > .batch-file-actions { grid-column: 3; grid-row: 1; flex-basis: auto; flex-wrap: nowrap; }
+@media (max-width: 900px) {
+  .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; margin: 3px 0; }
 }
+.batch-item-row .batch-file-actions button { min-height: 28px; padding: 0 10px; font-size: 12px; }
 
 /* Savings and completed replacement history. */
 .savings-dashboard {
@@ -2306,8 +2315,7 @@ pre {
 .profile-facts dd { margin: 0; }
 #reconfigure-profile-info { color: var(--ink); padding: 12px; border: 1px solid var(--line); border-radius: 4px; }
 #reconfigure-profile-info > p { margin: 8px 0 0; }
-.batch-item-row > .batch-file-profile { flex-basis: 100%; }
-.batch-file-activity { flex-basis: 100%; color: var(--forest); font-size: 12px; }
+.batch-file-activity { color: var(--forest); font-size: 12px; }
 
 .profile-info { margin: 8px 0 12px; padding: 12px; background: var(--subtle); border-left: 2px solid var(--forest); }
 .profile-info > p:first-child { margin-top: 0; }
@@ -2578,7 +2586,6 @@ button.status-action { border: 1px solid currentColor; min-height: 28px; cursor:
 button.status-action:hover { text-decoration: underline; }
 button.status-action:focus-visible { outline: 2px solid var(--forest); outline-offset: 3px; }
 .batch-file-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; flex-basis: 100%; }
-.batch-item-row > button.quiet { margin-left: auto; }
 
 /* Encode result (job.benchmark from the server summary). */
 .result-report {

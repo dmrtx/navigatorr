@@ -2027,11 +2027,11 @@ test("worker activity gives each node a row that opens onto its slots, and a tab
   assert.equal(rows[0].children[0].textContent,"m1 · Slot 1");
   assert.equal(rows[0].children[1].textContent,"one.mkv");
   // The phase and the bar have a cell each, so every bar lines up whatever the phase is called.
-  assert.deepEqual(table.children[0].children[0].children[0].children.map(c=>c.textContent),["Slot","File","Phase","Progress","Encode","Kind","Elapsed"]);
-  assert.equal(rows[0].children[2].textContent,"Encoding");
+  assert.deepEqual(table.children[0].children[0].children[0].children.map(c=>c.textContent),["Slot","File","Phase","Progress","Kind","Elapsed"]);
+  assert.equal(rows[0].children[2].children[0].textContent,"Encoding");
+  assert.equal(rows[0].children[2].children[1].textContent,"Waiting for the first update");
   assert.equal(rows[0].children[3].children[1].textContent,"10.0%");
-  assert.equal(rows[0].children[4].textContent,"Waiting for the first update");
-  assert.equal(rows[0].children[5].textContent,"Full conversion");
+  assert.equal(rows[0].children[4].textContent,"Full conversion");
   assert.equal(table.children[1].textContent,"1 slot available · m4 1");
   // What a person opened or shut stays that way on the next refresh.
   idle.children[0].listeners.get("click")();
@@ -3283,7 +3283,8 @@ test("simple series processing requires a frozen selection before admission",()=
 
 test("phase cost detail distinguishes measured wall intervals from unknown bytes and CPU",()=>{
  const h=harness();h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1,active_compute_ms:null},worker_encode:{duration_ms:500,attempts:2,nas_read_bytes:null,nas_written_bytes:400}}});');
- const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is unknown/);assert.match(rendered,/phases may overlap/);assert.doesNotMatch(rendered,/Total.*520/);
+ const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is only shown where the worker measured it/);assert.match(rendered,/can overlap/);
+ h.run('$("detail-summary").children.length=0;renderPhaseCosts($("detail-summary"),{batch:{total:2},phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1}}})');assert.equal(h.elements.get("detail-summary").children.length,0);assert.doesNotMatch(rendered,/Total.*520/);
 });
 
 test("a search that ran out of time on a busy worker says so and suggests trying again, whole",()=>{
