@@ -651,9 +651,18 @@ main {
 .backup-row .waiting { color: var(--warning); }
 #backup-progress:not([hidden]) { color: var(--forest); padding: 6px 0; }
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
-.activity-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11px; }
-.activity-heading-end { display:flex; align-items:center; gap:4px; min-width:0; }
-.activity-heading-end .quiet { min-height:0; padding:2px 6px; font-size:11px; color:var(--forest); }
+/* The slots are always read live; saying so on every refresh is noise. */
+#activity-checked { display:none; }
+.activity-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px 8px; font-size:11px; }
+.activity-heading-end { display:flex; align-items:center; gap:6px; min-width:0; }
+/* The scheduler's health is one chip beside the slots, not a line of its own. */
+.sched-chip { display:inline-flex; align-items:center; gap:5px; margin:0; padding:2px 8px; border:1px solid var(--line); border-radius:999px; font-size:11px; color:var(--muted); }
+.sched-chip::before { content:""; flex:none; width:6px; height:6px; border-radius:50%; background:var(--control-line); }
+.sched-chip[data-state="ok"]::before { background:var(--forest); }
+.sched-chip[data-state="degraded"] { border-color:var(--warning-line); color:var(--warning); }
+.sched-chip[data-state="degraded"]::before { background:var(--warning-line); }
+.queue-tool.slot-settings { width:28px; min-width:28px; height:28px; min-height:28px; padding:0; color:var(--muted); }
+.queue-tool.slot-settings svg { width:15px; height:15px; }
 .node-settings { margin-bottom:1.25rem; }
 .node-settings p { margin:4px 0 0; }
 .node-settings-title { display:block; font-size:12px; }
@@ -663,21 +672,51 @@ main {
 .inline-form input { width:76px; margin:0; }
 .worker-slot-split { margin-top:8px; font-size:12px; }
 .node-settings-pick { display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; }
-.worker-node-heading { margin:6px 0 0; font-size:11px; font-weight:600; }
 .worker-slot-split[open] form { margin-top:8px; }
 .worker-slot-split .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; max-width:420px; }
 .worker-slot-split .submit-actions { display:flex; gap:8px; margin-top:8px; }
-.worker-slots { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr)); gap:8px; margin-top:8px; }
-/* One column per node, side by side while they fit; slots stack under their heading. */
-.worker-slots:has(> .worker-node-group) { grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); align-items:start; gap:8px 16px; }
-.worker-node-group { min-width:0; }
-.worker-node-slots { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; margin-top:6px; }
-.worker-slot { min-width:0; min-height:95px; padding:8px; border:1px solid var(--line); border-radius:4px; }
+.worker-slots { margin-top:8px; }
+/* Phones: one row per node that opens onto its slots. */
+.slots-compact { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; }
+.slot-node { border:1px solid var(--line); border-radius:6px; background:var(--surface); }
+.slot-node > summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:8px 10px; cursor:pointer; list-style:none; }
+.slot-node > summary::-webkit-details-marker { display:none; }
+.slot-node > summary strong { font-size:12px; }
+.slot-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--control-line); }
+.slot-node[data-state="busy"] .slot-dot { background:var(--forest); }
+.slot-node[data-state="stale"] .slot-dot { background:var(--warning-line); }
+.slot-node[data-state="down"] .slot-dot { background:var(--danger); }
+.slot-split { margin-left:auto; }
+.slot-chevron { flex:none; width:6px; height:6px; margin:0 2px 2px auto; border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted); transform:rotate(45deg); transition:transform .15s; }
+.slot-split + .slot-chevron { margin-left:4px; }
+.slot-node[open] > summary > .slot-chevron { margin-bottom:-2px; transform:rotate(-135deg); }
+/* A node that is down has no slots to open onto. */
+.slot-node[data-state="down"] .slot-chevron { display:none; }
+.slot-node-body { padding:0 10px 2px; }
+.slot-node-body:empty { display:none; }
+.worker-slot { min-width:0; padding:7px 0; border-top:1px solid var(--line); }
 .worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.worker-slot.idle strong { font-weight:400; color:var(--muted); }
 .worker-slot p { margin:4px 0 0; }
-/* One line, however long: the full text is in its tooltip. */
-.worker-slot .slot-facts { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.worker-slot .slot-facts { overflow-wrap:anywhere; }
+.slot-facts.warn { color:var(--warning); }
 .worker-slot .slot-progress { margin-top:6px; max-width:none; }
+/* Wide screens: what is running as a table, the free slots in one line. */
+.slots-table { display:none; }
+@media (min-width: 901px) {
+  .slots-compact { display:none; }
+  .slots-table { display:block; }
+}
+.slots-table table { width:100%; border-collapse:collapse; font-size:12px; }
+.slots-table th { padding:4px 12px 4px 0; text-align:left; font-size:11px; font-weight:500; color:var(--muted); }
+.slots-table td { padding:8px 12px 8px 0; border-top:1px solid var(--line); vertical-align:top; }
+.slots-table .slot-file { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.slots-table .slot-progress { min-width:150px; margin:0; max-width:none; }
+.slots-table .batch-progress.slot-progress .batch-progress-count,
+.slots-table .batch-progress.slot-progress .batch-progress-percent { line-height: 1.4; }
+.slot-idle-line, .slot-down { margin:8px 0 0; }
+.slots-table table + .slot-idle-line { padding-top:8px; border-top:1px solid var(--line); }
+.slot-down { color:var(--danger); }
 #selection-count:empty {
   display: none;
 }
@@ -913,10 +952,32 @@ main {
   gap: 6px;
   min-width: 0;
 }
-.queue-filters select {
-  width: 170px;
+/* Filter, Pause all and refresh are one row of square tools. The select sits invisibly over its icon. */
+.queue-tool {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  place-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
 }
+.queue-tool svg { width: 17px; height: 17px; }
+.queue-tool.on { border-color: var(--forest); background: var(--success-wash); color: var(--forest-strong); }
+.filter-pick select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.queue-drain-toggle .icon-play, .queue-drain-toggle.on .icon-pause { display: none; }
+.queue-drain-toggle.on .icon-play { display: inline; }
+.queue-drain-toggle:not(.on) #queue-drain-label { display: none; }
+.queue-drain-toggle.on { border-color: var(--primary); background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 13px; }
 #jobs-updated {
   margin: 4px 0 6px;
 }
@@ -1045,6 +1106,104 @@ main {
 }
 .batch-file-preview {
   color: var(--ink);
+}
+/* Queue rows: the title is a link to the job, one sentence says what happened
+   or what to do next (the action is a link at its end), a bar shows each file
+   of a batch, and every other action is in one More actions menu in the corner. */
+.job-row { position: relative; }
+.job-row a.job-title {
+  display: -webkit-box;
+  height: auto;
+  min-height: 24px;
+  padding: 3px 0;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.job-row a.job-title:hover { color: var(--forest); text-decoration: underline; }
+.job-row > .job-meta, .batch-job .job-meta { height: auto; }
+.job-sentence {
+  margin: 2px 0 0;
+  color: var(--ink);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.job-sentence.failed { color: var(--danger); }
+.job-sentence .action-main {
+  display: inline;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--forest);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.job-sentence .action-main::after { content: " \203A"; }
+.job-sentence .action-main:hover:not(:disabled) { text-decoration: underline; }
+.job-sentence .action-main:disabled { color: var(--muted); cursor: default; }
+.job-row > .job-actions {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  display: flex;
+  margin: 0;
+}
+.job-row > .job-actions { align-items: center; gap: var(--action-gap); }
+/* The title line leaves room for however many buttons the corner holds. */
+.job-row.has-menu { --rail: 1; }
+.job-row.rail-2 { --rail: 2; }
+.job-row.rail-3 { --rail: 3; }
+.job-row.has-menu > .job-heading { padding-right: calc(var(--rail) * var(--action-height) + (var(--rail) - 1) * var(--action-gap) + 10px); }
+.job-row .job-summary { margin-top: 2px; -webkit-line-clamp: 2; }
+.job-row > .job-footer { min-height: 0; margin-top: 4px; }
+.batch-segments {
+  display: flex;
+  order: 1;
+  flex: 1 1 120px;
+  min-width: 48px;
+  height: 6px;
+  gap: 1px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--track);
+}
+.batch-segments > i { display: block; height: 100%; min-width: 2px; }
+.batch-segments .segment-ok { background: var(--forest); }
+.batch-segments .segment-err { background: var(--danger); }
+.batch-segments .segment-run { background: var(--info); }
+.batch-segments .segment-rev { background: var(--warning-line); }
+.batch-segments .segment-wait { background: var(--line-strong); }
+.batch-segments .segment-skip { background: var(--muted); }
+.batch-segments .segment-cancel { background: var(--control-line); }
+.batch-legend { order: 3; flex-basis: 100%; min-width: 0; color: var(--muted); line-height: 1.4; }
+.batch-legend ~ .batch-progress-phase { order: 4; }
+.batch-summary { display: grid; gap: 4px; min-width: 0; flex: 1 1 240px; }
+.batch-summary .batch-segments { flex: none; width: 100%; }
+/* In a queue row every bar is the same width: on its own line across the whole
+   footer, with the count and percentage underneath it. */
+.job-row .batch-progress > progress,
+.job-row .batch-progress > .batch-segments { order: 0; flex: 1 0 100%; width: 100%; max-width: none; }
+.job-row .batch-progress > .batch-progress-count { order: 1; }
+.job-row .batch-progress > .batch-progress-percent { order: 2; margin-left: auto; line-height: 1.4; }
+/* A batch row: the legend and the percentage share one line under the bar. */
+.job-row .batch-progress > .batch-legend { order: 1; flex: 1 1 0; }
+.job-row .batch-progress > .batch-legend ~ .batch-progress-phase { order: 3; flex-basis: 100%; }
+.job-row .batch-progress,
+.job-row .job-footer > .batch-progress:has(.batch-progress-phase) { row-gap: 4px; }
+/* The bars stop short of the corner menu, as the text on the left stops short of the edge. */
+.job-row .job-footer > .batch-progress, .job-row .job-footer > .batch-summary, .job-row .job-footer > .job-progress, .job-row .job-footer > .job-outcome { max-width: 560px; }
+.job-row .batch-progress:has(.batch-progress-phase) .batch-progress-count,
+.job-row .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
+@media (min-width: 901px) {
+  .job-row > .job-actions { top: 10px; }
+  .job-sentence, .job-row .job-summary { font-size: 13px; }
 }
 /* Job actions: one compact height for every button, in the queue rows and the
    job detail dialog. In the rows one main action is labelled and filled; every
@@ -1298,6 +1457,25 @@ main {
 #workers-dialog {
   max-width: 460px;
 }
+.worker-drain {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.worker-drain h3,
+.worker-drain p {
+  margin: 0;
+}
+.worker-drain-job {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+}
+.worker-drain-job .batch-file-actions {
+  grid-column: 1 / -1;
+}
 .worker-node {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1404,7 +1582,7 @@ main {
 .cleanup-space { color: var(--forest); margin-top: 0; }
 .cleanup-locations { padding-top: 8px; }
 .cleanup-locations summary { cursor: pointer; color: var(--muted); }
-.job-footer > .batch-progress { flex: 0 1 450px; }
+.job-footer > .batch-progress { flex: 1 1 450px; }
 .batch-progress-count { flex-shrink: 0; font-size: 12px; min-width: 0; white-space: nowrap; }
 .preview-note { display: none; }
 .batch-progress-percent { order: 2; flex: 0 0 auto; font-size: 12px; font-weight: 500; line-height: 1.4; }
@@ -1489,9 +1667,16 @@ main {
 .job-progress meter {
   width: 100%;
   min-width: 0;
-  height: 5px;
+  height: 6px;
   accent-color: var(--forest);
 }
+/* The same bar as a batch: 6px, rounded, on the track colour. */
+.job-row .job-progress meter { appearance: none; border: 0; border-radius: 3px; background: var(--track); }
+.job-row .job-progress meter::-webkit-meter-bar { height: 6px; border: 0; border-radius: 3px; background: var(--track); }
+.job-row .job-progress meter::-webkit-meter-optimum-value,
+.job-row .job-progress meter::-webkit-meter-suboptimum-value,
+.job-row .job-progress meter::-webkit-meter-even-less-good-value { background: var(--forest); border-radius: 3px; }
+.job-row .job-progress meter::-moz-meter-bar { background: var(--forest); border-radius: 3px; }
 .worker-progress > meter {
   grid-column: 1 / -1;
   grid-row: 2;
@@ -1909,10 +2094,7 @@ pre {
     gap: 6px;
     margin-bottom: 4px;
   }
-  .queue-filters select {
-    width: 176px;
-    max-width: 100%;
-  }
+
   #jobs-updated {
     margin: 2px 0;
     font-size: 10px;
@@ -2367,13 +2549,19 @@ pre {
 .phase-costs table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .phase-costs th, .phase-costs td { padding: .45rem; text-align: left; border-bottom: 1px solid var(--line); }
 
-/* Podcast cleaning is occasional: a quiet link beside the queue status opens it. */
-.queue-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.queue-meta #jobs-updated { min-width: 0; }
-.queue-meta .podcast-new { flex-shrink: 0; min-height: var(--control-size); padding: 4px 0; border: 0; background: none; color: var(--forest); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
-#podcast-form { display: grid; gap: 12px; padding: 8px 0 0; }
-#podcast-form label { display: grid; gap: 4px; min-width: 0; }
-#podcast-form input, #podcast-form select { width: 100%; }
+/* The status line: a dot and what the workers are doing, then when the list was updated. */
+.queue-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; margin: 0 0 8px; }
+.queue-meta #jobs-updated { min-width: 0; margin: 0; }
+.queue-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--forest); }
+.queue-state { font-size: 12px; font-weight: 600; color: var(--forest-strong); }
+.queue-state::after { content: "·"; margin-left: 6px; color: var(--muted); font-weight: 400; }
+.queue-meta[data-state="pausing"] .queue-dot { background: var(--warning-strong); }
+.queue-meta[data-state="pausing"] .queue-state { color: var(--warning-strong); }
+.toolbar-menu { position: relative; flex: 0 0 var(--control-size); }
+.toolbar-menu > summary { list-style: none; cursor: pointer; }
+.toolbar-menu > summary::-webkit-details-marker { display: none; }
+.toolbar-menu .menu-items { position: absolute; right: 0; top: 100%; z-index: 20; display: grid; min-width: 210px; padding: 4px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--surface); box-shadow: 0 6px 18px var(--shadow); }
+.toolbar-menu .menu-items button { justify-content: flex-start; text-align: left; }
 
 /* File outcomes expose their review without competing with the file title. */
 button.status-action { border: 1px solid currentColor; min-height: 28px; cursor: pointer; }
@@ -2444,7 +2632,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 @media (max-width: 700px) {
   .job-row .job-footer {
     height: auto;
-    min-height: var(--control-size);
+    min-height: 0;
     align-items: flex-start;
   }
   .job-row .job-footer > .job-outcome,
@@ -2686,3 +2874,23 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .track-report-row.dropped strong { font-weight: 400; color: var(--muted); }
 .track-report-row.kept .track-badge { border-color: var(--forest); color: var(--forest); }
 .batch-file-tracks { flex-basis: 100%; }
+/* Phones: the title gets the whole line beside the number, however long it is,
+   and the status badge sits under it instead of squeezing it. The corner
+   buttons are centred on the title's first line. */
+@media (max-width: 700px) {
+  .job-row > .job-heading {
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: start;
+    gap: 2px 6px;
+  }
+  .job-row > .job-heading > .job-number { grid-column: 1; grid-row: 1; align-self: start; line-height: 24px; }
+  .job-row > .job-heading > .job-title { grid-column: 2; grid-row: 1; padding-right: 0; -webkit-line-clamp: 2; }
+  .job-row > .job-heading > .status-badge:not(.decision-badge) {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    width: auto;
+    padding: 0 8px;
+  }
+  .job-row > .job-actions { top: calc(10px + (24px - var(--action-height)) / 2); }
+}

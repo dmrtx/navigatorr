@@ -191,6 +191,13 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if origSHA != "" {
 			return nil
 		}
+		// Drain: a file that has not begun hashing has not begun its encode
+		// either, so it waits here instead of reading the whole source. The
+		// next run starts the hash from zero; nothing is half done.
+		if held, reason := e.drainHold(); held {
+			res := drainBlockedResult("source hash", reason)
+			return &res
+		}
 		sha, res := e.hashPreflightSource(ctx, ec, cleanPath, fi)
 		if res != nil {
 			return res
@@ -455,10 +462,15 @@ func (e *Engine) hashPreflightSource(ctx context.Context, ec *ExecutionContext, 
 		_ = f.Close()
 		return fail("%v", err)
 	}
-	release, err := e.acquireHashSlot(ctx)
+	release, held, err := e.acquireHashSlotUnlessDraining(ctx)
 	if err != nil {
 		_ = f.Close()
 		return fail("failed to compute hash of original file %s: %v", cleanPath, err)
+	}
+	if held != nil {
+		_ = f.Close()
+		delete(ec.State, "work_progress")
+		return "", held
 	}
 	defer release()
 	if err := observe(cleanPath, 0, fi.Size()); err != nil {

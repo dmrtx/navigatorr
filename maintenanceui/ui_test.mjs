@@ -38,6 +38,7 @@ class Element {
   children = [];
   listeners = new Map();
   dataset = {};
+  style = {};
   hidden = false;
   disabled = false;
   value = "";
@@ -1826,6 +1827,9 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   assert.equal(h.elements.get("jobs-more").hidden, true);
 });
 
+// The phone layout's rows: a node opens onto its slots (the table is the wide-screen view of the same data).
+const slotRows=h=>h.elements.get("worker-slots").children[0].children.flatMap(details=>details.children[1].children);
+
 test("worker activity shows occupied slots, final measurement, elapsed time and unknown connection honestly", () => {
   const h=harness();
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[
@@ -1834,22 +1838,22 @@ test("worker activity shows occupied slots, final measurement, elapsed time and 
   ]}};
   h.run('renderWorkerActivity(activity)');
   assert.match(h.elements.get("worker-capacity").textContent,/2\/2 occupied/);
-  const first=h.elements.get("worker-slots").children[0];
+  const first=slotRows(h)[0];
   assert.match(first.children[0].textContent,/sample-one/);
-  assert.match(first.children[1].textContent,/Full conversion.*elapsed/);
   // One short line under the bar; the freshness of the last measurement is its tooltip.
-  assert.equal(first.children[3].textContent,"Encode finished · measuring quality");
-  assert.match(first.children[3].title,/Last advance 10s ago/);
-  assert.equal(first.children.length,4);
+  assert.match(first.children[2].textContent,/^Encode finished · measuring quality · Full conversion · .*elapsed$/);
+  assert.match(first.children[2].title,/Last advance 10s ago/);
+  assert.equal(first.children.length,3);
   // The encode's last 84.4% lingers in the progress file; once it is over the bar sweeps without a number.
-  const after=first.children[2];
+  const after=first.children[1];
   assert.match(after.className,/batch-progress slot-progress/);
   assert.deepEqual(after.children.map(c=>c.textContent),["Measuring quality",""]);
   assert.equal(after.children.some(c=>c.className==="batch-progress-percent"),false);
   assert.equal(after.children[1].className,"slot-progress-bar");
   h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
-  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/Slot 1 · Available/);
-  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/Slot 2 · sample-two/);
+  assert.match(slotRows(h)[0].children[0].textContent,/Slot 1 · Available/);
+  assert.equal(slotRows(h)[0].children.length,1,"a free slot is a single line");
+  assert.match(slotRows(h)[1].children[0].textContent,/Slot 2 · sample-two/);
   h.run('renderWorkerActivity({available:false})');
   assert.match(h.elements.get("worker-capacity").textContent,/Unknown/);
   assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
@@ -1864,26 +1868,27 @@ test("a slot shows the encode's measured percentage in the batch bar, and a stil
     {id:"quiet",file:"sample-three.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date(Date.now()-600000).toISOString(),progress:12},
   ]}};
   h.run('renderWorkerActivity(activity)');
-  const rows=h.elements.get("worker-slots").children;
-  const encoding=rows[0].children[2];
+  const rows=slotRows(h);
+  const encoding=rows[0].children[1];
   assert.deepEqual(encoding.children.map(c=>c.className||""),["batch-progress-count","batch-progress-percent",""]);
   assert.deepEqual(encoding.children.map(c=>c.textContent).slice(0,2),["Encoding","42.5%"]);
   assert.equal(encoding.children[2].max,100);
   assert.equal(encoding.children[2].value,42.46);
   assert.doesNotMatch(encoding.className,/stale/);
   // Pass 1 has no progress of its own; a stray number is not shown.
-  const analysing=rows[1].children[2];
+  const analysing=rows[1].children[1];
   assert.deepEqual(analysing.children.map(c=>c.textContent),["Analyzing",""]);
-  assert.equal(rows[1].children[3].textContent,"Pass 1 of 2 · no percentage yet");
-  // The encode being run and its speed are the one line under an encoding slot's bar.
-  assert.equal(rows[0].children[3].textContent,"x265 CRF 22 · 4.94×");
-  assert.match(rows[0].children[3].title,/118\.4 fps/);
-  assert.deepEqual(rows.slice(0,3).map(row=>row.children.length),[4,4,4]);
+  assert.match(rows[1].children[2].textContent,/^Pass 1 of 2 · no percentage yet · Full conversion/);
+  // The encode being run and its speed lead the one line under an encoding slot's bar.
+  assert.match(rows[0].children[2].textContent,/^x265 CRF 22 · 4\.94× · Full conversion/);
+  assert.match(rows[0].children[2].title,/118\.4 fps/);
+  assert.deepEqual(rows.slice(0,3).map(row=>row.children.length),[3,3,3]);
   // A worker that stopped reporting keeps its last value but loses the live look.
-  const quiet=rows[2].children[2];
+  const quiet=rows[2].children[1];
   assert.match(quiet.className,/stale/);
   assert.equal(quiet.children[1].textContent,"12.0%");
-  assert.equal(rows[2].children[3].textContent,"No recent worker heartbeat");
+  assert.match(rows[2].children[2].textContent,/^No recent worker heartbeat · Full conversion/);
+  assert.match(rows[2].children[2].className,/warn/);
 });
 
 test("an encoding slot with nothing to report yet still shows a single short line", () => {
@@ -1894,10 +1899,10 @@ test("an encoding slot with nothing to report yet still shows a single short lin
     {id:"reading",file:"sample-two.mkv",kind:"transcode",phase:"reading_source",heartbeat_at:beat,encoding:"x265 CRF 22"},
   ]}};
   h.run('renderWorkerActivity(activity)');
-  const rows=h.elements.get("worker-slots").children;
-  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
-  assert.equal(rows[1].children[3].textContent,"x265 CRF 22 · Reading the source");
-  assert.deepEqual(rows.map(row=>row.children.length),[4,4]);
+  const rows=slotRows(h);
+  assert.match(rows[0].children[2].textContent,/^Waiting for the first update · Full conversion/);
+  assert.match(rows[1].children[2].textContent,/^x265 CRF 22 · Reading the source · Full conversion/);
+  assert.deepEqual(rows.map(row=>row.children.length),[3,3]);
 });
 
 test("slot progress reuses the green batch bar and only animates while the worker is alive", () => {
@@ -1922,12 +1927,15 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
   assert.equal(h.elements.get("slot-video").value,2);
   assert.equal(h.elements.get("slot-podcast").value,1);
-  const rows=h.elements.get("worker-slots").children;
+  const rows=slotRows(h);
   assert.equal(rows.length,3);
   assert.match(rows[0].children[0].textContent,/Video slot 1 · movie\.mkv/);
   assert.match(rows[1].children[0].textContent,/Video slot 2 · Available/);
   assert.match(rows[2].children[0].textContent,/Podcast slot 1 · episode\.mp3/);
-  assert.match(rows[2].children[1].textContent,/Podcast processing/);
+  assert.match(rows[2].children[2].textContent,/Podcast processing/);
+  // The node's row says what is running and how the pools are used.
+  const summary=h.elements.get("worker-slots").children[0].children[0].children[0];
+  assert.match(summary.children.map(c=>c.textContent).join(" "),/Worker 2\/3 Video 1\/2 · Podcast 1\/1/);
   // An edit that has not been saved survives the next poll.
   h.elements.get("slot-video").value=1;
   h.run('state.slotFormDirty=true;renderWorkerActivity(activity)');
@@ -1937,7 +1945,7 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   // A worker that predates slots, or one that cannot be split, hides the form.
   h.run('activity.activity.slots=undefined;renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-usage").hidden,true);
-  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/^Slot 1/);
+  assert.match(slotRows(h)[0].children[0].textContent,/^Slot 1/);
   h.run('activity.activity.slots={ceiling:1,split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-split").hidden,true);
 });
@@ -1992,29 +2000,67 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   assert.equal(h.elements.get("settings-node").hidden,true);
 });
 
-test("worker activity puts each node's heading and slots in a column of its own", () => {
+test("worker activity gives each node a row that opens onto its slots, and a table of what runs for wide screens", () => {
   const h=harness();
   h.elements.get("settings-node-pick").options=[];
   const job=(id,file)=>({id,file,kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10});
   const node=(name,jobs)=>({name,available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:jobs.length,jobs,
     slots:{ceiling:1,split:false,video:{total:1,used:jobs.length},podcast:{total:0,used:0}}}});
-  h.context.activity={available:true,workers:[node("m1",[job("a","one.mkv")]),node("m4",[job("b","two.mkv")])]};
+  h.context.activity={available:true,workers:[node("m1",[job("a","one.mkv")]),node("m4",[])]};
   h.run('renderWorkerActivity(activity)');
-  const groups=h.elements.get("worker-slots").children;
-  assert.equal(groups.length,2,"one group per node, not a heading and slots mixed in one list");
-  assert.equal(groups[0].className,"worker-node-group");
-  assert.match(groups[0].children[0].textContent,/^m1 · 1\/1 occupied/);
-  assert.equal(groups[0].children[1].className,"worker-node-slots");
-  assert.match(groups[0].children[1].children[0].children[0].textContent,/one\.mkv/);
-  assert.match(groups[1].children[0].textContent,/^m4 · 1\/1 occupied/);
-  assert.match(groups[1].children[1].children[0].children[0].textContent,/two\.mkv/);
-  // A node that is down keeps its column and says why.
+  const [compact,table]=h.elements.get("worker-slots").children;
+  assert.equal(compact.className,"slots-compact");
+  assert.equal(table.className,"slots-table");
+  const [busy,idle]=compact.children;
+  const summaryText=d=>d.children[0].children.map(c=>c.textContent).join(" ");
+  // A node with something running opens by itself; an idle one stays shut, in one line.
+  assert.equal(busy.open,true);
+  assert.equal(idle.open,false);
+  assert.match(summaryText(busy),/m1 1\/1/);
+  assert.match(summaryText(idle),/m4 0\/1 · all available/);
+  assert.match(busy.children[1].children[0].children[0].textContent,/one\.mkv/);
+  assert.equal(busy.dataset.state,"busy");
+  assert.equal(idle.dataset.state,"idle");
+  // The table lists what runs, names the node, and counts the free slots in a line.
+  const rows=table.children[0].children[1].children;
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].children[0].textContent,"m1 · Slot 1");
+  assert.equal(rows[0].children[1].textContent,"one.mkv");
+  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
+  assert.equal(rows[0].children[4].textContent,"Full conversion");
+  assert.equal(table.children[1].textContent,"1 slot available · m4 1");
+  // What a person opened or shut stays that way on the next refresh.
+  idle.children[0].listeners.get("click")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slots").children[0].children[1].open,true);
+  busy.children[0].listeners.get("click")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slots").children[0].children[0].open,false);
+  // A node that is down keeps its row, open, and says why.
   h.run('activity.workers[1]={name:"m4",available:false,message:"Worker disconnected"};renderWorkerActivity(activity)');
-  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/^m4 · Worker disconnected/);
-  assert.equal(h.elements.get("worker-slots").children[1].children[1].children.length,0);
-  // A single node keeps the flat slot list.
+  const down=h.elements.get("worker-slots").children[0].children[1];
+  assert.equal(down.dataset.state,"down");
+  assert.equal(down.open,true);
+  assert.match(summaryText(down),/m4 Worker disconnected/);
+  assert.equal(down.children[1].children.length,0);
+  assert.equal(h.elements.get("worker-slots").children[1].children.at(-1).textContent,"m4 · Worker disconnected");
+  // A single node that predates names still gets a row.
   h.run('activity={available:true,workers:[activity.workers[0]]};renderWorkerActivity(activity)');
-  assert.equal(h.elements.get("worker-slots").children[0].className,"worker-slot");
+  assert.equal(h.elements.get("worker-slots").children[0].children.length,1);
+});
+
+test("the scheduler is a chip beside the slots and the settings link is an icon", () => {
+  assert.match(markup,/<div class="activity-heading">.*id="activity-scheduler" class="sched-chip"/s);
+  assert.match(markup,/id="worker-open-settings"[^>]*aria-label="Change in Settings"/);
+  assert.match(css,/@media \(min-width: 901px\) \{\s*\.slots-compact \{ display:none; \}\s*\.slots-table \{ display:block; \}/);
+  assert.match(css,/\.sched-chip\[data-state="degraded"\]/);
+  const h=harness();
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",scheduler_health:"degraded",stale:false,observed_at:new Date().toISOString()}]};renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"degraded");
+  h.run('state.workerInfo.nodes[0].scheduler_health="ok";renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"ok");
+  h.run('state.workerInfo.nodes[0].stale=true;renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"unknown");
 });
 
 test("activity stays read-only and links to the node settings only when something there is editable", () => {
@@ -2026,7 +2072,7 @@ test("activity stays read-only and links to the node settings only when somethin
   h.run('renderWorkerActivity(activity)');
   // Activity keeps the status; the editors are in Settings and the link leads there.
   assert.match(h.elements.get("worker-capacity").textContent,/0\/2 occupied/);
-  assert.equal(h.elements.get("worker-slots").children.length,2);
+  assert.equal(slotRows(h).length,2);
   assert.equal(h.elements.get("worker-open-settings").hidden,false);
   assert.equal(h.elements.get("settings-node").hidden,false);
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
@@ -2786,7 +2832,8 @@ test("an omitted video shows its reason and another-profile action instead of co
   await h.run('loadJobs()');
   const row=h.elements.get('jobs-list').children[0];
   assert.equal(row.children[0].children[1].textContent,'The Peripheral - S01E04');
-  assert.equal(row.children[1].children.length,1,'no repeated filename or reason');
+  assert.deepEqual(row.children[1].children.map(c=>c.className.split(' ')[0]).filter(c=>c!=='job-sentence'),['metadata'],'no repeated filename or reason');
+  assert.match(allText(row.children[1].children.find(c=>c.className.startsWith('job-sentence'))).trim(),/^Try another profile/);
   const outcome=row.children[2].children[0];
   assert.match(outcome.children[0].textContent,/Automatic testing does not support/);
   assert.match(outcome.children[1].textContent,/Choose another profile/);
@@ -3353,46 +3400,59 @@ test("a queue card labels at most one main action, the most important, first", (
   assert.equal(mains.length, 1);
   assert.equal(mains[0].attrs["aria-label"], "Review candidate");
   assert.equal(rail.children[0], mains[0]);
-  assert.equal(rail.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  // The other three are icons in view; no menu is needed for them.
+  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
+  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Keep original", "Retry", "Change goal"]);
+  assert.equal(rail.children.some((b) => b.className === "more-actions"), false);
   const none = queueRail(["Archive", "Compare frames"]).rail;
   assert.equal(none.children.some((b) => /\baction-main\b/.test(b.className)), false);
+  assert.deepEqual(none.children.map((b) => b.attrs["aria-label"]), ["Archive", "Compare frames"]);
 });
 
-test("icon-only queue actions keep their full name in aria-label and title", () => {
-  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings"]);
-  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
-  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Stop batch · keep originals", "Change settings"]);
-  assert.deepEqual(icons.map((b) => b.title), ["Stop batch · keep originals", "Change settings"]);
-  assert.match(icons[0].className, /\bdanger\b/);
-  // The row hides the label; it is kept for the More menu, never as a second main action.
-  assert.deepEqual(icons.map((b) => b.children.at(-1).className), ["action-label", "action-label"]);
-  assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
+test("the usual actions stay in view as icons with their full name in aria-label and title", () => {
+  const { rail } = queueRail(["Change settings", "Pause batch", "Cancel"]);
+  assert.deepEqual(rail.children.map((b) => b.attrs["aria-label"]), ["Change settings", "Pause batch", "Cancel"]);
+  assert.deepEqual(rail.children.map((b) => b.title), ["Change settings", "Pause batch", "Cancel"]);
+  assert.match(rail.children[2].className, /\bdanger\b/);
+  assert.ok(rail.children.every((b) => /\baction-icon\b/.test(b.className) && b.children.at(-1).className === "action-label"));
 });
 
-test("Run again is an icon with its name as tooltip, not a labelled main action", () => {
+test("a single other action is an icon in view, not a menu", () => {
   const { rail } = queueRail(["Run again"]);
   assert.equal(rail.children.length, 1);
-  const [b] = rail.children;
-  assert.match(b.className, /\baction-icon\b/);
-  assert.equal(b.title, "Run again");
-  assert.equal(b.attrs["aria-label"], "Run again");
+  assert.match(rail.children[0].className, /\baction-icon\b/);
+  assert.equal(rail.children[0].attrs["aria-label"], "Run again");
 });
 
-test("with five or more icon actions, three show and the rest go into a More actions menu", () => {
+test("with more than three icons the common ones stay and the rest go to More, which closes after a choice", () => {
   const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
-  assert.equal(rail.children.length, 5);
+  // Review is the main action; Archive stays in view with the first of the rest by rank, and the others are in the menu.
   const more = rail.children.at(-1);
   assert.equal(more.className, "more-actions");
+  assert.equal(rail.children.length, 1 + 2 + 1);
+  const shown = rail.children.slice(1, -1).map((b) => b.attrs["aria-label"]);
+  assert.ok(shown.includes("Archive"));
   assert.equal(more.dataset.menuFor, "job-1");
   const [toggle, menu] = more.children;
   assert.equal(toggle.attrs["aria-label"], "More actions");
   assert.equal(toggle.title, "More actions");
-  assert.deepEqual(menu.children.map((b) => b.attrs["aria-label"]), ["Archive", "View batch"]);
+  const inMenu = menu.children.map((b) => b.attrs["aria-label"]);
+  assert.equal(new Set([...shown, ...inMenu]).size, 5);
+  assert.ok(!inMenu.includes("Archive"));
   // The same elements move, so their handlers and job-control state come along.
   assert.ok(menu.children.every((b) => b.listeners.has("click") && b.dataset.jobControl === "job-1"));
   more.open = true;
   more.listeners.get("click")({ target: { closest: () => menu.children[0] } });
   assert.equal(more.open, false);
+});
+
+test("a Stop batch stays in view while Resume and other less common actions fold into More", () => {
+  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings", "View batch", "Archive"]);
+  const labels = rail.children.filter((b) => b.className !== "more-actions").map((b) => b.attrs["aria-label"]);
+  assert.ok(labels.includes("Resume batch") || rail.children[0].attrs["aria-label"] === "Resume batch");
+  const menu = rail.children.at(-1).children[1].children.map((b) => b.attrs["aria-label"]);
+  assert.ok(!menu.includes("Resume batch"));
+  assert.ok(menu.length >= 2);
 });
 
 function moreMenu(id, open) {
@@ -3479,20 +3539,6 @@ test("a podcast review card labels Review cuts instead of leaving it an icon", (
   assert.match(cuts.children[0].className, /\baction-main\b/);
   const classify = queueRail(["Ad library", "View transcript", "Validate classifications"]).rail;
   assert.equal(classify.children[0].attrs["aria-label"], "Validate classifications");
-});
-
-test("four icon actions all show; a More menu never holds a single item", () => {
-  const four = queueRail(["Review", "Run one more test", "Keep original", "Change goal", "View batch"]).rail;
-  assert.equal(four.children.some((c) => c.className === "more-actions"), false);
-  assert.deepEqual(
-    four.children.filter((b) => /\baction-icon\b/.test(b.className)).map((b) => b.attrs["aria-label"]),
-    ["Run one more test", "Keep original", "Change goal", "View batch"],
-  );
-  const five = queueRail(["Review", "Run one more test", "Keep original", "Cancel", "Change goal", "View batch"]).rail;
-  const more = five.children.at(-1);
-  assert.equal(more.className, "more-actions");
-  assert.equal(five.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
-  assert.equal(more.children[1].children.length, 2);
 });
 
 test("size mode details report the verification attempts and each window's search and final score", () => {
@@ -3745,34 +3791,16 @@ test("a VideoToolbox winner says why it was chosen next to the encoder line", ()
   assert.doesNotMatch(allText(software), /Chosen because/);
 });
 
-test("the queue comes before podcast cleaning, which opens in its own dialog", () => {
-  const jobs = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
-  assert.ok(jobs.indexOf('class="queue-toolbar"') < jobs.indexOf('id="podcast-new"'));
-  assert.ok(jobs.indexOf('id="podcast-new"') < jobs.indexOf('id="jobs-list"'));
-  assert.doesNotMatch(jobs, /id="podcast-form"|<details id="podcast-new"/);
-  const dialog = markup.slice(markup.indexOf('<dialog id="podcast-dialog"'), markup.indexOf("</dialog>", markup.indexOf('<dialog id="podcast-dialog"')));
-  assert.match(dialog, /id="podcast-form"/);
-  assert.match(dialog, /id="close-podcast"/);
-});
-
-test("clean podcast opens, lists podcasts and closes after starting", async () => {
+test("podcast cleaning is not launched from the main UI, but a podcast job in the queue can still be reviewed", () => {
+  for (const id of ["podcast-new", "podcast-dialog", "podcast-form", "close-podcast", "podcast-id", "podcast-source", "podcast-output"]) assert.doesNotMatch(markup, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(source, /\$\("podcast-(new|form|dialog)"\)|\$\("close-podcast"\)/);
+  assert.match(source, /async function reviewPodcastCuts/);
+  assert.match(source, /async function viewPodcastTranscript/);
+  assert.match(source, /async function viewPodcastAdLibrary/);
   const h = harness();
-  const calls = [];
-  h.context.record = (name, args) => calls.push([name, args]);
-  h.run('api=async(path)=>{record("api",path);return {enabled:true,podcasts:["genwhy"]}}; tool=async(name,args)=>{record(name,args);return {id:"podcast-job"}}; loadJobs=async()=>{}; openJob=async(id)=>record("open",id);');
-  h.elements.get("podcast-new").listeners.get("click")();
-  for (let i = 0; i < 6; i++) await Promise.resolve();
-  assert.equal(h.elements.get("podcast-dialog").open, true);
-  assert.deepEqual(calls[0], ["api", "podcasts"]);
-  assert.equal(h.elements.get("podcast-id").children.length, 1);
-  h.run('$("podcast-id").value="genwhy"; $("podcast-source").value="/media/p/e.mp3"; $("podcast-output").value="/media/p/e.clean.mp3";');
-  h.elements.get("podcast-form").listeners.get("submit")({ preventDefault() {} });
-  for (let i = 0; i < 12; i++) await Promise.resolve();
-  const run = calls.find(([name]) => name === "action_run");
-  assert.equal(run[1].action, "clean_podcast_ads");
-  assert.deepEqual(JSON.parse(run[1].inputs), { podcast_id: "genwhy", path: "/media/p/e.mp3", output_path: "/media/p/e.clean.mp3" });
-  assert.equal(h.elements.get("podcast-dialog").open, false);
-  assert.deepEqual(calls.at(-1), ["open", "podcast-job"]);
+  h.run('state.info={allow_destructive:false};');
+  const controls = h.run('jobControls({id:"p-1",status:"waiting_decision",waiting_condition:"podcast_review",podcast:{podcast_id:"x",cuts_digest:"d"}})');
+  assert.ok(flatten(controls).some((c) => c.textContent === "Review cuts"));
 });
 
 test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
@@ -4031,7 +4059,7 @@ test("tracking keeps the first time a status was seen and announces only changes
 // children, closest, removal and focus.
 class FakeNode {
   constructor(doc, tag = "div") {
-    Object.assign(this, {doc, tagName: tag.toUpperCase(), children: [], parent: null, dataset: {}, className: "", textContent: "", id: "", listeners: new Map()});
+    Object.assign(this, {doc, tagName: tag.toUpperCase(), children: [], parent: null, dataset: {}, style: {}, className: "", textContent: "", id: "", listeners: new Map()});
   }
   get classList() {
     const names = () => this.className.split(/\s+/).filter(Boolean);
@@ -4239,9 +4267,11 @@ test("a goal batch that is still encoding offers its waiting decision, and the f
   h.run('api=async(path)=>request(path);renderSavings=()=>{};state.tab="jobs";');
   await h.run("loadJobs()");
   assert.equal(h.elements.get("job-filter-decision").textContent, "Needs decision (2)");
-  const badges = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll(".status-action");
-  assert.equal(badges("encoding").length, 1);
-  assert.equal(badges("quiet").length, 0);
+  const row = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id);
+  // The flag is not a button: the sentence under the title carries the way in.
+  assert.equal(row("encoding").querySelectorAll(".status-action").length, 0);
+  assert.deepEqual(row("encoding").querySelectorAll(".action-main").map((b) => b.textContent), ["Review"]);
+  assert.equal(row("quiet").querySelectorAll(".action-main").length, 0);
   assert.equal(list.querySelectorAll(".decision-badge").length, 1);
   h.context.request = () => ({jobs:[], total:0, has_more:false, decision_count:0});
   await h.run("loadJobs()");
@@ -6919,6 +6949,213 @@ test("every batch row offers Show in Files when its file is inside the media fol
   assert.equal(h.context.routes[0].file, "/media/tv/F.mkv");
 });
 
+function drainInfo(drain) {
+  return { ready: true, nodes: [], drain: { enabled: true, revision: 1, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", workers: [], jobs: [], ...drain } };
+}
+
+test("worker drain is hidden until the server reports it, and starts off with a single Drain action", () => {
+  const h = harness();
+  h.run("state.workerInfo = {ready:true,nodes:[]}; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain").hidden, true);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain").hidden, false);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Pause all");
+  assert.doesNotMatch(h.elements.get("worker-status").textContent, /Pausing|Paused/);
+});
+
+test("a draining worker shows its progress, lists open jobs and offers Resume", () => {
+  const h = harness();
+  h.context.info = drainInfo({
+    running: 1, publication_pending: 1, queued: 3, message: "x",
+    workers: [{ name: "alpha", reachable: true, running: 1, publication_pending: 1, ready_for_deploy: false, reason: "1 running" }],
+    jobs: [
+      { action_id: "t-1", worker: "alpha", file: "Running.mkv", state: "running" },
+      { action_id: "t-2", worker: "alpha", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" },
+      { action_id: "t-3", file: "Waiting.mkv", state: "queued" },
+    ],
+  });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 1 file still encoding, 1 file encoded but not saved yet");
+  assert.match(h.elements.get("worker-drain-note").textContent, /alpha: 1 running/);
+  assert.match(h.elements.get("worker-drain-note").textContent, /Paused batches stay paused/);
+  assert.match(h.elements.get("worker-status").textContent, /Pausing$/);
+  // Queued jobs are counted but never listed as open work.
+  const rows = h.elements.get("worker-drain-jobs").children;
+  assert.equal(rows.length, 2);
+  assert.deepEqual(buttonLabels(rows[0]), ["View file"]);
+  assert.deepEqual(buttonLabels(rows[1]), ["Try again", "View file", "Show in Files"]);
+});
+
+test("worker drain reports ready for deploy only when the server says so", () => {
+  const h = harness();
+  h.context.info = drainInfo({ ready_for_deploy: true });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Paused — ready to deploy");
+  assert.match(h.elements.get("worker-status").textContent, /Paused$/);
+});
+
+test("an encode that could not be saved offers Try again through the same recheck as the queue", async () => {
+  const h = harness();
+  h.context.info = drainInfo({ publication_pending: 1, jobs: [{ action_id: "t-2", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" }] });
+  h.run("state.workerInfo = info; renderWorkers();");
+  const retry = flatten(h.elements.get("worker-drain-jobs").children[0]).find((e) => e.textContent === "Try again");
+  assert.equal(retry.dataset.jobControl, "t-2");
+  assert.equal(retry.dataset.requiresWorker, "true");
+  h.context.calls = [];
+  h.run('jobControl = async (...args) => calls.push(args); refreshWorkers = async () => {};');
+  await retry.listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0].slice(0, 3))), ["t-2", "action_resume", { decision: "recheck" }]);
+  assert.equal(h.context.calls[0][3].decision.label, "Try again");
+});
+
+test("Show in Files from the drain list closes the dialog and opens the file's folder", async () => {
+  const h = harness();
+  h.context.info = drainInfo({ publication_pending: 1, jobs: [{ action_id: "t-2", file: "Unsaved.mkv", state: "publication_pending", path: "/media/tv/Unsaved.mkv" }] });
+  h.run('state.info={allow_destructive:true,roots:["/media"]}; state.workerInfo = info; renderWorkers();');
+  h.context.routes = [];
+  h.run("applyNavigation = async (route) => routes.push(route);");
+  h.document.getElementById("workers-dialog").open = true;
+  const files = flatten(h.elements.get("worker-drain-jobs").children[0]).find((e) => e.textContent === "Show in Files");
+  assert.equal(files.dataset.navigation, "true");
+  await files.listeners.get("click")();
+  assert.equal(h.document.getElementById("workers-dialog").open, false);
+  assert.equal(h.context.routes[0].file, "/media/tv/Unsaved.mkv");
+});
+
+test("the drain button turns the drain on, then off, with one request each", async () => {
+  const h = harness();
+  h.context.requests = [];
+  h.run(`state.workerInfo = {ready:true,nodes:[]}; renderWorkers(); notify = () => {}; refreshWorkers = async () => {};
+    api = async (path, body) => { requests.push([path, body]); return { enabled: body.enabled, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", jobs: [], workers: [] }; };`);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.requests[0])), ["worker-drain", { enabled: true }]);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.requests[1])), ["worker-drain", { enabled: false }]);
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Pause all");
+});
+
+test("a job held by the drain says it is waiting for a worker deploy", () => {
+  const h = harness();
+  const observed = h.run('workerProgressObservation({status:"waiting_external",waiting_condition:"worker_drain"})');
+  assert.equal(observed.status, "Held for worker deploy");
+  assert.equal(observed.active, false);
+  assert.equal(observed.warning, false);
+});
+
+
+test("Pause all in the Queue, the header and the workers dialog show one state", () => {
+  const h = harness();
+  h.run("state.workerInfo = {ready:true,nodes:[]}; renderWorkers();");
+  assert.equal(h.elements.get("queue-drain-toggle").hidden, true);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("queue-drain-toggle").hidden, false);
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Pause all");
+  assert.equal(h.elements.get("queue-drain-status").textContent, "Running");
+  const states = [
+    [{ running: 2, queued: 8 }, "Pausing — 2 files still encoding · 8 files held back", /Pausing$/],
+    [{ running: 1, publication_pending: 1 }, "Pausing — 1 file still encoding, 1 file encoded but not saved yet", /Pausing$/],
+    [{}, "Pausing — checking the workers", /Pausing$/],
+    [{ ready_for_deploy: true }, "Paused — ready to deploy", /Paused$/],
+  ];
+  for (const [drain, text, header] of states) {
+    h.context.info = drainInfo(drain);
+    h.run("state.workerInfo = info; renderWorkers();");
+    assert.equal(h.elements.get("queue-drain-label").textContent, "Resume");
+    assert.equal(h.elements.get("queue-drain-status").textContent, text);
+    assert.equal(h.elements.get("worker-drain-status").textContent, text.split(" · ")[0]);
+    assert.match(h.elements.get("worker-status").textContent, header);
+  }
+  assert.equal(h.elements.get("queue-meta").dataset.state, "ready");
+});
+
+test("the Queue button pauses and resumes with the same single request as the dialog", async () => {
+  const h = harness();
+  h.context.requests = [];
+  h.run(`notify = () => {}; refreshWorkers = async () => {};
+    api = async (path, body) => { requests.push([path, body.enabled]); return { enabled: body.enabled, running: 0, publication_pending: 0, queued: 0, ready_for_deploy: false, message: "", jobs: [], workers: [] }; };`);
+  h.context.info = drainInfo({ enabled: false });
+  h.run("state.workerInfo = info; renderWorkers();");
+  await h.elements.get("queue-drain-toggle").listeners.get("click")();
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Resume");
+  assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
+  await h.elements.get("worker-drain-toggle").listeners.get("click")();
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Pause all");
+  assert.equal(JSON.stringify(h.context.requests), '[["worker-drain",true],["worker-drain",false]]');
+});
+
+test("a normal scheduler stays out of the header, a doubtful one is shown", () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",connected:true,scheduler_health:"ok",observed_at:new Date().toISOString(),last_success_at:new Date().toISOString(),sweeps:{queue:{observed_at:new Date().toISOString()}}}]};renderWorkers();');
+  assert.equal(h.elements.get("worker-status").textContent, "Worker · Connected");
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",connected:true,scheduler_health:"ok",observed_at:new Date(Date.now()-600000).toISOString()}]};renderWorkers();');
+  assert.match(h.elements.get("worker-status").textContent, /Scheduler Unknown/);
+});
+
+test("the header keeps only brand and worker status; install, open path and reload live in quieter places", () => {
+  const header = markup.slice(markup.indexOf('<header class="masthead">'), markup.indexOf("</header>"));
+  assert.match(header, /id="worker-status"/);
+  assert.doesNotMatch(header, /id="install-app"/);
+  const settings = markup.slice(markup.indexOf('<section id="advanced"'), markup.indexOf("</main>"));
+  assert.match(settings, /id="install-app"/);
+  const tools = markup.slice(markup.indexOf('id="library-tools"'), markup.indexOf('id="library-search-label"'));
+  const menu = tools.slice(tools.indexOf('id="library-actions"'));
+  assert.match(menu, /id="open-path"/);
+  assert.match(menu, /id="reload-library"/);
+  assert.equal((tools.match(/<button/g) || []).length, 3, "search plus the two menu items");
+  const queue = markup.slice(markup.indexOf('<section id="jobs"'), markup.indexOf('<section id="stats"'));
+  assert.ok(queue.indexOf('id="queue-drain-toggle"') < queue.indexOf('id="jobs-list"'));
+});
+
 // The palette and dark-mode contrast checks run with the rest of the UI tests.
 // Imported last, so the harness above is defined before any test starts.
 await import("./theme_test.mjs");
+
+test("a batch shows one segmented bar with a legend of what each file is doing", () => {
+  const h = harness();
+  h.context.batch = { total: 12, completed: 3, running: 2, failed: 1 };
+  const parts = h.run("batchSegments(batch)");
+  assert.equal(parts.legend, "3 done · 1 failed · 2 running · 6 waiting");
+  const widths = parts.bar.children.map(child => [child.className, Math.round(parseFloat(child.style.width))]);
+  assert.deepEqual(widths, [["segment-ok", 25], ["segment-err", 8], ["segment-run", 17], ["segment-wait", 50]]);
+  h.context.batch = { total: 8, completed: 6, review: 2 };
+  assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
+  h.context.batch = { total: 1, completed: 1 };
+  assert.equal(h.run("batchSegments(batch)"), null);
+  h.context.batch = { total: 4, completed: 4, dry_run: true };
+  assert.equal(h.run("batchSegments(batch)"), null);
+});
+
+test("a job title is a real link to the job that still opens in place on a plain click", () => {
+  const h = harness();
+  h.run('globalThis.opened = []; openJob = id => opened.push(id);');
+  const link = h.run('jobLink("Demo Show", "a b")');
+  assert.equal(link.href, "?view=queue&job=a%20b");
+  assert.match(link.className, /job-title/);
+  let prevented = false;
+  link.listeners.get("click")({ preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.opened)), ["a b"]);
+  link.listeners.get("click")({ metaKey: true, preventDefault: () => assert.fail("modified clicks keep the browser default") });
+  link.listeners.get("click")({ button: 1, preventDefault: () => assert.fail("middle clicks keep the browser default") });
+  assert.equal(h.context.opened.length, 1);
+});
+
+test("a file the probe could not read is described plainly", () => {
+  const h = harness();
+  h.context.reason = "mediainspect failed: ffprobe tool_exit after 58ms: exit status 1";
+  assert.equal(h.run("shortJobReason(reason)"), "Couldn't read the video file");
+});
+
+test("a failed batch with no error of its own says its first reason instead of a filler", async () => {
+  const h = harness();
+  h.run(`state.jobs = [];`);
+  h.context.job = { id: "f", number: 1, action_name: "transcode_batch", status: "failed", batch: { total: 6, failed: 6 }, batch_files: { reasons: [{ count: 6, reason: "smb_transport_error: i/o timeout" }] } };
+  assert.equal(h.run("queueOutcome(job)"), "Open job for error details");
+  assert.match(h.run("shortJobReason(job.batch_files.reasons[0].reason)"), /cannot access media storage/i);
+});

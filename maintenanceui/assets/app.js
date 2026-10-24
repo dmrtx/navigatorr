@@ -860,6 +860,98 @@ function renderWorkerDetails(host, info) {
   }
   if (!info) host.append(node("p", serverReachable ? "Checking shared worker observation…" : "Server disconnected; worker and scheduler status are unknown. Jobs may continue remotely.", "muted"));
 }
+// Pause all (worker drain): nothing new goes to the workers, files already
+// encoding finish and are saved, and paused batches stay paused after Resume.
+// The header, the Queue and the workers dialog all read this one summary.
+const filesWord = n => `${n} ${n === 1 ? "file" : "files"}`;
+function drainSummary(drain) {
+  if (!drain?.enabled) return null;
+  if (drain.ready_for_deploy) return {state: "ready", label: "Paused", text: "Paused — ready to deploy"};
+  const parts = [];
+  if (drain.running) parts.push(`${filesWord(drain.running)} still encoding`);
+  if (drain.publication_pending) parts.push(`${filesWord(drain.publication_pending)} encoded but not saved yet`);
+  return {state: "pausing", label: "Pausing", text: `Pausing — ${parts.join(", ") || "checking the workers"}`};
+}
+const drainJobLabels = {running: "Encoding", publication_pending: "Not saved yet"};
+function drainJobRow(job) {
+  const row = node("div", "", "worker-drain-job");
+  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
+  const actions = node("div", "", "batch-file-actions");
+  if (job.state === "publication_pending") {
+    const retry = button("Try again", () => jobControl(job.action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}).then(() => refreshWorkers()), "primary");
+    retry.dataset.jobControl = job.action_id;
+    retry.dataset.requiresWorker = "true";
+    retry.disabled = jobControlDisabled(retry);
+    actions.append(retry);
+  }
+  const view = button("View file", () => { $("workers-dialog").close(); return openJob(job.action_id); });
+  view.dataset.jobControl = job.action_id;
+  view.dataset.navigation = "true";
+  actions.append(view);
+  if (job.path) {
+    const files = button("Show in Files", () => { $("workers-dialog").close(); return showInFiles(job.path); });
+    files.dataset.jobControl = job.action_id;
+    files.dataset.navigation = "true";
+    actions.append(files);
+  }
+  row.append(actions);
+  return row;
+}
+function renderWorkerDrain(info) {
+  const drain = serverReachable ? info?.drain : null;
+  const summary = drainSummary(drain);
+  const label = drain?.enabled ? "Resume" : "Pause all";
+  const toggle = $("queue-drain-toggle");
+  toggle.hidden = !drain;
+  toggle.title = label;
+  toggle.setAttribute("aria-label", label);
+  toggle.classList.toggle("on", Boolean(drain?.enabled));
+  $("queue-drain-label").textContent = label;
+  // One status line: a dot and what the workers are doing, ahead of "Updated".
+  $("queue-meta").dataset.state = summary?.state || "running";
+  $("queue-drain-dot").hidden = !drain;
+  $("queue-drain-status").hidden = !drain;
+  $("queue-drain-status").textContent = summary ? `${summary.text}${drain.queued ? ` · ${filesWord(drain.queued)} held back` : ""}` : "Running";
+  $("worker-drain").hidden = !drain;
+  if (!drain) return;
+  const open = (drain.jobs || []).filter(job => job.state !== "queued");
+  $("worker-drain-status").textContent = summary
+    ? summary.text
+    : "Pause all stops new files from reaching the workers while the ones already encoding finish. Use it before deploying a worker.";
+  $("worker-drain-jobs").replaceChildren(...open.slice(0, 10).map(drainJobRow));
+  if (open.length > 10) $("worker-drain-jobs").append(node("p", `And ${open.length - 10} more.`, "metadata"));
+  const parts = [];
+  if (drain.enabled) {
+    for (const worker of drain.workers || []) parts.push(`${worker.name}: ${worker.ready_for_deploy ? "ready for deploy" : worker.reason || "not ready"}`);
+    parts.push("Paused batches stay paused after Resume.");
+  }
+  $("worker-drain-note").textContent = parts.join(" · ");
+  $("worker-drain-toggle").textContent = label;
+  $("worker-drain-toggle").classList.toggle("primary", Boolean(drain.enabled));
+  $("worker-drain-toggle").disabled = !serverReachable;
+  $("queue-drain-toggle").disabled = !serverReachable;
+}
+// One switch for the whole system, from the Queue or the workers dialog.
+function toggleWorkerDrain() {
+  return safe(async () => {
+    const enabled = !state.workerInfo?.drain?.enabled;
+    const toggles = [$("queue-drain-toggle"), $("worker-drain-toggle")];
+    toggles.forEach(toggle => { toggle.disabled = true; });
+    try {
+      const drain = await api("worker-drain", {enabled});
+      state.workerInfo = {...state.workerInfo, drain};
+      renderWorkers();
+      notify(enabled ? "Paused. Nothing new goes to the workers; files already encoding finish." : "Resumed. Held files start again; paused batches stay paused.");
+      await refreshWorkers();
+    } finally {
+      toggles.forEach(toggle => { toggle.disabled = !serverReachable; });
+    }
+  });
+}
+$("queue-drain-toggle").addEventListener("click", toggleWorkerDrain);
+$("worker-drain-toggle").addEventListener("click", toggleWorkerDrain);
+// A menu of secondary actions closes once one of them is chosen.
+$("library-actions").addEventListener("click", event => { if (event.target?.closest?.("button")) $("library-actions").open = false; });
 function renderWorkers() {
   const info = state.workerInfo;
   document.querySelectorAll('[data-job-control][data-requires-worker="true"]').forEach(button => {
@@ -875,8 +967,14 @@ function renderWorkers() {
     : info.message || info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
   renderWorkerDetails($("worker-nodes"), info);
   renderWorkerDetails($("settings-worker"), info);
-  $("activity-scheduler").textContent = schedulerSummary(info);
-  $("worker-status").textContent += ` · ${schedulerSummary(info).replace("Scheduler · ", "Scheduler ")}`;
+  renderWorkerDrain(info);
+  // A normal scheduler is the default and stays in the dialog; only a doubt belongs in the header.
+  const scheduler = schedulerSummary(info);
+  $("activity-scheduler").textContent = scheduler;
+  $("activity-scheduler").dataset.state = scheduler.startsWith("Scheduler · Normal") ? "ok" : scheduler.startsWith("Scheduler · Degraded") ? "degraded" : "unknown";
+  if (serverReachable && info && !scheduler.startsWith("Scheduler · Normal")) $("worker-status").textContent += ` · ${scheduler.replace("Scheduler · ", "Scheduler ")}`;
+  const paused = serverReachable ? drainSummary(info?.drain) : null;
+  if (paused) $("worker-status").textContent += ` · ${paused.label}`;
   $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
 }
 async function refreshWorkers() {
@@ -3023,7 +3121,29 @@ function whereBlock(where, {heading = true} = {}) {
   } else if (where.backup_removed) line("Original backup", "", "removed after the new file was verified");
   return box;
 }
-function batchProgress(job) {
+// What each file of a batch is doing, as one bar and a legend: finished, failed,
+// running, needing a decision, left alone, stopped, and the rest waiting.
+const segmentKinds = [["completed", "done", "ok"], ["failed", "failed", "err"], ["running", "running", "run"], ["waiting_decision", "need you", "rev"], ["policy", "below minimum savings", "skip"], ["skip", "skipped", "skip"], ["rejected", "rejected", "skip"], ["cancelled", "cancelled", "cancel"]];
+function batchSegments(batch) {
+  if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total < 2) return null;
+  const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
+  const parts = segmentKinds.map(([key, label, kind]) => ({kind, label, n: key === "waiting_decision" ? count("waiting_decision") || count("review") : count(key)})).filter(part => part.n > 0);
+  const known = parts.reduce((sum, part) => sum + part.n, 0);
+  const waiting = Math.max(0, batch.total - known);
+  if (waiting) parts.push({kind: "wait", label: "waiting", n: waiting});
+  const total = Math.max(batch.total, known);
+  const bar = node("div", "", "batch-segments");
+  bar.setAttribute("role", "img");
+  const legend = parts.map(part => `${part.n} ${part.label}`).join(" \u00b7 ");
+  bar.setAttribute("aria-label", `${total} files: ${legend}`);
+  for (const part of parts) {
+    const segment = node("i", "", `segment-${part.kind}`);
+    segment.style.width = `${part.n / total * 100}%`;
+    bar.append(segment);
+  }
+  return {bar, legend};
+}
+function batchProgress(job, {segments = false} = {}) {
   const replacing = replacementProgressBlock(job);
   if (replacing) return replacing;
   const batch = visibleBatch(job);
@@ -3077,36 +3197,45 @@ function batchProgress(job) {
   counts.title = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
   value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
-  const bar = document.createElement("progress");
-  bar.max = batch.total;
-  bar.value = percent / 100 * batch.total;
-  bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
-  result.append(counts, value, bar);
+  const parts = segments ? batchSegments(batch) : null;
+  if (parts) {
+    // The bar shows each file's state; the percent keeps the estimate.
+    parts.bar.title = value.title;
+    // The legend already counts the files, so the "N / M finished" line is left out.
+    result.append(value, parts.bar, node("span", parts.legend, "batch-legend metadata"));
+  } else {
+    const bar = document.createElement("progress");
+    bar.max = batch.total;
+    bar.value = percent / 100 * batch.total;
+    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
+    result.append(counts, value, bar);
+  }
 
+  // A time is shown only when the worker measured one.
+  const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
+  const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
+  const etaText = etas.length ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` \u00b7 about ${left} ${left === 1 ? "file" : "files"} left` : ""}` : "";
   if (active) {
     const phases = [...byFile.values()].map(a=>a.label);
-    const waiting = count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
-    const phaseText = [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files");
+    // The legend of a segmented bar already counts the files needing a decision.
+    const waiting = !parts && count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
+    const phaseText = [...phases, waiting, parts && etas.length && left > 0 ? `about ${left} ${left === 1 ? "file" : "files"} left` : ""].filter(Boolean).join(" \u00b7 ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files");
     const phase = node("span", phaseText, "batch-progress-phase metadata");
     // One line, whatever the numbers say; the whole text is the tooltip.
     phase.title = phaseText;
     result.append(phase);
   }
-  // A time is shown only when the worker measured one.
-  const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
-  const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
-  // The line is always there while the batch runs, so the row keeps its height
-  // when an estimate appears or goes away.
-  if (active) {
-    const eta = etas.length ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}` : "\u00a0";
-    const explanation = node("span", eta, "batch-progress-explanation metadata");
-    if (etas.length) explanation.title = eta;
+  // The line is always there while a plain bar runs, so the row keeps its height
+  // when an estimate appears or goes away; a segmented bar folds it into the phase line.
+  if (active && !parts) {
+    const explanation = node("span", etaText || "\u00a0", "batch-progress-explanation metadata");
+    if (etas.length) explanation.title = etaText;
     result.append(explanation);
   }
   return result;
 }
-function telemetry(job) {
-  const batch = batchProgress(job);
+function telemetry(job, options) {
+  const batch = batchProgress(job, options);
   if (batch) return batch;
   const w = job.worker;
   const result = node(
@@ -3182,7 +3311,8 @@ function telemetry(job) {
     meter.setAttribute("aria-label", `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${p.toFixed(1)}%`);
     result.append(meter, node("span", `${w.progress_is_stale ? "Last measured: " : ""}${p.toFixed(1)}%`, "metadata"));
   }
-  if (w.last_progress_at)
+  // In a queue row the heartbeat line says when the last measurement moved, so the time is left out.
+  if (w.last_progress_at && !(options?.segments && observation.active))
     result.append(
       node(
         "span",
@@ -3644,6 +3774,18 @@ function statusClass(status) {
   if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling", "No heartbeat", "No updates"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
+}
+// A job's title is a real link to its details: it opens in the dialog, or in a
+// new tab with the same job open.
+function jobLink(text, id) {
+  const link = node("a", text, "job-title");
+  link.href = `?view=queue&job=${encodeURIComponent(id)}`;
+  link.addEventListener("click", (e) => {
+    if (e?.defaultPrevented || e?.button > 0 || e?.metaKey || e?.ctrlKey || e?.shiftKey || e?.altKey) return;
+    e?.preventDefault?.();
+    safe(() => openJob(id));
+  });
+  return link;
 }
 function statusBadge(label, status = label, onClick = null) {
   const className = `badge status-badge ${statusClass(status)}`;
@@ -4357,6 +4499,7 @@ function shortJobReason(reason) {
   const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
+  if (/ffprobe|mediainspect failed/i.test(text)) return "Couldn't read the video file";
   if (/permission denied/i.test(text)) return "Permission denied";
   // The encode finished and only saving it failed: say so before any
   // storage-error wording, since nothing needs to be encoded again.
@@ -4409,6 +4552,7 @@ function workerProgressObservation(job) {
     const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
     return {...result, status: "Waiting for a free worker slot", message: `The worker is running as many jobs as it allows. This job continues automatically when a slot is free.${line}`};
   }
+  if (waiting === "worker_drain") return {...result, status: "Held for worker deploy", message: "Worker drain is on, so this job has not started. It continues when the drain is resumed."};
   if (["worker_busy", "parent_busy", "queued", "transcode_retry", "worker_reconciling"].includes(waiting))
     return {...result, status: "Waiting", message: job.waiting_reason || "Waiting for worker coordination."};
   // A finished worker can leave telemetry behind while the coordinator validates
@@ -4588,6 +4732,8 @@ function queuePresentation(job) {
     context,
     status,
     summary,
+    kind,
+    facts: metrics,
     showTelemetry:
       ["running", "waiting_external"].includes(job.status),
   };
@@ -4597,13 +4743,15 @@ function queuePresentation(job) {
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
 const shortActionLabels = {"Replace file":"Replace","Choose a goal":"Choose","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
 const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Choose a goal", "Retry", "Convert to SDR 1080p", "Make it smaller", "Try again", "Check library again", "Review preview", "Try another profile"];
+// Icon actions a row keeps in view when it cannot show them all, most useful first.
+const keptQueueIcons = ["Pause batch", "Resume batch", "Cancel", "Archive", "Stop batch · keep originals"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
-  // A card shows at most one labelled main action, then square icon buttons
-  // whose full name lives in aria-label and title. Up to four icons show; with
-  // five or more, three stay and the rest move, as the same elements with
-  // their handlers and state, into a More actions menu that lists them with
-  // icon and label.
+  // A card offers at most one labelled main action, which the row shows as a
+  // link at the end of its sentence. The other actions are icon buttons named
+  // by aria-label and title: up to three stay in view, and when there are more
+  // the least common go into one More actions menu (the same elements, with
+  // their handlers and state, listed with icon and label).
   const buttons = [...actions.children];
   const labelOf = (b) => b.textContent.trim();
   const main = mainQueueActions.map((label) => buttons.find((b) => labelOf(b) === label)).find(Boolean);
@@ -4614,19 +4762,21 @@ function compactQueueActions(actions) {
     b.setAttribute("aria-label", label);
     b.title ||= label;
     if (b === main) {
-      b.replaceChildren(...[icon, node("span", shortActionLabels[label] || label, "action-label")].filter(Boolean));
-      b.className = "action-main primary";
+      b.replaceChildren(node("span", shortActionLabels[label] || label, "action-label"));
+      b.className = "action-main";
       continue;
     }
-    // The label stays in the DOM for the More menu; the row shows the icon.
     b.replaceChildren(...[icon, node("span", label, "action-label")].filter(Boolean));
     b.className = ["Cancel", "Stop batch · keep originals"].includes(label) ? "action-icon danger" : "action-icon";
     icons.push(b);
   }
-  // A menu never holds a single item: four icons fit where three and More do.
-  const shown = icons.length > visibleQueueIcons + 1 ? visibleQueueIcons : icons.length;
-  const overflow = icons.slice(shown);
-  const rail = [main, ...icons.slice(0, shown)].filter(Boolean);
+  let overflow = [];
+  if (icons.length > visibleQueueIcons) {
+    const rank = (b) => { const i = keptQueueIcons.indexOf(labelOf(b)); return i < 0 ? keptQueueIcons.length : i; };
+    const kept = new Set([...icons].sort((a, b) => rank(a) - rank(b)).slice(0, visibleQueueIcons - 1));
+    overflow = icons.filter((b) => !kept.has(b));
+  }
+  const rail = [main, ...icons.filter((b) => !overflow.includes(b))].filter(Boolean);
   if (overflow.length) {
     const more = node("details", "", "more-actions");
     more.dataset.menuFor = buttons[0]?.dataset.jobControl || "";
@@ -5067,6 +5217,7 @@ async function loadJobs(more = false) {
   state.jobsLoading = true;
   if (state.tab === "jobs" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   $("jobs-more").disabled = true;
+  markQueueFilter();
   const status = $("job-filter").value;
   const offset = more ? state.jobsLoaded || 0 : 0;
   const target = more ? 25 : Math.max(25, state.jobsLoaded || 25);
@@ -5108,35 +5259,17 @@ async function loadJobs(more = false) {
       const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
       const heading = node("h3", "", "job-heading");
       heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
-      heading.append(
-        button(singleFile?.display_label || presentation.title, () => openJob(job.id), "job-title"),
-      );
-      heading.append(statusBadge(presentation.status, presentation.status, job.status === "waiting_decision" || job.batch?.outcome === "no_changes" ? () => openJob(job.id) : null));
+      heading.append(jobLink(singleFile?.display_label || presentation.title, job.id));
+      heading.append(statusBadge(presentation.status));
       // A goal batch keeps encoding while one file waits, so its own status says
-      // "In progress"; the decision still needs its own way in.
-      if (job.needs_decision && job.status !== "waiting_decision") {
-        const decision = statusBadge("Needs decision", "waiting_decision", () => openJob(job.id));
+      // "In progress"; the flag says a decision is waiting.
+      const flagged = job.needs_decision && job.status !== "waiting_decision";
+      if (flagged) {
+        const decision = statusBadge("Needs decision", "waiting_decision");
         decision.classList.add("decision-badge");
         decision.title = "Needs decision";
         heading.append(decision);
       }
-      const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
-      const summary = node("p", summaryText, "metadata job-summary");
-      summary.title = summaryText;
-      meta.append(summary);
-      if (!skipped && !singleFile && job.batch_files?.files?.length) {
-        const files = node("p", job.batch_files.files.map(file => file.display_label || file.file_path?.split("/").pop()).join(" · ") + (job.batch_files.file_count > 2 ? ` · +${job.batch_files.file_count - 2} more` : ""), "metadata batch-file-preview");
-        files.title = files.textContent;
-        meta.append(files);
-      }
-      for (const reason of (skipped ? [] : job.batch_files?.reasons || []).slice(0, 1)) {
-        const text = shortJobReason(reason.reason);
-        const count = batchReasonLabel(job, reason);
-        const line = node("p", `${count}: ${text}`, "metadata batch-reason");
-        line.title = reason.reason;
-        meta.append(line);
-      }
-      if (job.batch?.dry_run) meta.append(node("p", queueOutcome(job), "metadata preview-note"));
       const actions = jobControls(job);
       if (job.parent_action_id) {
         const parent = button(
@@ -5149,15 +5282,60 @@ async function loadJobs(more = false) {
         actions.append(parent);
       }
       compactQueueActions(actions);
-      row.append(heading, meta);
-      const footer = node("div", "", "job-footer");
-      footer.append(skipped ? skippedBatchOutcome(job) : presentation.showTelemetry ? telemetry(job) : batchProgress(job) || node("div", queueOutcome(job), "metadata job-outcome"));
-      if (actions.children.length) {
-        if (actions.children.length > 1)
-          actions.classList.add("multiple-actions");
-        footer.append(actions);
+      let main = [...actions.children].find(child => /\baction-main\b/.test(child.className));
+      if (!main && flagged) {
+        main = button("Review", () => openJob(job.id), "action-main");
+        main.title = "Review the file that needs a decision";
       }
-      row.append(footer);
+      // One sentence says what happened or what runs now; the one thing to do
+      // next is a link at its end. Everything else is in the More actions menu.
+      // The generic fallback says nothing; a batch with files to review says how many.
+      const fallback = queueOutcome(job);
+      const reviewing = visibleBatch(job)?.waiting_decision || visibleBatch(job)?.review;
+      const outcome = fallback !== "Finished · Open job for details" ? fallback : reviewing > 0 ? `${reviewing} ${reviewing === 1 ? "file needs" : "files need"} your review · Originals unchanged` : "";
+      const failedLine = job.status === "failed" && outcome === "Open job for error details" ? shortJobReason(job.error) || (job.batch_files?.reasons?.[0] ? shortJobReason(job.batch_files.reasons[0].reason) : "") : "";
+      const headline = replacementHeadline(job);
+      const sentenceText = skipped || presentation.showTelemetry && !headline ? "" : failedLine || headline || outcome;
+      if (sentenceText || main) {
+        const sentence = node("p", sentenceText && main ? `${sentenceText} ` : sentenceText, `job-sentence${presentation.status === "Failed" ? " failed" : ""}`);
+        if (sentenceText) sentence.title = sentenceText;
+        if (main) sentence.append(main);
+        meta.append(sentence);
+      }
+      // Facts about the job on one quiet line.
+      const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.facts ? (presentation.facts.length ? [presentation.kind, ...presentation.facts].join(" · ") : "") : presentation.summary;
+      if (summaryText) {
+        const summary = node("p", summaryText, "metadata job-summary");
+        summary.title = summaryText;
+        meta.append(summary);
+      }
+      for (const reason of (skipped ? [] : job.batch_files?.reasons || []).slice(0, 1)) {
+        const text = shortJobReason(reason.reason);
+        if (text === failedLine && !job.error) continue;
+        const count = batchReasonLabel(job, reason);
+        const line = node("p", `${count}: ${text}`, "metadata batch-reason");
+        line.title = reason.reason;
+        meta.append(line);
+      }
+      const menu = [...actions.children].filter(child => child !== main);
+      row.append(heading, meta);
+      const live = skipped ? null : presentation.showTelemetry ? telemetry(job, {segments: true}) : batchProgress(job, {segments: true});
+      const spread = skipped || live ? null : batchSegments(visibleBatch(job));
+      let body = skipped ? skippedBatchOutcome(job) : live;
+      if (spread) {
+        body = node("div", "", "job-progress batch-summary");
+        body.append(spread.bar, node("span", spread.legend, "batch-legend metadata"));
+      }
+      if (body) {
+        const footer = node("div", "", "job-footer");
+        footer.append(body);
+        row.append(footer);
+      }
+      if (menu.length) {
+        actions.replaceChildren(...menu);
+        row.className += ` has-menu rail-${Math.min(3, menu.length)}`;
+        row.append(actions);
+      }
       $("jobs-list").append(row);
     }
     if (!state.operationJobs.size)
@@ -5435,20 +5613,12 @@ function renderWorkerActivity(data) {
   if (nodes.length > 1) $("worker-slot-usage").hidden = true;
   // Activity only reports; the editors live in Settings.
   $("worker-open-settings").hidden = $("worker-parallel-form").hidden && $("worker-slot-split").hidden;
-  for (const n of nodes) {
-    // With several nodes each one is a column of its own: heading over its slots.
-    let target = $("worker-slots");
-    if (nodes.length > 1) {
-      const slots = n.activity?.slots;
-      const heading = !n.available || !n.activity ? `${n.name} · ${n.message || "Unavailable"}`
-        : `${n.name} · ${n.activity.worker_slots_used}/${n.activity.worker_slots_total} occupied${slots?.split ? ` · Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total}` : ""}`;
-      const group = node("section", "", "worker-node-group");
-      target = node("div", "", "worker-node-slots");
-      group.append(node("p", heading, "worker-node-heading"), target);
-      $("worker-slots").append(group);
-    }
-    if (n.available && n.activity) renderSlotGrid(n.activity, n.name, target);
-  }
+  const groups = nodes.map(n => ({n, entries: n.available && n.activity ? slotEntries(n.activity, n.name) : []}));
+  // Phones get a row per node that opens onto its slots; wide screens get a
+  // table of what is running. Both are in the page and the stylesheet picks one.
+  const compact = node("div","","slots-compact");
+  compact.append(...groups.map(({n, entries}) => slotNodeDetails(n, entries)));
+  $("worker-slots").append(compact, slotTable(groups));
 }
 // Phases where the worker has no percentage to give: it is still getting the
 // file ready, or (pass 1 of a two-pass x265) analysing it. The progress file
@@ -5506,8 +5676,10 @@ function slotProgressBlock(job, alive) {
   }
   return block;
 }
-// One node's slots. Each node keeps its own slot positions.
-function renderSlotGrid(activity, name, target = $("worker-slots")) {
+// One node's slots. Each node keeps its own slot positions. An entry is a free
+// slot, a slot the worker says is busy without saying with what (an older
+// worker), or a slot with its job.
+function slotEntries(activity, name) {
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
   const shown = Math.min(16, pools.total);
@@ -5528,25 +5700,97 @@ function renderSlotGrid(activity, name, target = $("worker-slots")) {
       if (found) break;
     }
   }
+  const entries = [];
   for (let i=0;i<shown;i++) {
-    const row = node("div","","worker-slot"), job = jobs.find(job => assigned.get(job.id) === i);
-    if (!job) {
-      const unknownOccupied = !activity.details_available && i < activity.worker_slots_used;
-      row.append(node("strong",`${pools.label(i)} · ${unknownOccupied ? "Occupied" : "Available"}`));
-      row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
-    } else {
-      const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
-      row.append(node("strong",`${pools.label(i)} · ${job.file}`));
-      row.children[0].title = job.file;
-      const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
-      row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
-      row.append(slotProgressBlock(job, !stale));
-      const facts = slotFacts(job, stale), line = node("p", facts.text, "metadata slot-facts");
-      line.title = facts.title;
-      row.append(line);
-    }
-    target.append(row);
+    const job = jobs.find(job => assigned.get(job.id) === i);
+    entries.push({label: pools.label(i), job, unknown: !job && !activity.details_available && i < activity.worker_slots_used});
   }
+  return entries;
+}
+const slotKind = job => job.kind === "podcast" ? "Podcast processing" : "Full conversion";
+// Phone layout: a free slot is one line, a busy one the file, its bar and one
+// line of facts. Everything about the job is on the row; nothing needs a tap.
+function slotRow(entry) {
+  const {label, job} = entry;
+  const row = node("div","",`worker-slot${job || entry.unknown ? "" : " idle"}`);
+  if (!job) {
+    row.append(node("strong",`${label} · ${entry.unknown ? "Occupied" : "Available"}`));
+    if (entry.unknown) row.append(node("p","File details require the updated video worker.","metadata"));
+    return row;
+  }
+  const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
+  row.append(node("strong",`${label} · ${job.file}`));
+  row.children[0].title = job.file;
+  row.append(slotProgressBlock(job, !stale));
+  const facts = slotFacts(job, stale), elapsed = activityElapsed(job.started_at);
+  const line = node("p", [facts.text, slotKind(job), elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), `metadata slot-facts${stale ? " warn" : ""}`);
+  line.title = facts.title;
+  row.append(line);
+  return row;
+}
+// One node as a row that opens onto its slots. Open while something runs or is
+// wrong, shut when it is idle, until the person opens or shuts it themselves.
+function slotNodeDetails(n, entries) {
+  const online = Boolean(n.available && n.activity);
+  const busy = entries.filter(e => e.job || e.unknown).length;
+  const stale = entries.some(e => e.job && !heartbeatAlive(workerHeartbeatState(e.job.heartbeat_at)));
+  const key = n.name || "", chosen = state.slotNodeOpen?.get(key);
+  const details = node("details","","slot-node");
+  details.open = chosen ?? (!online || busy > 0);
+  details.dataset.state = !online ? "down" : stale ? "stale" : busy ? "busy" : "idle";
+  const summary = node("summary");
+  const split = n.activity?.slots?.split ? n.activity.slots : null;
+  summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
+    node("span", !online ? n.message || "Unavailable" : `${busy}/${n.activity.worker_slots_total}${busy ? "" : " · all available"}`, "metadata"));
+  if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
+  summary.append(node("span","","slot-chevron"));
+  // The click runs before the details toggles: the new state is the opposite.
+  summary.addEventListener("click", () => { (state.slotNodeOpen ||= new Map()).set(key, !details.open); });
+  const body = node("div","","slot-node-body");
+  body.append(...entries.map(slotRow));
+  details.append(summary, body);
+  return details;
+}
+// Desktop layout: the slots that are doing something as a table, the rest in a line.
+function slotTable(groups) {
+  const wrap = node("div","","slots-table");
+  const multi = groups.length > 1, busy = [], free = [], down = [];
+  for (const {n, entries} of groups) {
+    if (!(n.available && n.activity)) { down.push(`${n.name} · ${n.message || "Unavailable"}`); continue; }
+    const idle = entries.filter(e => !e.job && !e.unknown).length;
+    if (idle) free.push([n.name, idle]);
+    for (const e of entries) if (e.job || e.unknown) busy.push({n, e});
+  }
+  if (busy.length) {
+    const table = node("table"), head = node("tr");
+    for (const title of ["Slot", "File", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
+    const thead = node("thead");
+    thead.append(head);
+    const tbody = node("tbody");
+    for (const {n, e} of busy) {
+      const row = node("tr"), slot = multi ? `${n.name} · ${e.label}` : e.label;
+      row.append(node("td", slot));
+      if (!e.job) {
+        const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
+        note.colSpan = 5;
+        row.append(note);
+      } else {
+        const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
+        const file = node("td", job.file, "slot-file"), progress = node("td"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        file.title = job.file;
+        progress.append(slotProgressBlock(job, !stale));
+        encode.title = facts.title;
+        row.append(file, progress, encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
+      }
+      tbody.append(row);
+    }
+    table.append(thead, tbody);
+    wrap.append(table);
+  }
+  const freeCount = free.reduce((sum, [, count]) => sum + count, 0);
+  if (freeCount) wrap.append(node("p", `${freeCount} ${freeCount === 1 ? "slot" : "slots"} available${multi ? ` · ${free.map(([name, count]) => `${name} ${count}`).join(", ")}` : ""}`, "metadata slot-idle-line"));
+  for (const text of down) wrap.append(node("p", text, "metadata slot-down"));
+  return wrap;
 }
 async function refreshWorkerActivity(force) {
   if (state.activityRequest || (!force && $("workspace").hidden)) return;
@@ -5562,7 +5806,12 @@ async function refreshWorkerActivity(force) {
   } finally { state.activityRequest = false; }
 }
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
+// A chosen filter lights the filter button, since the select itself is only an icon.
+function markQueueFilter() {
+  $("job-filter-pick").classList.toggle("on", $("job-filter").value !== "all");
+}
 $("job-filter").addEventListener("change", () => {
+  markQueueFilter();
   state.jobsLoaded = 0;
   state.jobsHasMore = false;
   writeNavigation();
@@ -7373,9 +7622,6 @@ setInterval(async () => {
 }, 5000);
 if (typeof window !== "undefined") setConnection(serverReachable);
 
-$("close-podcast").addEventListener("click", () => $("podcast-dialog").close());
-$("podcast-new").addEventListener("click", () => { $("podcast-dialog").showModal(); safe(async () => { const data=await api("podcasts"); const select=$("podcast-id"); select.replaceChildren(); for (const id of data.podcasts || []) option(select,id,id); $("podcast-create-status").textContent=data.enabled && data.podcasts?.length ? "" : "Enable a podcast in the server configuration first."; }); });
-$("podcast-form").addEventListener("submit", event => { event.preventDefault(); safe(async () => { const result=await tool("action_run",{action:"clean_podcast_ads",inputs:JSON.stringify({podcast_id:$("podcast-id").value,path:$("podcast-source").value,output_path:$("podcast-output").value})}); $("podcast-dialog").close(); await loadJobs(); await openJob(result.id || result.action?.id); }); });
 async function reviewPodcastCuts(id) {
  const content=[]; let offset=0,review;
  do { review=await tool("podcast_review",{id,offset}); if (!review.digest) throw new Error("Could not read cut review."); for (const b of review.boundaries || []) content.push(node("p",`${(b.cut.start_ms/1000).toFixed(2)}–${(b.cut.end_ms/1000).toFixed(2)} s · ${b.cut.first_id}–${b.cut.last_id}: ${b.first.text} … ${b.last.text}. Before: ${b.before.map(u=>u.text).join(" ")} · After: ${b.after.map(u=>u.text).join(" ")}`,"metadata")); offset=review.next_offset; } while(review.has_more);

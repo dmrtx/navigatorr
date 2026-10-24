@@ -191,6 +191,9 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_reconciling", WaitingReason: reason, Outputs: ec.State}, nil
 	}
 	if id == "" {
+		if held, reason := e.drainHold(); held {
+			return drainBlockedResult("podcast "+op, reason), nil
+		}
 		id = fmt.Sprintf("podcast-%s-%s-%d", ec.InstanceID, op, getInt(ec.State, "podcast_"+op+"_attempt"))
 		ec.State[key] = id
 		ec.State["job_id"] = id

@@ -84,6 +84,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerActionTools(s, actEngine)
 	registerPodcastTools(s, actEngine)
 	registerWorkerHealth(s, actEngine)
+	registerWorkerDrain(s, actEngine)
 	return actEngine
 }
 

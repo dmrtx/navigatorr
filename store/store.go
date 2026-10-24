@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 14
+const SchemaVersion = 15
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -363,6 +363,9 @@ var migrations = []migration{
 		// The worker a batch item's child was assigned. '' on earlier rows,
 		// which belong to video-worker (see action/worker_affinity.go).
 		`ALTER TABLE transcode_batch_items ADD COLUMN worker TEXT NOT NULL DEFAULT ''`,
+	}},
+	{version: 15, statements: []string{
+		`CREATE TABLE worker_drain (id INTEGER PRIMARY KEY CHECK (id = 1), enabled INTEGER NOT NULL, since TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
 	}},
 }
 

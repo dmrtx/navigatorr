@@ -823,6 +823,12 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
+		// Worker drain starts no new child, so no file is probed or hashed for
+		// a worker that is about to be deployed. Running children keep going.
+		if held, _ := e.drainHold(); held {
+			break
+		}
+
 		// The free video slots across the workers, capped by
 		// transcode.max_parallel_jobs when set (see batch_fanout.go).
 		availableSlots := e.batchAvailableSlots(ctx, items, activeCount)
@@ -968,10 +974,14 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 	}
 	if queuedCount > 0 {
+		reason := fmt.Sprintf("%d item(s) queued for transcode", queuedCount)
+		if held, _ := e.drainHold(); held {
+			reason += "; worker drain is holding new jobs"
+		}
 		return StepResult{
 			Status:           StepWaitingExternal,
 			WaitingCondition: "queued",
-			WaitingReason:    fmt.Sprintf("%d item(s) queued for transcode", queuedCount),
+			WaitingReason:    reason,
 			Outputs:          batchOutputs,
 		}, nil
 	}
