@@ -3184,7 +3184,9 @@ function batchProgress(job, {segments = false} = {}) {
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
-  let estimate = (processed + partial) / batch.total;
+  // A cancelled file will never run, so it is not work left to do.
+  const workTotal = Math.max(1, batch.total - count("cancelled"));
+  let estimate = (processed + partial) / workTotal;
   if (active && job.replacement_requested) {
     const promotion = batch.promotion;
     const conversion = Math.min(1,estimate);
@@ -3205,8 +3207,8 @@ function batchProgress(job, {segments = false} = {}) {
     result.append(value, parts.bar, node("span", parts.legend, "batch-legend metadata"));
   } else {
     const bar = document.createElement("progress");
-    bar.max = batch.total;
-    bar.value = percent / 100 * batch.total;
+    bar.max = workTotal;
+    bar.value = percent / 100 * workTotal;
     bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
     result.append(counts, value, bar);
   }

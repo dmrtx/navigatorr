@@ -2564,8 +2564,12 @@ test("batch progress counts resolved files independently of individual worker pe
   assert.equal(progress.children[2].max, 23);
   const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
   assert.equal(mixed.children[0].textContent, "6 / 10 files finished");
-  assert.equal(mixed.children[1].textContent, "60%");
+  assert.equal(mixed.children[1].textContent, "67%");
   assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
+  // A cancelled file is not work left to do: one file done, one cancelled is complete, not half done.
+  const cancelledOne = h.run('batchProgress({status:"waiting_external",batch:{total:2,completed:1,cancelled:1}})');
+  assert.equal(cancelledOne.children[1].textContent, "~99%");
+  assert.equal(cancelledOne.children[2].max, 1);
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
   assert.equal(h.run('batchProgress({batch:{total:0}})'), null);
   assert.equal(h.run('batchProgress({batch:{completed:2}})'), null);
