@@ -1667,9 +1667,16 @@ main {
 .job-progress meter {
   width: 100%;
   min-width: 0;
-  height: 5px;
+  height: 6px;
   accent-color: var(--forest);
 }
+/* The same bar as a batch: 6px, rounded, on the track colour. */
+.job-row .job-progress meter { appearance: none; border: 0; border-radius: 3px; background: var(--track); }
+.job-row .job-progress meter::-webkit-meter-bar { height: 6px; border: 0; border-radius: 3px; background: var(--track); }
+.job-row .job-progress meter::-webkit-meter-optimum-value,
+.job-row .job-progress meter::-webkit-meter-suboptimum-value,
+.job-row .job-progress meter::-webkit-meter-even-less-good-value { background: var(--forest); border-radius: 3px; }
+.job-row .job-progress meter::-moz-meter-bar { background: var(--forest); border-radius: 3px; }
 .worker-progress > meter {
   grid-column: 1 / -1;
   grid-row: 2;
@@ -2625,7 +2632,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 @media (max-width: 700px) {
   .job-row .job-footer {
     height: auto;
-    min-height: var(--control-size);
+    min-height: 0;
     align-items: flex-start;
   }
   .job-row .job-footer > .job-outcome,
