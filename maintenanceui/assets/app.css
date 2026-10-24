@@ -1736,10 +1736,12 @@ main {
   white-space: nowrap;
 }
 .batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 1; min-width: 56px; color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
-.batch-item-row > .status-badge { grid-column: 3; grid-row: 1; min-width: 108px; justify-content: center; white-space: nowrap; }
+.batch-item-row > .status-badge { grid-column: 3; grid-row: 1; min-width: 108px; min-height: 22px; padding: 2px 8px; border-radius: 11px; justify-content: center; font-size: 12px; white-space: nowrap; }
+/* A row with no menu still leaves the menu's place empty, so the actions line up. */
+.batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { content: ""; flex: 0 0 32px; }
 .batch-item-row > .batch-file-actions { grid-column: 4; grid-row: 1; display: flex; justify-content: flex-end; gap: 6px; min-width: 150px; margin: 0; }
 .batch-item-row > .batch-file-activity, .batch-item-row > .muted { color: var(--ink); font-size: 13px; line-height: 1.4; }
-.batch-item-row > .batch-file-activity { color: var(--forest); }
+.batch-item-row > .batch-file-activity { color: var(--muted); font-size: 12px; }
 .batch-item-row > .batch-file-tracks, .batch-item-row > .batch-file-profile { color: var(--muted); font-size: 12px; line-height: 1.4; }
 .batch-item-row .batch-file-actions button {
   min-height: 30px;
@@ -1756,13 +1758,21 @@ main {
 /* The failure card keeps its own button row under the line. */
 .batch-item-row > .replacement-failure .batch-file-actions { grid-column: auto; grid-row: auto; flex-wrap: wrap; }
 @media (max-width: 560px) {
-  /* Narrow screens: name and state on one line, the rest below. */
-  .batch-item-row > .batch-file-name { grid-column: 1; white-space: normal; overflow-wrap: anywhere; }
-  .batch-item-row > .batch-file-saved { grid-column: 1; grid-row: 2; min-width: 0; text-align: left; }
-  .batch-item-row > .status-badge { grid-column: 2; }
-  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; min-width: 0; }
-  .batch-item-row.has-saved > .batch-file-actions { grid-row: 3; }
-  .batch-item-row > .status-badge { min-width: 0; }
+  /* Narrow screens, two lines per file: name and state on top; the actions
+     and, to their right, what it saves underneath. */
+  .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .batch-item-row > .batch-file-name {
+    grid-column: 1;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .batch-item-row > .status-badge { grid-column: 2; min-width: 0; }
+  .batch-item-row > .batch-file-actions { grid-column: 1; grid-row: 2; justify-content: flex-start; min-width: 0; }
+  .batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 2; align-self: center; min-width: 0; text-align: right; }
+  .batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { content: none; }
   .batch-item-row .more-menu { right: auto; left: 0; }
 }
 .batch-item-row .batch-file-name a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
@@ -1805,6 +1815,16 @@ main {
   border: 0;
   border-radius: 6px;
   text-align: left;
+}
+/* Near the bottom of the dialog the menu opens upward so it is never cut off. */
+.batch-item-row .more-actions.up .more-menu { top: auto; bottom: calc(100% + 4px); }
+/* Fingers need bigger targets than a pointer does. */
+@media (pointer: coarse) {
+  .batch-item-row .batch-file-actions { gap: 10px; }
+  .batch-item-row .batch-file-actions button { min-height: 44px; padding: 0 16px; border-radius: 22px; }
+  .batch-item-row .more-actions > summary { width: 44px; height: 44px; border-radius: 22px; }
+  .batch-item-row .batch-file-actions .more-menu button { min-height: 44px; border-radius: 8px; }
+  .batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { flex-basis: 44px; }
 }
 
 /* Savings and completed replacement history. */

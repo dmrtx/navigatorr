@@ -727,8 +727,8 @@ test("batch file detail and worker slots agree about a long measurement and lost
   const h = metricProgressHarness();
   h.run('progressJob.batch={total:2,running:1};progressJob.activities=[{id:"child",worker:progressJob.worker,current_step:0,stages:[{name:"wait_transcode"}]}];');
   const label = h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)');
-  assert.match(label, /Measuring final quality.*Worker heartbeat received/);
-  assert.doesNotMatch(label, /stale|No updates/);
+  // The file line stays quiet while the worker is alive; the batch progress text keeps the heartbeat.
+  assert.equal(label, "Measuring final quality");
   assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring final quality.*Worker heartbeat received/);
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:15:00Z";');
   assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /No worker heartbeat for 7m 54s/);
@@ -3319,13 +3319,15 @@ test("batch outcome buttons reveal current decisions, readable skips and ready r
   assert.match(text(rows[1]),/quality target; original kept/);
   assert.match(text(rows[2]),/Needs attention.*Change goal.*Search reached its limit/);
   assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
-  for (const [index,label] of [[0,"Candidate ready"],[1,"Skipped"],[2,"Needs attention"]]) {
+  // Candidate ready opens the same file as the name does, so its badge is not a second button.
+  assert.equal(rows[0].children.some(el=>el.className.includes("status-action")),false);
+  for (const [index,label] of [[1,"Skipped"],[2,"Needs attention"]]) {
     const badge=rows[index].children.find(el=>el.className.includes("status-action"));
     assert.ok(badge,`${label} is actionable`);
     await badge.listeners.get("click")();
   }
   await all(rows[0]).find(el=>el.textContent==="Replace file").listeners.get("click")();
-  assert.deepEqual(calls,[["open","ready-child"],["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
+  assert.deepEqual(calls,[["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
 });
 
 test("file recovery freezes one item across review and submission and never falls back to the whole batch",async()=>{

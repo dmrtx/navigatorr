@@ -6042,7 +6042,7 @@ function batchFileActivity(item, job) {
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
-    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && heartbeatAlive(observation.heartbeat) ? " · Worker heartbeat received; last measurement shown" : eta ? ` · ${eta}` : "");
+    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : eta ? ` · ${eta}` : "");
   }
   if (activity?.work?.phase === "waiting_for_hash_slot") return "Waiting to verify source";
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
@@ -6093,6 +6093,13 @@ function foldBatchFileActions(actions, itemKey) {
     more.open = false;
     toggle.focus?.({preventScroll: true});
   }, true);
+  // Near the bottom of the dialog the menu opens upward, so it is never cut off.
+  more.addEventListener("toggle", () => {
+    if (!more.open) return;
+    const edge = more.closest?.("dialog")?.getBoundingClientRect?.().bottom ?? window.innerHeight;
+    const room = edge - toggle.getBoundingClientRect().bottom;
+    more.classList.toggle("up", room < menu.getBoundingClientRect().height + 12);
+  });
   more.addEventListener("focusout", e => {
     if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
   });
@@ -6121,7 +6128,7 @@ async function loadBatchItems(id, revision) {
     const queued = item.replacement_plan === "queued";
     const failure = item.replacement_failure;
     const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
-    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
+    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
     // The name opens the file, so there is no separate View file button.
     const fileName = item.display_label || (item.file_path || "").split("/").pop();
     const nameCell = node("span", item.child_action_id ? "" : fileName, "metadata batch-file-name");
