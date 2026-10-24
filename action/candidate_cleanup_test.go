@@ -1020,3 +1020,34 @@ func TestDiscardLeftoverCandidateRefusesOtherActions(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// One job's leftovers are listed from its own attempts only: another job's
+// files, ready candidates and ids that are not attempts never appear.
+func TestLeftoverCandidatesOfListsOnlyTheNamedAttempts(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := candidateEngine(t, st, root, nil)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	original := func(n string) string {
+		path := filepath.Join(season, "sample-episode-"+n+".mkv")
+		writeCandidateFile(t, path, "original "+n)
+		return path
+	}
+	cancelled := seedCandidateAttempt(t, st, "cancelled", StatusCancelled, original("01"), "job-cancelled", nil, nil)
+	writeCandidateFile(t, cancelled+".partial.job-cancelled", strings.Repeat("p", 30))
+	other := seedCandidateAttempt(t, st, "other", StatusFailed, original("02"), "job-other", nil, nil)
+	writeCandidateFile(t, other, strings.Repeat("o", 50))
+	ready := seedCandidateAttempt(t, st, "ready", StatusCompleted, original("03"), "job-ready", nil, nil)
+	writeCandidateFile(t, ready, "awaiting replacement")
+
+	page, err := e.LeftoverCandidatesOf(context.Background(), []string{"cancelled", "ready", "missing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ActionID != "cancelled" || page.Bytes != 30 {
+		t.Fatalf("only the cancelled attempt of this job leaves files: %+v", page)
+	}
+	if page, err = e.LeftoverCandidatesOf(context.Background(), nil); err != nil || len(page.Items) != 0 {
+		t.Fatalf("no ids, no files: %+v %v", page, err)
+	}
+}

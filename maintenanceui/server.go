@@ -136,6 +136,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/library", s.library)
 	mux.HandleFunc("GET /api/maintenance/operations", s.operations)
 	mux.HandleFunc("POST /api/maintenance/archive", s.archive)
+	mux.HandleFunc("GET /api/maintenance/job-leftovers", s.jobLeftovers)
+	mux.HandleFunc("POST /api/maintenance/job-leftovers", s.jobLeftovers)
 	mux.HandleFunc("GET /api/maintenance/batch-items", s.batchItems)
 	mux.HandleFunc("GET /api/maintenance/batch-preview", s.batchPreview)
 	mux.HandleFunc("POST /api/maintenance/batch-preview", s.batchPreview)

@@ -25,9 +25,13 @@ func stateObject(state map[string]any, key string) map[string]any {
 func BatchSelectionVersion(inst *store.ActionInstance, items []store.TranscodeBatchItem) string {
 	state := map[string]any{}
 	_ = json.Unmarshal([]byte(inst.StateJSON), &state)
+	// Which files the batch holds, not how far each has got: a running batch
+	// admits files and creates their child actions every few seconds, and a
+	// version that followed them would be stale before it could be submitted.
+	// Scopes that depend on one attempt check that attempt on their own.
 	var identity []string
 	for _, it := range items {
-		identity = append(identity, it.ItemKey+"\x00"+it.FilePath+"\x00"+it.ChildActionID)
+		identity = append(identity, it.ItemKey+"\x00"+it.FilePath)
 	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(toJSON(map[string]any{"items": identity, "revision": state["batch_settings_revision"]}))))
 }

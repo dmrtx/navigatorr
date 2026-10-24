@@ -21,27 +21,14 @@ func (s *Server) archive(w http.ResponseWriter, req *http.Request) {
 		fail(w, 503, "maintenance store is required")
 		return
 	}
-	instances, err := st.ListMaintenanceActionSnapshot()
+	root, ids, err := s.workflowMemberIDs(input.ID)
 	if err != nil {
 		fail(w, 500, "read maintenance history")
 		return
 	}
-	records := make([]operationRecord, 0, len(instances))
-	byID := map[string]operationRecord{}
-	for _, inst := range instances {
-		r := operationRecord{inst: inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
-		records = append(records, r)
-		byID[inst.ID] = r
-	}
-	roots, _, members := queueWorkflows(records, byID, queueReplacementLinks(records))
-	root := roots[input.ID]
 	if root == "" {
 		fail(w, 404, "job not found")
 		return
-	}
-	ids := make([]string, 0, len(members[root]))
-	for _, member := range members[root] {
-		ids = append(ids, member.inst.ID)
 	}
 	if err := st.SetMaintenanceArchived(root, ids, *input.Archived); err != nil {
 		if errors.Is(err, store.ErrArchiveActiveWorkflow) {
