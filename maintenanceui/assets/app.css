@@ -711,9 +711,19 @@ main {
 .slots-table th { padding:4px 12px 4px 0; text-align:left; font-size:11px; font-weight:500; color:var(--muted); }
 .slots-table td { padding:8px 12px 8px 0; border-top:1px solid var(--line); vertical-align:top; }
 .slots-table .slot-file { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.slots-table .slot-progress { min-width:150px; margin:0; max-width:none; }
-.slots-table .batch-progress.slot-progress .batch-progress-count,
-.slots-table .batch-progress.slot-progress .batch-progress-percent { line-height: 1.4; }
+.slots-table .slot-phase { white-space:nowrap; color:var(--forest); }
+.slots-table .slot-phase.stale, .slots-table .slot-bar.stale { color:var(--muted); }
+.slots-table .slot-bar { width:210px; min-width:210px; color:var(--forest); font-variant-numeric:tabular-nums; }
+.slots-table .slot-bar-track { display:inline-flex; align-items:center; width:140px; height:1.4em; vertical-align:top; }
+.slots-table .slot-bar-track > progress, .slots-table .slot-bar-track > .slot-progress-bar { flex:1 1 auto; width:100%; max-width:none; min-width:0; }
+.slots-table .slot-bar progress { height:3px; border:0; border-radius:2px; overflow:hidden; accent-color:var(--forest); background:var(--track); }
+.slots-table .slot-bar progress::-webkit-progress-bar { background:var(--track); }
+.slots-table .slot-bar progress::-webkit-progress-value { background:var(--forest); border-radius:3px; }
+.slots-table .slot-bar progress::-moz-progress-bar { background:var(--forest); border-radius:3px; }
+.slots-table .slot-bar.stale progress::-webkit-progress-value { background:var(--muted); }
+.slots-table .slot-bar.stale progress::-moz-progress-bar { background:var(--muted); }
+.slots-table .slot-bar.stale .slot-progress-bar::after { background:var(--muted); animation:none; width:0; }
+.slots-table .slot-bar-percent { display:inline-block; width:56px; text-align:right; font-weight:500; line-height:1.4; vertical-align:top; }
 .slot-idle-line, .slot-down { margin:8px 0 0; }
 .slots-table table + .slot-idle-line { padding-top:8px; border-top:1px solid var(--line); }
 .slot-down { color:var(--danger); }

@@ -2026,8 +2026,12 @@ test("worker activity gives each node a row that opens onto its slots, and a tab
   assert.equal(rows.length,1);
   assert.equal(rows[0].children[0].textContent,"m1 · Slot 1");
   assert.equal(rows[0].children[1].textContent,"one.mkv");
-  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
-  assert.equal(rows[0].children[4].textContent,"Full conversion");
+  // The phase and the bar have a cell each, so every bar lines up whatever the phase is called.
+  assert.deepEqual(table.children[0].children[0].children[0].children.map(c=>c.textContent),["Slot","File","Phase","Progress","Encode","Kind","Elapsed"]);
+  assert.equal(rows[0].children[2].textContent,"Encoding");
+  assert.equal(rows[0].children[3].children[1].textContent,"10.0%");
+  assert.equal(rows[0].children[4].textContent,"Waiting for the first update");
+  assert.equal(rows[0].children[5].textContent,"Full conversion");
   assert.equal(table.children[1].textContent,"1 slot available · m4 1");
   // What a person opened or shut stays that way on the next refresh.
   idle.children[0].listeners.get("click")();
