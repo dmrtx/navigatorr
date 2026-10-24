@@ -296,6 +296,53 @@ test("terminal jobs expose archive and archived jobs restore; active jobs never 
   pending.resolve({archived:true});await first;assert.equal(h.run('state.busyJobs.size'),0);
 });
 
+test("archiving a job offers to delete the temporary files its encode left, and keeps them on request", async () => {
+  for (const [name, answer, wantPost, wantArchive] of [
+    ["delete", true, true, true],
+    ["keep", "keep", false, true],
+    ["back", false, false, false],
+  ]) {
+    const h=harness(), calls=[], reviews=[];
+    h.context.record=(path,body)=>{calls.push(body ? `POST ${path}` : `GET ${path}`);return path.startsWith("job-leftovers") ? (body ? {removed:2,kept:0,freed_bytes:3e9} : {id:"done",files:2,bytes:3e9,can_delete:true}) : {archived:true};};
+    h.context.review=o=>{reviews.push(o);return Promise.resolve(answer);};
+    h.run('state.info={allow_destructive:true};controls=()=>{};loadJobs=async()=>{};api=async(...args)=>record(...args);reviewAction=async o=>review(o);');
+    await h.run('archiveJob({id:"done"},true)');
+    assert.equal(reviews.length,1,name);
+    assert.match(JSON.stringify(reviews[0].content),/2 temporary files \(3\.00 GB\)/,name);
+    assert.equal(calls.includes("POST job-leftovers"),wantPost,name);
+    assert.equal(calls.includes("POST archive"),wantArchive,name);
+  }
+});
+
+test("archiving skips the question when nothing was left, when deleting is off, and when the lookup fails", async () => {
+  for (const [info, reply] of [
+    [{allow_destructive:true},{id:"done",files:0,bytes:0,can_delete:true}],
+    [{allow_destructive:false},{id:"done",files:2,bytes:1,can_delete:true}],
+    [{allow_destructive:true},new Error("offline")],
+  ]) {
+    const h=harness(), calls=[];
+    h.context.record=(path,body)=>{calls.push(path);if(path.startsWith("job-leftovers")){if(reply instanceof Error)throw reply;return reply;}return {archived:true};};
+    h.context.info=info;
+    h.run('state.info=info;controls=()=>{};loadJobs=async()=>{};api=async(...args)=>record(...args);reviewAction=async()=>{throw new Error("must not ask");};');
+    await h.run('archiveJob({id:"done"},true)');
+    assert.ok(calls.includes("archive"));
+  }
+});
+
+test("cancelling says how many temporary files the encode left", async () => {
+  const h=harness(), notes=[];
+  h.context.note=t=>notes.push(t);
+  h.context.record=()=>({id:"j",files:3,bytes:2e9,can_delete:true});
+  h.run('notify=note;api=async(...args)=>record(...args);');
+  await h.run('noteJobLeftovers({id:"j"})');
+  assert.equal(notes.length,1);
+  assert.match(notes[0],/3 temporary files \(2\.00 GB\)/);
+  assert.match(notes[0],/Archive the job to delete them/);
+  h.context.record=()=>({id:"j",files:0,bytes:0,can_delete:true});
+  await h.run('noteJobLeftovers({id:"j"})');
+  assert.equal(notes.length,1);
+});
+
 test("recovery inventory loads through empty pages, deduplicates and exposes original locations and blocked reasons", async () => {
   const h=harness(), offsets=[];
   h.context.read=(_name,args)=>{offsets.push(args.offset);return args.offset===0 ? {items:[],next_offset:25} : {items:[{action_id:"copy",status:"failed",original_path:"/media/Series/episode.mkv",path:"/media/.recovery/original.bak",bytes:1000,partial_bytes:500,reason:"promotion stopped before final cleanup"}],next_offset:args.offset===25 ? 50:null};};
@@ -710,12 +757,149 @@ test("folder sizes distinguish empty, partial and unavailable measurements; late
   assert.match(h.context.target.textContent,/^≥ /);
   h.run('showFolderSize(target,{status:"unavailable"})');
   assert.equal(h.context.target.textContent,"Unavailable");
-  h.run('target.textContent="Calculating…"; state.folder="/old";state.libraryRevision=1;state.folderSizeTargets=new Map([["/old/child",target]]);api=async()=>pending;');
+  h.run('target.textContent="Calculating…"; target.dataset.pending="1"; state.folder="/old";state.tab="library";state.libraryRevision=1;state.folderSizeTargets=new Map([["/old/child",target]]);api=async()=>pending;$("workspace").hidden=false;');
   const load=h.run('updateFolderSizes(1,"/old","",1)');
   h.run('state.libraryRevision=2;state.folder="/new";');
   pending.resolve({items:[{path:"/old/child",folder_size:{status:"ready",bytes:100}}]});
   await load;
   assert.equal(h.context.target.textContent,"Calculating…");
+});
+
+test("folder sizes are only asked for while one is measuring, only for its page, with growing gaps, and never in a hidden tab", async () => {
+  const h=harness();
+  const mk=(page,pending)=>Object.assign(new Element(),{dataset:{page:String(page),pending:pending?"1":"0"}});
+  const settled=mk(0,false), slow=mk(200,true), slowToo=mk(200,true);
+  h.context.settled=settled;h.context.slow=slow;h.context.slowToo=slowToo;
+  const delays=[], fetched=[];
+  h.context.setTimeout=(fn,ms)=>{delays.push(ms);return 1;};
+  h.context.record=url=>{fetched.push(url);return {items:[{path:"/m/slow",folder_size:{status:"ready",bytes:5}}]};};
+  h.run('state.folder="/m";state.tab="library";state.libraryRevision=1;$("workspace").hidden=false;state.folderSizeTargets=new Map([["/m/settled",[settled]],["/m/slow",[slow]],["/m/slow2",[slowToo]]]);api=async url=>record(url);');
+  assert.deepEqual([...h.run("pendingSizePages()")],[200]);
+  // Each round waits longer, up to a ceiling.
+  h.run('state.folderSizesAttempt=0;for(let i=0;i<8;i++)scheduleFolderSizes(1,"/m","",300)');
+  assert.deepEqual(delays,[2000,3000,5000,8000,12000,20000,20000,20000]);
+  // One request, for the page that holds the pending folders, not for all three.
+  await h.run('updateFolderSizes(1,"/m","",300)');
+  assert.equal(fetched.length,1);
+  assert.match(fetched[0],/offset=200/);
+  // Every size settled: no further request is scheduled.
+  delays.length=0;
+  h.run('slow.dataset.pending="0";slowToo.dataset.pending="0";scheduleFolderSizes(1,"/m","",300)');
+  assert.deepEqual(delays,[]);
+  // A hidden tab asks for nothing, even with a size still measuring.
+  h.run('slow.dataset.pending="1";document.hidden=true;scheduleFolderSizes(1,"/m","",300)');
+  assert.deepEqual(delays,[]);
+});
+
+test("coming back to a Files tab that has been open a while checks every page once", async () => {
+  const h=harness();
+  const label=Object.assign(new Element(),{dataset:{page:"0",pending:"0"}});
+  h.context.label=label;
+  const fetched=[];h.context.record=url=>{fetched.push(url);return {items:[]};};
+  h.run('state.folder="/m";state.tab="library";state.libraryRevision=1;$("workspace").hidden=false;state.folderSizeTargets=new Map([["/m/a",[label]]]);state.folderSizesArgs={revision:1,path:"/m",query:"",loaded:250};api=async url=>record(url);state.folderSizesCheckedAt=Date.now();');
+  h.run("resumeFolderSizes()");
+  assert.equal(fetched.length,0);
+  h.run("state.folderSizesCheckedAt=Date.now()-6*60*1000;resumeFolderSizes()");
+  await Promise.resolve();await Promise.resolve();
+  assert.deepEqual(fetched.map(u=>/offset=(\d+)/.exec(u)[1]),["0","100","200"]);
+});
+
+// Ticking several files at once: Shift+click and Shift+arrow tick a range.
+function selectionRows(h, names, folders = []) {
+  const rows = names.map(name => Object.assign(new Element(), { tagName: "INPUT", type: "checkbox", dataset: { selection: `/m/${name}`, ...(folders.includes(name) ? { folder: `/m/${name}` } : {}) }, checked: false }));
+  h.run('$("service").value="folder:/m";state.folderSelected=new Set();fileSelectionChanged=()=>{};');
+  h.elements.get("library-items").querySelectorAll = () => rows;
+  return rows;
+}
+const press = (h, row, key, shiftKey = false) => { let stopped = false; h.elements.get("library-items").listeners.get("keydown")({ target: row, key, shiftKey, preventDefault() { stopped = true; } }); return stopped; };
+const clickRow = (h, row, shiftKey = false) => { row.checked = !row.checked; h.elements.get("library-items").listeners.get("click")({ target: row, shiftKey }); };
+const picked = h => [...h.run("state.folderSelected")].map(path => path.slice(3)).sort();
+
+test("Shift+click ticks every file between the last one ticked and this one", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "b", "c", "d", "e"], ["dir"]);
+  clickRow(h, rows[1]);
+  clickRow(h, rows[3], true);
+  assert.deepEqual(picked(h), ["b", "c", "d"]);
+  assert.deepEqual(rows.map(r => r.checked), [false, true, true, true, false]);
+  // Shift+click backwards, on an unticked row after a ticked one, unticks the range.
+  clickRow(h, rows[4]);
+  clickRow(h, rows[2], true);
+  assert.deepEqual(picked(h), ["b"]);
+});
+
+test("Shift+arrow grows and shrinks a range from the row it started on; arrows alone only move", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "b", "c", "d", "e"]);
+  let focused = null;
+  rows.forEach(row => { row.focus = () => { focused = row; }; });
+  assert.equal(press(h, rows[1], "ArrowDown"), true);
+  assert.equal(focused, rows[2]);
+  assert.deepEqual(picked(h), []);
+  press(h, rows[1], "ArrowDown", true);
+  assert.deepEqual(picked(h), ["b", "c"]);
+  press(h, rows[2], "ArrowDown", true);
+  assert.deepEqual(picked(h), ["b", "c", "d"]);
+  // Back up: the row left behind is unticked, the starting row stays.
+  press(h, rows[3], "ArrowUp", true);
+  assert.deepEqual(picked(h), ["b", "c"]);
+  press(h, rows[2], "ArrowUp", true);
+  press(h, rows[1], "ArrowUp", true);
+  assert.deepEqual(picked(h), ["a", "b"]);
+  // The ends of the list stop the move, and other keys are left alone.
+  assert.equal(press(h, rows[0], "ArrowUp"), false);
+  assert.equal(press(h, rows[4], "ArrowDown"), false);
+  assert.equal(press(h, rows[1], "Enter"), false);
+});
+
+test("a folder row is never part of a range", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "dir", "b"], ["dir"]);
+  rows.forEach(row => { row.focus = () => {}; });
+  clickRow(h, rows[0]);
+  clickRow(h, rows[2], true);
+  assert.deepEqual(picked(h), ["a", "b"]);
+  press(h, rows[0], "ArrowDown", true);
+  assert.deepEqual(picked(h), ["a", "b"]);
+});
+
+test("Encode again sends the file back through the goal it already has", () => {
+  const h = harness();
+  const request = plan => h.run(`sameSettingsRequest(${JSON.stringify(plan)})`);
+  const base = { id: "b-1", item_key: "k", selection_version: "v1", decision_version: "d1" };
+  const kept = { preserve_limits: true, preserve_savings: true, preserve_growth: true };
+  // A batch made with a profile keeps each file's own.
+  assert.deepEqual({ ...request({ ...base, settings: {} }) }, { id: "b-1", scope: "file", item_key: "k", selection_version: "v1", decision_version: "d1", profile: "same", ...kept });
+  // A goal keeps the goal; size also keeps the engine and the size budget it was frozen with.
+  const size = request({ ...base, mode: "size", settings: { allow_hardware: false, hardware_margin_percent: 12, size_budget_percent: 40 } });
+  assert.deepEqual([size.mode, size.allow_hardware, size.hardware_margin_percent, size.size_budget_percent], ["size", false, 12, 40]);
+  assert.equal("size_budget_bytes" in size, false);
+  const siblings = request({ ...base, mode: "size", settings: { size_budget_source: "siblings" } });
+  assert.deepEqual([siblings.allow_hardware, siblings.size_budget_source, siblings.size_budget_sibling_multiplier], [true, "siblings", 1.5]);
+  assert.equal("allow_hardware" in request({ ...base, mode: "quality", settings: {} }), false);
+});
+
+test("a cancelled or failed file offers Encode again; a running or locked one does not", async () => {
+  const items = [
+    { item_key: "k-c", display_label: "Cancelled", status: "cancelled", child_action_id: "t-c", file_path: "/media/tv/C.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-f", display_label: "Failed", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-r", display_label: "Running", status: "running", child_action_id: "t-r", file_path: "/media/tv/R.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-l", display_label: "Locked", status: "cancelled", child_action_id: "t-l", file_path: "/media/tv/L.mkv", mode: "size" },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:4});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const rows = itemRows(h);
+  assert.deepEqual(rows.map((row) => buttonLabels(row).includes("Encode again")), [true, true, false, false]);
+  // It submits the file's own settings without opening the goal dialog.
+  const calls = [];
+  h.context.record = (path, body) => { calls.push([path, body]); return {}; };
+  h.run('api=async()=>({id:"batch-a",item_key:"k-c",mode:"size",selection_version:"v",decision_version:"d",settings:{allow_hardware:true}});commandRequest=async(path,body)=>record(path,body);loadJobs=async()=>{};notify=()=>{};');
+  await flatten(rows[0]).find((e) => e.textContent === "Encode again").listeners.get("click")();
+  assert.equal(calls[0][0], "batch-settings");
+  assert.deepEqual([calls[0][1].scope, calls[0][1].item_key, calls[0][1].mode], ["file", "k-c", "size"]);
+  assert.equal(h.elements.get("reconfigure-batch")?.open || false, false);
 });
 
 test("every startup control exists in the shipped HTML", () => {
@@ -2128,11 +2312,15 @@ test("Access network outages and JSON permission failures do not report session 
 
 test("folder measurements update every alias and resume on returning to Files", async () => {
  const h=harness();h.context.one=new Element();h.context.two=new Element();h.context.controls=()=>{};
- h.run('state.folder="/media";state.libraryRevision=1;state.libraryLoaded=1;state.tab="library";state.folderSizeTargets=new Map([["/media/child",[one,two]]]);$("service").value="folder:/media";api=async()=>({items:[{path:"/media/child",folder_size:{status:"ready",bytes:200}}]});');
+ h.run('state.folder="/media";state.libraryRevision=1;state.libraryLoaded=1;state.tab="library";state.folderSizeTargets=new Map([["/media/child",[one,two]]]);$("service").value="folder:/media";api=async()=>({items:[{path:"/media/child",folder_size:{status:"ready",bytes:200}}]});one.dataset.pending="1";two.dataset.pending="1";');
  await h.run('updateFolderSizes(1,"/media","",1)');
  assert.equal(h.context.one.textContent,"200 B");assert.equal(h.context.two.textContent,"200 B");
  let calls=0;h.context.record=()=>calls++;
- h.run('updateFolderSizes=async()=>record();selectTab("more");selectTab("library");');
+ // Nothing is still measuring and the sizes are fresh: coming back asks for nothing.
+ h.run('one.dataset.pending="0";two.dataset.pending="0";state.folderSizesArgs={revision:1,path:"/media",query:"",loaded:1};state.folderSizesCheckedAt=Date.now();updateFolderSizes=async()=>record();selectTab("more");selectTab("library");');
+ assert.equal(calls,0);
+ // Something still measuring resumes at once.
+ h.run('one.dataset.pending="1";selectTab("more");selectTab("library");');
  assert.equal(calls,1);
  h.run('showFolderSize(one,{status:"calculating",measured_at:"0001-01-01T00:00:00Z"})');
  assert.doesNotMatch(h.context.one.title,/Measured/);
@@ -6656,20 +6844,30 @@ test("Show in Files goes to the file, and says so when the file is outside the m
   assert.match(h.context.notes[0], /outside the media folders/);
 });
 
-test("a failed or cancelled job card shows its file in Files, and so does the open detail of a finished one", () => {
+test("every job card and open job offers its file or folder in Files", () => {
   const h = harness();
   h.run('state.info={allow_destructive:true,roots:["/media"]};');
   const labels = (job, detail = false) => h.run(`jobControls(${JSON.stringify(job)}, ${detail}).children.map(b => b.textContent)`);
   const base = { id: "t-a", action_name: "transcode_media", source_path: "/media/tv/Show S04E13.mkv", mode: "size" };
   assert.ok(labels({ ...base, status: "cancelled" }).includes("Show in Files"));
   assert.ok(labels({ ...base, status: "failed" }).includes("Show in Files"));
-  // A finished job only offers it once it is open, so queue cards stay short.
-  assert.ok(!labels({ ...base, status: "completed" }).includes("Show in Files"));
-  assert.ok(labels({ ...base, status: "completed" }, true).includes("Show in Files"));
-  // No file, a file outside the folders, or a preview run: nothing to show.
+  // Every job offers it, finished or running, in the queue and when open.
+  for (const status of ["completed", "running", "waiting_decision", "pending"]) {
+    assert.ok(labels({ ...base, status }).includes("Show in Files"), status);
+    assert.ok(labels({ ...base, status }, true).includes("Show in Files"), status);
+  }
+  assert.ok(labels({ ...base, status: "completed", batch: { dry_run: true } }).includes("Show in Files"));
+  // A batch of several files shows their folder.
+  const folderJob = { id: "b-1", action_name: "transcode_batch", status: "running", batch_files: { file_count: 3, folder: "/media/tv/Show/Season 4", files: [] } };
+  assert.ok(labels(folderJob).includes("Show in Files"));
+  h.context.routes = [];
+  h.run("applyNavigation = async (route) => routes.push(route);");
+  h.run(`jobControls(${JSON.stringify(folderJob)}).children.find(b => b.textContent === "Show in Files")`).listeners.get("click")();
+  assert.equal(h.context.routes[0].folder, "/media/tv/Show/Season 4");
+  assert.equal(h.context.routes[0].file, "");
+  // No file, a file outside the folders: nothing to show.
   assert.ok(!labels({ id: "t-b", action_name: "transcode_media", status: "cancelled" }).includes("Show in Files"));
   assert.ok(!labels({ ...base, status: "cancelled", source_path: "/elsewhere/clip.mkv" }).includes("Show in Files"));
-  assert.ok(!labels({ ...base, status: "completed", batch: { dry_run: true } }, true).includes("Show in Files"));
   // A replacement job knows its file from the promotion.
   assert.ok(labels({ id: "p-a", action_name: "file_promotion", status: "cancelled", promotion: { original_path: "/media/tv/Show S04E13.mkv" } }).includes("Show in Files"));
   // It only opens something, so a busy job does not disable it.
@@ -6678,7 +6876,7 @@ test("a failed or cancelled job card shows its file in Files, and so does the op
   assert.ok(h.run('navigationLabels').includes("Show in Files"));
 });
 
-test("a failed, cancelled or skipped batch row offers Show in Files, and a running one does not", async () => {
+test("every batch row offers Show in Files when its file is inside the media folders", async () => {
   const items = [
     { item_key: "k-f", display_label: "Failed", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv" },
     { item_key: "k-c", display_label: "Cancelled", status: "cancelled", child_action_id: "t-c", file_path: "/media/tv/C.mkv" },
@@ -6692,7 +6890,7 @@ test("a failed, cancelled or skipped batch row offers Show in Files, and a runni
   await h.run('loadBatchItems("batch-a",2)');
   const rows = itemRows(h);
   const shows = rows.map((row) => buttonLabels(row).includes("Show in Files"));
-  assert.deepEqual(shows, [true, true, true, false, false]);
+  assert.deepEqual(shows, [true, true, true, true, false]);
   const control = flatten(rows[0]).find((e) => e.textContent === "Show in Files");
   // It names the file's own job and keeps working while the batch is busy.
   assert.equal(control.dataset.jobControl, "t-f");

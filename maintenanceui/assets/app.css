@@ -2138,7 +2138,22 @@ pre {
 
 .profile-info { margin: 8px 0 12px; padding: 12px; background: var(--subtle); border-left: 2px solid var(--forest); }
 .profile-info > p:first-child { margin-top: 0; }
-.batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; }
+.batch-progress-explanation { order: 3; flex-basis: 100%; font-size: 11px; line-height: 1.4; min-height: 1.4em; }
+/* A queue row keeps one height while its numbers change from poll to poll: the
+   long lines (file names, reasons, progress and estimates) stay on one line,
+   cut with an ellipsis, with the whole text in their tooltip. Digits have the
+   same width, so a changing size does not move what is beside it. */
+.job-row .batch-file-preview,
+.job-row .batch-reason,
+.job-row .batch-progress-phase,
+.job-row .batch-progress-explanation {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+}
+.job-row .job-meta,
+.job-row .job-footer { font-variant-numeric: tabular-nums; }
 /* The backup cleanup notice spans its row. */
 .job-command {
   display: block;

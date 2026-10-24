@@ -232,7 +232,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("offline", () => setConnection(false));
   window.addEventListener("online", () => safe(reconnect));
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) safe(reconnect);
+    if (!document.hidden) { safe(reconnect); resumeFolderSizes(); }
   });
 }
 function invalidateAuthentication() {
@@ -800,8 +800,7 @@ function selectTab(tab, fromRoute = false) {
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   else if (tab === "library") void refreshFileMarks();
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
-    clearTimeout(state.folderSizesTimer);
-    void updateFolderSizes(state.libraryRevision, state.folder, $("search").value, state.libraryLoaded);
+    resumeFolderSizes();
   }
   if (tab === "recipes" && !fromRoute)
     safe(async () => {
@@ -1607,6 +1606,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
       const sizeLabel = node("span", file.is_dir ? "Calculating…" : bytes(file.size), "media-size");
       if (file.is_dir) {
         showFolderSize(sizeLabel, file.folder_size || {status:"calculating"});
+        sizeLabel.dataset.page = String(state.libraryOffset);
         const targets = state.folderSizeTargets.get(file.path) || [];
         targets.push(sizeLabel);
         state.folderSizeTargets.set(file.path, targets);
@@ -1652,12 +1652,9 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     if (!more) writeNavigation();
     $("library-more").hidden = !page.has_more;
     controls();
-    if (state.folderSizeTargets.size) {
-      const pending = [...state.folderSizeTargets.values()].flat().some(label => label.dataset.pending === "1");
-      state.folderSizesTimer = setTimeout(() => {
-        void updateFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
-      }, pending ? 3000 : 30000);
-    }
+    state.folderSizesAttempt = 0;
+    state.folderSizesCheckedAt = Date.now();
+    scheduleFolderSizes(revision, page.path, $("search").value, state.libraryLoaded);
   } catch (error) {
     if (revision === state.libraryRevision) libraryFailure(error, more);
     throw error;
@@ -1677,26 +1674,57 @@ function showFolderSize(target, size) {
     ? `Total file bytes, excluding symbolic links. Measured ${new Date(size.measured_at).toLocaleString()}. Saved across restarts; changes checked in the background.${size.updating ? " Updating; last measured total remains visible." : ""}`
     : "Measuring total file bytes in this folder.");
 }
-async function updateFolderSizes(revision, path, query, loaded) {
+// Sizes are only asked for while one is still being measured, and only for the
+// pages that hold it. Once every size is settled nothing is requested until the
+// user comes back to the tab after a while.
+const folderSizeDelays = [2000, 3000, 5000, 8000, 12000, 20000];
+const folderSizeStaleMs = 5 * 60 * 1000;
+function pendingSizePages() {
+  const pages = new Set();
+  for (const labels of state.folderSizeTargets?.values() || []) {
+    for (const label of [].concat(labels)) if (label.dataset.pending === "1") pages.add(Number(label.dataset.page) || 0);
+  }
+  return [...pages].sort((a, b) => a - b);
+}
+function scheduleFolderSizes(revision, path, query, loaded) {
+  clearTimeout(state.folderSizesTimer);
+  state.folderSizesArgs = {revision, path, query, loaded};
+  if (!pendingSizePages().length || document.hidden) return;
+  const delay = folderSizeDelays[Math.min(state.folderSizesAttempt || 0, folderSizeDelays.length - 1)];
+  state.folderSizesAttempt = (state.folderSizesAttempt || 0) + 1;
+  state.folderSizesTimer = setTimeout(() => {
+    void updateFolderSizes(revision, path, query, loaded);
+  }, delay);
+}
+// Back in view: finish what is still measuring, or look again if the sizes
+// have been on screen for a while.
+function resumeFolderSizes() {
+  const args = state.folderSizesArgs;
+  if (!args || !state.folderSizeTargets?.size || state.tab !== "library" || document.hidden) return;
+  clearTimeout(state.folderSizesTimer);
+  const stale = Date.now() - (state.folderSizesCheckedAt || 0) > folderSizeStaleMs;
+  if (!stale && !pendingSizePages().length) return;
+  state.folderSizesAttempt = 0;
+  void updateFolderSizes(args.revision, args.path, args.query, args.loaded, stale);
+}
+async function updateFolderSizes(revision, path, query, loaded, everything = false) {
   const auth = state.authRevision;
   const current = () => revision === state.libraryRevision && auth === state.authRevision &&
     state.folder === path && state.tab === "library" && !$("workspace").hidden;
   if (!current() || !state.folderSizeTargets?.size) return;
-  let pending = false;
+  const offsets = everything ? Array.from({length: Math.ceil(loaded / 100)}, (_, i) => i * 100) : pendingSizePages();
   try {
-    for (let offset = 0; offset < loaded; offset += 100) {
+    for (const offset of offsets) {
       const page = await api(`folder?${new URLSearchParams({path, q:query, offset, sizes:"1", sort:$("library-sort").value || "name", listing:state.folderListing || ""})}`);
       if (!current()) return;
       for (const item of page.items || []) {
         const target = state.folderSizeTargets.get(item.path);
         if (!target) continue;
         for (const label of Array.isArray(target) ? target : [target]) showFolderSize(label, item.folder_size);
-        pending ||= item.folder_size?.status === "calculating" || item.folder_size?.updating;
       }
     }
-    if (current()) state.folderSizesTimer = setTimeout(() => {
-      void updateFolderSizes(revision, path, query, loaded);
-    }, pending ? 3000 : 30000);
+    state.folderSizesCheckedAt = Date.now();
+    if (current()) scheduleFolderSizes(revision, path, query, loaded);
   } catch {
     if (current()) for (const targets of state.folderSizeTargets.values()) {
       for (const target of Array.isArray(targets) ? targets : [targets]) {
@@ -1822,6 +1850,63 @@ function fileSelectionChanged() {
   } else if (!singleColumn) configureSelection(false);
   else controls();
 }
+// Ticking a range of the rows on screen. Shift+click ticks everything between
+// the last row ticked and this one; the arrow keys move between rows and
+// Shift+arrow grows or shrinks a range from the row the move started on.
+function fileChecks() {
+  return [...$("library-items").querySelectorAll('input[type="checkbox"]')].filter(input => input.dataset.selection !== undefined && input.dataset.folder === undefined);
+}
+function setFileChecked(input, checked) {
+  const folder = $("service").value.startsWith("folder:");
+  const key = folder ? input.dataset.selection : Number(input.dataset.selection);
+  const chosen = folder ? (state.folderSelected ||= new Set()) : state.selected;
+  if (checked) chosen.add(key); else chosen.delete(key);
+  input.checked = checked;
+}
+// The rows from `from` to `to`, in the order they are shown.
+function rowsBetween(checks, from, to) {
+  const a = checks.findIndex(input => input.dataset.selection === from), b = checks.findIndex(input => input.dataset.selection === to);
+  return a < 0 || b < 0 ? [] : checks.slice(Math.min(a, b), Math.max(a, b) + 1);
+}
+function rowClicked(input, shift) {
+  const checks = fileChecks();
+  const range = shift && state.selectionAnchor ? rowsBetween(checks, state.selectionAnchor, input.dataset.selection) : [];
+  if (range.length) {
+    for (const row of range) setFileChecked(row, input.checked);
+    fileSelectionChanged();
+  }
+  if (range.length && typeof window !== "undefined") window.getSelection?.()?.removeAllRanges();
+  state.selectionAnchor = input.dataset.selection;
+  state.selectionRange = null;
+}
+function rowKeyed(input, event) {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  const all = [...$("library-items").querySelectorAll('input[type="checkbox"]')].filter(box => box.dataset.selection !== undefined);
+  const next = all[all.indexOf(input) + (event.key === "ArrowDown" ? 1 : -1)];
+  if (!next) return;
+  event.preventDefault();
+  next.focus();
+  if (!event.shiftKey) { state.selectionRange = null; return; }
+  if (input.dataset.folder !== undefined || next.dataset.folder !== undefined) return;
+  const checks = fileChecks();
+  // The range starts on the row the key was pressed on, and grows from there.
+  if (!state.selectionRange) state.selectionRange = {anchor: input.dataset.selection, keys: new Set()};
+  const range = rowsBetween(checks, state.selectionRange.anchor, next.dataset.selection);
+  const keys = new Set(range.map(row => row.dataset.selection));
+  for (const row of checks) if (state.selectionRange.keys.has(row.dataset.selection) && !keys.has(row.dataset.selection)) setFileChecked(row, false);
+  for (const row of range) setFileChecked(row, true);
+  state.selectionRange.keys = keys;
+  state.selectionAnchor = state.selectionRange.anchor;
+  fileSelectionChanged();
+}
+$("library-items").addEventListener("click", event => {
+  const input = event.target;
+  if (input?.tagName === "INPUT" && input.type === "checkbox" && input.dataset.selection !== undefined && input.dataset.folder === undefined) rowClicked(input, event.shiftKey);
+});
+$("library-items").addEventListener("keydown", event => {
+  const input = event.target;
+  if (input?.tagName === "INPUT" && input.type === "checkbox" && input.dataset.selection !== undefined) rowKeyed(input, event);
+});
 async function selectAllFiles() {
   if (state.libraryLoading || state.selectionLoading) return;
   const revision = state.libraryRevision, auth = state.authRevision;
@@ -3092,12 +3177,23 @@ function batchProgress(job) {
   if (active) {
     const phases = [...byFile.values()].map(a=>a.label);
     const waiting = count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
-    result.append(node("span", [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files"), "batch-progress-phase metadata"));
+    const phaseText = [...phases,waiting].filter(Boolean).join(" · ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files");
+    const phase = node("span", phaseText, "batch-progress-phase metadata");
+    // One line, whatever the numbers say; the whole text is the tooltip.
+    phase.title = phaseText;
+    result.append(phase);
   }
   // A time is shown only when the worker measured one.
   const etas = active ? [...byFile.values()].map(a => a.eta).filter(eta => eta > 0) : [];
   const left = Math.max(0, batch.total - processed - count("waiting_decision") - count("cancelled"));
-  if (etas.length) result.append(node("span", `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}`, "batch-progress-explanation metadata"));
+  // The line is always there while the batch runs, so the row keeps its height
+  // when an estimate appears or goes away.
+  if (active) {
+    const eta = etas.length ? `Current encode ${remainingLabel(Math.max(...etas))}${left > 0 ? ` · about ${left} ${left === 1 ? "file" : "files"} left` : ""}` : "\u00a0";
+    const explanation = node("span", eta, "batch-progress-explanation metadata");
+    if (etas.length) explanation.title = eta;
+    result.append(explanation);
+  }
   return result;
 }
 function telemetry(job) {
@@ -3745,6 +3841,39 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   }
 }
 
+// The request that sends one file back through the goal it already has: what
+// the dialog would submit if nothing were changed.
+function sameSettingsRequest(plan) {
+  const s = plan.settings || {};
+  const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true};
+  if (!plan.mode) return {...body, profile:"same"};
+  body.mode = plan.mode;
+  if (plan.mode !== "size") return body;
+  body.allow_hardware = s.allow_hardware !== false;
+  if (s.hardware_margin_percent > 0) body.hardware_margin_percent = s.hardware_margin_percent;
+  if (s.size_budget_percent > 0) body.size_budget_percent = s.size_budget_percent;
+  else if (s.size_budget_bytes > 0) body.size_budget_bytes = s.size_budget_bytes;
+  else if (s.size_budget_source === "siblings") Object.assign(body, {size_budget_source:"siblings", size_budget_sibling_multiplier:s.size_budget_sibling_multiplier || 1.5});
+  return body;
+}
+async function encodeFileAgain(id, itemKey) {
+  if (jobIsBusy(id)) return;
+  const auth = state.authRevision;
+  state.busyJobs.add(id);
+  try {
+    const plan = await api(`batch-settings?${new URLSearchParams({id, scope:"file", item_key:itemKey})}`);
+    if (auth !== state.authRevision) return;
+    // A file that automatic testing skipped has no profile to keep.
+    if (plan.requires_explicit_profile) { state.busyJobs.delete(id); await reconfigureBatch(id, false, {item_key:itemKey}); return; }
+    await commandRequest("batch-settings", sameSettingsRequest(plan));
+    if (auth !== state.authRevision) return;
+    await loadJobs();
+    notify("Encoding this file again with the same settings.");
+  } finally {
+    state.busyJobs.delete(id);
+    setConnection(serverReachable);
+  }
+}
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
@@ -3886,11 +4015,58 @@ async function submitReconfiguredBatch() {
   }
 }
 $("reconfigure-form").addEventListener("submit", event => { event.preventDefault(); safe(submitReconfiguredBatch); });
+// Temporary files an unfinished encode left beside its original. Best effort:
+// a failed read must never block archiving or the notice after a cancel.
+async function jobLeftovers(id) {
+  try {
+    const found = await api(`job-leftovers?id=${encodeURIComponent(id)}`);
+    return found?.files > 0 ? found : null;
+  } catch (error) {
+    return null;
+  }
+}
+function leftoverSummary(found) {
+  return `${found.files} temporary ${found.files === 1 ? "file" : "files"} (${bytes(found.bytes)})`;
+}
+async function removeJobLeftovers(job, found) {
+  const result = await api("job-leftovers", {id:job.id});
+  if (!result.kept) return notify(`Removed ${result.removed} temporary ${result.removed === 1 ? "file" : "files"}, freeing ${bytes(result.freed_bytes)}.`);
+  notify(`Removed ${result.removed} of ${found.files} temporary files. ${result.kept} could not be removed${result.error ? `: ${result.error}` : "."}`);
+}
+// After a cancel the encode's partial output stays on the share until someone
+// removes it; say how much, and where it goes away.
+async function noteJobLeftovers(job) {
+  const found = await jobLeftovers(job.id);
+  if (!found) return;
+  notify(`Stopped. ${leftoverSummary(found)} from the encode ${found.files === 1 ? "was" : "were"} left beside the original. Archive the job to delete ${found.files === 1 ? "it" : "them"}.`);
+}
 async function archiveJob(job, archived) {
   if (jobIsBusy(job.id)) return;
   const auth = state.authRevision;
   state.busyJobs.add(job.id);
   try {
+    let found = null;
+    if (archived && state.info?.allow_destructive) {
+      found = await jobLeftovers(job.id);
+      if (auth !== state.authRevision || $("workspace").hidden) return;
+    }
+    if (found?.can_delete) {
+      const chosen = await reviewAction({
+        title: "Archive this job?",
+        content: [
+          node("p", queuePresentation(job).title, "review-filename"),
+          node("p", `Its encode left ${leftoverSummary(found)} beside the original. Originals and files waiting for a decision are never touched.`),
+        ],
+        confirmLabel: "Archive and delete temporary files",
+        cancelLabel: "Back",
+        choices: [{label: "Archive only · keep temporary files", value: "keep"}],
+      });
+      if (!chosen) return;
+      if (chosen !== "keep") {
+        await removeJobLeftovers(job, found);
+        if (auth !== state.authRevision || $("workspace").hidden) return;
+      }
+    }
     await api("archive", {id:job.id,archived});
     if (auth !== state.authRevision || $("workspace").hidden) return;
     if (state.detailJob?.id === job.id) $("job-detail").close();
@@ -4011,12 +4187,14 @@ function openGoalForm(path, options = {}) {
 // The Files location of a file Navigatorr was asked to convert: its media
 // folder, its own folder and the file itself, so the goal form opens on it.
 // null when the file is outside every folder the Files tab can browse.
-function filesRouteFor(path) {
+function filesRouteFor(path, {folder: isFolder = false} = {}) {
   if (typeof path !== "string" || !path.startsWith("/")) return null;
   const root = (state.info?.roots || [])
-    .filter(r => path.startsWith(`${r.replace(/\/+$/, "")}/`))
+    .filter(r => path === r.replace(/\/+$/, "") || path.startsWith(`${r.replace(/\/+$/, "")}/`))
     .sort((a, b) => b.length - a.length)[0];
   if (!root) return null;
+  // A folder opens as it is; a file opens its own folder, on the file.
+  if (isFolder) return new URLSearchParams({view: "files", source: `folder:${root}`, folder: path}).toString();
   const folder = path.slice(0, path.lastIndexOf("/")) || root;
   return new URLSearchParams({view: "files", source: `folder:${root}`, folder, file: path}).toString();
 }
@@ -4026,12 +4204,16 @@ function jobFilePath(job) {
   if (job.promotion?.original_path) return job.promotion.original_path;
   return job.batch_files?.file_count === 1 ? job.batch_files.files?.[0]?.file_path || "" : "";
 }
+// The folder holding a batch's files, for a batch of more than one.
+function jobFolderPath(job) {
+  return job.batch_files?.file_count > 1 && typeof job.batch_files.folder === "string" ? job.batch_files.folder : "";
+}
 // Show the file in Files where it lives, to try again from there. Closes the
 // job that asked for it; Back returns to the queue.
-function showInFiles(path) {
-  const query = filesRouteFor(path);
+function showInFiles(path, options) {
+  const query = filesRouteFor(path, options);
   if (!query) {
-    notify("This file is outside the media folders Navigatorr can browse.");
+    notify(`This ${options?.folder ? "folder" : "file"} is outside the media folders Navigatorr can browse.`);
     return;
   }
   if (typeof window !== "undefined" && window.history) window.history.pushState({navigatorr: true}, "", `${window.location.pathname}?${query}`);
@@ -4088,7 +4270,7 @@ function jobControls(job, detail = false) {
       async () => {
         if (choice.decision === "cancel") {
           if (await reviewAction({title:job.batch ? "Stop this batch?" : "Keep this original?",message:job.batch ? "Stop the remaining work. Originals and completed candidates are kept." : "Stop this file’s operation and keep its original.",confirmLabel:decisionLabels.cancel,cancelLabel:"Decide later"}))
-            await jobControl(job.id, "action_resume", {decision:"cancel"});
+            { await jobControl(job.id, "action_resume", {decision:"cancel"}); await noteJobLeftovers(job); }
           return;
         }
         if (choice.decision === "reject" && job.batch?.promotion_plan_ready) {
@@ -4189,9 +4371,12 @@ function jobControls(job, detail = false) {
   )
     add("Cancel", async () => {
       if (await reviewAction({title:"Cancel job?", message:`Stop ${queuePresentation(job).title} and its active work.`, confirmLabel:"Cancel job", cancelLabel:"Keep job"}))
+      {
         await jobControl(job.id, "action_cancel", {
           reason: "Cancelled from maintenance UI",
         });
+        await noteJobLeftovers(job);
+      }
     });
   if (
     job.action_name === "transcode_media" &&
@@ -4214,9 +4399,12 @@ function jobControls(job, detail = false) {
     add("View preview", () => openJob(job.preview_action_id));
   // A job that ended without a result leaves its file where it was. Files
   // shows it there, with its status and the goal form, to try again from.
-  const filePath = jobFilePath(job);
-  if (filePath && filesRouteFor(filePath) && !job.batch?.dry_run && (detail || ["failed", "cancelled"].includes(job.status)))
+  // Every job offers it, whatever its state, so the source is one click away.
+  const filePath = jobFilePath(job), folderPath = filePath ? "" : jobFolderPath(job);
+  if (filePath && filesRouteFor(filePath))
     add("Show in Files", () => showInFiles(filePath));
+  else if (folderPath && filesRouteFor(folderPath, {folder: true}))
+    add("Show in Files", () => showInFiles(folderPath, {folder: true}));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
     add("Archive", () => archiveJob(job, true));
   return actionRail;
@@ -5766,7 +5954,11 @@ async function loadBatchItems(id, revision) {
     } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
     const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
     if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
-    if (["failed", "cancelled", "skip"].includes(item.status) && filesRouteFor(item.file_path))
+    // A cancelled or failed file can be encoded again as it was set up, without
+    // reopening the goal dialog.
+    if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
+      add("Encode again", () => encodeFileAgain(id, item.item_key));
+    if (filesRouteFor(item.file_path))
       add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
     if (actions.children.length) row.append(actions);
     const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);

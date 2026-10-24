@@ -280,5 +280,13 @@ func batchQueueFeedback(items []store.TranscodeBatchItem) map[string]any {
 			context = filepath.Base(filepath.Dir(commonDir)) + " · " + context
 		}
 	}
-	return map[string]any{"files": preview, "file_count": len(items), "context": context, "reasons": reasonViews, "rejected_count": rejected, "policy_count": policy}
+	// Where to look for the files: their shared folder, or the first one's.
+	folder := commonDir
+	if (folder == "" || folder == ".") && len(items) > 0 {
+		folder = filepath.Dir(items[0].FilePath)
+	}
+	if folder == "." || folder == "/" {
+		folder = ""
+	}
+	return map[string]any{"files": preview, "file_count": len(items), "context": context, "folder": folder, "reasons": reasonViews, "rejected_count": rejected, "policy_count": policy}
 }

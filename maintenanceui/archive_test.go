@@ -94,3 +94,31 @@ func TestArchiveRejectsActiveMembersAndRequiresAuthenticatedExplicitInput(t *tes
 		t.Fatal("archive not attached to stable workflow", items)
 	}
 }
+
+func TestJobLeftoversReportsAndRequiresAuthenticatedKnownJob(t *testing.T) {
+	s, h := testUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch", "transcode_batch", "cancelled", nil, nil, nil)
+	seedOperation(t, s.engine.Deps().Store, "child", "transcode_media", "cancelled", map[string]any{"parent_action_id": "batch"}, nil, nil)
+	if w := request(h, "GET", "/api/maintenance/job-leftovers?id=batch", "", false); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/maintenance/job-leftovers?id=missing", "", true); w.Code != 404 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/maintenance/job-leftovers", "", true); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	w := request(h, "GET", "/api/maintenance/job-leftovers?id=batch", "", true)
+	var found struct {
+		Files     int   `json:"files"`
+		Bytes     int64 `json:"bytes"`
+		CanDelete bool  `json:"can_delete"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &found) != nil || found.Files != 0 || found.Bytes != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Removing files needs the server to allow it.
+	if w := request(h, "POST", "/api/maintenance/job-leftovers", `{"id":"batch"}`, true); found.CanDelete == (w.Code == 403) {
+		t.Fatal("deletion must follow allow_destructive", w.Code, found.CanDelete)
+	}
+}
