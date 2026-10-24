@@ -635,6 +635,18 @@ main {
 /* One slim header row: select-all, Name, the selection count, Size. */
 .library-columns { display: grid; grid-template-columns: var(--control-size) auto minmax(0,1fr) auto; gap: 0 8px; align-items: center; border-bottom: 1px solid var(--line); }
 .library-columns .media-check { min-height: 32px; grid-column: 1; }
+/* The line under it teaches the ways to tick several files, and holds "Select
+   range" once a file is ticked. Touch screens read the drag hint, not Shift. */
+.range-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; padding: 2px 0; min-height: 36px; border-bottom: 1px solid var(--line); font-size: 11px; }
+.range-bar[hidden], .range-bar [hidden] { display: none; }
+.range-bar button { font-size: 11px; padding: 0 8px; min-height: 32px; }
+.range-bar .hint-touch { display: none; }
+@media (hover: none) and (pointer: coarse) {
+  .range-bar .hint-touch { display: inline; }
+  .range-bar .hint-pointer { display: none; }
+}
+/* A finger that starts on a checkbox draws a range instead of scrolling the list. */
+.media-row .media-check { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
 .library-columns #sort-name { grid-column: 2; }
 .library-columns #selection-count { grid-column: 3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .library-columns #sort-size { grid-column: 4; }

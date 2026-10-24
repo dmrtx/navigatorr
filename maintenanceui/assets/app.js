@@ -1857,9 +1857,12 @@ function fileSelectionChanged() {
   } else if (!singleColumn) configureSelection(false);
   else controls();
 }
-// Ticking a range of the rows on screen. Shift+click ticks everything between
-// the last row ticked and this one; the arrow keys move between rows and
-// Shift+arrow grows or shrinks a range from the row the move started on.
+// Ticking several of the rows on screen at once, four ways: Shift+click ticks
+// everything between the last row ticked and this one; the arrow keys move
+// between rows and Shift+arrow grows or shrinks a range from the row the move
+// started on; dragging down (or up) the checkboxes ticks, or unticks, every row
+// the pointer crosses, with a finger as well as a mouse; and "Select range"
+// arms the next tap as a Shift+click for screens that have no Shift key.
 function fileChecks() {
   return [...$("library-items").querySelectorAll('input[type="checkbox"]')].filter(input => input.dataset.selection !== undefined && input.dataset.folder === undefined);
 }
@@ -1875,11 +1878,11 @@ function rowsBetween(checks, from, to) {
   const a = checks.findIndex(input => input.dataset.selection === from), b = checks.findIndex(input => input.dataset.selection === to);
   return a < 0 || b < 0 ? [] : checks.slice(Math.min(a, b), Math.max(a, b) + 1);
 }
-function rowClicked(input, shift) {
+function rowClicked(input, shift, value = input.checked) {
   const checks = fileChecks();
   const range = shift && state.selectionAnchor ? rowsBetween(checks, state.selectionAnchor, input.dataset.selection) : [];
   if (range.length) {
-    for (const row of range) setFileChecked(row, input.checked);
+    for (const row of range) setFileChecked(row, value);
     fileSelectionChanged();
   }
   if (range.length && typeof window !== "undefined") window.getSelection?.()?.removeAllRanges();
@@ -1906,9 +1909,94 @@ function rowKeyed(input, event) {
   state.selectionAnchor = state.selectionRange.anchor;
   fileSelectionChanged();
 }
+// "Select range" needs a ticked row on screen to start from.
+function rangeAnchorReady() {
+  const anchor = state.selectionAnchor;
+  return anchor !== undefined && anchor !== null && fileChecks().some(input => input.dataset.selection === anchor && input.checked);
+}
+// Dragging over the checkboxes. The row the pointer went down on sets what the
+// drag does (tick it if it was empty, untick it if it was ticked); every file
+// row between there and the pointer follows, and a row the pointer leaves goes
+// back to how it was. Nothing happens until the pointer reaches another row, so
+// a plain tap or click is untouched.
+function fileRowAt(checks, y) {
+  return checks.find(input => {
+    const box = (input.closest?.(".media-row") || input).getBoundingClientRect?.();
+    return box && y >= box.top && y < box.bottom;
+  });
+}
+function dragSelectStart(event) {
+  if (event.isPrimary === false || (event.pointerType === "mouse" && event.button !== 0)) return;
+  const input = event.target?.closest?.(".media-check")?.querySelector?.('input[type="checkbox"]') || event.target;
+  if (input?.tagName !== "INPUT" || input.type !== "checkbox" || input.dataset.selection === undefined || input.dataset.folder !== undefined || input.disabled) return;
+  state.drag = {id: event.pointerId, start: input.dataset.selection, value: !input.checked, before: new Map(), last: input.dataset.selection, moved: false};
+}
+function dragSelectMove(event) {
+  const drag = state.drag;
+  if (!drag || (drag.id !== undefined && event.pointerId !== undefined && event.pointerId !== drag.id)) return;
+  const checks = fileChecks();
+  const over = fileRowAt(checks, event.clientY);
+  if (!over || over.dataset.selection === drag.last || (!drag.moved && over.dataset.selection === drag.start)) return;
+  if (!drag.moved) {
+    drag.moved = true;
+    // The mouse can leave the list while it is held down; the finger already holds on to its row.
+    try { $("library-items").setPointerCapture?.(event.pointerId); } catch {}
+  }
+  event.preventDefault?.();
+  drag.last = over.dataset.selection;
+  const range = rowsBetween(checks, drag.start, drag.last);
+  const keys = new Set(range.map(row => row.dataset.selection));
+  for (const row of checks) if (drag.before.has(row.dataset.selection) && !keys.has(row.dataset.selection)) {
+    setFileChecked(row, drag.before.get(row.dataset.selection));
+    drag.before.delete(row.dataset.selection);
+  }
+  for (const row of range) {
+    if (!drag.before.has(row.dataset.selection)) drag.before.set(row.dataset.selection, row.checked);
+    setFileChecked(row, drag.value);
+  }
+  if (typeof window !== "undefined") window.getSelection?.()?.removeAllRanges();
+  fileSelectionChanged();
+}
+function dragSelectEnd(event) {
+  const drag = state.drag;
+  if (!drag || (drag.id !== undefined && event.pointerId !== undefined && event.pointerId !== drag.id)) return;
+  state.drag = null;
+  if (!drag.moved) return;
+  if (event.type === "pointercancel") {
+    // The browser took the gesture over (a scroll, say): leave the rows as they were.
+    for (const row of fileChecks()) if (drag.before.has(row.dataset.selection)) setFileChecked(row, drag.before.get(row.dataset.selection));
+    fileSelectionChanged();
+    return;
+  }
+  // The click that follows the release must not flip the last row back.
+  state.dragEndedAt = Date.now();
+  state.selectionAnchor = drag.last;
+  state.selectionRange = null;
+  state.rangeArmed = false;
+  controls();
+}
+$("library-items").addEventListener("pointerdown", dragSelectStart);
+$("library-items").addEventListener("pointermove", dragSelectMove);
+$("library-items").addEventListener("pointerup", dragSelectEnd);
+$("library-items").addEventListener("pointercancel", dragSelectEnd);
+$("select-range").addEventListener("click", () => {
+  state.rangeArmed = !state.rangeArmed && rangeAnchorReady();
+  controls();
+});
 $("library-items").addEventListener("click", event => {
   const input = event.target;
-  if (input?.tagName === "INPUT" && input.type === "checkbox" && input.dataset.selection !== undefined && input.dataset.folder === undefined) rowClicked(input, event.shiftKey);
+  if (state.dragEndedAt && Date.now() - state.dragEndedAt < 500) {
+    state.dragEndedAt = 0;
+    event.preventDefault?.();
+    return;
+  }
+  if (input?.tagName === "INPUT" && input.type === "checkbox" && input.dataset.selection !== undefined && input.dataset.folder === undefined) {
+    const armed = Boolean(state.rangeArmed);
+    state.rangeArmed = false;
+    // An armed tap always ticks the range, even when it lands on a ticked row.
+    rowClicked(input, event.shiftKey || armed, armed ? true : input.checked);
+    if (armed) fileSelectionChanged();
+  }
 });
 $("library-items").addEventListener("keydown", event => {
   const input = event.target;
@@ -2600,6 +2688,16 @@ function controls() {
   $("select-all-files").checked = headerKeys?.size>0 && [...headerKeys].every(key=>selectedKeys.has(key));
   const visibleSelected = seriesSeasonSelected() ? [...state.selected].some(id => fileInCurrentSeason(state.files.get(id))) : selectedCount > 0;
   $("select-all-files").indeterminate = !$("select-all-files").checked && (headerKeys ? [...headerKeys].some(key=>selectedKeys.has(key)) : visibleSelected);
+  const anchored = rangeAnchorReady();
+  if (!anchored) state.rangeArmed = false;
+  const armed = Boolean(state.rangeArmed);
+  $("range-bar").hidden = !folder && !state.media || fileChecks().length < 2;
+  $("range-hint").hidden = anchored;
+  $("select-range").hidden = !anchored;
+  $("select-range").disabled = state.libraryLoading || state.selectionLoading;
+  $("select-range").textContent = armed ? "Cancel range" : "Select range";
+  $("select-range").setAttribute("aria-pressed", String(armed));
+  $("range-status").textContent = armed ? "Choose the last file of the range." : anchored ? "Starts at the file you ticked last." : "";
   $("clear-selected-files").hidden = !selectedCount;
   $("clear-selected-files").disabled = state.libraryLoading || state.selectionLoading;
   $("configure-selection").disabled ||= state.selectionLoading;
