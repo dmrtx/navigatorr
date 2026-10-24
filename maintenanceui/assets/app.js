@@ -5656,27 +5656,42 @@ function slotFacts(job, stale) {
 // The slot's progress in the same green bar the batch rows use: a measured
 // percentage while encoding, an animated bar with no number while the worker
 // is busy in a phase that has none, and a still, muted one when it has gone quiet.
-function slotProgressBlock(job, alive) {
+function slotProgressParts(job, alive) {
   const phase = job.phase, value = job.progress != null ? Number(job.progress) : NaN;
   const measured = Number.isFinite(value) && !postEncodeWorkerPhases.includes(phase) && !slotUnmeasuredPhases.includes(phase);
   const label = slotShortPhases[phase] || workerPhaseLabel(phase);
-  const block = node("div", "", `job-progress batch-progress slot-progress${alive ? "" : " stale"}`);
-  block.append(node("span", label, "batch-progress-count"));
+  let percent = null, bar;
   if (measured) {
-    const percent = Math.max(0, Math.min(100, value));
-    block.append(node("strong", `${percent.toFixed(1)}%`, "batch-progress-percent"));
-    const bar = document.createElement("progress");
+    percent = Math.max(0, Math.min(100, value));
+    bar = document.createElement("progress");
     bar.max = 100;
     bar.value = percent;
     bar.setAttribute("aria-label", `${label} ${percent.toFixed(1)}%`);
-    block.append(bar);
   } else {
-    const bar = node("span", "", "slot-progress-bar");
+    bar = node("span", "", "slot-progress-bar");
     bar.setAttribute("role", "progressbar");
     bar.setAttribute("aria-label", `${label}, no percentage available`);
-    block.append(bar);
   }
+  return {label, percent, bar};
+}
+function slotProgressBlock(job, alive) {
+  const {label, percent, bar} = slotProgressParts(job, alive);
+  const block = node("div", "", `job-progress batch-progress slot-progress${alive ? "" : " stale"}`);
+  block.append(node("span", label, "batch-progress-count"));
+  if (percent != null) block.append(node("strong", `${percent.toFixed(1)}%`, "batch-progress-percent"));
+  block.append(bar);
   return block;
+}
+// The table keeps the phase and the bar in cells of their own: the bars of
+// every row start and end in the same place however long a phase name is.
+function slotProgressCells(job, alive) {
+  const {label, percent, bar} = slotProgressParts(job, alive);
+  const phase = node("td", label, `slot-phase${alive ? "" : " stale"}`);
+  const cell = node("td", "", `slot-bar${alive ? "" : " stale"}`);
+  const track = node("div", "", "slot-bar-track");
+  track.append(bar);
+  cell.append(track, node("span", percent != null ? `${percent.toFixed(1)}%` : "", "slot-bar-percent"));
+  return [phase, cell];
 }
 // One node's slots. Each node keeps its own slot positions. An entry is a free
 // slot, a slot the worker says is busy without saying with what (an older
@@ -5765,7 +5780,7 @@ function slotTable(groups) {
   }
   if (busy.length) {
     const table = node("table"), head = node("tr");
-    for (const title of ["Slot", "File", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
+    for (const title of ["Slot", "File", "Phase", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
     const thead = node("thead");
     thead.append(head);
     const tbody = node("tbody");
@@ -5774,15 +5789,14 @@ function slotTable(groups) {
       row.append(node("td", slot));
       if (!e.job) {
         const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
-        note.colSpan = 5;
+        note.colSpan = 6;
         row.append(note);
       } else {
         const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
-        const file = node("td", job.file, "slot-file"), progress = node("td"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        const file = node("td", job.file, "slot-file"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
         file.title = job.file;
-        progress.append(slotProgressBlock(job, !stale));
         encode.title = facts.title;
-        row.append(file, progress, encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
+        row.append(file, ...slotProgressCells(job, !stale), encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
       }
       tbody.append(row);
     }
