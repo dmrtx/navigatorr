@@ -1107,6 +1107,104 @@ main {
 .batch-file-preview {
   color: var(--ink);
 }
+/* Queue rows: the title is a link to the job, one sentence says what happened
+   or what to do next (the action is a link at its end), a bar shows each file
+   of a batch, and every other action is in one More actions menu in the corner. */
+.job-row { position: relative; }
+.job-row a.job-title {
+  display: -webkit-box;
+  height: auto;
+  min-height: 24px;
+  padding: 3px 0;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  cursor: pointer;
+}
+.job-row a.job-title:hover { color: var(--forest); text-decoration: underline; }
+.job-row > .job-meta, .batch-job .job-meta { height: auto; }
+.job-sentence {
+  margin: 2px 0 0;
+  color: var(--ink);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.job-sentence.failed { color: var(--danger); }
+.job-sentence .action-main {
+  display: inline;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--forest);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.job-sentence .action-main::after { content: " \203A"; }
+.job-sentence .action-main:hover:not(:disabled) { text-decoration: underline; }
+.job-sentence .action-main:disabled { color: var(--muted); cursor: default; }
+.job-row > .job-actions {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  display: flex;
+  margin: 0;
+}
+.job-row > .job-actions { align-items: center; gap: var(--action-gap); }
+/* The title line leaves room for however many buttons the corner holds. */
+.job-row.has-menu { --rail: 1; }
+.job-row.rail-2 { --rail: 2; }
+.job-row.rail-3 { --rail: 3; }
+.job-row.has-menu > .job-heading { padding-right: calc(var(--rail) * var(--action-height) + (var(--rail) - 1) * var(--action-gap) + 10px); }
+.job-row .job-summary { margin-top: 2px; -webkit-line-clamp: 2; }
+.job-row > .job-footer { min-height: 0; margin-top: 4px; }
+.batch-segments {
+  display: flex;
+  order: 1;
+  flex: 1 1 120px;
+  min-width: 48px;
+  height: 6px;
+  gap: 1px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--track);
+}
+.batch-segments > i { display: block; height: 100%; min-width: 2px; }
+.batch-segments .segment-ok { background: var(--forest); }
+.batch-segments .segment-err { background: var(--danger); }
+.batch-segments .segment-run { background: var(--info); }
+.batch-segments .segment-rev { background: var(--warning-line); }
+.batch-segments .segment-wait { background: var(--line-strong); }
+.batch-segments .segment-skip { background: var(--muted); }
+.batch-segments .segment-cancel { background: var(--control-line); }
+.batch-legend { order: 3; flex-basis: 100%; min-width: 0; color: var(--muted); line-height: 1.4; }
+.batch-legend ~ .batch-progress-phase { order: 4; }
+.batch-summary { display: grid; gap: 4px; min-width: 0; flex: 1 1 240px; }
+.batch-summary .batch-segments { flex: none; width: 100%; }
+/* In a queue row every bar is the same width: on its own line across the whole
+   footer, with the count and percentage underneath it. */
+.job-row .batch-progress > progress,
+.job-row .batch-progress > .batch-segments { order: 0; flex: 1 0 100%; width: 100%; max-width: none; }
+.job-row .batch-progress > .batch-progress-count { order: 1; }
+.job-row .batch-progress > .batch-progress-percent { order: 2; margin-left: auto; line-height: 1.4; }
+/* A batch row: the legend and the percentage share one line under the bar. */
+.job-row .batch-progress > .batch-legend { order: 1; flex: 1 1 0; }
+.job-row .batch-progress > .batch-legend ~ .batch-progress-phase { order: 3; flex-basis: 100%; }
+.job-row .batch-progress,
+.job-row .job-footer > .batch-progress:has(.batch-progress-phase) { row-gap: 4px; }
+/* The bars stop short of the corner menu, as the text on the left stops short of the edge. */
+.job-row .job-footer > .batch-progress, .job-row .job-footer > .batch-summary, .job-row .job-footer > .job-progress, .job-row .job-footer > .job-outcome { max-width: 560px; }
+.job-row .batch-progress:has(.batch-progress-phase) .batch-progress-count,
+.job-row .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
+@media (min-width: 901px) {
+  .job-row > .job-actions { top: 10px; }
+  .job-sentence, .job-row .job-summary { font-size: 13px; }
+}
 /* Job actions: one compact height for every button, in the queue rows and the
    job detail dialog. In the rows one main action is labelled and filled; every
    other action is a square icon button named by aria-label and title.
@@ -1484,7 +1582,7 @@ main {
 .cleanup-space { color: var(--forest); margin-top: 0; }
 .cleanup-locations { padding-top: 8px; }
 .cleanup-locations summary { cursor: pointer; color: var(--muted); }
-.job-footer > .batch-progress { flex: 0 1 450px; }
+.job-footer > .batch-progress { flex: 1 1 450px; }
 .batch-progress-count { flex-shrink: 0; font-size: 12px; min-width: 0; white-space: nowrap; }
 .preview-note { display: none; }
 .batch-progress-percent { order: 2; flex: 0 0 auto; font-size: 12px; font-weight: 500; line-height: 1.4; }

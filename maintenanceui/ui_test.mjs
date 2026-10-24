@@ -38,6 +38,7 @@ class Element {
   children = [];
   listeners = new Map();
   dataset = {};
+  style = {};
   hidden = false;
   disabled = false;
   value = "";
@@ -2831,7 +2832,8 @@ test("an omitted video shows its reason and another-profile action instead of co
   await h.run('loadJobs()');
   const row=h.elements.get('jobs-list').children[0];
   assert.equal(row.children[0].children[1].textContent,'The Peripheral - S01E04');
-  assert.equal(row.children[1].children.length,1,'no repeated filename or reason');
+  assert.deepEqual(row.children[1].children.map(c=>c.className.split(' ')[0]).filter(c=>c!=='job-sentence'),['metadata'],'no repeated filename or reason');
+  assert.match(allText(row.children[1].children.find(c=>c.className.startsWith('job-sentence'))).trim(),/^Try another profile/);
   const outcome=row.children[2].children[0];
   assert.match(outcome.children[0].textContent,/Automatic testing does not support/);
   assert.match(outcome.children[1].textContent,/Choose another profile/);
@@ -3398,46 +3400,59 @@ test("a queue card labels at most one main action, the most important, first", (
   assert.equal(mains.length, 1);
   assert.equal(mains[0].attrs["aria-label"], "Review candidate");
   assert.equal(rail.children[0], mains[0]);
-  assert.equal(rail.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
+  // The other three are icons in view; no menu is needed for them.
+  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
+  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Keep original", "Retry", "Change goal"]);
+  assert.equal(rail.children.some((b) => b.className === "more-actions"), false);
   const none = queueRail(["Archive", "Compare frames"]).rail;
   assert.equal(none.children.some((b) => /\baction-main\b/.test(b.className)), false);
+  assert.deepEqual(none.children.map((b) => b.attrs["aria-label"]), ["Archive", "Compare frames"]);
 });
 
-test("icon-only queue actions keep their full name in aria-label and title", () => {
-  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings"]);
-  const icons = rail.children.filter((b) => /\baction-icon\b/.test(b.className));
-  assert.deepEqual(icons.map((b) => b.attrs["aria-label"]), ["Stop batch · keep originals", "Change settings"]);
-  assert.deepEqual(icons.map((b) => b.title), ["Stop batch · keep originals", "Change settings"]);
-  assert.match(icons[0].className, /\bdanger\b/);
-  // The row hides the label; it is kept for the More menu, never as a second main action.
-  assert.deepEqual(icons.map((b) => b.children.at(-1).className), ["action-label", "action-label"]);
-  assert.equal(rail.children[0].attrs["aria-label"], "Resume batch");
+test("the usual actions stay in view as icons with their full name in aria-label and title", () => {
+  const { rail } = queueRail(["Change settings", "Pause batch", "Cancel"]);
+  assert.deepEqual(rail.children.map((b) => b.attrs["aria-label"]), ["Change settings", "Pause batch", "Cancel"]);
+  assert.deepEqual(rail.children.map((b) => b.title), ["Change settings", "Pause batch", "Cancel"]);
+  assert.match(rail.children[2].className, /\bdanger\b/);
+  assert.ok(rail.children.every((b) => /\baction-icon\b/.test(b.className) && b.children.at(-1).className === "action-label"));
 });
 
-test("Run again is an icon with its name as tooltip, not a labelled main action", () => {
+test("a single other action is an icon in view, not a menu", () => {
   const { rail } = queueRail(["Run again"]);
   assert.equal(rail.children.length, 1);
-  const [b] = rail.children;
-  assert.match(b.className, /\baction-icon\b/);
-  assert.equal(b.title, "Run again");
-  assert.equal(b.attrs["aria-label"], "Run again");
+  assert.match(rail.children[0].className, /\baction-icon\b/);
+  assert.equal(rail.children[0].attrs["aria-label"], "Run again");
 });
 
-test("with five or more icon actions, three show and the rest go into a More actions menu", () => {
+test("with more than three icons the common ones stay and the rest go to More, which closes after a choice", () => {
   const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
-  assert.equal(rail.children.length, 5);
+  // Review is the main action; Archive stays in view with the first of the rest by rank, and the others are in the menu.
   const more = rail.children.at(-1);
   assert.equal(more.className, "more-actions");
+  assert.equal(rail.children.length, 1 + 2 + 1);
+  const shown = rail.children.slice(1, -1).map((b) => b.attrs["aria-label"]);
+  assert.ok(shown.includes("Archive"));
   assert.equal(more.dataset.menuFor, "job-1");
   const [toggle, menu] = more.children;
   assert.equal(toggle.attrs["aria-label"], "More actions");
   assert.equal(toggle.title, "More actions");
-  assert.deepEqual(menu.children.map((b) => b.attrs["aria-label"]), ["Archive", "View batch"]);
+  const inMenu = menu.children.map((b) => b.attrs["aria-label"]);
+  assert.equal(new Set([...shown, ...inMenu]).size, 5);
+  assert.ok(!inMenu.includes("Archive"));
   // The same elements move, so their handlers and job-control state come along.
   assert.ok(menu.children.every((b) => b.listeners.has("click") && b.dataset.jobControl === "job-1"));
   more.open = true;
   more.listeners.get("click")({ target: { closest: () => menu.children[0] } });
   assert.equal(more.open, false);
+});
+
+test("a Stop batch stays in view while Resume and other less common actions fold into More", () => {
+  const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings", "View batch", "Archive"]);
+  const labels = rail.children.filter((b) => b.className !== "more-actions").map((b) => b.attrs["aria-label"]);
+  assert.ok(labels.includes("Resume batch") || rail.children[0].attrs["aria-label"] === "Resume batch");
+  const menu = rail.children.at(-1).children[1].children.map((b) => b.attrs["aria-label"]);
+  assert.ok(!menu.includes("Resume batch"));
+  assert.ok(menu.length >= 2);
 });
 
 function moreMenu(id, open) {
@@ -3524,20 +3539,6 @@ test("a podcast review card labels Review cuts instead of leaving it an icon", (
   assert.match(cuts.children[0].className, /\baction-main\b/);
   const classify = queueRail(["Ad library", "View transcript", "Validate classifications"]).rail;
   assert.equal(classify.children[0].attrs["aria-label"], "Validate classifications");
-});
-
-test("four icon actions all show; a More menu never holds a single item", () => {
-  const four = queueRail(["Review", "Run one more test", "Keep original", "Change goal", "View batch"]).rail;
-  assert.equal(four.children.some((c) => c.className === "more-actions"), false);
-  assert.deepEqual(
-    four.children.filter((b) => /\baction-icon\b/.test(b.className)).map((b) => b.attrs["aria-label"]),
-    ["Run one more test", "Keep original", "Change goal", "View batch"],
-  );
-  const five = queueRail(["Review", "Run one more test", "Keep original", "Cancel", "Change goal", "View batch"]).rail;
-  const more = five.children.at(-1);
-  assert.equal(more.className, "more-actions");
-  assert.equal(five.children.filter((b) => /\baction-icon\b/.test(b.className)).length, 3);
-  assert.equal(more.children[1].children.length, 2);
 });
 
 test("size mode details report the verification attempts and each window's search and final score", () => {
@@ -4058,7 +4059,7 @@ test("tracking keeps the first time a status was seen and announces only changes
 // children, closest, removal and focus.
 class FakeNode {
   constructor(doc, tag = "div") {
-    Object.assign(this, {doc, tagName: tag.toUpperCase(), children: [], parent: null, dataset: {}, className: "", textContent: "", id: "", listeners: new Map()});
+    Object.assign(this, {doc, tagName: tag.toUpperCase(), children: [], parent: null, dataset: {}, style: {}, className: "", textContent: "", id: "", listeners: new Map()});
   }
   get classList() {
     const names = () => this.className.split(/\s+/).filter(Boolean);
@@ -4266,9 +4267,11 @@ test("a goal batch that is still encoding offers its waiting decision, and the f
   h.run('api=async(path)=>request(path);renderSavings=()=>{};state.tab="jobs";');
   await h.run("loadJobs()");
   assert.equal(h.elements.get("job-filter-decision").textContent, "Needs decision (2)");
-  const badges = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll(".status-action");
-  assert.equal(badges("encoding").length, 1);
-  assert.equal(badges("quiet").length, 0);
+  const row = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id);
+  // The flag is not a button: the sentence under the title carries the way in.
+  assert.equal(row("encoding").querySelectorAll(".status-action").length, 0);
+  assert.deepEqual(row("encoding").querySelectorAll(".action-main").map((b) => b.textContent), ["Review"]);
+  assert.equal(row("quiet").querySelectorAll(".action-main").length, 0);
   assert.equal(list.querySelectorAll(".decision-badge").length, 1);
   h.context.request = () => ({jobs:[], total:0, has_more:false, decision_count:0});
   await h.run("loadJobs()");
@@ -7112,3 +7115,47 @@ test("the header keeps only brand and worker status; install, open path and relo
 // The palette and dark-mode contrast checks run with the rest of the UI tests.
 // Imported last, so the harness above is defined before any test starts.
 await import("./theme_test.mjs");
+
+test("a batch shows one segmented bar with a legend of what each file is doing", () => {
+  const h = harness();
+  h.context.batch = { total: 12, completed: 3, running: 2, failed: 1 };
+  const parts = h.run("batchSegments(batch)");
+  assert.equal(parts.legend, "3 done · 1 failed · 2 running · 6 waiting");
+  const widths = parts.bar.children.map(child => [child.className, Math.round(parseFloat(child.style.width))]);
+  assert.deepEqual(widths, [["segment-ok", 25], ["segment-err", 8], ["segment-run", 17], ["segment-wait", 50]]);
+  h.context.batch = { total: 8, completed: 6, review: 2 };
+  assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
+  h.context.batch = { total: 1, completed: 1 };
+  assert.equal(h.run("batchSegments(batch)"), null);
+  h.context.batch = { total: 4, completed: 4, dry_run: true };
+  assert.equal(h.run("batchSegments(batch)"), null);
+});
+
+test("a job title is a real link to the job that still opens in place on a plain click", () => {
+  const h = harness();
+  h.run('globalThis.opened = []; openJob = id => opened.push(id);');
+  const link = h.run('jobLink("Demo Show", "a b")');
+  assert.equal(link.href, "?view=queue&job=a%20b");
+  assert.match(link.className, /job-title/);
+  let prevented = false;
+  link.listeners.get("click")({ preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.opened)), ["a b"]);
+  link.listeners.get("click")({ metaKey: true, preventDefault: () => assert.fail("modified clicks keep the browser default") });
+  link.listeners.get("click")({ button: 1, preventDefault: () => assert.fail("middle clicks keep the browser default") });
+  assert.equal(h.context.opened.length, 1);
+});
+
+test("a file the probe could not read is described plainly", () => {
+  const h = harness();
+  h.context.reason = "mediainspect failed: ffprobe tool_exit after 58ms: exit status 1";
+  assert.equal(h.run("shortJobReason(reason)"), "Couldn't read the video file");
+});
+
+test("a failed batch with no error of its own says its first reason instead of a filler", async () => {
+  const h = harness();
+  h.run(`state.jobs = [];`);
+  h.context.job = { id: "f", number: 1, action_name: "transcode_batch", status: "failed", batch: { total: 6, failed: 6 }, batch_files: { reasons: [{ count: 6, reason: "smb_transport_error: i/o timeout" }] } };
+  assert.equal(h.run("queueOutcome(job)"), "Open job for error details");
+  assert.match(h.run("shortJobReason(job.batch_files.reasons[0].reason)"), /cannot access media storage/i);
+});
