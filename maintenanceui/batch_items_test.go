@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -44,5 +45,40 @@ func TestBatchItemsDurablePaginationAndOwnership(t *testing.T) {
 	}
 	if w := request(h, "GET", "/api/maintenance/batch-items?id=batch", "", false); w.Code != 401 {
 		t.Fatal("unauthenticated batch exposed")
+	}
+}
+
+// A finished encode that could not be saved is tried again as it is: the row
+// carries the decisions its attempt offers, and is not offered a goal change.
+func TestBatchItemsOfferTryAgainForAnEncodeThatWasNotSaved(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "waiting_decision", map[string]any{"mode": "size"}, nil, nil)
+	for key, options := range map[string]string{"unsaved": `[{"decision":"recheck"},{"decision":"cancel"}]`, "unsure": `[{"decision":"cancel"}]`} {
+		path := "/media/" + key + ".mkv"
+		seedOperation(t, st, key, "transcode_media", "waiting_decision", map[string]any{"parent_action_id": "batch", "path": path}, nil, nil)
+		child, _ := st.GetActionInstance(key)
+		child.WaitingReason, child.WaitingOptionsJSON = "Encoding finished", options
+		if err := st.UpdateActionInstance(*child); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: key, FilePath: path, DisplayLabel: key, ChildActionID: key, Status: "waiting_decision", Decision: "transcode"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/batch-items?id=batch", "", true)
+	var page struct{ Items []batchItemView }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	views := map[string]batchItemView{}
+	for _, item := range page.Items {
+		views[item.ItemKey] = item
+	}
+	if got := views["unsaved"]; !slices.Equal(got.WaitingDecisions, []string{"recheck", "cancel"}) || got.CanReconfigure {
+		t.Fatalf("an unsaved encode is retried, not reconfigured: %+v", got)
+	}
+	if got := views["unsure"]; !slices.Equal(got.WaitingDecisions, []string{"cancel"}) || !got.CanReconfigure {
+		t.Fatalf("other waiting files keep their goal change: %+v", got)
 	}
 }

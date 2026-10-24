@@ -78,6 +78,9 @@ func (e *Engine) retireBatchDecision(ctx context.Context, child *store.ActionIns
 	}
 	canCancel := false
 	for _, option := range options {
+		if option.Decision == "recheck" {
+			return fmt.Errorf("this file's encode finished and only saving it failed; use Try again to save it as it is, because changing the goal would encode it again")
+		}
 		if option.Decision == "reject" {
 			_, err := e.ResumeReviewedCandidate(ctx, child.ID, child.ID, CandidateDecisionVersion(child), "reject")
 			return err

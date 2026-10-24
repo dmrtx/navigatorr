@@ -206,11 +206,12 @@ func TestOperationsProjectPlanNoteAndPausedOutcome(t *testing.T) {
 	}
 }
 
-// A decision must stay reachable however old it is: it is listed first, found
-// by the Needs decision filter, and counted for the whole history. A goal batch
-// that keeps encoding while one file waits is not itself waiting_decision, so
-// the filter has to follow its children.
-func TestWorkflowsWaitingOnADecisionAreNeverBuriedByAge(t *testing.T) {
+// The queue keeps one fixed order, newest first, so a row never jumps because a
+// file in it started or stopped waiting. A decision stays reachable however old
+// it is: it is flagged on its row, found by the Needs decision filter, and
+// counted for the whole history. A goal batch that keeps encoding while one file
+// waits is not itself waiting_decision, so the filter has to follow its children.
+func TestQueueKeepsOneOrderAndDecisionsStayReachable(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
 	read := func(query string) operationsPage {
@@ -240,20 +241,36 @@ func TestWorkflowsWaitingOnADecisionAreNeverBuriedByAge(t *testing.T) {
 	if first.DecisionCount != 2 || first.Total != 42 || !first.HasMore {
 		t.Fatalf("decision count %d total %d more %v", first.DecisionCount, first.Total, first.HasMore)
 	}
-	got := map[string]bool{}
+	// The two old workflows are not hoisted above the newer ones.
 	for _, id := range ids(first) {
-		got[id] = true
-	}
-	if !got["old-batch"] || !got["old-goal-batch"] {
-		t.Fatalf("first page %v hides work that waits on a decision", ids(first))
-	}
-	for _, job := range first.Jobs {
-		if job["needs_decision"] != true {
-			t.Fatalf("job %v is not flagged as needing a decision", job["id"])
+		if id == "old-batch" || id == "old-goal-batch" {
+			t.Fatalf("first page %v reorders work because it waits on a decision", ids(first))
 		}
+	}
+	all := read("&limit=100")
+	flagged := map[string]bool{}
+	for _, job := range all.Jobs {
+		if job["needs_decision"] == true {
+			flagged[fmt.Sprint(job["id"])] = true
+		}
+	}
+	if len(flagged) != 2 || !flagged["old-batch"] || !flagged["old-goal-batch"] {
+		t.Fatalf("jobs flagged as needing a decision: %v", flagged)
 	}
 	filtered := read("&status=waiting_decision")
 	if filtered.Total != 2 || filtered.DecisionCount != 2 {
 		t.Fatalf("filter total %d count %d, want 2 and 2 (%v)", filtered.Total, filtered.DecisionCount, ids(filtered))
+	}
+	// The order is the same whether a decision waits or not.
+	old, err := st.GetActionInstance("old-batch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Status = "completed"
+	if err := st.UpdateActionInstance(*old); err != nil {
+		t.Fatal(err)
+	}
+	if after := ids(read("&limit=100")); fmt.Sprint(after) != fmt.Sprint(ids(all)) {
+		t.Fatalf("resolving a decision moved rows:\nbefore %v\nafter  %v", ids(all), after)
 	}
 }

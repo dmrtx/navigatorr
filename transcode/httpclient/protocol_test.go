@@ -167,3 +167,49 @@ func TestHTTPExecutor_TransportErrorCarriesRequestID(t *testing.T) {
 		t.Fatalf("uncertain submit must name its request ID for log correlation, got %v", err)
 	}
 }
+
+func TestHTTPExecutor_RetryPublicationAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+		fail   bool
+	}{
+		{"accepted", http.StatusOK, `{"id":"job-1","status":"running"}`, nil, false},
+		{"nothing to retry", http.StatusConflict, `{"error":"job is not waiting to retry a publication","code":"nothing_to_retry","retryable":false}`, transcode.ErrNothingToRetry, false},
+		{"worker without the endpoint", http.StatusNotFound, `{"error":"not found","code":"not_found","retryable":false}`, transcode.ErrPublicationRetryUnsupported, false},
+		{"older worker without envelope", http.StatusNotFound, `{"error":"not found"}`, transcode.ErrPublicationRetryUnsupported, false},
+		{"job missing", http.StatusNotFound, `{"id":"job-1","status":"failed","error":"job not found","code":"not_found","retryable":false}`, nil, true},
+		{"worker error", http.StatusInternalServerError, `{"error":"saving job","code":"internal","retryable":true}`, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			var path string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				path = r.Method + " " + r.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			err := newTestHTTPExecutor(t, srv).RetryPublication(context.Background(), "job-1")
+			if tc.fail {
+				var he *HTTPError
+				if !errors.As(err, &he) || he.StatusCode != tc.status {
+					t.Fatalf("want the worker's own error, got %v", err)
+				}
+			} else if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v want %v", err, tc.want)
+			}
+			if attempts.Load() != 1 || path != "POST /v1/jobs/job-1/retry-publication" {
+				t.Fatalf("attempts=%d request=%q", attempts.Load(), path)
+			}
+		})
+	}
+	unused := httptest.NewServer(http.NotFoundHandler())
+	defer unused.Close()
+	if err := newTestHTTPExecutor(t, unused).RetryPublication(context.Background(), "../evil"); err == nil {
+		t.Fatal("an unsafe job id must be refused before any request")
+	}
+}

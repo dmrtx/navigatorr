@@ -136,7 +136,13 @@ recovery attempts with backoff. Permanent failures or an exhausted budget expose
 `publication_pending` and `recovery_required`; the action waits for a decision
 and preserves the local candidate. Resolving a permanent storage problem still
 requires operator intervention. A `reconcile` decision checks the existing job
-and does not submit a new encode.
+and does not submit a new encode. A `recheck` decision (**Try again** in the UI)
+asks the worker for one more publication attempt of the same candidate
+(`POST /v1/jobs/{id}/retry-publication`); the worker records the request as
+`operator_retry_requested` and restores the budget of automatic attempts; the
+next sweep consumes the request and publishes the same candidate, and if that
+fails the worker again retries on its own up to the usual three attempts before
+asking for a decision once more.
 
 Jobs identify `storage_backend` and distinguish the Navigatorr path, worker
 path, SMB share and relative path. Selecting direct SMB does not enable an

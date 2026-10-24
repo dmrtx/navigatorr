@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,9 +12,13 @@ import (
 )
 
 type batchItemView struct {
-	WaitingReason  string `json:"waiting_reason,omitempty"`
-	ReasonCode     string `json:"reason_code,omitempty"`
-	CandidateReady bool   `json:"candidate_ready,omitempty"`
+	WaitingReason string `json:"waiting_reason,omitempty"`
+	// WaitingDecisions are the decisions the file's attempt offers while it
+	// waits on one. recheck means the encode finished and only saving it
+	// failed: the file is tried again as it is, never re-encoded.
+	WaitingDecisions []string `json:"waiting_decisions,omitempty"`
+	ReasonCode       string   `json:"reason_code,omitempty"`
+	CandidateReady   bool     `json:"candidate_ready,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -130,6 +135,20 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					if childInputs["parent_action_id"] == id && childInputs["path"] == item.FilePath {
 						r := operationRecord{inst: *child, inputs: childInputs, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
 						view.WaitingReason = batchReasonText(child.WaitingReason, true)
+						if child.Status == store.ActionStatusWaitingDecision {
+							var options []struct {
+								Decision string `json:"decision"`
+							}
+							_ = json.Unmarshal([]byte(child.WaitingOptionsJSON), &options)
+							for _, option := range options {
+								view.WaitingDecisions = append(view.WaitingDecisions, option.Decision)
+							}
+							// Changing the goal retires the attempt and encodes again;
+							// a finished encode that only failed to save is retried.
+							if slices.Contains(view.WaitingDecisions, "recheck") {
+								view.CanReconfigure = false
+							}
+						}
 						view.ReasonCode = operationString(operationValue(r, "reason_code"))
 						if !view.RetryPending {
 							if child.Status == store.ActionStatusCompleted && (operationValue(r, "skip_transcode") == true || operationValue(r, "skipped") == true) {

@@ -1653,11 +1653,14 @@ test("worker activity shows occupied slots, final measurement, elapsed time and 
   const first=h.elements.get("worker-slots").children[0];
   assert.match(first.children[0].textContent,/sample-one/);
   assert.match(first.children[1].textContent,/Full conversion.*elapsed/);
-  assert.match(first.children[3].textContent,/Last advance 10s ago/);
+  // One short line under the bar; the freshness of the last measurement is its tooltip.
+  assert.equal(first.children[3].textContent,"Encode finished · measuring quality");
+  assert.match(first.children[3].title,/Last advance 10s ago/);
+  assert.equal(first.children.length,4);
   // The encode's last 84.4% lingers in the progress file; once it is over the bar sweeps without a number.
   const after=first.children[2];
   assert.match(after.className,/batch-progress slot-progress/);
-  assert.deepEqual(after.children.map(c=>c.textContent),["Measuring quality","","Encode finished · Measuring final quality"]);
+  assert.deepEqual(after.children.map(c=>c.textContent),["Measuring quality",""]);
   assert.equal(after.children.some(c=>c.className==="batch-progress-percent"),false);
   assert.equal(after.children[1].className,"slot-progress-bar");
   h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
@@ -1672,7 +1675,7 @@ test("a slot shows the encode's measured percentage in the batch bar, and a stil
   const h=harness();
   const beat=new Date().toISOString();
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:3,worker_slots_used:3,jobs:[
-    {id:"enc",file:"sample-one.mkv",kind:"transcode",phase:"encoding",heartbeat_at:beat,last_progress_at:beat,progress:42.46},
+    {id:"enc",file:"sample-one.mkv",kind:"transcode",phase:"encoding",heartbeat_at:beat,last_progress_at:beat,progress:42.46,encoding:"x265 CRF 22",speed:4.944,fps:118.36},
     {id:"pass1",file:"sample-two.mkv",kind:"transcode",phase:"analysing_video",heartbeat_at:beat,progress:100},
     {id:"quiet",file:"sample-three.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date(Date.now()-600000).toISOString(),progress:12},
   ]}};
@@ -1686,12 +1689,31 @@ test("a slot shows the encode's measured percentage in the batch bar, and a stil
   assert.doesNotMatch(encoding.className,/stale/);
   // Pass 1 has no progress of its own; a stray number is not shown.
   const analysing=rows[1].children[2];
-  assert.deepEqual(analysing.children.map(c=>c.textContent),["Analyzing","","Analyzing video · x265 pass 1 of 2 · percentage starts in pass 2"]);
+  assert.deepEqual(analysing.children.map(c=>c.textContent),["Analyzing",""]);
+  assert.equal(rows[1].children[3].textContent,"Pass 1 of 2 · no percentage yet");
+  // The encode being run and its speed are the one line under an encoding slot's bar.
+  assert.equal(rows[0].children[3].textContent,"x265 CRF 22 · 4.94×");
+  assert.match(rows[0].children[3].title,/118\.4 fps/);
+  assert.deepEqual(rows.slice(0,3).map(row=>row.children.length),[4,4,4]);
   // A worker that stopped reporting keeps its last value but loses the live look.
   const quiet=rows[2].children[2];
   assert.match(quiet.className,/stale/);
   assert.equal(quiet.children[1].textContent,"12.0%");
-  assert.match(rows[2].children[3].textContent,/No recent worker heartbeat/);
+  assert.equal(rows[2].children[3].textContent,"No recent worker heartbeat");
+});
+
+test("an encoding slot with nothing to report yet still shows a single short line", () => {
+  const h=harness();
+  const beat=new Date().toISOString();
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[
+    {id:"fresh",file:"sample-one.mkv",kind:"transcode",phase:"encoding",heartbeat_at:beat},
+    {id:"reading",file:"sample-two.mkv",kind:"transcode",phase:"reading_source",heartbeat_at:beat,encoding:"x265 CRF 22"},
+  ]}};
+  h.run('renderWorkerActivity(activity)');
+  const rows=h.elements.get("worker-slots").children;
+  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
+  assert.equal(rows[1].children[3].textContent,"x265 CRF 22 · Reading the source");
+  assert.deepEqual(rows.map(row=>row.children.length),[4,4]);
 });
 
 test("slot progress reuses the green batch bar and only animates while the worker is alive", () => {
@@ -3732,7 +3754,10 @@ test("every shortened main action label is a prefix of its accessible name", () 
   const pairs = JSON.parse(h.run("JSON.stringify(Object.entries(shortActionLabels))"));
   assert.ok(pairs.length > 0);
   for (const [full, visible] of pairs) assert.ok(full.startsWith(visible), `${visible} is not a prefix of ${full}`);
-  assert.equal(new Set(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v)).size, 2);
+  assert.deepEqual(pairs.filter(([full]) => full.startsWith("Check")).map(([, v]) => v), ["Check library"]);
+  // Trying a failed save again is a short label already, and a main action.
+  assert.ok(!pairs.some(([full]) => full === "Try again"));
+  assert.equal(h.run('mainQueueActions.includes("Try again")'), true);
 });
 
 function commandHarness(commands) {
@@ -6555,6 +6580,145 @@ test("one file takes one source slot at a time: its tracks are read after its pr
   await h.run('loadGoalProfile("/media/next.mkv")');
   assert.equal(h.run("state.goalProfile.status"), "error");
   assert.equal(h.context.timers.length, before + 1);
+});
+
+// An encode that finished but could not be saved is tried again as it is.
+test("a batch row whose encode finished but was not saved offers Try again, not a goal change", async () => {
+  const item = { item_key: "k-s", display_label: "Sample Show S04E13", status: "waiting_decision", child_action_id: "child-s", waiting_decisions: ["recheck", "cancel"], can_reconfigure: false, mode: "size", reason_code: "eligible" };
+  const h = await batchItemsHarness([item], { detailJob: { status: "waiting_decision", batch: {} } });
+  const row = itemRows(h)[0];
+  assert.deepEqual(buttonLabels(row).filter((l) => /Try again|Change goal|Change settings/.test(l)), ["Try again"]);
+  const control = flatten(row).find((e) => e.textContent === "Try again");
+  // It acts on the file's own job, needs its worker, and is the row's main action.
+  assert.equal(control.dataset.jobControl, "child-s");
+  assert.equal(control.dataset.requiresWorker, "true");
+  assert.match(control.className, /primary/);
+  h.context.calls = [];
+  h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+  await control.listeners.get("click")();
+  const [id, name, args, options] = plain(h.context.calls[0]);
+  assert.deepEqual([id, name, args], ["child-s", "action_resume", { decision: "recheck" }]);
+  assert.equal(options.decision.label, "Try again");
+  // A row that is only waiting for another reason has no such button.
+  const other = await batchItemsHarness([{ ...item, waiting_decisions: ["cancel"] }], { detailJob: { status: "waiting_decision", batch: {} } });
+  assert.equal(buttonLabels(itemRows(other)[0]).includes("Try again"), false);
+});
+
+test("Try again on a job card resumes with recheck, with no confirmation and no goal change beside it", async () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  h.context.asked = 0;
+  h.run("confirmDecision = async () => { asked++; return true; };");
+  h.context.calls = [];
+  h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
+  const job = { id: "child-s", action_name: "transcode_media", status: "waiting_decision", mode: "size", parent_action_id: "batch", parent_item_key: "k-s", waiting_options: [{ decision: "recheck" }, { decision: "cancel" }] };
+  const labels = h.run(`jobControls(${JSON.stringify(job)}).children.map(b => b.textContent)`);
+  assert.ok(labels.includes("Try again"));
+  assert.ok(!labels.includes("Change goal") && !labels.includes("Change settings"));
+  const rail = h.run(`jobControls(${JSON.stringify(job)})`);
+  const control = rail.children.find((b) => b.textContent === "Try again");
+  assert.equal(control.dataset.requiresWorker, "true");
+  await control.listeners.get("click")();
+  assert.equal(h.context.asked, 0);
+  assert.deepEqual(plain(h.context.calls[0]), ["child-s", "action_resume", { decision: "recheck" }]);
+  // The batch row's main queue actions keep it as one of the visible buttons.
+  assert.ok(h.run("mainQueueActions").includes("Try again"));
+});
+
+test("a failed save says one thing, whatever storage error came with it", () => {
+  const h = harness();
+  const say = (text) => h.run(`shortJobReason(${JSON.stringify(text)})`);
+  const plainFailure = say("Encoding finished for job abc but publication requires intervention: publish failed");
+  assert.match(plainFailure, /Encoding finished, but the file could not be saved\. The encoded copy is kept\. Use Try again/);
+  // The storage wording never replaces it, and an old worker's note is passed on.
+  const storage = say("Encoding finished for job abc but publication requires intervention: smb_transport_error connecting to SMB server");
+  assert.equal(storage, plainFailure);
+  assert.match(say("Encoding finished for job abc but publication requires intervention: x The worker has not been updated to retry a publication; update it first."), /The worker has not been updated to retry a publication; update it first\.$/);
+  // A storage failure with no finished encode still points at the connection.
+  assert.match(say("smb_transport_error: connecting to SMB server"), /Fix the connection/);
+});
+
+test("Show in Files opens the Files tab on the folder and file, inside the root that holds it", () => {
+  const h = harness();
+  h.run('state.info={roots:["/media","/media/tv"]};');
+  const query = (path) => h.run(`filesRouteFor(${JSON.stringify(path)})`);
+  const params = new URLSearchParams(query("/media/tv/Show/Season 4/Show S04E13.mkv"));
+  // The longest root wins, so the file is shown under the folder it was added from.
+  assert.equal(params.get("view"), "files");
+  assert.equal(params.get("source"), "folder:/media/tv");
+  assert.equal(params.get("folder"), "/media/tv/Show/Season 4");
+  assert.equal(params.get("file"), "/media/tv/Show/Season 4/Show S04E13.mkv");
+  // A sibling folder that merely shares a prefix is not inside the root.
+  assert.equal(query("/media2/clip.mkv"), null);
+  assert.equal(query("relative/clip.mkv"), null);
+  assert.equal(query(""), null);
+  assert.equal(new URLSearchParams(query("/media/clip.mkv")).get("folder"), "/media");
+  // The route round-trips through the same parser the address bar uses.
+  const route = h.run(`navigationRoute("?${params.toString().replace(/"/g, "")}")`);
+  assert.equal(route.tab, "library");
+  assert.equal(route.file, "/media/tv/Show/Season 4/Show S04E13.mkv");
+});
+
+test("Show in Files goes to the file, and says so when the file is outside the media folders", async () => {
+  const h = harness();
+  h.run('state.info={roots:["/media"]};');
+  h.context.routes = [];
+  h.context.notes = [];
+  h.run("applyNavigation = async (route) => routes.push(route); notify = (text) => notes.push(text);");
+  await h.run('showInFiles("/media/tv/Show S04E13.mkv")');
+  assert.equal(h.context.routes.length, 1);
+  assert.equal(h.context.routes[0].file, "/media/tv/Show S04E13.mkv");
+  assert.equal(h.context.routes[0].source, "folder:/media");
+  await h.run('showInFiles("/elsewhere/clip.mkv")');
+  assert.equal(h.context.routes.length, 1);
+  assert.match(h.context.notes[0], /outside the media folders/);
+});
+
+test("a failed or cancelled job card shows its file in Files, and so does the open detail of a finished one", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};');
+  const labels = (job, detail = false) => h.run(`jobControls(${JSON.stringify(job)}, ${detail}).children.map(b => b.textContent)`);
+  const base = { id: "t-a", action_name: "transcode_media", source_path: "/media/tv/Show S04E13.mkv", mode: "size" };
+  assert.ok(labels({ ...base, status: "cancelled" }).includes("Show in Files"));
+  assert.ok(labels({ ...base, status: "failed" }).includes("Show in Files"));
+  // A finished job only offers it once it is open, so queue cards stay short.
+  assert.ok(!labels({ ...base, status: "completed" }).includes("Show in Files"));
+  assert.ok(labels({ ...base, status: "completed" }, true).includes("Show in Files"));
+  // No file, a file outside the folders, or a preview run: nothing to show.
+  assert.ok(!labels({ id: "t-b", action_name: "transcode_media", status: "cancelled" }).includes("Show in Files"));
+  assert.ok(!labels({ ...base, status: "cancelled", source_path: "/elsewhere/clip.mkv" }).includes("Show in Files"));
+  assert.ok(!labels({ ...base, status: "completed", batch: { dry_run: true } }, true).includes("Show in Files"));
+  // A replacement job knows its file from the promotion.
+  assert.ok(labels({ id: "p-a", action_name: "file_promotion", status: "cancelled", promotion: { original_path: "/media/tv/Show S04E13.mkv" } }).includes("Show in Files"));
+  // It only opens something, so a busy job does not disable it.
+  const control = h.run(`jobControls(${JSON.stringify({ ...base, status: "failed" })}).children.find(b => b.textContent === "Show in Files")`);
+  assert.equal(control.dataset.requiresWorker, "false");
+  assert.ok(h.run('navigationLabels').includes("Show in Files"));
+});
+
+test("a failed, cancelled or skipped batch row offers Show in Files, and a running one does not", async () => {
+  const items = [
+    { item_key: "k-f", display_label: "Failed", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv" },
+    { item_key: "k-c", display_label: "Cancelled", status: "cancelled", child_action_id: "t-c", file_path: "/media/tv/C.mkv" },
+    { item_key: "k-s", display_label: "Skipped", status: "skip", file_path: "/media/tv/S.mkv", reasons: ["quality_not_met"] },
+    { item_key: "k-r", display_label: "Running", status: "running", child_action_id: "t-r", file_path: "/media/tv/R.mkv" },
+    { item_key: "k-o", display_label: "Outside", status: "failed", child_action_id: "t-o", file_path: "/elsewhere/O.mkv" },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:5});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const rows = itemRows(h);
+  const shows = rows.map((row) => buttonLabels(row).includes("Show in Files"));
+  assert.deepEqual(shows, [true, true, true, false, false]);
+  const control = flatten(rows[0]).find((e) => e.textContent === "Show in Files");
+  // It names the file's own job and keeps working while the batch is busy.
+  assert.equal(control.dataset.jobControl, "t-f");
+  assert.equal(control.dataset.navigation, "true");
+  h.context.routes = [];
+  h.run("applyNavigation = async (route) => routes.push(route);");
+  await control.listeners.get("click")();
+  assert.equal(h.context.routes[0].file, "/media/tv/F.mkv");
 });
 
 // The palette and dark-mode contrast checks run with the rest of the UI tests.

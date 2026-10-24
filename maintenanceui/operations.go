@@ -739,16 +739,12 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if grouped {
+		// One fixed order: the newest submission first, by workflow number. It
+		// survives polling, state changes and a conversion becoming a
+		// replacement, and it never moves a row because a file in it started or
+		// stopped waiting. Work that waits on a person is flagged on its row,
+		// counted, and found by the Needs decision filter.
 		sort.SliceStable(filtered, func(i, j int) bool {
-			// Work that waits on a person comes first, however old it is, so a
-			// decision is never buried under newer jobs or behind "Load more".
-			// Within each group, workflow creation order survives polling, state
-			// changes and a conversion becoming a replacement. New submissions
-			// appear first.
-			left, right := decisionWorkflows[roots[filtered[i].inst.ID]], decisionWorkflows[roots[filtered[j].inst.ID]]
-			if left != right {
-				return left
-			}
 			return numbers[roots[filtered[i].inst.ID]] > numbers[roots[filtered[j].inst.ID]]
 		})
 	}

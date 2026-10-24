@@ -962,4 +962,43 @@ func (e *HTTPExecutor) Cancel(ctx context.Context, jobID string) error {
 	return nil
 }
 
-var _ transcode.Executor = (*HTTPExecutor)(nil)
+// RetryPublication asks the worker to publish a finished encode again after it
+// stopped retrying on its own. The request only records the ask, so repeating
+// it is harmless; the worker publishes on its next recovery sweep and never
+// encodes again. A worker that predates the endpoint answers 404 for the
+// route, reported as transcode.ErrPublicationRetryUnsupported.
+func (e *HTTPExecutor) RetryPublication(ctx context.Context, jobID string) error {
+	if strings.TrimSpace(jobID) == "" {
+		return errors.New("jobID is required")
+	}
+	if !validJobIDRegex.MatchString(jobID) {
+		return fmt.Errorf("invalid jobID %q", jobID)
+	}
+	path := "/v1/jobs/" + url.PathEscape(jobID) + "/retry-publication"
+	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	defer cancel()
+	hreq, err := e.newRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return fmt.Errorf("building retry publication request: %w", err)
+	}
+	data, code, hdr, err := e.do(hreq, "retry_publication", jobID, false)
+	if err != nil {
+		return err
+	}
+	if code == http.StatusOK {
+		return nil
+	}
+	he := newHTTPError(hreq, code, data, hdr)
+	switch {
+	case code == http.StatusNotFound && !strings.Contains(strings.ToLower(he.Message), "job not found"):
+		return transcode.ErrPublicationRetryUnsupported
+	case code == http.StatusConflict && he.Code == transcode.WorkerErrorNothingToRetry:
+		return transcode.ErrNothingToRetry
+	}
+	return he
+}
+
+var (
+	_ transcode.Executor           = (*HTTPExecutor)(nil)
+	_ transcode.PublicationRetrier = (*HTTPExecutor)(nil)
+)

@@ -18,8 +18,11 @@ const (
 	// WorkerErrorAlreadyTerminal marks a 200 cancel acknowledgement for a job
 	// that had already completed or failed: there is nothing left to cancel.
 	WorkerErrorAlreadyTerminal = "already_terminal"
-	WorkerErrorInternal        = "internal"
-	WorkerErrorUnavailable     = "unavailable"
+	// WorkerErrorNothingToRetry (409) answers a retry-publication request for
+	// a job that is not waiting to publish. It is definitive.
+	WorkerErrorNothingToRetry = "nothing_to_retry"
+	WorkerErrorInternal       = "internal"
+	WorkerErrorUnavailable    = "unavailable"
 )
 
 // RequestIDHeader carries a per-request correlation ID from Navigatorr to the
