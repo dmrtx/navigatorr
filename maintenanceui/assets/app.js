@@ -3141,7 +3141,7 @@ function batchSegments(batch) {
     segment.style.width = `${part.n / total * 100}%`;
     bar.append(segment);
   }
-  return {bar, legend};
+  return {bar, legend, kinds: parts.length};
 }
 function batchProgress(job, {segments = false} = {}) {
   const replacing = replacementProgressBlock(job);
@@ -3184,7 +3184,9 @@ function batchProgress(job, {segments = false} = {}) {
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
-  let estimate = (processed + partial) / batch.total;
+  // A cancelled file will never run, so it is not work left to do.
+  const workTotal = Math.max(1, batch.total - count("cancelled"));
+  let estimate = (processed + partial) / workTotal;
   if (active && job.replacement_requested) {
     const promotion = batch.promotion;
     const conversion = Math.min(1,estimate);
@@ -3205,9 +3207,9 @@ function batchProgress(job, {segments = false} = {}) {
     result.append(value, parts.bar, node("span", parts.legend, "batch-legend metadata"));
   } else {
     const bar = document.createElement("progress");
-    bar.max = batch.total;
-    bar.value = percent / 100 * batch.total;
-    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
+    bar.max = workTotal;
+    bar.value = percent / 100 * workTotal;
+    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${workTotal} files processed`);
     result.append(counts, value, bar);
   }
 
@@ -4813,7 +4815,11 @@ function actionMenuKeydown(e) {
   if (e.key !== "Escape") return;
   const menu = document.activeElement?.closest?.(".more-actions[open]");
   closeActionMenus();
-  if (menu) menu.querySelector("summary")?.focus();
+  // Inside a dialog, Escape closes only the menu, not the whole dialog.
+  if (menu) {
+    e.preventDefault?.();
+    menu.querySelector("summary")?.focus();
+  }
 }
 if (typeof document.addEventListener === "function") {
   document.addEventListener("pointerdown", (e) => closeActionMenus(e.target));
@@ -5322,7 +5328,8 @@ async function loadJobs(more = false) {
       const menu = [...actions.children].filter(child => child !== main);
       row.append(heading, meta);
       const live = skipped ? null : presentation.showTelemetry ? telemetry(job, {segments: true}) : batchProgress(job, {segments: true});
-      const spread = skipped || live ? null : batchSegments(visibleBatch(job));
+      // A bar of one colour says nothing the summary line has not said (every file replaced, say), so it is left out.
+      const spread = skipped || live ? null : (seg => seg?.kinds > 1 ? seg : null)(batchSegments(visibleBatch(job)));
       let body = skipped ? skippedBatchOutcome(job) : live;
       if (spread) {
         body = node("div", "", "job-progress batch-summary");
@@ -5686,7 +5693,8 @@ function slotProgressBlock(job, alive) {
 // every row start and end in the same place however long a phase name is.
 function slotProgressCells(job, alive) {
   const {label, percent, bar} = slotProgressParts(job, alive);
-  const phase = node("td", label, `slot-phase${alive ? "" : " stale"}`);
+  const phase = node("td", "", `slot-phase${alive ? "" : " stale"}`);
+  phase.append(node("span", label, "slot-phase-name"));
   const cell = node("td", "", `slot-bar${alive ? "" : " stale"}`);
   const track = node("div", "", "slot-bar-track");
   track.append(bar);
@@ -5780,7 +5788,7 @@ function slotTable(groups) {
   }
   if (busy.length) {
     const table = node("table"), head = node("tr");
-    for (const title of ["Slot", "File", "Phase", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
+    for (const title of ["Slot", "File", "Phase", "Progress", "Kind", "Elapsed"]) head.append(node("th", title));
     const thead = node("thead");
     thead.append(head);
     const tbody = node("tbody");
@@ -5789,14 +5797,17 @@ function slotTable(groups) {
       row.append(node("td", slot));
       if (!e.job) {
         const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
-        note.colSpan = 6;
+        note.colSpan = 5;
         row.append(note);
       } else {
         const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
-        const file = node("td", job.file, "slot-file"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        const file = node("td", job.file, "slot-file"), [phase, bar] = slotProgressCells(job, !stale);
         file.title = job.file;
-        encode.title = facts.title;
-        row.append(file, ...slotProgressCells(job, !stale), encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
+        // What the worker is doing sits under the phase's name: encoder and speed while encoding, a short note otherwise.
+        const factsLine = node("span", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        factsLine.title = facts.title;
+        phase.append(factsLine);
+        row.append(file, phase, bar, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
       }
       tbody.append(row);
     }
@@ -5848,13 +5859,16 @@ if (typeof IntersectionObserver !== "undefined") {
   ).observe($("jobs-sentinel"));
 }
 function renderPhaseCosts(host, job) {
+  // A batch only keeps its own bookkeeping here (listing the files, saving the
+  // results); each file's encode times are in that file's details.
+  if (job.batch) return;
   const entries = Object.entries(job.phase_costs || {});
   if (!entries.length) return;
   const detail = node("details", "", "phase-costs detail-row");
   detail.open = Boolean(state.detailCostsOpen);
   detail.addEventListener("toggle", () => { state.detailCostsOpen = detail.open; });
-  detail.append(node("summary", "Phase costs"));
-  detail.append(node("p", "Elapsed wall measurements include synchronous I/O. Coordinator measurements count returned invocations and exclude waits between them. CPU time is the user + system time of the worker's ffmpeg/ffprobe processes where the worker measured it; otherwise CPU time is unknown; phases may overlap and are not added into a total.", "metadata"));
+  detail.append(node("summary", "Where the time went"));
+  detail.append(node("p", "Time spent in each part of this file's work. Parts can overlap, so the rows are not a total. CPU time is only shown where the worker measured it.", "metadata"));
   const table = node("table");
   const header = node("tr");
   for (const label of ["Phase", "Wall time", "CPU time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
@@ -6028,7 +6042,7 @@ function batchFileActivity(item, job) {
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
-    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : worker.progress_is_stale && heartbeatAlive(observation.heartbeat) ? " · Worker heartbeat received; last measurement shown" : eta ? ` · ${eta}` : "");
+    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : eta ? ` · ${eta}` : "");
   }
   if (activity?.work?.phase === "waiting_for_hash_slot") return "Waiting to verify source";
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
@@ -6058,6 +6072,39 @@ async function retryFileReplacement(item, batchID) {
   const name = item.display_label || (item.file_path || "").split("/").pop();
   await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
 }
+// A file's actions: the main one stays in view, the others sit under a "..."
+// menu so a row is never a wall of buttons.
+function foldBatchFileActions(actions, itemKey) {
+  const buttons = [...actions.children];
+  if (buttons.length < 2) return;
+  const main = buttons.find(b => /\bprimary\b/.test(b.className)) || buttons[0];
+  const rest = buttons.filter(b => b !== main);
+  const more = node("details", "", "more-actions");
+  more.dataset.menuFor = itemKey || "";
+  const toggle = node("summary", "\u22ef", "more-toggle");
+  toggle.setAttribute("aria-label", "More actions");
+  toggle.title = "More actions";
+  const menu = node("div", "", "more-menu");
+  for (const control of rest) control.setAttribute("aria-label", control.textContent);
+  menu.append(...rest);
+  more.append(toggle, menu);
+  more.addEventListener("click", e => {
+    if (!e.target?.closest?.(".more-menu button")) return;
+    more.open = false;
+    toggle.focus?.({preventScroll: true});
+  }, true);
+  // Near the bottom of the dialog the menu opens upward, so it is never cut off.
+  more.addEventListener("toggle", () => {
+    if (!more.open) return;
+    const edge = more.closest?.("dialog")?.getBoundingClientRect?.().bottom ?? window.innerHeight;
+    const room = edge - toggle.getBoundingClientRect().bottom;
+    more.classList.toggle("up", room < menu.getBoundingClientRect().height + 12);
+  });
+  more.addEventListener("focusout", e => {
+    if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
+  });
+  actions.replaceChildren(main, more);
+}
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -6071,6 +6118,9 @@ async function loadBatchItems(id, revision) {
   )
     return;
   const focus = focusedControl($("batch-items-list"));
+  // The list redraws every few seconds: an open file menu and a focused file name stay as they were.
+  const menu = openActionMenu($("batch-items-list"));
+  const nameFocus = document.activeElement?.dataset?.nameLink ? document.activeElement.dataset.batchItemKey : null;
   $("batch-items-list").replaceChildren();
   for (const item of response.items || []) {
     const row = node("div", "", "batch-item-row");
@@ -6078,13 +6128,26 @@ async function loadBatchItems(id, revision) {
     const queued = item.replacement_plan === "queued";
     const failure = item.replacement_failure;
     const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
-    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : item.candidate_ready ? () => openJob(item.child_action_id) : null;
-    row.append(node("span", item.display_label || (item.file_path || "").split("/").pop(), "metadata batch-file-name"), statusBadge(label, item.replacement_status || label, review));
-    if (item.child_action_id)
-      row.append(
-        button("View file", () => openJob(item.child_action_id), "quiet"),
-      );
-
+    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
+    // The name opens the file, so there is no separate View file button.
+    const fileName = item.display_label || (item.file_path || "").split("/").pop();
+    const nameCell = node("span", item.child_action_id ? "" : fileName, "metadata batch-file-name");
+    if (item.child_action_id) {
+      const link = jobLink(fileName, item.child_action_id);
+      link.dataset.nameLink = "true";
+      link.dataset.batchItemKey = item.item_key;
+      nameCell.append(link);
+    }
+    nameCell.title = fileName;
+    // One line per file: name, how much it saves, state, then the main action.
+    const savedCell = item.saved_bytes > 0 ? node("span", `\u2212${bytes(item.saved_bytes)}`, "batch-file-saved") : null;
+    if (savedCell) savedCell.title = "Smaller than the original by this much";
+    row.append(nameCell);
+    if (savedCell) {
+      row.className += " has-saved";
+      row.append(savedCell);
+    }
+    row.append(statusBadge(label, item.replacement_status || label, review));
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
     const add = (label, fn, {navigation = false, target = id, primary = label === "Replace file", requiresWorker = false} = {}) => {
@@ -6130,9 +6193,10 @@ async function loadBatchItems(id, revision) {
     // A cancelled or failed file can be encoded again as it was set up, without
     // reopening the goal dialog.
     if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
-      add("Encode again", () => encodeFileAgain(id, item.item_key));
+      add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
     if (filesRouteFor(item.file_path))
       add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
+    foldBatchFileActions(actions, item.item_key);
     if (actions.children.length) row.append(actions);
     const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
@@ -6144,7 +6208,12 @@ async function loadBatchItems(id, revision) {
     }
 
     if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
-    if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    // A finished candidate repeats its batch's goal and its own status, so only
+    // files that still need a look say which goal they follow.
+    const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
+    if (settled) {
+      // Nothing to add.
+    } else if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
@@ -6159,7 +6228,8 @@ async function loadBatchItems(id, revision) {
     if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
     for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
     if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
-    if (item.candidate_ready) row.append(node("span", state.info.allow_destructive ? "Candidate verified · Original kept until replacement is approved" : "Candidate verified · Replacement is disabled in server settings", "muted"));
+    // The status already says "Candidate ready"; only a reason it cannot be replaced is added.
+    if (item.candidate_ready && !state.info.allow_destructive) row.append(node("span", "Replacement is disabled in server settings", "muted"));
     for (const control of row.querySelectorAll("button")) {
       control.dataset.batchItemKey = item.item_key;
       // Buttons made without a target only open something.
@@ -6169,6 +6239,8 @@ async function loadBatchItems(id, revision) {
     $("batch-items-list").append(row);
   }
   restoreControl($("batch-items-list"), focus);
+  restoreActionMenu($("batch-items-list"), menu);
+  if (nameFocus) [...$("batch-items-list").querySelectorAll("[data-name-link]")].find(link => link.dataset.batchItemKey === nameFocus)?.focus({preventScroll: true});
   $("batch-items-note").textContent =
     `${response.items?.length || 0} of ${response.total} files`;
   state.batchItemsHasMore = response.has_more;
@@ -6255,7 +6327,8 @@ function renderDetailRows(job) {
   const location = job.promotion?.new_path || job.promotion?.original_path;
   if (location) paths.append(node("p", `Library: ${location.slice(0, location.lastIndexOf("/"))}`, "metadata"));
   // With several workers, say which one runs (or ran) the job.
-  if (job.worker && (state.workerInfo?.nodes?.length || 0) > 1) paths.append(node("p", `Worker: ${job.worker}`, "metadata"));
+  const workerName = job.worker_name || (typeof job.worker === "string" ? job.worker : "");
+  if (workerName && (state.workerInfo?.nodes?.length || 0) > 1) paths.append(node("p", `Worker: ${workerName}`, "metadata"));
   showDetailRow("path", paths.children.length > 0);
   // The log opens itself for a failure no step explains; opening loads it.
   const explained = stages.some(stage => ["failed", "rejected"].includes(stage.status));

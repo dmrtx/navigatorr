@@ -19,6 +19,8 @@ type batchItemView struct {
 	WaitingDecisions []string `json:"waiting_decisions,omitempty"`
 	ReasonCode       string   `json:"reason_code,omitempty"`
 	CandidateReady   bool     `json:"candidate_ready,omitempty"`
+	// SavedBytes is how much smaller the finished candidate is than the original.
+	SavedBytes int64 `json:"saved_bytes,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -177,6 +179,10 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
 								break
 							}
+						}
+						// The saving of a candidate that was cleaned up is shown only once it replaced the original.
+						if saved := projectOperationSavings(r, time.Now()).CandidateSavedBytes; saved != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && (operationValue(r, "candidate_removed") != true || view.Replaced) {
+							view.SavedBytes = *saved
 						}
 					}
 				}

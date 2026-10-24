@@ -727,8 +727,8 @@ test("batch file detail and worker slots agree about a long measurement and lost
   const h = metricProgressHarness();
   h.run('progressJob.batch={total:2,running:1};progressJob.activities=[{id:"child",worker:progressJob.worker,current_step:0,stages:[{name:"wait_transcode"}]}];');
   const label = h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)');
-  assert.match(label, /Measuring final quality.*Worker heartbeat received/);
-  assert.doesNotMatch(label, /stale|No updates/);
+  // The file line stays quiet while the worker is alive; the batch progress text keeps the heartbeat.
+  assert.equal(label, "Measuring final quality");
   assert.match(progressText(h.run('batchProgress(progressJob)')), /Measuring final quality.*Worker heartbeat received/);
   h.run('progressJob.worker.worker_heartbeat_at="2026-10-16T12:15:00Z";');
   assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},progressJob)'), /No worker heartbeat for 7m 54s/);
@@ -2027,11 +2027,11 @@ test("worker activity gives each node a row that opens onto its slots, and a tab
   assert.equal(rows[0].children[0].textContent,"m1 · Slot 1");
   assert.equal(rows[0].children[1].textContent,"one.mkv");
   // The phase and the bar have a cell each, so every bar lines up whatever the phase is called.
-  assert.deepEqual(table.children[0].children[0].children[0].children.map(c=>c.textContent),["Slot","File","Phase","Progress","Encode","Kind","Elapsed"]);
-  assert.equal(rows[0].children[2].textContent,"Encoding");
+  assert.deepEqual(table.children[0].children[0].children[0].children.map(c=>c.textContent),["Slot","File","Phase","Progress","Kind","Elapsed"]);
+  assert.equal(rows[0].children[2].children[0].textContent,"Encoding");
+  assert.equal(rows[0].children[2].children[1].textContent,"Waiting for the first update");
   assert.equal(rows[0].children[3].children[1].textContent,"10.0%");
-  assert.equal(rows[0].children[4].textContent,"Waiting for the first update");
-  assert.equal(rows[0].children[5].textContent,"Full conversion");
+  assert.equal(rows[0].children[4].textContent,"Full conversion");
   assert.equal(table.children[1].textContent,"1 slot available · m4 1");
   // What a person opened or shut stays that way on the next refresh.
   idle.children[0].listeners.get("click")();
@@ -2564,8 +2564,12 @@ test("batch progress counts resolved files independently of individual worker pe
   assert.equal(progress.children[2].max, 23);
   const mixed = h.run('batchProgress({batch:{total:10,completed:3,failed:2,skip:1,cancelled:1,waiting_decision:2,running:1}})');
   assert.equal(mixed.children[0].textContent, "6 / 10 files finished");
-  assert.equal(mixed.children[1].textContent, "60%");
+  assert.equal(mixed.children[1].textContent, "67%");
   assert.match(mixed.children[0].title, /Cancelled files.*not counted/);
+  // A cancelled file is not work left to do: one file done, one cancelled is complete, not half done.
+  const cancelledOne = h.run('batchProgress({status:"waiting_external",batch:{total:2,completed:1,cancelled:1}})');
+  assert.equal(cancelledOne.children[1].textContent, "~99%");
+  assert.equal(cancelledOne.children[2].max, 1);
   assert.equal(h.run('batchProgress({batch:{dry_run:true,total:10,queued:10}})'), null);
   assert.equal(h.run('batchProgress({batch:{total:0}})'), null);
   assert.equal(h.run('batchProgress({batch:{completed:2}})'), null);
@@ -3283,7 +3287,8 @@ test("simple series processing requires a frozen selection before admission",()=
 
 test("phase cost detail distinguishes measured wall intervals from unknown bytes and CPU",()=>{
  const h=harness();h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1,active_compute_ms:null},worker_encode:{duration_ms:500,attempts:2,nas_read_bytes:null,nas_written_bytes:400}}});');
- const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is unknown/);assert.match(rendered,/phases may overlap/);assert.doesNotMatch(rendered,/Total.*520/);
+ const rendered=JSON.stringify(h.elements.get("detail-summary").children);assert.match(rendered,/Coordinator · Inventory/);assert.match(rendered,/20 ms/);assert.match(rendered,/Unknown/);assert.match(rendered,/CPU time is only shown where the worker measured it/);assert.match(rendered,/can overlap/);
+ h.run('$("detail-summary").children.length=0;renderPhaseCosts($("detail-summary"),{batch:{total:2},phase_costs:{coordinator_inventory:{duration_ms:20,attempts:1}}})');assert.equal(h.elements.get("detail-summary").children.length,0);assert.doesNotMatch(rendered,/Total.*520/);
 });
 
 test("a search that ran out of time on a busy worker says so and suggests trying again, whole",()=>{
@@ -3314,13 +3319,15 @@ test("batch outcome buttons reveal current decisions, readable skips and ready r
   assert.match(text(rows[1]),/quality target; original kept/);
   assert.match(text(rows[2]),/Needs attention.*Change goal.*Search reached its limit/);
   assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
-  for (const [index,label] of [[0,"Candidate ready"],[1,"Skipped"],[2,"Needs attention"]]) {
+  // Candidate ready opens the same file as the name does, so its badge is not a second button.
+  assert.equal(rows[0].children.some(el=>el.className.includes("status-action")),false);
+  for (const [index,label] of [[1,"Skipped"],[2,"Needs attention"]]) {
     const badge=rows[index].children.find(el=>el.className.includes("status-action"));
     assert.ok(badge,`${label} is actionable`);
     await badge.listeners.get("click")();
   }
   await all(rows[0]).find(el=>el.textContent==="Replace file").listeners.get("click")();
-  assert.deepEqual(calls,[["open","ready-child"],["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
+  assert.deepEqual(calls,[["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
 });
 
 test("file recovery freezes one item across review and submission and never falls back to the whole batch",async()=>{
@@ -3531,10 +3538,13 @@ test("Escape closes open More menus and returns focus to the toggle it was in", 
   h.document.querySelectorAll = () => [menu, other.menu];
   h.run('actionMenuKeydown({ key: "Tab" })');
   assert.equal(menu.open, true);
-  h.run('actionMenuKeydown({ key: "Escape" })');
+  h.context.escape = { key: "Escape", prevented: false, preventDefault() { this.prevented = true; } };
+  h.run('actionMenuKeydown(escape)');
   assert.equal(menu.open, false);
   assert.equal(other.menu.open, false);
   assert.equal(focused, true);
+  // Inside a dialog, the same Escape must not also close the dialog.
+  assert.equal(h.context.escape.prevented, true);
 });
 
 test("a podcast review card labels Review cuts instead of leaving it an icon", () => {
@@ -6928,6 +6938,45 @@ test("every job card and open job offers its file or folder in Files", () => {
   assert.ok(h.run('navigationLabels').includes("Show in Files"));
 });
 
+test("a batch file is one line: a name that opens the file, its saving, one action and a menu for the rest", async () => {
+  const items = [
+    { item_key: "k-c", display_label: "Ready.mkv", status: "completed", candidate_ready: true, saved_bytes: 1.9e9, child_action_id: "t-c", file_path: "/media/tv/Ready.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-x", display_label: "Cancelled.mkv", status: "cancelled", child_action_id: "t-x", file_path: "/media/tv/X.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-w", display_label: "Waiting.mkv", status: "queued" },
+  ];
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};');
+  h.context.items = items;
+  h.run('api=async()=>({items,total:3});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const rows = itemRows(h);
+  const flat = (row) => flatten(row);
+  // The name is the link to the file's job; there is no View file button.
+  const link = flat(rows[0]).find((e) => e.dataset.nameLink);
+  assert.equal(link.textContent, "Ready.mkv");
+  assert.equal(link.dataset.batchItemKey, "k-c");
+  assert.ok(!rows.some((row) => buttonLabels(row).includes("View file")));
+  // A file with no job has plain text for a name.
+  assert.ok(!flat(rows[2]).some((e) => e.dataset.nameLink));
+  // The saving is shown only where the server gave one.
+  const saved = (row) => flat(row).find((e) => /batch-file-saved/.test(e.className || ""));
+  assert.match(saved(rows[0]).textContent, /1\.90 GB/);
+  assert.ok(rows[0].className.includes("has-saved"));
+  assert.equal(saved(rows[1]), undefined);
+  // Replace file stays in view; the other actions sit in the menu with their controls intact.
+  const actions = flat(rows[0]).find((e) => /batch-file-actions/.test(e.className || ""));
+  assert.equal(actions.children[0].textContent, "Replace file");
+  const more = actions.children[1];
+  assert.equal(more.dataset.menuFor, "k-c");
+  const menu = flat(more).filter((e) => e.textContent && e.textContent !== "\u22ef" && e.dataset?.jobControl);
+  assert.deepEqual(menu.map((e) => e.textContent), ["Show in Files"]);
+  assert.ok(menu.every((e) => e.dataset.batchItemKey === "k-c"));
+  // The primary action of a cancelled file is Encode again.
+  const cancelled = flat(rows[1]).find((e) => /batch-file-actions/.test(e.className || ""));
+  assert.equal(cancelled.children[0].textContent, "Encode again");
+  assert.equal(cancelled.children.length, 2);
+});
+
 test("every batch row offers Show in Files when its file is inside the media folders", async () => {
   const items = [
     { item_key: "k-f", display_label: "Failed", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv" },
@@ -7129,6 +7178,11 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.deepEqual(widths, [["segment-ok", 25], ["segment-err", 8], ["segment-run", 17], ["segment-wait", 50]]);
   h.context.batch = { total: 8, completed: 6, review: 2 };
   assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
+  // A single colour is reported so the queue row can leave the bar out.
+  h.context.batch = { total: 13, completed: 13 };
+  assert.equal(h.run("batchSegments(batch).kinds"), 1);
+  h.context.batch = { total: 8, completed: 6, review: 2 };
+  assert.equal(h.run("batchSegments(batch).kinds"), 2);
   h.context.batch = { total: 1, completed: 1 };
   assert.equal(h.run("batchSegments(batch)"), null);
   h.context.batch = { total: 4, completed: 4, dry_run: true };
