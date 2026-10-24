@@ -3209,7 +3209,7 @@ function batchProgress(job, {segments = false} = {}) {
     const bar = document.createElement("progress");
     bar.max = workTotal;
     bar.value = percent / 100 * workTotal;
-    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${batch.total} files processed`);
+    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${workTotal} files processed`);
     result.append(counts, value, bar);
   }
 
@@ -4815,7 +4815,11 @@ function actionMenuKeydown(e) {
   if (e.key !== "Escape") return;
   const menu = document.activeElement?.closest?.(".more-actions[open]");
   closeActionMenus();
-  if (menu) menu.querySelector("summary")?.focus();
+  // Inside a dialog, Escape closes only the menu, not the whole dialog.
+  if (menu) {
+    e.preventDefault?.();
+    menu.querySelector("summary")?.focus();
+  }
 }
 if (typeof document.addEventListener === "function") {
   document.addEventListener("pointerdown", (e) => closeActionMenus(e.target));
@@ -6081,6 +6085,7 @@ function foldBatchFileActions(actions, itemKey) {
   toggle.setAttribute("aria-label", "More actions");
   toggle.title = "More actions";
   const menu = node("div", "", "more-menu");
+  for (const control of rest) control.setAttribute("aria-label", control.textContent);
   menu.append(...rest);
   more.append(toggle, menu);
   more.addEventListener("click", e => {
@@ -6106,6 +6111,9 @@ async function loadBatchItems(id, revision) {
   )
     return;
   const focus = focusedControl($("batch-items-list"));
+  // The list redraws every few seconds: an open file menu and a focused file name stay as they were.
+  const menu = openActionMenu($("batch-items-list"));
+  const nameFocus = document.activeElement?.dataset?.nameLink ? document.activeElement.dataset.batchItemKey : null;
   $("batch-items-list").replaceChildren();
   for (const item of response.items || []) {
     const row = node("div", "", "batch-item-row");
@@ -6117,13 +6125,21 @@ async function loadBatchItems(id, revision) {
     // The name opens the file, so there is no separate View file button.
     const fileName = item.display_label || (item.file_path || "").split("/").pop();
     const nameCell = node("span", item.child_action_id ? "" : fileName, "metadata batch-file-name");
-    if (item.child_action_id) nameCell.append(jobLink(fileName, item.child_action_id));
+    if (item.child_action_id) {
+      const link = jobLink(fileName, item.child_action_id);
+      link.dataset.nameLink = "true";
+      link.dataset.batchItemKey = item.item_key;
+      nameCell.append(link);
+    }
     nameCell.title = fileName;
     // One line per file: name, how much it saves, state, then the main action.
     const savedCell = item.saved_bytes > 0 ? node("span", `\u2212${bytes(item.saved_bytes)}`, "batch-file-saved") : null;
     if (savedCell) savedCell.title = "Smaller than the original by this much";
     row.append(nameCell);
-    if (savedCell) row.append(savedCell);
+    if (savedCell) {
+      row.className += " has-saved";
+      row.append(savedCell);
+    }
     row.append(statusBadge(label, item.replacement_status || label, review));
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
@@ -6216,6 +6232,8 @@ async function loadBatchItems(id, revision) {
     $("batch-items-list").append(row);
   }
   restoreControl($("batch-items-list"), focus);
+  restoreActionMenu($("batch-items-list"), menu);
+  if (nameFocus) [...$("batch-items-list").querySelectorAll("[data-name-link]")].find(link => link.dataset.batchItemKey === nameFocus)?.focus({preventScroll: true});
   $("batch-items-note").textContent =
     `${response.items?.length || 0} of ${response.total} files`;
   state.batchItemsHasMore = response.has_more;

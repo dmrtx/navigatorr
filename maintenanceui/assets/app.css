@@ -1736,7 +1736,7 @@ main {
   white-space: nowrap;
 }
 .batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 1; min-width: 56px; color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
-.batch-item-row > .badge { grid-column: 3; grid-row: 1; min-width: 108px; justify-content: center; white-space: nowrap; }
+.batch-item-row > .status-badge { grid-column: 3; grid-row: 1; min-width: 108px; justify-content: center; white-space: nowrap; }
 .batch-item-row > .batch-file-actions { grid-column: 4; grid-row: 1; display: flex; justify-content: flex-end; gap: 6px; min-width: 150px; margin: 0; }
 .batch-item-row > .batch-file-activity, .batch-item-row > .muted { color: var(--ink); font-size: 13px; line-height: 1.4; }
 .batch-item-row > .batch-file-activity { color: var(--forest); }
@@ -1759,9 +1759,10 @@ main {
   /* Narrow screens: name and state on one line, the rest below. */
   .batch-item-row > .batch-file-name { grid-column: 1; white-space: normal; overflow-wrap: anywhere; }
   .batch-item-row > .batch-file-saved { grid-column: 1; grid-row: 2; min-width: 0; text-align: left; }
-  .batch-item-row > .badge { grid-column: 2; }
-  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 3; justify-content: flex-start; min-width: 0; }
-  .batch-item-row > .badge { min-width: 0; }
+  .batch-item-row > .status-badge { grid-column: 2; }
+  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; min-width: 0; }
+  .batch-item-row.has-saved > .batch-file-actions { grid-row: 3; }
+  .batch-item-row > .status-badge { min-width: 0; }
   .batch-item-row .more-menu { right: auto; left: 0; }
 }
 .batch-item-row .batch-file-name a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }

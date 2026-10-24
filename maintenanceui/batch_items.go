@@ -160,9 +160,6 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 							}
 						}
 						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
-						if saved := projectOperationSavings(r, time.Now()).CandidateSavedBytes; saved != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true {
-							view.SavedBytes = *saved
-						}
 						view.SizeBudgetOutcome = operationSizeBudgetOutcome(r)
 						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
@@ -182,6 +179,10 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
 								break
 							}
+						}
+						// The saving of a candidate that was cleaned up is shown only once it replaced the original.
+						if saved := projectOperationSavings(r, time.Now()).CandidateSavedBytes; saved != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && (operationValue(r, "candidate_removed") != true || view.Replaced) {
+							view.SavedBytes = *saved
 						}
 					}
 				}

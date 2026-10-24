@@ -3536,10 +3536,13 @@ test("Escape closes open More menus and returns focus to the toggle it was in", 
   h.document.querySelectorAll = () => [menu, other.menu];
   h.run('actionMenuKeydown({ key: "Tab" })');
   assert.equal(menu.open, true);
-  h.run('actionMenuKeydown({ key: "Escape" })');
+  h.context.escape = { key: "Escape", prevented: false, preventDefault() { this.prevented = true; } };
+  h.run('actionMenuKeydown(escape)');
   assert.equal(menu.open, false);
   assert.equal(other.menu.open, false);
   assert.equal(focused, true);
+  // Inside a dialog, the same Escape must not also close the dialog.
+  assert.equal(h.context.escape.prevented, true);
 });
 
 test("a podcast review card labels Review cuts instead of leaving it an icon", () => {
@@ -6933,6 +6936,45 @@ test("every job card and open job offers its file or folder in Files", () => {
   assert.ok(h.run('navigationLabels').includes("Show in Files"));
 });
 
+test("a batch file is one line: a name that opens the file, its saving, one action and a menu for the rest", async () => {
+  const items = [
+    { item_key: "k-c", display_label: "Ready.mkv", status: "completed", candidate_ready: true, saved_bytes: 1.9e9, child_action_id: "t-c", file_path: "/media/tv/Ready.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-x", display_label: "Cancelled.mkv", status: "cancelled", child_action_id: "t-x", file_path: "/media/tv/X.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-w", display_label: "Waiting.mkv", status: "queued" },
+  ];
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};');
+  h.context.items = items;
+  h.run('api=async()=>({items,total:3});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const rows = itemRows(h);
+  const flat = (row) => flatten(row);
+  // The name is the link to the file's job; there is no View file button.
+  const link = flat(rows[0]).find((e) => e.dataset.nameLink);
+  assert.equal(link.textContent, "Ready.mkv");
+  assert.equal(link.dataset.batchItemKey, "k-c");
+  assert.ok(!rows.some((row) => buttonLabels(row).includes("View file")));
+  // A file with no job has plain text for a name.
+  assert.ok(!flat(rows[2]).some((e) => e.dataset.nameLink));
+  // The saving is shown only where the server gave one.
+  const saved = (row) => flat(row).find((e) => /batch-file-saved/.test(e.className || ""));
+  assert.match(saved(rows[0]).textContent, /1\.90 GB/);
+  assert.ok(rows[0].className.includes("has-saved"));
+  assert.equal(saved(rows[1]), undefined);
+  // Replace file stays in view; the other actions sit in the menu with their controls intact.
+  const actions = flat(rows[0]).find((e) => /batch-file-actions/.test(e.className || ""));
+  assert.equal(actions.children[0].textContent, "Replace file");
+  const more = actions.children[1];
+  assert.equal(more.dataset.menuFor, "k-c");
+  const menu = flat(more).filter((e) => e.textContent && e.textContent !== "\u22ef" && e.dataset?.jobControl);
+  assert.deepEqual(menu.map((e) => e.textContent), ["Show in Files"]);
+  assert.ok(menu.every((e) => e.dataset.batchItemKey === "k-c"));
+  // The primary action of a cancelled file is Encode again.
+  const cancelled = flat(rows[1]).find((e) => /batch-file-actions/.test(e.className || ""));
+  assert.equal(cancelled.children[0].textContent, "Encode again");
+  assert.equal(cancelled.children.length, 2);
+});
+
 test("every batch row offers Show in Files when its file is inside the media folders", async () => {
   const items = [
     { item_key: "k-f", display_label: "Failed", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv" },
@@ -7136,7 +7178,6 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
   // A single colour is reported so the queue row can leave the bar out.
   h.context.batch = { total: 13, completed: 13 };
-  assert.equal(h.run("batchSegments(batch).kinds"), 1);
   assert.equal(h.run("batchSegments(batch).kinds"), 1);
   h.context.batch = { total: 8, completed: 6, review: 2 };
   assert.equal(h.run("batchSegments(batch).kinds"), 2);
