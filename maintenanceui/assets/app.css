@@ -672,9 +672,11 @@ main {
 .worker-slots:has(> .worker-node-group) { grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); align-items:start; gap:8px 16px; }
 .worker-node-group { min-width:0; }
 .worker-node-slots { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; margin-top:6px; }
-.worker-slot { min-width:0; min-height:82px; padding:8px; border:1px solid var(--line); border-radius:4px; }
+.worker-slot { min-width:0; min-height:95px; padding:8px; border:1px solid var(--line); border-radius:4px; }
 .worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .worker-slot p { margin:4px 0 0; }
+/* One line, however long: the full text is in its tooltip. */
+.worker-slot .slot-facts { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .worker-slot .slot-progress { margin-top:6px; max-width:none; }
 #selection-count:empty {
   display: none;
@@ -1433,7 +1435,6 @@ main {
    a tall footer row; inside a slot they keep their natural line height. */
 .worker-slot .batch-progress.slot-progress .batch-progress-count,
 .worker-slot .batch-progress.slot-progress .batch-progress-percent { line-height: 1.4; }
-.worker-slot .batch-progress.slot-progress .batch-progress-phase { margin-top: 2px; font-size: 11px; }
 .batch-progress.stale { color: var(--muted); }
 .batch-progress.stale progress::-webkit-progress-value { background: var(--muted); }
 .batch-progress.stale progress::-moz-progress-bar { background: var(--muted); }

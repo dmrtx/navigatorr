@@ -572,6 +572,28 @@ func appendFailureHistory(ec *ExecutionContext, phase, class, msg string) {
 	}
 }
 
+// retryPublication is the "recheck" decision of a finished encode whose output
+// could not be published: it asks the job's worker for a fresh publication
+// attempt, so the same candidate is published again and nothing is encoded
+// again. It returns a note for the waiting reason when the worker could not be
+// asked, and "" otherwise. A worker that predates the endpoint, or a job with
+// nothing to retry, is not an error here: the status read that follows reports
+// what the worker really has.
+func (e *Engine) retryPublication(ctx context.Context, ec *ExecutionContext, jobID string) string {
+	retrier, ok := e.actionWorker(ec).(transcode.PublicationRetrier)
+	if !ok {
+		return ""
+	}
+	err := retrier.RetryPublication(ctx, jobID)
+	switch {
+	case err == nil, errors.Is(err, transcode.ErrNothingToRetry):
+		return ""
+	case errors.Is(err, transcode.ErrPublicationRetryUnsupported):
+		return "The worker has not been updated to retry a publication; update the worker and try again."
+	}
+	return "The worker could not be asked to try again: " + err.Error() + "."
+}
+
 func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{
@@ -588,6 +610,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	}
 	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is not available to monitor job"}, nil
+	}
+	retryNote := ""
+	if strings.EqualFold(ec.Decision, "recheck") {
+		ec.Decision = ""
+		retryNote = e.retryPublication(ctx, ec, jobID)
 	}
 	e.recordWorkerPoll(ec)
 	st, err := e.actionWorker(ec).Status(ctx, jobID)
@@ -612,7 +639,11 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		out := transcodeWorkerMetadataOutputs(ec, st)
 		out["job_id"], out["external_reference"] = jobID, jobID
 		out["worker_error"] = st.Error
-		return StepResult{Status: StepWaitingDecision, WaitingReason: fmt.Sprintf("Encoding finished for job %s; the encoded candidate is preserved but publication requires intervention (%s): %s", jobID, st.FailureClassification, st.Error), WaitingOptions: []WaitingOption{{Decision: "recheck", Description: "Check the same worker job after publication recovery; do not encode again"}}, Outputs: out}, nil
+		reason := fmt.Sprintf("Encoding finished for job %s; the encoded candidate is preserved but publication requires intervention (%s): %s", jobID, st.FailureClassification, st.Error)
+		if retryNote != "" {
+			reason += " " + retryNote
+		}
+		return StepResult{Status: StepWaitingDecision, WaitingReason: reason, WaitingOptions: []WaitingOption{{Decision: "recheck", Description: "Check the same worker job after publication recovery; do not encode again"}}, Outputs: out}, nil
 	}
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:

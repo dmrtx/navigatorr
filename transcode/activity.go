@@ -13,6 +13,12 @@ type WorkerActivityJob struct {
 	HeartbeatAt    time.Time `json:"heartbeat_at"`
 	LastProgressAt time.Time `json:"last_progress_at"`
 	Progress       *float64  `json:"progress,omitempty"`
+	// Navigatorr fills these in from the job's action; a worker does not send
+	// them. Encoding names the encode being run ("x265 CRF 22"), Speed is the
+	// encoder's running speed against real time.
+	Encoding string   `json:"encoding,omitempty"`
+	Speed    *float64 `json:"speed,omitempty"`
+	FPS      *float64 `json:"fps,omitempty"`
 }
 type WorkerActivity struct {
 	SlotsTotal       int                 `json:"worker_slots_total"`

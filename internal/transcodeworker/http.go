@@ -538,7 +538,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(rest, "/")
 	parts := strings.Split(trimmed, "/")
 	var id string
-	var isCancel, isLogs bool
+	var isCancel, isLogs, isRetryPublication bool
 	switch {
 	case len(parts) == 1:
 		id = parts[0]
@@ -548,6 +548,9 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "logs":
 		id = parts[0]
 		isLogs = true
+	case len(parts) == 2 && parts[1] == "retry-publication":
+		id = parts[0]
+		isRetryPublication = true
 	default:
 		writeHTTPError(w, http.StatusNotFound, "not found")
 		return
@@ -576,7 +579,19 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && isLogs:
 		s.handleJobLogs(w, r, id)
-	case r.Method == http.MethodGet && !isCancel:
+	case r.Method == http.MethodPost && isRetryPublication:
+		res, err := s.worker.RetryPublication(r.Context(), id)
+		switch {
+		case err == nil:
+			writeHTTPJSON(w, http.StatusOK, res)
+		case isNotFoundError(err):
+			writeHTTPCodedJSON(w, http.StatusNotFound, transcode.WorkerErrorNotFound, res)
+		case errors.Is(err, ErrNoPublicationToRetry):
+			writeHTTPErrorCode(w, http.StatusConflict, transcode.WorkerErrorNothingToRetry, "job is not waiting to retry a publication")
+		default:
+			writeHTTPCodedJSON(w, http.StatusInternalServerError, transcode.WorkerErrorInternal, res)
+		}
+	case r.Method == http.MethodGet && !isCancel && !isRetryPublication:
 		st, err := s.worker.Status(r.Context(), id)
 		if err != nil {
 			// The ID was validated above, so the only failures left are a
@@ -607,7 +622,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeHTTPJSON(w, http.StatusOK, res)
 	default:
-		if isCancel {
+		if isCancel || isRetryPublication {
 			writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
 			return
 		}

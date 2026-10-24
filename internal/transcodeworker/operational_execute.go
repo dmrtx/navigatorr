@@ -1316,6 +1316,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			// Reserve an attempt before spawning so daemon crashes and fast
 			// child failures cannot reset the budget or race an immediate retry.
 			job.FinalizationRetryCount++
+			job.OperatorRetryRequested = false
 			job.NextFinalizationAt = time.Time{}
 			if job.FinalizationRetryCount < MaxFinalizationRetries {
 				job.NextFinalizationAt = time.Now().UTC().Add(finalizationRetryDelay(job.FinalizationRetryCount))

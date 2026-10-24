@@ -58,6 +58,7 @@ func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker)
 		return node
 	}
 	s.syncWorkerSlots(ctx, worker, activity.Slots)
+	s.describeActivityJobs(&activity)
 	node["available"], node["activity"] = true, activity
 	return node
 }

@@ -41,6 +41,9 @@ func finalizationClassRetryable(class string) bool {
 }
 
 func automaticFinalizationAllowed(job *JobRecord) bool {
+	if job.OperatorRetryRequested {
+		return true
+	}
 	if job.FinalizationRetryCount >= MaxFinalizationRetries {
 		return false
 	}

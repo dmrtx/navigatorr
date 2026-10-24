@@ -78,6 +78,11 @@ type JobRecord struct {
 	// encode retry or invalidates the already completed encode checkpoint.
 	FinalizationRetryCount int       `json:"finalization_retry_count,omitempty"`
 	NextFinalizationAt     time.Time `json:"next_finalization_at,omitzero"`
+	// OperatorRetryRequested is an operator's "try again" for a publication
+	// the worker stopped retrying. It lets the next recovery sweep start one
+	// attempt whatever the last failure was; the sweep clears it when it
+	// reserves that attempt, so a failure that is not transient stops again.
+	OperatorRetryRequested bool `json:"operator_retry_requested,omitempty"`
 }
 
 // ErrJobNotFound reports that a job has no job.json. Only fs.ErrNotExist maps

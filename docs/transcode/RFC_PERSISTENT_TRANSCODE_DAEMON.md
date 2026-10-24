@@ -163,6 +163,16 @@ application/json` on responses; error envelope `{"error":"…"}`.
 - `POST /v1/jobs/{id}/cancel` — validates `{id}`, delegates to
   `Worker.Cancel`. 200 cancelled record; 400 invalid ID; 404 unknown job.
   Deeper paths (`/v1/jobs/a/b`) → 404; encoded separators (`%2F/%5C`) → 400.
+- `POST /v1/jobs/{id}/retry-publication` — validates `{id}`, delegates to
+  `Worker.RetryPublication`. For a job whose encode finished and whose
+  publication needs intervention (`publication_pending` + `recovery_required`,
+  no runner alive) it clears the retry budget and grants the scheduler sweep one
+  operator-requested attempt; the candidate is published again, never encoded
+  again. 200 `JobStatusResponse`; 400 invalid ID; 404 `not_found` unknown job
+  (a 404 without “job not found” means a worker that predates the route);
+  409 `nothing_to_retry` when the job has no publication to retry or a runner is
+  alive; GET → 405. Only the operator's request triggers it, so a poll never
+  retries a publication.
 - No shell/raw ffmpeg args anywhere. All existing guards are reused:
   job-ID validation, `bench-` rejection, path traversal fail-closed,
   `AllowedRoots`, `candidate != source`, source exists/not-dir, supplied

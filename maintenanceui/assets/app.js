@@ -112,7 +112,8 @@ function actionIcon(label) {
     "Stop batch · keep originals": "M6 6h12v12H6Z",
     "Compare frames": "M4 5h16v14H4ZM12 5v14",
     "Run one more test": "M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3",
-    "Check worker again": "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
+    "Try again": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
+    "Show in Files": "M3 6h6l2 2h10v11H3Z",
     "Check library again": "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
     "Ad library": "M4 6h16M4 12h16M4 18h10",
     "Review cuts": "M9 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9 17a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM8.5 8.5 20 19M8.5 15.5 20 5",
@@ -3916,7 +3917,36 @@ function openGoalForm(path, options = {}) {
   if (options.mode) state.goalExplicit = true;
   if (options.pickTracks) $("keep-tracks").open = true;
 }
-const navigationLabels = ["View replacement", "View batch", "View preview", "Review preview", "Review", "View file"];
+// The Files location of a file Navigatorr was asked to convert: its media
+// folder, its own folder and the file itself, so the goal form opens on it.
+// null when the file is outside every folder the Files tab can browse.
+function filesRouteFor(path) {
+  if (typeof path !== "string" || !path.startsWith("/")) return null;
+  const root = (state.info?.roots || [])
+    .filter(r => path.startsWith(`${r.replace(/\/+$/, "")}/`))
+    .sort((a, b) => b.length - a.length)[0];
+  if (!root) return null;
+  const folder = path.slice(0, path.lastIndexOf("/")) || root;
+  return new URLSearchParams({view: "files", source: `folder:${root}`, folder, file: path}).toString();
+}
+// The file a job or batch row is about, when it is one file.
+function jobFilePath(job) {
+  if (job.source_path) return job.source_path;
+  if (job.promotion?.original_path) return job.promotion.original_path;
+  return job.batch_files?.file_count === 1 ? job.batch_files.files?.[0]?.file_path || "" : "";
+}
+// Show the file in Files where it lives, to try again from there. Closes the
+// job that asked for it; Back returns to the queue.
+function showInFiles(path) {
+  const query = filesRouteFor(path);
+  if (!query) {
+    notify("This file is outside the media folders Navigatorr can browse.");
+    return;
+  }
+  if (typeof window !== "undefined" && window.history) window.history.pushState({navigatorr: true}, "", `${window.location.pathname}?${query}`);
+  return applyNavigation(navigationRoute(`?${query}`));
+}
+const navigationLabels = ["View replacement", "View batch", "View preview", "Review preview", "Review", "View file", "Show in Files"];
 function jobControls(job, detail = false) {
   const actionRail = node("div", "", "job-actions");
   const add = (label, fn) => {
@@ -3929,6 +3959,7 @@ function jobControls(job, detail = false) {
     b.dataset.requiresWorker = String(
       (label === "Retry" && ["transcode_media", "transcode_batch", "benchmark_transcode"].includes(job.action_name) && !(job.action_name === "transcode_batch" && job.current_step >= 2)) ||
       label === "Run again" ||
+      label === "Try again" ||
       label === "Try with x265" ||
       Object.values(remedyActions).some(r => r.label === label) ||
       label === "Resume batch" ||
@@ -3953,7 +3984,7 @@ function jobControls(job, detail = false) {
     accept_loss: "Review candidate",
     abort: "Cancel",
     cancel: job.batch ? "Stop batch · keep originals" : "Keep original",
-    recheck: "Check worker again",
+    recheck: "Try again",
     reconcile: "Check library again",
   };
   for (const choice of job.waiting_options || []) {
@@ -3991,7 +4022,7 @@ function jobControls(job, detail = false) {
         }
         // Pausing, resuming and retrying are reversible; every other decision is
         // confirmed with the server's own explanation before it is sent.
-        if (!["resume", "pause", "retry"].includes(choice.decision) && !(await confirmDecision(job, choice, label)))
+        if (!["resume", "pause", "retry", "recheck"].includes(choice.decision) && !(await confirmDecision(job, choice, label)))
           return;
         await jobControl(job.id, "action_resume", {
           decision: choice.decision,
@@ -4018,7 +4049,10 @@ function jobControls(job, detail = false) {
   if (job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready && ["completed","failed"].includes(job.status) && (job.remaining_candidates != null ? job.remaining_candidates > 0 : job.batch?.completed > 0 && !job.batch?.promotion?.promoted))
     add("Review candidates", () => reviewBatchReplacement(job.id));
   const reconfigurable = job.action_name === "transcode_batch" && !job.batch?.dry_run && !job.batch?.promotion_plan_ready;
-  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
+  // An encode that finished but could not be saved is tried again as it is;
+  // a new goal would encode the file again.
+  const savingFailed = job.waiting_options?.some(option => option.decision === "recheck");
+  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
     add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
   if (reconfigurable && !(job.mode && onlyUnsupportedSources(job))) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable && !job.parent_item_key) {
@@ -4087,6 +4121,11 @@ function jobControls(job, detail = false) {
     add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, goal: job.goal || {mode: job.mode}, context: job.replacement_context, languages: Array.isArray(job.tracks.languages) ? job.tracks.languages : undefined, pickTracks: true}));
   if (job.preview_action_id && detail)
     add("View preview", () => openJob(job.preview_action_id));
+  // A job that ended without a result leaves its file where it was. Files
+  // shows it there, with its status and the goal form, to try again from.
+  const filePath = jobFilePath(job);
+  if (filePath && filesRouteFor(filePath) && !job.batch?.dry_run && (detail || ["failed", "cancelled"].includes(job.status)))
+    add("Show in Files", () => showInFiles(filePath));
   if (job.can_archive && ["completed", "failed", "cancelled"].includes(job.status))
     add("Archive", () => archiveJob(job, true));
   return actionRail;
@@ -4131,10 +4170,15 @@ function shortJobReason(reason) {
   if (growth) return `Candidate is ${growth[1]}% larger; allowed growth is ${growth[2]}%`;
   if (/no such file or directory/i.test(text)) return "File not found";
   if (/permission denied/i.test(text)) return "Permission denied";
+  // The encode finished and only saving it failed: say so before any
+  // storage-error wording, since nothing needs to be encoded again.
+  if (/^Encoding finished for job .*publication requires intervention/.test(text)) {
+    const note = text.match(/ (The worker (?:has not been updated|could not be asked)[^]*)$/)?.[1];
+    return `Encoding finished, but the file could not be saved. The encoded copy is kept. Use Try again once storage is reachable.${note ? ` ${note}` : ""}`;
+  }
   if (/smb_transport_error|connecting to SMB server/.test(text)) return "Worker cannot access media storage. Fix the connection before retrying.";
   if (/shared VMAF\/CAMBI calibration supports 8-bit SDR video below 45 fps/.test(text))
     return "Automatic testing does not support this video format";
-  if (/^Encoding finished for job .*publication requires intervention/.test(text)) return "Encoding finished, but saving the candidate failed. The candidate is kept; check storage, then ask the worker again";
   // Engine reasons often start with a machine code ("code: detail").
   const coded = text.match(/^([a-z0-9]+(?:_[a-z0-9]+)+)(?::\s*(.*))?$/);
   if (coded) return reasons[coded[1]] || `${coded[1].replace(/_/g, " ").replace(/^./, c => c.toUpperCase())}${coded[2] ? `: ${coded[2]}` : ""}`;
@@ -4363,8 +4407,8 @@ function queuePresentation(job) {
 // The next step a card offers, most important first. Only one is labelled.
 // Shortened visible labels for main actions. Each is a prefix of the full
 // label, which stays the accessible name (WCAG 2.5.3 Label in Name).
-const shortActionLabels = {"Replace file":"Replace","Choose a goal":"Choose","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check worker again":"Check worker","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
-const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Choose a goal", "Retry", "Convert to SDR 1080p", "Make it smaller", "Check worker again", "Check library again", "Review preview", "Try another profile"];
+const shortActionLabels = {"Replace file":"Replace","Choose a goal":"Choose","Review candidates":"Review","Review candidate":"Review","Review replacement":"Review","Review replacements":"Review","Review preview":"Review","Validate classifications":"Validate","Check library again":"Check library","Resume batch":"Resume","Start batch":"Start","Try another profile":"Try another","Convert to SDR 1080p":"Convert to SDR"};
+const mainQueueActions = ["Replace file", "Review replacements", "Review replacement", "Review candidates", "Review candidate", "Review cuts", "Validate classifications", "Review", "Resume batch", "Start batch", "Choose a goal", "Retry", "Convert to SDR 1080p", "Make it smaller", "Try again", "Check library again", "Review preview", "Try another profile"];
 const visibleQueueIcons = 3;
 function compactQueueActions(actions) {
   // A card shows at most one labelled main action, then square icon buttons
@@ -5228,11 +5272,26 @@ const slotShortPhases = {
   analysing_video: "Analyzing", encoding: "Encoding", validating: "Verifying", validating_quality: "Measuring quality",
   publishing: "Saving", publication_pending: "Saving", completed: "Finished",
 };
-function slotProgressDetail(phase) {
-  if (phase === "encoding") return "";
-  if (phase === "analysing_video") return `${workerPhaseLabel(phase)} · percentage starts in pass 2`;
-  if (postEncodeWorkerPhases.includes(phase) && phase !== "completed") return `Encode finished · ${workerPhaseLabel(phase === "publication_pending" ? "publishing" : phase)}`;
-  return workerPhaseLabel(phase);
+// The one line under a slot's bar. Short on purpose: every busy slot shows the
+// same four rows, so cards stay the same size whatever phase they are in.
+const slotPhaseNotes = {
+  queued: "Waiting for a free slot", waiting_for_worker: "Waiting for a free slot", preparing: "Getting the file ready", reading_source: "Reading the source",
+  probing_source: "Inspecting the file", analysing_video: "Pass 1 of 2 · no percentage yet", validating: "Encode finished · verifying",
+  validating_quality: "Encode finished · measuring quality", publishing: "Encode finished · saving", publication_pending: "Encode finished · saving", completed: "Finished",
+};
+// The encode and its speed while encoding (x265 CRF 22 · 4.94×); what the worker
+// is busy with in every other phase. ffmpeg's speed is a running average, so it
+// is left out once the worker goes quiet.
+function slotFacts(job, stale) {
+  if (stale) return {text: "No recent worker heartbeat", title: "No recent worker heartbeat. Showing the last reported state."};
+  const phase = job.phase, speed = Number(job.speed), fps = Number(job.fps), last = activityElapsed(job.last_progress_at);
+  const parts = [job.encoding || null];
+  if (phase === "encoding") {
+    if (speed > 0) parts.push(`${speed.toFixed(2)}×`);
+  } else parts.push(slotPhaseNotes[phase] || workerPhaseLabel(phase));
+  const text = parts.filter(Boolean).join(" · ") || (last ? `Last advance ${last} ago` : "Waiting for the first update");
+  const detail = [job.encoding, phase === "encoding" && fps > 0 ? `${fps.toFixed(1)} fps` : null, last ? `Last advance ${last} ago` : null].filter(Boolean);
+  return {text, title: [text, ...detail.filter(part => !text.includes(part))].join(" · ")};
 }
 // The slot's progress in the same green bar the batch rows use: a measured
 // percentage while encoding, an animated bar with no number while the worker
@@ -5257,8 +5316,6 @@ function slotProgressBlock(job, alive) {
     bar.setAttribute("aria-label", `${label}, no percentage available`);
     block.append(bar);
   }
-  const detail = slotProgressDetail(phase);
-  if (detail) block.append(node("span", detail, "batch-progress-phase metadata"));
   return block;
 }
 // One node's slots. Each node keeps its own slot positions.
@@ -5296,8 +5353,9 @@ function renderSlotGrid(activity, name, target = $("worker-slots")) {
       const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
       row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
       row.append(slotProgressBlock(job, !stale));
-      const last = activityElapsed(job.last_progress_at);
-      row.append(node("p",stale ? "No recent worker heartbeat. Last reported state." : last ? `Last advance ${last} ago` : "Worker connected · Waiting for the next measurement", "metadata"));
+      const facts = slotFacts(job, stale), line = node("p", facts.text, "metadata slot-facts");
+      line.title = facts.title;
+      row.append(line);
     }
     target.append(row);
   }
@@ -5576,15 +5634,21 @@ async function loadBatchItems(id, revision) {
 
     const actions = node("div", "", "batch-file-actions");
     // Buttons that only open something stay usable while the batch is busy.
-    const add = (label, fn, {navigation = false, target = id} = {}) => {
-      const control = button(label, fn, label === "Replace file" ? "primary" : "");
+    const add = (label, fn, {navigation = false, target = id, primary = label === "Replace file", requiresWorker = false} = {}) => {
+      const control = button(label, fn, primary ? "primary" : "");
       control.dataset.jobControl = target;
+      if (requiresWorker) control.dataset.requiresWorker = "true";
       control.dataset.batchItemKey = item.item_key;
       if (navigation) control.dataset.navigation = "true";
       control.disabled = jobControlDisabled(control);
       actions.append(control);
     };
     if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
+    // The encode finished and only saving it failed: one button tries the same
+    // file again, on the worker that holds it. No settings change, no re-encode.
+    if (item.status === "waiting_decision" && item.child_action_id && item.waiting_decisions?.includes("recheck")) {
+      add("Try again", () => jobControl(item.child_action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}), {target: item.child_action_id, primary: true, requiresWorker: true});
+    }
     if (failure) {
       const card = node("div", "", "replacement-failure");
       card.setAttribute("role", "group");
@@ -5610,6 +5674,8 @@ async function loadBatchItems(id, revision) {
     } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
     const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
     if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+    if (["failed", "cancelled", "skip"].includes(item.status) && filesRouteFor(item.file_path))
+      add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
     if (actions.children.length) row.append(actions);
     const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
     if (activity) row.append(node("span", activity, "batch-file-activity"));
