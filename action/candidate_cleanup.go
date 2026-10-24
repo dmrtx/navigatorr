@@ -412,37 +412,69 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		inst := &instances[i]
-		ec := parseExecutionContext(inst, e)
-		reason, err := e.leftoverCandidateReason(inst, ec, replaced)
-		if reason == "" || err != nil {
+		if item, ok := e.leftoverOf(&instances[i], replaced); ok {
+			page.Bytes += item.Bytes + item.PartialBytes
+			page.Items = append(page.Items, item)
+		}
+	}
+	return page, nil
+}
+
+// leftoverOf reports the candidate files one attempt left behind that nothing
+// can promote, and whether it left any. replaced caches each batch's replaced
+// attempts across calls.
+func (e *Engine) leftoverOf(inst *store.ActionInstance, replaced map[string]map[string]bool) (LeftoverCandidate, bool) {
+	ec := parseExecutionContext(inst, e)
+	reason, err := e.leftoverCandidateReason(inst, ec, replaced)
+	if reason == "" || err != nil {
+		return LeftoverCandidate{}, false
+	}
+	candidate, partial, err := ownCandidateFiles(ec.State)
+	if err != nil || e.candidatePromotionStarted(inst, ec, candidate) != nil {
+		return LeftoverCandidate{}, false
+	}
+	item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
+	var candidateInfo os.FileInfo
+	for _, path := range []string{candidate, partial} {
+		if _, err := e.promotionPath(path, false); err != nil {
+			break
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		candidate, partial, err := ownCandidateFiles(ec.State)
-		if err != nil || e.candidatePromotionStarted(inst, ec, candidate) != nil {
+		if path == candidate {
+			candidateInfo, item.Bytes = info, info.Size()
+		} else if !sameCandidateBytes(candidateInfo, info) {
+			item.PartialBytes = info.Size()
+		}
+	}
+	return item, item.Bytes+item.PartialBytes > 0
+}
+
+// LeftoverCandidatesOf lists, read-only, the leftovers among the named actions:
+// the attempts of one job. Ids that are not transcode attempts are ignored.
+func (e *Engine) LeftoverCandidatesOf(ctx context.Context, ids []string) (*LeftoverCandidatePage, error) {
+	if e.deps.Store == nil {
+		return nil, fmt.Errorf("maintenance store is required")
+	}
+	page := &LeftoverCandidatePage{Items: []LeftoverCandidate{}}
+	replaced := map[string]map[string]bool{}
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inst, err := e.deps.Store.GetActionInstanceIfExists(id)
+		if err != nil {
+			return nil, err
+		}
+		if inst == nil || inst.ActionName != "transcode_media" {
 			continue
 		}
-		item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
-		var candidateInfo os.FileInfo
-		for _, path := range []string{candidate, partial} {
-			if _, err := e.promotionPath(path, false); err != nil {
-				break
-			}
-			info, err := os.Lstat(path)
-			if err != nil || !info.Mode().IsRegular() {
-				continue
-			}
-			if path == candidate {
-				candidateInfo, item.Bytes = info, info.Size()
-			} else if !sameCandidateBytes(candidateInfo, info) {
-				item.PartialBytes = info.Size()
-			}
+		if item, ok := e.leftoverOf(inst, replaced); ok {
+			page.Bytes += item.Bytes + item.PartialBytes
+			page.Items = append(page.Items, item)
 		}
-		if item.Bytes+item.PartialBytes == 0 {
-			continue
-		}
-		page.Bytes += item.Bytes + item.PartialBytes
-		page.Items = append(page.Items, item)
 	}
 	return page, nil
 }
