@@ -7159,3 +7159,19 @@ test("a failed batch with no error of its own says its first reason instead of a
   assert.equal(h.run("queueOutcome(job)"), "Open job for error details");
   assert.match(h.run("shortJobReason(job.batch_files.reasons[0].reason)"), /cannot access media storage/i);
 });
+
+test("a selection is titled by what the server named it, a single file by its own name, a Sonarr batch by its series", () => {
+  const h = metricProgressHarness();
+  const title = (job) => h.run(`queuePresentation(${JSON.stringify(job)}).title`);
+  const base = {id: "j", action_name: "transcode_batch", status: "waiting_external"};
+  // Several files chosen across folders: the server's name replaces "Selected files".
+  assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, name: "Demo Movie (2001)", files: []}}), "Demo Movie (2001)");
+  // The folder label still wins when every file is in one folder.
+  assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, context: "Demo Show · Season 1", name: "Demo Show", files: []}}), "Demo Show · Season 1");
+  // One file is called by its file name, whatever the batch is called.
+  assert.equal(title({...base, batch: {title: "Selected files", total: 1}, batch_files: {file_count: 1, name: "Demo Clip", files: [{file_path: "/lib/Demo Clip.mkv"}]}}), "Demo Clip.mkv");
+  // A real series title is never replaced by a name made from file names.
+  assert.equal(title({...base, batch: {title: "Demo Show", total: 12}, batch_files: {file_count: 12, name: "Demo Show - S01", files: []}}), "Demo Show");
+  // Nothing better known: the old name stays.
+  assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, files: []}}), "Selected files");
+});
