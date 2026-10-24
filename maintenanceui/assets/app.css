@@ -1731,7 +1731,22 @@ main {
 .batch-item-row > .batch-file-actions { grid-column: 3; grid-row: 1; flex-basis: auto; flex-wrap: nowrap; }
 @media (max-width: 1000px) {
   .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; margin: 3px 0; }
+  .batch-item-row { row-gap: 2px; padding: 10px 0; }
+  .batch-item-row > .badge { align-self: start; }
+  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; gap: 0 18px; margin: 0 0 4px; }
+  /* Quiet text actions: four bordered buttons under every name made the list heavy. */
+  .batch-item-row .batch-file-actions button {
+    min-height: 36px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--forest);
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .batch-item-row .batch-file-actions button:disabled { color: var(--muted); }
+  .batch-item-row .batch-file-actions button:hover { text-decoration: underline; }
+  .batch-item-row > .muted, .batch-item-row > .metadata, .batch-item-row > .batch-file-activity { font-size: 12px; line-height: 1.45; }
 }
 .batch-item-row .batch-file-actions button { min-height: 28px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
 
