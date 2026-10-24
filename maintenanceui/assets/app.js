@@ -6133,7 +6133,7 @@ async function loadBatchItems(id, revision) {
     // A cancelled or failed file can be encoded again as it was set up, without
     // reopening the goal dialog.
     if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
-      add("Encode again", () => encodeFileAgain(id, item.item_key));
+      add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
     if (filesRouteFor(item.file_path))
       add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
     if (actions.children.length) row.append(actions);

@@ -1714,41 +1714,41 @@ main {
 }
 .batch-item-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 390px;
-  align-items: center;
-  column-gap: 10px;
-  row-gap: 3px;
-  padding: 8px 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 4px;
+  padding: 12px 0;
   border-bottom: 1px solid var(--line);
 }
-.batch-item-row > * { grid-column: 1 / -1; min-width: 0; }
+.batch-item-row > * { grid-column: 1 / -1; min-width: 0; margin: 0; }
 .batch-item-row > span:first-child {
   grid-column: 1;
   grid-row: 1;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.batch-item-row > .badge { grid-column: 2; grid-row: 1; min-width: 68px; justify-content: center; }
-.batch-item-row > .batch-file-actions { grid-column: 3; grid-row: 1; flex-basis: auto; flex-wrap: nowrap; }
-@media (max-width: 1000px) {
-  .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .batch-item-row { row-gap: 2px; padding: 10px 0; }
-  .batch-item-row > .badge { align-self: start; }
-  .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; gap: 0 18px; margin: 0 0 4px; }
-  /* Quiet text actions: four bordered buttons under every name made the list heavy. */
-  .batch-item-row .batch-file-actions button {
-    min-height: 36px;
-    padding: 0;
-    border: 0;
-    background: none;
-    color: var(--forest);
-    font-size: 13px;
-    font-weight: 500;
-  }
-  .batch-item-row .batch-file-actions button:disabled { color: var(--muted); }
-  .batch-item-row .batch-file-actions button:hover { text-decoration: underline; }
-  .batch-item-row > .muted, .batch-item-row > .metadata, .batch-item-row > .batch-file-activity { font-size: 12px; line-height: 1.45; }
+.batch-item-row > .badge { grid-column: 2; grid-row: 1; justify-content: center; }
+/* What is happening to the file, then what a person can do, then the small print. */
+.batch-item-row > .batch-file-activity, .batch-item-row > .muted { order: 1; color: var(--ink); font-size: 13px; line-height: 1.4; }
+.batch-item-row > .batch-file-activity { color: var(--forest); }
+.batch-item-row > .batch-file-actions { order: 2; display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 8px; margin: 4px 0 2px; }
+.batch-item-row > .batch-file-tracks, .batch-item-row > .batch-file-profile { order: 3; color: var(--muted); font-size: 12px; line-height: 1.4; }
+.batch-item-row .batch-file-actions button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: none;
+  color: var(--ink);
+  font-size: 13px;
+  white-space: nowrap;
 }
-.batch-item-row .batch-file-actions button { min-height: 28px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
+.batch-item-row .batch-file-actions button:hover { background: var(--hover); }
+.batch-item-row .batch-file-actions button.primary { border-color: var(--forest); color: var(--forest); }
 
 /* Savings and completed replacement history. */
 .savings-dashboard {
