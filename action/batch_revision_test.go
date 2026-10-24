@@ -195,6 +195,41 @@ func TestBatchRevisionRejectsStaleSelectionAndPreservesCompletedSubset(t *testin
 	}
 }
 
+// A running batch admits a file and creates its child action every few
+// seconds. A settings plan opened before that must still be accepted; only a
+// change in which files the batch holds makes it stale.
+func TestBatchRevisionSurvivesFilesBeingAdmittedWhileTheSettingsAreOpen(t *testing.T) {
+	st := setupTestStore(t)
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}})
+	seedActionInstance(t, st, "batch", "transcode_batch", StatusRunning, 2, "", map[string]any{"paths": []string{"/media/one", "/media/two"}}, map[string]any{"series_title": "Season"})
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "one", FilePath: "/media/one", Status: "queued", Profile: "old"})
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "two", FilePath: "/media/two", Status: "queued", Profile: "old"})
+	root, _ := st.GetActionInstance("batch")
+	items, _ := st.ListTranscodeBatchItems("batch")
+	version := BatchSelectionVersion(root, items)
+
+	seedActionInstance(t, st, "child-two", "transcode_media", StatusRunning, 7, "", map[string]any{"path": "/media/two"}, nil)
+	admitted := items[1]
+	admitted.Status, admitted.ChildActionID = "running", "child-two"
+	if err := st.UpdateTranscodeBatchItem(admitted); err != nil {
+		t.Fatal(err)
+	}
+	moved, _ := st.ListTranscodeBatchItems("batch")
+	if BatchSelectionVersion(root, moved) != version {
+		t.Fatal("admitting a file must not change the selection version")
+	}
+	if _, err := e.ReconfigureBatch(context.Background(), "batch", "unfinished", "", version, "", "r", map[string]any{"profile": "new"}); err != nil {
+		t.Fatalf("a plan opened before a file was admitted was refused: %v", err)
+	}
+
+	root, _ = st.GetActionInstance("batch")
+	st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "three", FilePath: "/media/three", Status: "queued", Profile: "old"})
+	grown, _ := st.ListTranscodeBatchItems("batch")
+	if BatchSelectionVersion(root, grown) == version {
+		t.Fatal("a file added to the batch must make an open plan stale")
+	}
+}
+
 func TestBatchFileRevisionPreservesOtherCandidatesAndRejectsChangedDecision(t *testing.T) {
 	for _, status := range []string{"skip", "waiting_decision"} {
 		t.Run(status, func(t *testing.T) {
