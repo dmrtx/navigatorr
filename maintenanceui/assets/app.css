@@ -651,6 +651,8 @@ main {
 .backup-row .waiting { color: var(--warning); }
 #backup-progress:not([hidden]) { color: var(--forest); padding: 6px 0; }
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
+/* The slots are always read live; saying so on every refresh is noise. */
+#activity-checked { display:none; }
 .activity-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11px; }
 .activity-heading-end { display:flex; align-items:center; gap:4px; min-width:0; }
 .activity-heading-end .quiet { min-height:0; padding:2px 6px; font-size:11px; color:var(--forest); }
@@ -913,10 +915,32 @@ main {
   gap: 6px;
   min-width: 0;
 }
-.queue-filters select {
-  width: 170px;
+/* Filter, Pause all and refresh are one row of square tools. The select sits invisibly over its icon. */
+.queue-tool {
+  position: relative;
+  display: inline-grid;
+  grid-auto-flow: column;
+  place-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
   margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
 }
+.queue-tool svg { width: 17px; height: 17px; }
+.queue-tool.on { border-color: var(--forest); background: var(--success-wash); color: var(--forest-strong); }
+.filter-pick select { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.queue-drain-toggle .icon-play, .queue-drain-toggle.on .icon-pause { display: none; }
+.queue-drain-toggle.on .icon-play { display: inline; }
+.queue-drain-toggle:not(.on) #queue-drain-label { display: none; }
+.queue-drain-toggle.on { border-color: var(--primary); background: var(--primary); color: var(--on-primary); font-weight: 600; font-size: 13px; }
 #jobs-updated {
   margin: 4px 0 6px;
 }
@@ -1928,10 +1952,7 @@ pre {
     gap: 6px;
     margin-bottom: 4px;
   }
-  .queue-filters select {
-    width: 176px;
-    max-width: 100%;
-  }
+
   #jobs-updated {
     margin: 2px 0;
     font-size: 10px;
@@ -2386,12 +2407,14 @@ pre {
 .phase-costs table { width: 100%; border-collapse: collapse; font-size: .82rem; }
 .phase-costs th, .phase-costs td { padding: .45rem; text-align: left; border-bottom: 1px solid var(--line); }
 
-/* Pause all sits beside the queue status; its state shows below. */
-.queue-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.queue-meta #jobs-updated { min-width: 0; }
-.queue-meta .queue-drain-toggle { flex-shrink: 0; min-height: var(--control-size); padding: 4px 0; border: 0; background: none; color: var(--forest); font-size: 12px; font-weight: 600; }
-.queue-drain { margin: 0 0 6px; padding: 6px 10px; border: 1px solid var(--warning-line); border-radius: 6px; background: var(--warning-wash); color: var(--warning-strong); font-size: 13px; }
-.queue-drain[data-state="ready"] { border-color: var(--forest); background: var(--success-wash); color: var(--forest-strong); }
+/* The status line: a dot and what the workers are doing, then when the list was updated. */
+.queue-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; margin: 0 0 8px; }
+.queue-meta #jobs-updated { min-width: 0; margin: 0; }
+.queue-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--forest); }
+.queue-state { font-size: 12px; font-weight: 600; color: var(--forest-strong); }
+.queue-state::after { content: "·"; margin-left: 6px; color: var(--muted); font-weight: 400; }
+.queue-meta[data-state="pausing"] .queue-dot { background: var(--warning-strong); }
+.queue-meta[data-state="pausing"] .queue-state { color: var(--warning-strong); }
 .toolbar-menu { position: relative; flex: 0 0 var(--control-size); }
 .toolbar-menu > summary { list-style: none; cursor: pointer; }
 .toolbar-menu > summary::-webkit-details-marker { display: none; }

@@ -901,11 +901,17 @@ function renderWorkerDrain(info) {
   const drain = serverReachable ? info?.drain : null;
   const summary = drainSummary(drain);
   const label = drain?.enabled ? "Resume" : "Pause all";
-  $("queue-drain-toggle").hidden = !drain;
-  $("queue-drain-toggle").textContent = label;
-  $("queue-drain-status").hidden = !summary;
-  $("queue-drain-status").textContent = summary ? `${summary.text}${drain.queued ? ` · ${filesWord(drain.queued)} held back` : ""}` : "";
-  $("queue-drain-status").dataset.state = summary?.state || "";
+  const toggle = $("queue-drain-toggle");
+  toggle.hidden = !drain;
+  toggle.title = label;
+  toggle.setAttribute("aria-label", label);
+  toggle.classList.toggle("on", Boolean(drain?.enabled));
+  $("queue-drain-label").textContent = label;
+  // One status line: a dot and what the workers are doing, ahead of "Updated".
+  $("queue-meta").dataset.state = summary?.state || "running";
+  $("queue-drain-dot").hidden = !drain;
+  $("queue-drain-status").hidden = !drain;
+  $("queue-drain-status").textContent = summary ? `${summary.text}${drain.queued ? ` · ${filesWord(drain.queued)} held back` : ""}` : "Running";
   $("worker-drain").hidden = !drain;
   if (!drain) return;
   const open = (drain.jobs || []).filter(job => job.state !== "queued");
@@ -5159,6 +5165,7 @@ async function loadJobs(more = false) {
   state.jobsLoading = true;
   if (state.tab === "jobs" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   $("jobs-more").disabled = true;
+  markQueueFilter();
   const status = $("job-filter").value;
   const offset = more ? state.jobsLoaded || 0 : 0;
   const target = more ? 25 : Math.max(25, state.jobsLoaded || 25);
@@ -5654,7 +5661,12 @@ async function refreshWorkerActivity(force) {
   } finally { state.activityRequest = false; }
 }
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
+// A chosen filter lights the filter button, since the select itself is only an icon.
+function markQueueFilter() {
+  $("job-filter-pick").classList.toggle("on", $("job-filter").value !== "all");
+}
 $("job-filter").addEventListener("change", () => {
+  markQueueFilter();
   state.jobsLoaded = 0;
   state.jobsHasMore = false;
   writeNavigation();

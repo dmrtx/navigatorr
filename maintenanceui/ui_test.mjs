@@ -7007,8 +7007,8 @@ test("Pause all in the Queue, the header and the workers dialog show one state",
   h.context.info = drainInfo({ enabled: false });
   h.run("state.workerInfo = info; renderWorkers();");
   assert.equal(h.elements.get("queue-drain-toggle").hidden, false);
-  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Pause all");
-  assert.equal(h.elements.get("queue-drain-status").hidden, true);
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Pause all");
+  assert.equal(h.elements.get("queue-drain-status").textContent, "Running");
   const states = [
     [{ running: 2, queued: 8 }, "Pausing — 2 files still encoding · 8 files held back", /Pausing$/],
     [{ running: 1, publication_pending: 1 }, "Pausing — 1 file still encoding, 1 file encoded but not saved yet", /Pausing$/],
@@ -7018,13 +7018,12 @@ test("Pause all in the Queue, the header and the workers dialog show one state",
   for (const [drain, text, header] of states) {
     h.context.info = drainInfo(drain);
     h.run("state.workerInfo = info; renderWorkers();");
-    assert.equal(h.elements.get("queue-drain-toggle").textContent, "Resume");
-    assert.equal(h.elements.get("queue-drain-status").hidden, false);
+    assert.equal(h.elements.get("queue-drain-label").textContent, "Resume");
     assert.equal(h.elements.get("queue-drain-status").textContent, text);
     assert.equal(h.elements.get("worker-drain-status").textContent, text.split(" · ")[0]);
     assert.match(h.elements.get("worker-status").textContent, header);
   }
-  assert.equal(h.elements.get("queue-drain-status").dataset.state, "ready");
+  assert.equal(h.elements.get("queue-meta").dataset.state, "ready");
 });
 
 test("the Queue button pauses and resumes with the same single request as the dialog", async () => {
@@ -7035,10 +7034,10 @@ test("the Queue button pauses and resumes with the same single request as the di
   h.context.info = drainInfo({ enabled: false });
   h.run("state.workerInfo = info; renderWorkers();");
   await h.elements.get("queue-drain-toggle").listeners.get("click")();
-  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Resume");
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Resume");
   assert.equal(h.elements.get("worker-drain-toggle").textContent, "Resume");
   await h.elements.get("worker-drain-toggle").listeners.get("click")();
-  assert.equal(h.elements.get("queue-drain-toggle").textContent, "Pause all");
+  assert.equal(h.elements.get("queue-drain-label").textContent, "Pause all");
   assert.equal(JSON.stringify(h.context.requests), '[["worker-drain",true],["worker-drain",false]]');
 });
 

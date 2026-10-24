@@ -558,7 +558,9 @@
             <h2>Queue</h2>
 
             <div class="queue-filters">
-              <select id="job-filter" aria-label="Filter jobs by status">
+              <label id="job-filter-pick" class="queue-tool filter-pick" title="Filter jobs">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>
+                <select id="job-filter" aria-label="Filter jobs by status">
                 <option value="all">All jobs</option>
                 <option value="pending">Queued</option>
                 <option value="running">Running</option>
@@ -567,10 +569,15 @@
                 <option value="completed">Finished</option>
                 <option value="failed">Failed</option>
                 <option value="cancelled">Cancelled</option>
-                <option value="archived">Archived</option></select
-              ><button
+                <option value="archived">Archived</option></select>
+              </label>
+              <button id="queue-drain-toggle" class="queue-tool queue-drain-toggle" type="button" aria-label="Pause all" title="Pause all" hidden>
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path class="icon-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /><path class="icon-play" d="M8 5l11 7-11 7z" /></svg>
+                <span id="queue-drain-label">Pause all</span>
+              </button>
+              <button
                 id="refresh-jobs"
-                class="icon-button"
+                class="queue-tool"
                 aria-label="Refresh jobs"
                 title="Refresh"
               >
@@ -588,11 +595,11 @@
               </button>
             </div>
           </div>
-          <div class="queue-meta">
+          <div id="queue-meta" class="queue-meta" data-state="running">
+            <span id="queue-drain-dot" class="queue-dot" aria-hidden="true" hidden></span>
+            <span id="queue-drain-status" class="queue-state" role="status" hidden></span>
             <p id="jobs-updated" class="metadata" role="status"></p>
-            <button id="queue-drain-toggle" class="quiet queue-drain-toggle" type="button" hidden>Pause all</button>
           </div>
-          <p id="queue-drain-status" class="queue-drain" role="status" hidden></p>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <p id="activity-scheduler" class="metadata" role="status"></p>
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span class="activity-heading-end"><span id="activity-checked" class="metadata"></span><button id="worker-open-settings" type="button" class="quiet" hidden>Change in Settings</button></span></div>
