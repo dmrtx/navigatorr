@@ -151,6 +151,7 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		offset = len(items)
 	}
 	end := min(offset+limit, len(items))
+	marks := s.fileStatuses()
 	if r.URL.Query().Get("all") == "1" {
 		if id == "" {
 			fail(w, 400, "select a title before selecting files")
@@ -162,7 +163,36 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 		offset, end = 0, len(items)
 	}
-	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": librarySeasonGroups(seasonFiles, r.URL.Query().Get("sort"))})
+	// A title's folder summarizes its files; a file shows its own state. The
+	// paths are the *arr's, the same ones a batch is created from.
+	for _, item := range items[offset:end] {
+		path, _ := item["path"].(string)
+		var mark *fileStatusView
+		if id == "" {
+			mark = marks.under(path)
+		} else {
+			mark = marks.file(path)
+		}
+		if mark != nil {
+			item["nav_status"] = mark
+		}
+	}
+	groups := librarySeasonGroups(seasonFiles, r.URL.Query().Get("sort"))
+	for _, group := range groups {
+		n := -1
+		if value, ok := group["seasonNumber"].(int); ok {
+			n = value
+		}
+		paths := make([]string, 0, len(seasonFiles[n]))
+		for _, item := range seasonFiles[n] {
+			path, _ := item["path"].(string)
+			paths = append(paths, path)
+		}
+		if mark := marks.among(paths); mark != nil {
+			group["nav_status"] = mark
+		}
+	}
+	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": groups})
 }
 
 func libraryFileSeason(item map[string]any) int {

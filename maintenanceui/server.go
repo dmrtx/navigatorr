@@ -44,17 +44,18 @@ var allowedTools = map[string]bool{
 var allowedActions = map[string]bool{"clean_podcast_ads": true, "transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
-	cfg            *config.Config
-	registry       *arrservice.Registry
-	engine         *action.Engine
-	mcp            *server.MCPServer
-	access         *cloudflareAccessVerifier
-	accessOnly     bool
-	tokenHash      [32]byte
-	mu             sync.Mutex
-	sessions       map[string]time.Time
-	folderSizes    folderSizeCache
-	folderListings folderListingCache
+	cfg             *config.Config
+	registry        *arrservice.Registry
+	engine          *action.Engine
+	mcp             *server.MCPServer
+	access          *cloudflareAccessVerifier
+	accessOnly      bool
+	tokenHash       [32]byte
+	mu              sync.Mutex
+	sessions        map[string]time.Time
+	folderSizes     folderSizeCache
+	folderListings  folderListingCache
+	fileStatusCache fileStatusCache
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
 	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
 	classify action.SourceClassifier

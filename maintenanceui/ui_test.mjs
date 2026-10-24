@@ -1652,14 +1652,54 @@ test("worker activity shows occupied slots, final measurement, elapsed time and 
   assert.match(h.elements.get("worker-capacity").textContent,/2\/2 occupied/);
   const first=h.elements.get("worker-slots").children[0];
   assert.match(first.children[0].textContent,/sample-one/);
-  assert.match(first.children[1].textContent,/Measuring final quality.*elapsed/);
-  assert.match(first.children[2].textContent,/Last advance 10s ago/);
+  assert.match(first.children[1].textContent,/Full conversion.*elapsed/);
+  assert.match(first.children[3].textContent,/Last advance 10s ago/);
+  // The encode's last 84.4% lingers in the progress file; once it is over the bar sweeps without a number.
+  const after=first.children[2];
+  assert.match(after.className,/batch-progress slot-progress/);
+  assert.deepEqual(after.children.map(c=>c.textContent),["Measuring quality","","Encode finished · Measuring final quality"]);
+  assert.equal(after.children.some(c=>c.className==="batch-progress-percent"),false);
+  assert.equal(after.children[1].className,"slot-progress-bar");
   h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
   assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/Slot 1 · Available/);
   assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/Slot 2 · sample-two/);
   h.run('renderWorkerActivity({available:false})');
   assert.match(h.elements.get("worker-capacity").textContent,/Unknown/);
   assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
+});
+
+test("a slot shows the encode's measured percentage in the batch bar, and a still muted one once the worker goes quiet", () => {
+  const h=harness();
+  const beat=new Date().toISOString();
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:3,worker_slots_used:3,jobs:[
+    {id:"enc",file:"sample-one.mkv",kind:"transcode",phase:"encoding",heartbeat_at:beat,last_progress_at:beat,progress:42.46},
+    {id:"pass1",file:"sample-two.mkv",kind:"transcode",phase:"analysing_video",heartbeat_at:beat,progress:100},
+    {id:"quiet",file:"sample-three.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date(Date.now()-600000).toISOString(),progress:12},
+  ]}};
+  h.run('renderWorkerActivity(activity)');
+  const rows=h.elements.get("worker-slots").children;
+  const encoding=rows[0].children[2];
+  assert.deepEqual(encoding.children.map(c=>c.className||""),["batch-progress-count","batch-progress-percent",""]);
+  assert.deepEqual(encoding.children.map(c=>c.textContent).slice(0,2),["Encoding","42.5%"]);
+  assert.equal(encoding.children[2].max,100);
+  assert.equal(encoding.children[2].value,42.46);
+  assert.doesNotMatch(encoding.className,/stale/);
+  // Pass 1 has no progress of its own; a stray number is not shown.
+  const analysing=rows[1].children[2];
+  assert.deepEqual(analysing.children.map(c=>c.textContent),["Analyzing","","Analyzing video · x265 pass 1 of 2 · percentage starts in pass 2"]);
+  // A worker that stopped reporting keeps its last value but loses the live look.
+  const quiet=rows[2].children[2];
+  assert.match(quiet.className,/stale/);
+  assert.equal(quiet.children[1].textContent,"12.0%");
+  assert.match(rows[2].children[3].textContent,/No recent worker heartbeat/);
+});
+
+test("slot progress reuses the green batch bar and only animates while the worker is alive", () => {
+  assert.match(css, /\.worker-slot \.slot-progress \{[^}]*margin-top:6px;/);
+  assert.match(css, /\.slot-progress-bar::after \{[^}]*background: var\(--forest\);[^}]*animation: slot-progress-sweep/);
+  assert.match(css, /\.batch-progress\.stale \.slot-progress-bar::after \{ background: var\(--muted\); animation: none; width: 0; \}/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.slot-progress-bar::after \{ animation: none;/);
+  assert.match(css, /\.worker-slot \.batch-progress\.slot-progress \.batch-progress-count,\s*\.worker-slot \.batch-progress\.slot-progress \.batch-progress-percent \{ line-height: 1\.4; \}/);
 });
 
 test("worker activity labels video and podcast slots and shows each pool's use", () => {
@@ -2049,6 +2089,106 @@ test("folder measurements update every alias and resume on returning to Files", 
  assert.equal(calls,1);
  h.run('showFolderSize(one,{status:"calculating",measured_at:"0001-01-01T00:00:00Z"})');
  assert.doesNotMatch(h.context.one.title,/Measured/);
+});
+
+test("file marks say what a batch did with a file and roll a folder up to what needs attention", () => {
+ const h=harness();
+ const mark=status=>h.run(`fileMark(${JSON.stringify(status)})`);
+ assert.equal(mark({state:"none"}),null);
+ assert.equal(mark(null),null);
+ const replaced=mark({state:"replaced"});
+ assert.equal(replaced.className,"file-mark replaced");
+ assert.equal(replaced.title,"Replaced with the converted file");
+ assert.equal(replaced.children[0].textContent,"✓");
+ // Failing to convert is the quietest mark and says the file itself is fine.
+ const failed=mark({state:"failed"});
+ assert.match(failed.title,/did not finish/);assert.match(failed.title,/untouched/);
+ // A folder shows its loudest state, a count, and everything it holds in the tooltip.
+ const folder=mark({state:"working",count:5,counts:{working:2,queued:3,converted:1}});
+ assert.equal(folder.className,"file-mark working");
+ assert.equal(folder.children.at(-1).textContent,"5");
+ assert.equal(folder.title,"2 converting · 3 queued · 1 converted");
+ assert.equal(folder.getAttribute?.("aria-label") ?? folder.title,"2 converting · 3 queued · 1 converted");
+ assert.equal(mark({state:"attention",count:1,counts:{attention:1}}).children.length,1,"a single file is never numbered");
+});
+
+test("file marks label library titles, seasons, episodes and folder entries", async () => {
+ const h=harness();h.context.controls=()=>{};
+ const rows=()=>h.elements.get("library-items").children;
+ const marksOf=row=>row.children.flatMap(function find(c){return [c,...(c.children||[]).flatMap(find)]}).filter(c=>String(c.className).startsWith("file-mark "));
+ h.run('$("service").value="sonarr";api=async()=>({total:2,has_more:false,seasons:[],items:[{id:1,title:"Road Notes",path:"/tv/Road Notes",nav_status:{state:"working",count:4,counts:{working:1,queued:3}}},{id:2,title:"Untouched",path:"/tv/Untouched"}]});');
+ await h.run("loadLibrary()");
+ assert.deepEqual(rows().map(row=>marksOf(row).map(m=>m.className)),[["file-mark working"],[]]);
+ assert.ok(h.run("state.fileMarks.has('title:1')")&&h.run("state.fileMarks.has('title:2')"));
+ h.run('state.media={id:7,title:"Road Notes"};api=async()=>({total:2,has_more:true,seasons:[],items:[],season_groups:[{seasonNumber:1,fileCount:10,size:200,nav_status:{state:"converted",count:10,counts:{converted:10}}},{seasonNumber:0,fileCount:2,size:50}]});');
+ await h.run("loadLibrary()");
+ assert.deepEqual(rows().map(row=>marksOf(row).map(m=>m.className)),[["file-mark converted"],[]]);
+ assert.ok(h.run("state.fileMarks.has('season:1')")&&h.run("state.fileMarks.has('season:0')"));
+ h.run('api=async()=>({total:1,has_more:false,seasons:[],items:[{id:9,path:"/tv/Season 1/one.mkv",nav_status:{state:"replaced"}}]});');
+ await h.run("loadLibrary()");
+ assert.deepEqual(marksOf(rows()[0]).map(m=>m.className),["file-mark replaced"]);
+ assert.ok(h.run("state.fileMarks.has('file:9')"));
+ h.run('state.media=null;$("service").value="folder:/media";state.folder="/media";api=async()=>({path:"/media",total:2,has_more:false,listing:"l1",items:[{name:"Shows",path:"/media/Shows",is_dir:true,nav_status:{state:"queued",count:3,counts:{queued:3}}},{name:"a.mkv",path:"/media/a.mkv",size:5,nav_status:{state:"failed"}},{name:"b.mkv",path:"/media/b.mkv",size:5}]});');
+ await h.run("loadLibrary()");
+ assert.deepEqual(rows().map(row=>marksOf(row).map(m=>m.className)),[["file-mark queued"],["file-mark failed"],[]]);
+ assert.deepEqual([...h.run("[...state.fileMarks.keys()]")].sort(),["folder:/media/Shows","folder:/media/a.mkv","folder:/media/b.mkv"]);
+});
+
+test("a poll changes only the marks that moved, and never touches a list that is being replaced", async () => {
+ const h=harness();h.context.controls=()=>{};
+ // The basic stub has no parent links, so removing a mark is modelled here.
+ class Mark extends Element{remove(){const host=this.host;if(host)host.children=host.children.filter(c=>c!==this)}}
+ h.document.createElement=()=>new Mark();
+ const originalAppend=Element.prototype.append;
+ Element.prototype.append=function(...children){for(const c of children)if(c instanceof Mark)c.host=this;return originalAppend.apply(this,children)};
+ try{
+  h.run('state.tab="library";state.libraryLoaded=2;state.libraryRevision=4;$("workspace").hidden=false;$("service").value="radarr";state.media=null;');
+  const names=[new Element(),new Element()];h.context.markHosts=names;
+  h.run('state.fileMarks=new Map();markFile("title:1",markHosts[0],{state:"queued"});markFile("title:2",markHosts[1],null);');
+  assert.equal(names[0].children.length,1);assert.equal(names[1].children.length,0);
+  const kept=names[0].children[0];
+  h.run('api=async()=>({total:2,items:[{id:1,nav_status:{state:"queued"}},{id:2,nav_status:{state:"converted"}}]});');
+  await h.run("refreshFileMarks()");
+  assert.equal(names[0].children[0],kept,"an unchanged mark is not rebuilt");
+  assert.equal(names[1].children[0].className,"file-mark converted");
+  h.run('api=async()=>({total:2,items:[{id:1,nav_status:{state:"replaced"}},{id:2}]});');
+  await h.run("refreshFileMarks()");
+  assert.deepEqual(names.map(n=>n.children.map(c=>c.className)),[["file-mark replaced"],[]]);
+  // A reply that arrives after the list was reloaded must not paint the old rows.
+  const gate=deferred();h.context.gate=gate.promise;
+  h.run('api=async()=>{await gate;return {total:1,items:[{id:1,nav_status:{state:"failed"}}]}};');
+  const late=h.run("refreshFileMarks()");
+  h.run("state.libraryRevision++;state.fileMarks=new Map();");
+  gate.resolve();await late;
+  assert.deepEqual(names[0].children.map(c=>c.className),["file-mark replaced"]);
+  // Nothing is requested while the list is loading or another tab is open.
+  let calls=0;h.context.count=()=>calls++;
+  h.run('state.fileMarks=new Map([["title:1",{host:markHosts[0],mark:null,signature:""}]]);api=async()=>{count();return {items:[]}};state.libraryLoading=true;');
+  await h.run("refreshFileMarks()");
+  h.run('state.libraryLoading=false;state.tab="more";');
+  await h.run("refreshFileMarks()");
+  assert.equal(calls,0);
+ }finally{Element.prototype.append=originalAppend}
+});
+
+test("file marks refresh when returning to Files and ride the page poll only while it is open", () => {
+ assert.match(source,/else if \(tab === "library"\) void refreshFileMarks\(\);/);
+ assert.match(source,/state\.tab === "library" && Date\.now\(\) - \(state\.fileMarksCheckedAt \|\| 0\) > 10000 \? refreshFileMarks\(\)/);
+});
+
+test("file marks are small, quiet and never animate under reduced motion", () => {
+ const rule=selector=>{const at=css.indexOf(`${selector} {`);assert.ok(at>=0,`${selector} rule`);return css.slice(at,css.indexOf("}",at))};
+ const base=rule(".file-mark");
+ assert.match(base,/height: 14px/);assert.match(base,/min-width: 14px/);
+ assert.match(base,/border-radius: 7px/,"a one-glyph mark is a circle, a counted one a pill");
+ assert.match(base,/font: 500 9px/);
+ // The failed conversion is the faintest; "kept" is only a little stronger.
+ assert.match(rule(".file-mark.failed"),/opacity: \.5/);
+ assert.match(rule(".file-mark.kept"),/opacity: \.7/);
+ assert.match(css,/\.file-mark\.working::before \{[^}]*animation: pending-spin/);
+ assert.match(css,/prefers-reduced-motion: reduce\) \{ \.file-mark\.working::before \{ animation: none; \} \}/);
+ assert.match(css,/@keyframes pending-spin/);
+ assert.match(css,/\.folder-title \.file-mark \{ margin-left: 0; \}/);
 });
 
 test("unsupported historical benchmarks open a usable new setup without retrying invalid inputs", async () => {
@@ -3864,9 +4004,22 @@ test("a goal batch that is still encoding offers its waiting decision, and the f
   const badges = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll(".status-action");
   assert.equal(badges("encoding").length, 1);
   assert.equal(badges("quiet").length, 0);
+  assert.equal(list.querySelectorAll(".decision-badge").length, 1);
   h.context.request = () => ({jobs:[], total:0, has_more:false, decision_count:0});
   await h.run("loadJobs()");
   assert.equal(h.elements.get("job-filter-decision").textContent, "Needs decision");
+});
+
+test("the decision flag is a small icon on the title line, not a second badge row", () => {
+  assert.match(css, /\.job-heading > \.status-badge\.decision-badge \{[^}]*grid-column: 2;[^}]*grid-row: 1;[^}]*width: 20px;[^}]*height: 20px;[^}]*min-height: 0;/);
+  assert.match(css, /\.job-heading > \.decision-badge > span:not\(\.status-symbol\) \{ display: none; \}/);
+  assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ padding-right: 26px; \}/);
+  // With a command chip the status badge owns column 4; the flag must not take its cell.
+  assert.match(css, /\.job-heading:has\(> \.command-chip\) > \.badge:not\(\.decision-badge\) \{ grid-column: 4; grid-row: 1; \}/);
+  assert.doesNotMatch(css, /\.decision-badge \{[^}]*grid-row: [23]/);
+  // Explicitly placing the flag would otherwise push the title and status badge out of their cells.
+  assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ grid-column: 2; grid-row: 1; \}/);
+  assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.status-badge:not\(\.decision-badge\) \{ grid-column: 3; grid-row: 1; \}/);
 });
 
 test("a recovery copy redraw keeps focus on its button, or the first enabled one while it verifies", () => {
