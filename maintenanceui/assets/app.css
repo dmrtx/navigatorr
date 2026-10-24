@@ -2874,3 +2874,23 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .track-report-row.dropped strong { font-weight: 400; color: var(--muted); }
 .track-report-row.kept .track-badge { border-color: var(--forest); color: var(--forest); }
 .batch-file-tracks { flex-basis: 100%; }
+/* Phones: the title gets the whole line beside the number, however long it is,
+   and the status badge sits under it instead of squeezing it. The corner
+   buttons are centred on the title's first line. */
+@media (max-width: 700px) {
+  .job-row > .job-heading {
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: start;
+    gap: 2px 6px;
+  }
+  .job-row > .job-heading > .job-number { grid-column: 1; grid-row: 1; align-self: start; line-height: 24px; }
+  .job-row > .job-heading > .job-title { grid-column: 2; grid-row: 1; padding-right: 0; -webkit-line-clamp: 2; }
+  .job-row > .job-heading > .status-badge:not(.decision-badge) {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    width: auto;
+    padding: 0 8px;
+  }
+  .job-row > .job-actions { top: calc(10px + (24px - var(--action-height)) / 2); }
+}
