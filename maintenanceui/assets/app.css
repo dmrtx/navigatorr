@@ -653,9 +653,16 @@ main {
 .worker-activity { padding:10px 0; border-bottom:1px solid var(--line); }
 /* The slots are always read live; saying so on every refresh is noise. */
 #activity-checked { display:none; }
-.activity-heading { display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:11px; }
-.activity-heading-end { display:flex; align-items:center; gap:4px; min-width:0; }
-.activity-heading-end .quiet { min-height:0; padding:2px 6px; font-size:11px; color:var(--forest); }
+.activity-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:6px 8px; font-size:11px; }
+.activity-heading-end { display:flex; align-items:center; gap:6px; min-width:0; }
+/* The scheduler's health is one chip beside the slots, not a line of its own. */
+.sched-chip { display:inline-flex; align-items:center; gap:5px; margin:0; padding:2px 8px; border:1px solid var(--line); border-radius:999px; font-size:11px; color:var(--muted); }
+.sched-chip::before { content:""; flex:none; width:6px; height:6px; border-radius:50%; background:var(--control-line); }
+.sched-chip[data-state="ok"]::before { background:var(--forest); }
+.sched-chip[data-state="degraded"] { border-color:var(--warning-line); color:var(--warning); }
+.sched-chip[data-state="degraded"]::before { background:var(--warning-line); }
+.queue-tool.slot-settings { width:28px; min-width:28px; height:28px; min-height:28px; padding:0; color:var(--muted); }
+.queue-tool.slot-settings svg { width:15px; height:15px; }
 .node-settings { margin-bottom:1.25rem; }
 .node-settings p { margin:4px 0 0; }
 .node-settings-title { display:block; font-size:12px; }
@@ -665,21 +672,51 @@ main {
 .inline-form input { width:76px; margin:0; }
 .worker-slot-split { margin-top:8px; font-size:12px; }
 .node-settings-pick { display:flex; align-items:center; gap:6px; margin-top:4px; font-size:12px; }
-.worker-node-heading { margin:6px 0 0; font-size:11px; font-weight:600; }
 .worker-slot-split[open] form { margin-top:8px; }
 .worker-slot-split .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; max-width:420px; }
 .worker-slot-split .submit-actions { display:flex; gap:8px; margin-top:8px; }
-.worker-slots { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr)); gap:8px; margin-top:8px; }
-/* One column per node, side by side while they fit; slots stack under their heading. */
-.worker-slots:has(> .worker-node-group) { grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr)); align-items:start; gap:8px 16px; }
-.worker-node-group { min-width:0; }
-.worker-node-slots { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; margin-top:6px; }
-.worker-slot { min-width:0; min-height:95px; padding:8px; border:1px solid var(--line); border-radius:4px; }
+.worker-slots { margin-top:8px; }
+/* Phones: one row per node that opens onto its slots. */
+.slots-compact { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; }
+.slot-node { border:1px solid var(--line); border-radius:6px; background:var(--surface); }
+.slot-node > summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px; padding:8px 10px; cursor:pointer; list-style:none; }
+.slot-node > summary::-webkit-details-marker { display:none; }
+.slot-node > summary strong { font-size:12px; }
+.slot-dot { flex:none; width:7px; height:7px; border-radius:50%; background:var(--control-line); }
+.slot-node[data-state="busy"] .slot-dot { background:var(--forest); }
+.slot-node[data-state="stale"] .slot-dot { background:var(--warning-line); }
+.slot-node[data-state="down"] .slot-dot { background:var(--danger); }
+.slot-split { margin-left:auto; }
+.slot-chevron { flex:none; width:6px; height:6px; margin:0 2px 2px auto; border-right:1.5px solid var(--muted); border-bottom:1.5px solid var(--muted); transform:rotate(45deg); transition:transform .15s; }
+.slot-split + .slot-chevron { margin-left:4px; }
+.slot-node[open] > summary > .slot-chevron { margin-bottom:-2px; transform:rotate(-135deg); }
+/* A node that is down has no slots to open onto. */
+.slot-node[data-state="down"] .slot-chevron { display:none; }
+.slot-node-body { padding:0 10px 2px; }
+.slot-node-body:empty { display:none; }
+.worker-slot { min-width:0; padding:7px 0; border-top:1px solid var(--line); }
 .worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.worker-slot.idle strong { font-weight:400; color:var(--muted); }
 .worker-slot p { margin:4px 0 0; }
-/* One line, however long: the full text is in its tooltip. */
-.worker-slot .slot-facts { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.worker-slot .slot-facts { overflow-wrap:anywhere; }
+.slot-facts.warn { color:var(--warning); }
 .worker-slot .slot-progress { margin-top:6px; max-width:none; }
+/* Wide screens: what is running as a table, the free slots in one line. */
+.slots-table { display:none; }
+@media (min-width: 901px) {
+  .slots-compact { display:none; }
+  .slots-table { display:block; }
+}
+.slots-table table { width:100%; border-collapse:collapse; font-size:12px; }
+.slots-table th { padding:4px 12px 4px 0; text-align:left; font-size:11px; font-weight:500; color:var(--muted); }
+.slots-table td { padding:8px 12px 8px 0; border-top:1px solid var(--line); vertical-align:top; }
+.slots-table .slot-file { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.slots-table .slot-progress { min-width:150px; margin:0; max-width:none; }
+.slots-table .batch-progress.slot-progress .batch-progress-count,
+.slots-table .batch-progress.slot-progress .batch-progress-percent { line-height: 1.4; }
+.slot-idle-line, .slot-down { margin:8px 0 0; }
+.slots-table table + .slot-idle-line { padding-top:8px; border-top:1px solid var(--line); }
+.slot-down { color:var(--danger); }
 #selection-count:empty {
   display: none;
 }

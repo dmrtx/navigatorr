@@ -1826,6 +1826,9 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   assert.equal(h.elements.get("jobs-more").hidden, true);
 });
 
+// The phone layout's rows: a node opens onto its slots (the table is the wide-screen view of the same data).
+const slotRows=h=>h.elements.get("worker-slots").children[0].children.flatMap(details=>details.children[1].children);
+
 test("worker activity shows occupied slots, final measurement, elapsed time and unknown connection honestly", () => {
   const h=harness();
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[
@@ -1834,22 +1837,22 @@ test("worker activity shows occupied slots, final measurement, elapsed time and 
   ]}};
   h.run('renderWorkerActivity(activity)');
   assert.match(h.elements.get("worker-capacity").textContent,/2\/2 occupied/);
-  const first=h.elements.get("worker-slots").children[0];
+  const first=slotRows(h)[0];
   assert.match(first.children[0].textContent,/sample-one/);
-  assert.match(first.children[1].textContent,/Full conversion.*elapsed/);
   // One short line under the bar; the freshness of the last measurement is its tooltip.
-  assert.equal(first.children[3].textContent,"Encode finished · measuring quality");
-  assert.match(first.children[3].title,/Last advance 10s ago/);
-  assert.equal(first.children.length,4);
+  assert.match(first.children[2].textContent,/^Encode finished · measuring quality · Full conversion · .*elapsed$/);
+  assert.match(first.children[2].title,/Last advance 10s ago/);
+  assert.equal(first.children.length,3);
   // The encode's last 84.4% lingers in the progress file; once it is over the bar sweeps without a number.
-  const after=first.children[2];
+  const after=first.children[1];
   assert.match(after.className,/batch-progress slot-progress/);
   assert.deepEqual(after.children.map(c=>c.textContent),["Measuring quality",""]);
   assert.equal(after.children.some(c=>c.className==="batch-progress-percent"),false);
   assert.equal(after.children[1].className,"slot-progress-bar");
   h.run('activity.activity.jobs.shift(); activity.activity.worker_slots_used=1;renderWorkerActivity(activity)');
-  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/Slot 1 · Available/);
-  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/Slot 2 · sample-two/);
+  assert.match(slotRows(h)[0].children[0].textContent,/Slot 1 · Available/);
+  assert.equal(slotRows(h)[0].children.length,1,"a free slot is a single line");
+  assert.match(slotRows(h)[1].children[0].textContent,/Slot 2 · sample-two/);
   h.run('renderWorkerActivity({available:false})');
   assert.match(h.elements.get("worker-capacity").textContent,/Unknown/);
   assert.doesNotMatch(h.elements.get("worker-capacity").textContent,/0\/2/);
@@ -1864,26 +1867,27 @@ test("a slot shows the encode's measured percentage in the batch bar, and a stil
     {id:"quiet",file:"sample-three.mkv",kind:"transcode",phase:"encoding",heartbeat_at:new Date(Date.now()-600000).toISOString(),progress:12},
   ]}};
   h.run('renderWorkerActivity(activity)');
-  const rows=h.elements.get("worker-slots").children;
-  const encoding=rows[0].children[2];
+  const rows=slotRows(h);
+  const encoding=rows[0].children[1];
   assert.deepEqual(encoding.children.map(c=>c.className||""),["batch-progress-count","batch-progress-percent",""]);
   assert.deepEqual(encoding.children.map(c=>c.textContent).slice(0,2),["Encoding","42.5%"]);
   assert.equal(encoding.children[2].max,100);
   assert.equal(encoding.children[2].value,42.46);
   assert.doesNotMatch(encoding.className,/stale/);
   // Pass 1 has no progress of its own; a stray number is not shown.
-  const analysing=rows[1].children[2];
+  const analysing=rows[1].children[1];
   assert.deepEqual(analysing.children.map(c=>c.textContent),["Analyzing",""]);
-  assert.equal(rows[1].children[3].textContent,"Pass 1 of 2 · no percentage yet");
-  // The encode being run and its speed are the one line under an encoding slot's bar.
-  assert.equal(rows[0].children[3].textContent,"x265 CRF 22 · 4.94×");
-  assert.match(rows[0].children[3].title,/118\.4 fps/);
-  assert.deepEqual(rows.slice(0,3).map(row=>row.children.length),[4,4,4]);
+  assert.match(rows[1].children[2].textContent,/^Pass 1 of 2 · no percentage yet · Full conversion/);
+  // The encode being run and its speed lead the one line under an encoding slot's bar.
+  assert.match(rows[0].children[2].textContent,/^x265 CRF 22 · 4\.94× · Full conversion/);
+  assert.match(rows[0].children[2].title,/118\.4 fps/);
+  assert.deepEqual(rows.slice(0,3).map(row=>row.children.length),[3,3,3]);
   // A worker that stopped reporting keeps its last value but loses the live look.
-  const quiet=rows[2].children[2];
+  const quiet=rows[2].children[1];
   assert.match(quiet.className,/stale/);
   assert.equal(quiet.children[1].textContent,"12.0%");
-  assert.equal(rows[2].children[3].textContent,"No recent worker heartbeat");
+  assert.match(rows[2].children[2].textContent,/^No recent worker heartbeat · Full conversion/);
+  assert.match(rows[2].children[2].className,/warn/);
 });
 
 test("an encoding slot with nothing to report yet still shows a single short line", () => {
@@ -1894,10 +1898,10 @@ test("an encoding slot with nothing to report yet still shows a single short lin
     {id:"reading",file:"sample-two.mkv",kind:"transcode",phase:"reading_source",heartbeat_at:beat,encoding:"x265 CRF 22"},
   ]}};
   h.run('renderWorkerActivity(activity)');
-  const rows=h.elements.get("worker-slots").children;
-  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
-  assert.equal(rows[1].children[3].textContent,"x265 CRF 22 · Reading the source");
-  assert.deepEqual(rows.map(row=>row.children.length),[4,4]);
+  const rows=slotRows(h);
+  assert.match(rows[0].children[2].textContent,/^Waiting for the first update · Full conversion/);
+  assert.match(rows[1].children[2].textContent,/^x265 CRF 22 · Reading the source · Full conversion/);
+  assert.deepEqual(rows.map(row=>row.children.length),[3,3]);
 });
 
 test("slot progress reuses the green batch bar and only animates while the worker is alive", () => {
@@ -1922,12 +1926,15 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
   assert.equal(h.elements.get("slot-video").value,2);
   assert.equal(h.elements.get("slot-podcast").value,1);
-  const rows=h.elements.get("worker-slots").children;
+  const rows=slotRows(h);
   assert.equal(rows.length,3);
   assert.match(rows[0].children[0].textContent,/Video slot 1 · movie\.mkv/);
   assert.match(rows[1].children[0].textContent,/Video slot 2 · Available/);
   assert.match(rows[2].children[0].textContent,/Podcast slot 1 · episode\.mp3/);
-  assert.match(rows[2].children[1].textContent,/Podcast processing/);
+  assert.match(rows[2].children[2].textContent,/Podcast processing/);
+  // The node's row says what is running and how the pools are used.
+  const summary=h.elements.get("worker-slots").children[0].children[0].children[0];
+  assert.match(summary.children.map(c=>c.textContent).join(" "),/Worker 2\/3 Video 1\/2 · Podcast 1\/1/);
   // An edit that has not been saved survives the next poll.
   h.elements.get("slot-video").value=1;
   h.run('state.slotFormDirty=true;renderWorkerActivity(activity)');
@@ -1937,7 +1944,7 @@ test("worker activity labels video and podcast slots and shows each pool's use",
   // A worker that predates slots, or one that cannot be split, hides the form.
   h.run('activity.activity.slots=undefined;renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-usage").hidden,true);
-  assert.match(h.elements.get("worker-slots").children[0].children[0].textContent,/^Slot 1/);
+  assert.match(slotRows(h)[0].children[0].textContent,/^Slot 1/);
   h.run('activity.activity.slots={ceiling:1,split:false,video:{total:1,used:0},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-split").hidden,true);
 });
@@ -1992,29 +1999,67 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   assert.equal(h.elements.get("settings-node").hidden,true);
 });
 
-test("worker activity puts each node's heading and slots in a column of its own", () => {
+test("worker activity gives each node a row that opens onto its slots, and a table of what runs for wide screens", () => {
   const h=harness();
   h.elements.get("settings-node-pick").options=[];
   const job=(id,file)=>({id,file,kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10});
   const node=(name,jobs)=>({name,available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:jobs.length,jobs,
     slots:{ceiling:1,split:false,video:{total:1,used:jobs.length},podcast:{total:0,used:0}}}});
-  h.context.activity={available:true,workers:[node("m1",[job("a","one.mkv")]),node("m4",[job("b","two.mkv")])]};
+  h.context.activity={available:true,workers:[node("m1",[job("a","one.mkv")]),node("m4",[])]};
   h.run('renderWorkerActivity(activity)');
-  const groups=h.elements.get("worker-slots").children;
-  assert.equal(groups.length,2,"one group per node, not a heading and slots mixed in one list");
-  assert.equal(groups[0].className,"worker-node-group");
-  assert.match(groups[0].children[0].textContent,/^m1 · 1\/1 occupied/);
-  assert.equal(groups[0].children[1].className,"worker-node-slots");
-  assert.match(groups[0].children[1].children[0].children[0].textContent,/one\.mkv/);
-  assert.match(groups[1].children[0].textContent,/^m4 · 1\/1 occupied/);
-  assert.match(groups[1].children[1].children[0].children[0].textContent,/two\.mkv/);
-  // A node that is down keeps its column and says why.
+  const [compact,table]=h.elements.get("worker-slots").children;
+  assert.equal(compact.className,"slots-compact");
+  assert.equal(table.className,"slots-table");
+  const [busy,idle]=compact.children;
+  const summaryText=d=>d.children[0].children.map(c=>c.textContent).join(" ");
+  // A node with something running opens by itself; an idle one stays shut, in one line.
+  assert.equal(busy.open,true);
+  assert.equal(idle.open,false);
+  assert.match(summaryText(busy),/m1 1\/1/);
+  assert.match(summaryText(idle),/m4 0\/1 · all available/);
+  assert.match(busy.children[1].children[0].children[0].textContent,/one\.mkv/);
+  assert.equal(busy.dataset.state,"busy");
+  assert.equal(idle.dataset.state,"idle");
+  // The table lists what runs, names the node, and counts the free slots in a line.
+  const rows=table.children[0].children[1].children;
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].children[0].textContent,"m1 · Slot 1");
+  assert.equal(rows[0].children[1].textContent,"one.mkv");
+  assert.equal(rows[0].children[3].textContent,"Waiting for the first update");
+  assert.equal(rows[0].children[4].textContent,"Full conversion");
+  assert.equal(table.children[1].textContent,"1 slot available · m4 1");
+  // What a person opened or shut stays that way on the next refresh.
+  idle.children[0].listeners.get("click")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slots").children[0].children[1].open,true);
+  busy.children[0].listeners.get("click")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-slots").children[0].children[0].open,false);
+  // A node that is down keeps its row, open, and says why.
   h.run('activity.workers[1]={name:"m4",available:false,message:"Worker disconnected"};renderWorkerActivity(activity)');
-  assert.match(h.elements.get("worker-slots").children[1].children[0].textContent,/^m4 · Worker disconnected/);
-  assert.equal(h.elements.get("worker-slots").children[1].children[1].children.length,0);
-  // A single node keeps the flat slot list.
+  const down=h.elements.get("worker-slots").children[0].children[1];
+  assert.equal(down.dataset.state,"down");
+  assert.equal(down.open,true);
+  assert.match(summaryText(down),/m4 Worker disconnected/);
+  assert.equal(down.children[1].children.length,0);
+  assert.equal(h.elements.get("worker-slots").children[1].children.at(-1).textContent,"m4 · Worker disconnected");
+  // A single node that predates names still gets a row.
   h.run('activity={available:true,workers:[activity.workers[0]]};renderWorkerActivity(activity)');
-  assert.equal(h.elements.get("worker-slots").children[0].className,"worker-slot");
+  assert.equal(h.elements.get("worker-slots").children[0].children.length,1);
+});
+
+test("the scheduler is a chip beside the slots and the settings link is an icon", () => {
+  assert.match(markup,/<div class="activity-heading">.*id="activity-scheduler" class="sched-chip"/s);
+  assert.match(markup,/id="worker-open-settings"[^>]*aria-label="Change in Settings"/);
+  assert.match(css,/@media \(min-width: 901px\) \{\s*\.slots-compact \{ display:none; \}\s*\.slots-table \{ display:block; \}/);
+  assert.match(css,/\.sched-chip\[data-state="degraded"\]/);
+  const h=harness();
+  h.run('state.workerInfo={ready:true,nodes:[{name:"A",scheduler_health:"degraded",stale:false,observed_at:new Date().toISOString()}]};renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"degraded");
+  h.run('state.workerInfo.nodes[0].scheduler_health="ok";renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"ok");
+  h.run('state.workerInfo.nodes[0].stale=true;renderWorkers();');
+  assert.equal(h.elements.get("activity-scheduler").dataset.state,"unknown");
 });
 
 test("activity stays read-only and links to the node settings only when something there is editable", () => {
@@ -2026,7 +2071,7 @@ test("activity stays read-only and links to the node settings only when somethin
   h.run('renderWorkerActivity(activity)');
   // Activity keeps the status; the editors are in Settings and the link leads there.
   assert.match(h.elements.get("worker-capacity").textContent,/0\/2 occupied/);
-  assert.equal(h.elements.get("worker-slots").children.length,2);
+  assert.equal(slotRows(h).length,2);
   assert.equal(h.elements.get("worker-open-settings").hidden,false);
   assert.equal(h.elements.get("settings-node").hidden,false);
   assert.equal(h.elements.get("worker-slot-split").hidden,false);

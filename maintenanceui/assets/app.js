@@ -968,9 +968,10 @@ function renderWorkers() {
   renderWorkerDetails($("worker-nodes"), info);
   renderWorkerDetails($("settings-worker"), info);
   renderWorkerDrain(info);
-  $("activity-scheduler").textContent = schedulerSummary(info);
   // A normal scheduler is the default and stays in the dialog; only a doubt belongs in the header.
   const scheduler = schedulerSummary(info);
+  $("activity-scheduler").textContent = scheduler;
+  $("activity-scheduler").dataset.state = scheduler.startsWith("Scheduler · Normal") ? "ok" : scheduler.startsWith("Scheduler · Degraded") ? "degraded" : "unknown";
   if (serverReachable && info && !scheduler.startsWith("Scheduler · Normal")) $("worker-status").textContent += ` · ${scheduler.replace("Scheduler · ", "Scheduler ")}`;
   const paused = serverReachable ? drainSummary(info?.drain) : null;
   if (paused) $("worker-status").textContent += ` · ${paused.label}`;
@@ -5534,20 +5535,12 @@ function renderWorkerActivity(data) {
   if (nodes.length > 1) $("worker-slot-usage").hidden = true;
   // Activity only reports; the editors live in Settings.
   $("worker-open-settings").hidden = $("worker-parallel-form").hidden && $("worker-slot-split").hidden;
-  for (const n of nodes) {
-    // With several nodes each one is a column of its own: heading over its slots.
-    let target = $("worker-slots");
-    if (nodes.length > 1) {
-      const slots = n.activity?.slots;
-      const heading = !n.available || !n.activity ? `${n.name} · ${n.message || "Unavailable"}`
-        : `${n.name} · ${n.activity.worker_slots_used}/${n.activity.worker_slots_total} occupied${slots?.split ? ` · Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total}` : ""}`;
-      const group = node("section", "", "worker-node-group");
-      target = node("div", "", "worker-node-slots");
-      group.append(node("p", heading, "worker-node-heading"), target);
-      $("worker-slots").append(group);
-    }
-    if (n.available && n.activity) renderSlotGrid(n.activity, n.name, target);
-  }
+  const groups = nodes.map(n => ({n, entries: n.available && n.activity ? slotEntries(n.activity, n.name) : []}));
+  // Phones get a row per node that opens onto its slots; wide screens get a
+  // table of what is running. Both are in the page and the stylesheet picks one.
+  const compact = node("div","","slots-compact");
+  compact.append(...groups.map(({n, entries}) => slotNodeDetails(n, entries)));
+  $("worker-slots").append(compact, slotTable(groups));
 }
 // Phases where the worker has no percentage to give: it is still getting the
 // file ready, or (pass 1 of a two-pass x265) analysing it. The progress file
@@ -5605,8 +5598,10 @@ function slotProgressBlock(job, alive) {
   }
   return block;
 }
-// One node's slots. Each node keeps its own slot positions.
-function renderSlotGrid(activity, name, target = $("worker-slots")) {
+// One node's slots. Each node keeps its own slot positions. An entry is a free
+// slot, a slot the worker says is busy without saying with what (an older
+// worker), or a slot with its job.
+function slotEntries(activity, name) {
   const jobs = activity.jobs || [];
   const pools = slotPools(activity);
   const shown = Math.min(16, pools.total);
@@ -5627,25 +5622,97 @@ function renderSlotGrid(activity, name, target = $("worker-slots")) {
       if (found) break;
     }
   }
+  const entries = [];
   for (let i=0;i<shown;i++) {
-    const row = node("div","","worker-slot"), job = jobs.find(job => assigned.get(job.id) === i);
-    if (!job) {
-      const unknownOccupied = !activity.details_available && i < activity.worker_slots_used;
-      row.append(node("strong",`${pools.label(i)} · ${unknownOccupied ? "Occupied" : "Available"}`));
-      row.append(node("p",unknownOccupied ? "File details require the updated video worker." : "Ready for the next job.","metadata"));
-    } else {
-      const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
-      row.append(node("strong",`${pools.label(i)} · ${job.file}`));
-      row.children[0].title = job.file;
-      const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
-      row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
-      row.append(slotProgressBlock(job, !stale));
-      const facts = slotFacts(job, stale), line = node("p", facts.text, "metadata slot-facts");
-      line.title = facts.title;
-      row.append(line);
-    }
-    target.append(row);
+    const job = jobs.find(job => assigned.get(job.id) === i);
+    entries.push({label: pools.label(i), job, unknown: !job && !activity.details_available && i < activity.worker_slots_used});
   }
+  return entries;
+}
+const slotKind = job => job.kind === "podcast" ? "Podcast processing" : "Full conversion";
+// Phone layout: a free slot is one line, a busy one the file, its bar and one
+// line of facts. Everything about the job is on the row; nothing needs a tap.
+function slotRow(entry) {
+  const {label, job} = entry;
+  const row = node("div","",`worker-slot${job || entry.unknown ? "" : " idle"}`);
+  if (!job) {
+    row.append(node("strong",`${label} · ${entry.unknown ? "Occupied" : "Available"}`));
+    if (entry.unknown) row.append(node("p","File details require the updated video worker.","metadata"));
+    return row;
+  }
+  const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
+  row.append(node("strong",`${label} · ${job.file}`));
+  row.children[0].title = job.file;
+  row.append(slotProgressBlock(job, !stale));
+  const facts = slotFacts(job, stale), elapsed = activityElapsed(job.started_at);
+  const line = node("p", [facts.text, slotKind(job), elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), `metadata slot-facts${stale ? " warn" : ""}`);
+  line.title = facts.title;
+  row.append(line);
+  return row;
+}
+// One node as a row that opens onto its slots. Open while something runs or is
+// wrong, shut when it is idle, until the person opens or shuts it themselves.
+function slotNodeDetails(n, entries) {
+  const online = Boolean(n.available && n.activity);
+  const busy = entries.filter(e => e.job || e.unknown).length;
+  const stale = entries.some(e => e.job && !heartbeatAlive(workerHeartbeatState(e.job.heartbeat_at)));
+  const key = n.name || "", chosen = state.slotNodeOpen?.get(key);
+  const details = node("details","","slot-node");
+  details.open = chosen ?? (!online || busy > 0);
+  details.dataset.state = !online ? "down" : stale ? "stale" : busy ? "busy" : "idle";
+  const summary = node("summary");
+  const split = n.activity?.slots?.split ? n.activity.slots : null;
+  summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
+    node("span", !online ? n.message || "Unavailable" : `${busy}/${n.activity.worker_slots_total}${busy ? "" : " · all available"}`, "metadata"));
+  if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
+  summary.append(node("span","","slot-chevron"));
+  // The click runs before the details toggles: the new state is the opposite.
+  summary.addEventListener("click", () => { (state.slotNodeOpen ||= new Map()).set(key, !details.open); });
+  const body = node("div","","slot-node-body");
+  body.append(...entries.map(slotRow));
+  details.append(summary, body);
+  return details;
+}
+// Desktop layout: the slots that are doing something as a table, the rest in a line.
+function slotTable(groups) {
+  const wrap = node("div","","slots-table");
+  const multi = groups.length > 1, busy = [], free = [], down = [];
+  for (const {n, entries} of groups) {
+    if (!(n.available && n.activity)) { down.push(`${n.name} · ${n.message || "Unavailable"}`); continue; }
+    const idle = entries.filter(e => !e.job && !e.unknown).length;
+    if (idle) free.push([n.name, idle]);
+    for (const e of entries) if (e.job || e.unknown) busy.push({n, e});
+  }
+  if (busy.length) {
+    const table = node("table"), head = node("tr");
+    for (const title of ["Slot", "File", "Progress", "Encode", "Kind", "Elapsed"]) head.append(node("th", title));
+    const thead = node("thead");
+    thead.append(head);
+    const tbody = node("tbody");
+    for (const {n, e} of busy) {
+      const row = node("tr"), slot = multi ? `${n.name} · ${e.label}` : e.label;
+      row.append(node("td", slot));
+      if (!e.job) {
+        const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
+        note.colSpan = 5;
+        row.append(note);
+      } else {
+        const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
+        const file = node("td", job.file, "slot-file"), progress = node("td"), encode = node("td", facts.text, stale ? "slot-facts warn" : "slot-facts");
+        file.title = job.file;
+        progress.append(slotProgressBlock(job, !stale));
+        encode.title = facts.title;
+        row.append(file, progress, encode, node("td", slotKind(job)), node("td", activityElapsed(job.started_at) || ""));
+      }
+      tbody.append(row);
+    }
+    table.append(thead, tbody);
+    wrap.append(table);
+  }
+  const freeCount = free.reduce((sum, [, count]) => sum + count, 0);
+  if (freeCount) wrap.append(node("p", `${freeCount} ${freeCount === 1 ? "slot" : "slots"} available${multi ? ` · ${free.map(([name, count]) => `${name} ${count}`).join(", ")}` : ""}`, "metadata slot-idle-line"));
+  for (const text of down) wrap.append(node("p", text, "metadata slot-down"));
+  return wrap;
 }
 async function refreshWorkerActivity(force) {
   if (state.activityRequest || (!force && $("workspace").hidden)) return;
