@@ -675,6 +675,7 @@ main {
 .worker-slot { min-width:0; min-height:82px; padding:8px; border:1px solid var(--line); border-radius:4px; }
 .worker-slot strong { display:block; font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .worker-slot p { margin:4px 0 0; }
+.worker-slot .slot-progress { margin-top:6px; max-width:none; }
 #selection-count:empty {
   display: none;
 }
@@ -820,6 +821,47 @@ main {
   font: 400 11px/1.4 var(--body);
   white-space: nowrap;
 }
+/* What a batch has done with a file, or with the files inside a folder: one
+   small quiet mark after the name. Colors come from the status badges. */
+.file-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 14px;
+  height: 14px;
+  margin-left: 7px;
+  padding: 0 1px;
+  box-sizing: border-box;
+  vertical-align: middle;
+  border-radius: 7px;
+  color: var(--muted);
+  font: 500 9px/1 var(--body);
+  font-variant-numeric: tabular-nums;
+}
+.file-mark:has(> .file-mark-count) { padding: 0 5px; }
+.folder-title .file-mark { margin-left: 0; }
+.file-mark-glyph { font-weight: 700; }
+.file-mark.attention { color: var(--decision); border: 1px solid currentColor; }
+.file-mark.converted { color: var(--forest); border: 1px solid currentColor; }
+.file-mark.replaced { color: var(--on-forest); background: var(--forest); }
+.file-mark.queued, .file-mark.working { color: var(--info); }
+.file-mark.queued::before,
+.file-mark.working::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  box-sizing: border-box;
+  border-radius: 50%;
+}
+.file-mark.queued::before { border: 1px dashed currentColor; }
+.file-mark.working::before { border: 1.5px solid currentColor; border-right-color: transparent; animation: pending-spin .8s linear infinite; }
+/* Checked and kept, or a conversion that did not finish: present, never loud. */
+.file-mark.kept { opacity: .7; }
+.file-mark.failed { opacity: .5; }
+.file-mark.failed .file-mark-glyph { font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .file-mark.working::before { animation: none; } }
 .media-icon {
   display: inline-grid;
   place-items: center;
@@ -913,6 +955,28 @@ main {
   justify-self: end;
   text-align: right;
 }
+/* A goal batch keeps its own status badge and flags a file that needs a
+   decision with a small icon-only chip. It shares the title's cell, at its
+   right edge beside the status badge, so the heading keeps its single line;
+   the title gives it room instead of the chip being squeezed in a new row. */
+.job-heading > .status-badge.decision-badge {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  width: 20px;
+  height: 20px;
+  /* button.status-action asks for 28px; a taller box would turn the circle into an oval. */
+  min-height: 0;
+  padding: 0;
+  line-height: 1;
+  border-radius: 50%;
+}
+.job-heading > .decision-badge > span:not(.status-symbol) { display: none; }
+.job-heading:has(> .decision-badge) > .job-title { padding-right: 26px; }
+/* A placed item moves the auto-placed ones around it, so pin the rest too. */
+.job-heading:has(> .decision-badge) > .job-number { grid-column: 1; grid-row: 1; }
+.job-heading:has(> .decision-badge) > .job-title { grid-column: 2; grid-row: 1; }
+.job-heading:has(> .decision-badge) > .status-badge:not(.decision-badge) { grid-column: 3; grid-row: 1; }
 .job-row > .job-meta {
   grid-row: 2;
   grid-column: 1 / -1;
@@ -1365,6 +1429,47 @@ main {
 .batch-progress.failed progress::-moz-progress-bar { background: var(--danger); }
 .batch-progress.cancelled { color: var(--muted); }
 #detail-summary > .batch-progress { margin: 10px 0; }
+/* A worker slot reuses the batch bar. The batch rules above size the labels for
+   a tall footer row; inside a slot they keep their natural line height. */
+.worker-slot .batch-progress.slot-progress .batch-progress-count,
+.worker-slot .batch-progress.slot-progress .batch-progress-percent { line-height: 1.4; }
+.worker-slot .batch-progress.slot-progress .batch-progress-phase { margin-top: 2px; font-size: 11px; }
+.batch-progress.stale { color: var(--muted); }
+.batch-progress.stale progress::-webkit-progress-value { background: var(--muted); }
+.batch-progress.stale progress::-moz-progress-bar { background: var(--muted); }
+/* No percentage to show: a sweeping segment says the worker is busy, and stops
+   when the worker goes quiet so a frozen job never looks alive. */
+.slot-progress-bar {
+  position: relative;
+  order: 1;
+  flex: 1 1 120px;
+  min-width: 24px;
+  max-width: 180px;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--track);
+}
+.slot-progress-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 35%;
+  border-radius: 2px;
+  background: var(--forest);
+  animation: slot-progress-sweep 1.6s ease-in-out infinite;
+}
+.batch-progress.stale .slot-progress-bar::after { background: var(--muted); animation: none; width: 0; }
+@keyframes slot-progress-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(286%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .slot-progress-bar::after { animation: none; width: 100%; opacity: .45; }
+  .batch-progress.stale .slot-progress-bar::after { width: 0; }
+}
 .batch-counts { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
 .batch-counts .badge { margin: 0; }
 .preview-notice { padding: 8px 10px; color: var(--preview); background: var(--preview-wash); border-left: 3px solid var(--preview-line); font-size: 12px; }
@@ -2056,7 +2161,7 @@ pre {
 .job-heading:has(> .command-chip) {
   grid-template-columns: 42px minmax(0, 1fr) auto 96px;
 }
-.job-heading:has(> .command-chip) > .badge { grid-column: 4; grid-row: 1; }
+.job-heading:has(> .command-chip) > .badge:not(.decision-badge) { grid-column: 4; grid-row: 1; }
 .job-heading > .command-chip {
   grid-column: 3;
   grid-row: 1;
@@ -2069,7 +2174,7 @@ pre {
   .job-heading:has(> .command-chip) {
     grid-template-columns: 34px minmax(0, 1fr) 88px;
   }
-  .job-heading:has(> .command-chip) > .badge { grid-column: 3; }
+  .job-heading:has(> .command-chip) > .badge:not(.decision-badge) { grid-column: 3; }
   .job-heading > .command-chip {
     grid-column: 2 / -1;
     grid-row: 2;

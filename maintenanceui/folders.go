@@ -133,7 +133,13 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 	offset = max(0, min(offset, len(items)))
 	end := min(offset+100, len(items))
 	page := make([]folderItem, 0, end-offset)
+	marks := s.fileStatuses()
 	for _, item := range items[offset:end] {
+		if item.IsDir {
+			item.Status = marks.under(item.Path)
+		} else {
+			item.Status = marks.file(item.Path)
+		}
 		if item.IsDir && r.URL.Query().Get("sizes") == "1" {
 			size := s.folderSizes.get(item.Path, resolver, s.engine.Deps().Store)
 			item.FolderSize = &size

@@ -19,6 +19,9 @@ import (
 type folderItem struct {
 	fsop.Stat
 	FolderSize *folderSize `json:"folder_size,omitempty"`
+	// Status is what a conversion batch has done with the file, or with the
+	// files inside a folder.
+	Status *fileStatusView `json:"nav_status,omitempty"`
 }
 type folderSize struct {
 	Status     string    `json:"status"`

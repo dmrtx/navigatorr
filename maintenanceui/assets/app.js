@@ -797,6 +797,7 @@ function selectTab(tab, fromRoute = false) {
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   if (tab === "advanced") void loadKeepLanguages();
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
+  else if (tab === "library") void refreshFileMarks();
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     clearTimeout(state.folderSizesTimer);
     void updateFolderSizes(state.libraryRevision, state.folder, $("search").value, state.libraryLoaded);
@@ -955,6 +956,78 @@ async function initialize() {
   if (!["jobs","stats"].includes(state.tab)) await loadJobs();
 }
 
+// What a conversion batch has done with a file, or with the files in a folder,
+// title or season: one small mark after the name. The queued and working marks
+// are drawn in CSS; failed is the quietest, since the file itself is fine and
+// only its conversion did not finish.
+const fileMarkInfo = {
+  attention: {glyph: "!", label: "Needs your decision", many: n => `${n} ${n === 1 ? "needs" : "need"} a decision`},
+  working: {label: "Converting now", many: n => `${n} converting`},
+  queued: {label: "Added · waiting for its turn", many: n => `${n} queued`},
+  converted: {glyph: "✓", label: "Converted · the original is untouched", many: n => `${n} converted`},
+  replaced: {glyph: "✓", label: "Replaced with the converted file", many: n => `${n} replaced`},
+  kept: {glyph: "–", label: "Checked · the original stays as it is", many: n => `${n} kept as they are`},
+  failed: {glyph: "↺", label: "Last conversion did not finish · the file is untouched", many: n => `${n} not finished`},
+};
+function fileMark(status) {
+  const info = fileMarkInfo[status?.state];
+  if (!info) return null;
+  const counts = status.counts && typeof status.counts === "object" ? status.counts : null;
+  const note = counts ? Object.keys(fileMarkInfo).filter(key => counts[key] > 0).map(key => fileMarkInfo[key].many(counts[key])).join(" · ") : info.label;
+  const mark = node("span", "", `file-mark ${status.state}`);
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", note);
+  mark.title = note;
+  if (info.glyph) mark.append(node("span", info.glyph, "file-mark-glyph"));
+  if (status.count > 1) mark.append(node("span", String(status.count), "file-mark-count"));
+  return mark;
+}
+// Marks a row's name. Each mark is remembered by what it describes, so a later
+// poll can change it in place instead of redrawing the list.
+function markFile(key, host, status) {
+  const entry = {host, mark: null, signature: ""};
+  (state.fileMarks ||= new Map()).set(key, entry);
+  setFileMark(entry, status);
+}
+function setFileMark(entry, status) {
+  const signature = status ? JSON.stringify([status.state, status.count || 0, status.counts || null]) : "";
+  if (signature === entry.signature) return;
+  entry.signature = signature;
+  entry.mark?.remove();
+  entry.mark = fileMark(status);
+  if (entry.mark) entry.host.append(entry.mark);
+}
+// Re-reads the rows already on screen, so a file added from another page or
+// finished in the background shows its new state without reopening the list.
+async function refreshFileMarks() {
+  const targets = state.fileMarks;
+  if (state.tab !== "library" || !targets?.size || state.libraryLoading || state.fileMarksRefreshing || $("workspace").hidden) return;
+  const revision = state.libraryRevision, auth = state.authRevision;
+  const current = () => revision === state.libraryRevision && auth === state.authRevision && state.fileMarks === targets;
+  state.fileMarksRefreshing = true;
+  try {
+    const loaded = Math.max(1, state.libraryLoaded || 0);
+    const folder = $("service").value.startsWith("folder:");
+    const sort = $("library-sort").value || "name";
+    const apply = (key, status) => { const entry = targets.get(key); if (entry) setFileMark(entry, status); };
+    for (let offset = 0; offset < (state.libraryShowsSeasons ? 1 : loaded); offset += 100) {
+      const query = folder
+        ? new URLSearchParams({path: state.folder, q: $("search").value, offset, sort, listing: state.folderListing || ""})
+        : new URLSearchParams({service: $("service").value, q: $("search").value, offset, limit: 100, sort});
+      if (!folder && state.media) query.set("id", state.media.id);
+      if (!folder && seriesSeasonSelected()) query.set("season", state.librarySeason);
+      const page = await api(`${folder ? "folder" : "library"}?${query}`);
+      if (!current()) return;
+      if (state.libraryShowsSeasons) for (const group of page.season_groups || []) apply(`season:${group.seasonNumber ?? "unknown"}`, group.nav_status);
+      else for (const item of page.items || []) apply(folder ? `folder:${item.path}` : `${state.media ? "file" : "title"}:${item.id}`, item.nav_status);
+    }
+    state.fileMarksCheckedAt = Date.now();
+  } catch {
+    // The marks are advisory; the next poll tries again.
+  } finally {
+    state.fileMarksRefreshing = false;
+  }
+}
 async function loadLibrary(more = false) {
   restoreLibraryDraft();
   const revision = ++state.libraryRevision;
@@ -993,6 +1066,8 @@ async function loadLibrary(more = false) {
       $("library-items").replaceChildren();
       state.libraryFileKeys = new Set();
       state.allSelectionKeys = null;
+      state.fileMarks = new Map();
+      state.fileMarksCheckedAt = Date.now();
     }
     if (grouped) renderSeriesSeasons(page.season_groups);
     for (const item of grouped ? [] : page.items) {
@@ -1062,7 +1137,9 @@ async function loadLibrary(more = false) {
         },
         "open-media",
       );
-      b.append(node("span", title, "media-title"));
+      const name = node("span", title, "media-title");
+      markFile(`${state.media ? "file" : "title"}:${item.id}`, name, item.nav_status);
+      b.append(name);
       b.append(
         node(
           "span",
@@ -1132,7 +1209,9 @@ function renderSeriesSeasons(seasons) {
     const folder = actionIcon("Folder");
     if (folder) icon.append(folder); else icon.textContent = "▤";
     const open = button("", () => navigateSeriesSeason(season.seasonNumber ?? "unknown"), "open-media");
-    open.append(node("span",seriesSeasonLabel(season.seasonNumber),"media-title"),node("span",`${season.fileCount} ${season.fileCount === 1 ? "file" : "files"}`,"metadata"));
+    const name = node("span",seriesSeasonLabel(season.seasonNumber),"media-title");
+    markFile(`season:${season.seasonNumber ?? "unknown"}`, name, season.nav_status);
+    open.append(name,node("span",`${season.fileCount} ${season.fileCount === 1 ? "file" : "files"}`,"metadata"));
     row.append(icon,open,node("span",bytes(season.size),"media-size"));
     $("library-items").append(row);
   }
@@ -1406,6 +1485,8 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
     if (!more) {
       $("library-items").replaceChildren();
       state.folderSizeTargets = new Map();
+      state.fileMarks = new Map();
+      state.fileMarksCheckedAt = Date.now();
     }
     state.folderSizeTargets ||= new Map();
     for (const file of page.items) {
@@ -1464,6 +1545,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
           title.className += " folder-title";
         }
       }
+      markFile(`folder:${file.path}`, title, file.nav_status);
       row.append(title, sizeLabel);
       $("library-items").append(row);
     }
@@ -4800,7 +4882,12 @@ async function loadJobs(more = false) {
       heading.append(statusBadge(presentation.status, presentation.status, job.status === "waiting_decision" || job.batch?.outcome === "no_changes" ? () => openJob(job.id) : null));
       // A goal batch keeps encoding while one file waits, so its own status says
       // "In progress"; the decision still needs its own way in.
-      if (job.needs_decision && job.status !== "waiting_decision") heading.append(statusBadge("Needs decision", "waiting_decision", () => openJob(job.id)));
+      if (job.needs_decision && job.status !== "waiting_decision") {
+        const decision = statusBadge("Needs decision", "waiting_decision", () => openJob(job.id));
+        decision.classList.add("decision-badge");
+        decision.title = "Needs decision";
+        heading.append(decision);
+      }
       const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.summary;
       const summary = node("p", summaryText, "metadata job-summary");
       summary.title = summaryText;
@@ -5131,6 +5218,49 @@ function renderWorkerActivity(data) {
     if (n.available && n.activity) renderSlotGrid(n.activity, n.name, target);
   }
 }
+// Phases where the worker has no percentage to give: it is still getting the
+// file ready, or (pass 1 of a two-pass x265) analysing it. The progress file
+// written by the encode keeps its last value afterwards, so a number shown in
+// these phases or after the encode would be stale, not live.
+const slotUnmeasuredPhases = ["queued", "waiting_for_worker", "preparing", "reading_source", "probing_source", "analysing_video"];
+const slotShortPhases = {
+  queued: "Waiting", waiting_for_worker: "Waiting", preparing: "Preparing", reading_source: "Reading", probing_source: "Inspecting",
+  analysing_video: "Analyzing", encoding: "Encoding", validating: "Verifying", validating_quality: "Measuring quality",
+  publishing: "Saving", publication_pending: "Saving", completed: "Finished",
+};
+function slotProgressDetail(phase) {
+  if (phase === "encoding") return "";
+  if (phase === "analysing_video") return `${workerPhaseLabel(phase)} · percentage starts in pass 2`;
+  if (postEncodeWorkerPhases.includes(phase) && phase !== "completed") return `Encode finished · ${workerPhaseLabel(phase === "publication_pending" ? "publishing" : phase)}`;
+  return workerPhaseLabel(phase);
+}
+// The slot's progress in the same green bar the batch rows use: a measured
+// percentage while encoding, an animated bar with no number while the worker
+// is busy in a phase that has none, and a still, muted one when it has gone quiet.
+function slotProgressBlock(job, alive) {
+  const phase = job.phase, value = job.progress != null ? Number(job.progress) : NaN;
+  const measured = Number.isFinite(value) && !postEncodeWorkerPhases.includes(phase) && !slotUnmeasuredPhases.includes(phase);
+  const label = slotShortPhases[phase] || workerPhaseLabel(phase);
+  const block = node("div", "", `job-progress batch-progress slot-progress${alive ? "" : " stale"}`);
+  block.append(node("span", label, "batch-progress-count"));
+  if (measured) {
+    const percent = Math.max(0, Math.min(100, value));
+    block.append(node("strong", `${percent.toFixed(1)}%`, "batch-progress-percent"));
+    const bar = document.createElement("progress");
+    bar.max = 100;
+    bar.value = percent;
+    bar.setAttribute("aria-label", `${label} ${percent.toFixed(1)}%`);
+    block.append(bar);
+  } else {
+    const bar = node("span", "", "slot-progress-bar");
+    bar.setAttribute("role", "progressbar");
+    bar.setAttribute("aria-label", `${label}, no percentage available`);
+    block.append(bar);
+  }
+  const detail = slotProgressDetail(phase);
+  if (detail) block.append(node("span", detail, "batch-progress-phase metadata"));
+  return block;
+}
 // One node's slots. Each node keeps its own slot positions.
 function renderSlotGrid(activity, name, target = $("worker-slots")) {
   const jobs = activity.jobs || [];
@@ -5163,10 +5293,9 @@ function renderSlotGrid(activity, name, target = $("worker-slots")) {
       const stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at));
       row.append(node("strong",`${pools.label(i)} · ${job.file}`));
       row.children[0].title = job.file;
-      const phase = workerPhaseLabel(job.phase);
-      const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",phase,activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
-      if (job.progress != null) parts.push(`${Number(job.progress).toFixed(1)}%`);
+      const parts = [job.kind === "podcast" ? "Podcast processing" : "Full conversion",activityElapsed(job.started_at) ? `${activityElapsed(job.started_at)} elapsed` : null];
       row.append(node("p",parts.filter(Boolean).join(" · "),"metadata"));
+      row.append(slotProgressBlock(job, !stale));
       const last = activityElapsed(job.last_progress_at);
       row.append(node("p",stale ? "No recent worker heartbeat. Last reported state." : last ? `Last advance ${last} ago` : "Worker connected · Waiting for the next measurement", "metadata"));
     }
@@ -6978,6 +7107,7 @@ setInterval(async () => {
       !state.jobsLoading ? safe(() => loadJobs()) : Promise.resolve(),
       $("job-detail").open ? safe(refreshDetail) : Promise.resolve(),
       state.backupCleaning ? safe(refreshBackupCleanup) : Promise.resolve(),
+      state.tab === "library" && Date.now() - (state.fileMarksCheckedAt || 0) > 10000 ? refreshFileMarks() : Promise.resolve(),
     ]);
   } finally {
     polling = false;
