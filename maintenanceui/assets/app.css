@@ -1714,7 +1714,7 @@ main {
 }
 .batch-item-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 330px;
+  grid-template-columns: minmax(0, 1fr) 84px 390px;
   align-items: center;
   column-gap: 10px;
   row-gap: 3px;
@@ -1729,11 +1729,11 @@ main {
 }
 .batch-item-row > .badge { grid-column: 2; grid-row: 1; min-width: 68px; justify-content: center; }
 .batch-item-row > .batch-file-actions { grid-column: 3; grid-row: 1; flex-basis: auto; flex-wrap: nowrap; }
-@media (max-width: 900px) {
+@media (max-width: 1000px) {
   .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
   .batch-item-row > .batch-file-actions { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; margin: 3px 0; }
 }
-.batch-item-row .batch-file-actions button { min-height: 28px; padding: 0 10px; font-size: 12px; }
+.batch-item-row .batch-file-actions button { min-height: 28px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
 
 /* Savings and completed replacement history. */
 .savings-dashboard {
