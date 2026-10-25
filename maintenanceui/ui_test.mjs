@@ -7524,3 +7524,153 @@ test("a selection is titled by what the server named it, a single file by its ow
   assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, files: []}}), "Selected files");
 });
 
+
+function storageFixture(overrides = {}) {
+  const day = (n, bytes) => ({ t: `2026-10-${String(n).padStart(2, "0")}T12:00:00Z`, bytes });
+  return {
+    helper: true,
+    measuring: false,
+    measured_at: "2026-10-25T12:00:00Z",
+    volumes: [
+      {
+        id: "/m/Anime",
+        roots: ["/m/Anime", "/m/Movies"],
+        total_bytes: 20e12,
+        used_bytes: 12e12,
+        free_bytes: 7.9e12,
+        accounted_bytes: 11e12,
+        other_bytes: 1e12,
+        source: "helper",
+        trend: { points: [day(1, 13e12), day(10, 12.6e12), day(25, 12e12)], change_7d: -3e11, change_30d: -1e12 },
+      },
+    ],
+    folders: [
+      { path: "/m/Anime", name: "Anime", volume: "/m/Anime", bytes: 7e12, source: "helper", trend: { points: [], change_7d: -2e11 } },
+      { path: "/m/Movies", name: "Movies", volume: "/m/Anime", bytes: 4e12, source: "helper", trend: { points: [] } },
+      { path: "/m/Anime/Podcasts", name: "Podcasts", volume: "/m/Anime", inside: "/m/Anime", bytes: 1e11, source: "helper", trend: { points: [] } },
+    ],
+    ...overrides,
+  };
+}
+function storageHarness() {
+  const h = harness();
+  h.document.createElementNS = () => new Element();
+  return h;
+}
+
+test("sizes in the terabytes are not shown as thousands of gigabytes", () => {
+  const h = harness();
+  assert.equal(h.run("bytes(12.34e12)"), "12.34 TB");
+  assert.equal(h.run("bytes(999e9)"), "999.00 GB");
+});
+
+test("Stats shows the NAS total against what is used, what is free and what each folder holds", () => {
+  const h = storageHarness();
+  h.context.data = storageFixture();
+  h.run("renderStorage(data)");
+  const card = h.elements.get("storage-volumes").children[0];
+  const text = allText(card);
+  assert.match(text, /NAS/);
+  assert.match(text, /12\.00 TB used of 20\.00 TB/);
+  assert.match(text, /7\.90 TB free · 60% full/);
+  for (const name of ["Anime", "Movies", "Everything else", "Free"]) assert.ok(text.includes(name), name);
+  assert.match(text, /7\.00 TB.*35%/s);
+  // The recovery section says how much was freed, from the volume's own trend.
+  assert.match(text, /300\.00 GB freed in 7 days/);
+  assert.match(text, /1\.00 TB freed in 30 days/);
+});
+
+test("the bar counts each served folder once and leaves a nested folder to the one holding it", () => {
+  const h = storageHarness();
+  h.context.data = storageFixture();
+  h.run("renderStorage(data)");
+  const bar = h.elements.get("storage-volumes").children[0].children.find((c) => c.className === "storage-bar");
+  // Anime, Movies and "everything else": the nested Podcasts is not a segment.
+  assert.equal(bar.children.length, 3);
+  const widths = bar.children.map((s) => parseFloat(s.style.width));
+  assert.equal(JSON.stringify(widths), "[35,20,5]");
+  const card = allText(h.elements.get("storage-volumes").children[0]);
+  assert.match(card, /Podcasts/);
+  assert.match(card, /inside Anime/);
+});
+
+test("a change is only reported for a window the history actually covers", () => {
+  const h = storageHarness();
+  h.context.young = storageFixture({
+    volumes: [{ ...storageFixture().volumes[0], trend: { points: [], change_all: 5e9 } }],
+    folders: storageFixture().folders.map((f) => ({ ...f, trend: { points: [] } })),
+  });
+  h.run("renderStorage(young)");
+  const text = allText(h.elements.get("storage-volumes").children[0]);
+  assert.match(text, /5\.00 GB more since the first measurement/);
+  assert.doesNotMatch(text, /in 7 days|in 30 days/);
+  assert.equal(h.run("storageChanges({}).length"), 0);
+  assert.equal(h.run("storageChanges({change_7d:0})[0]"), "No change in 7 days");
+});
+
+test("a trend with fewer than two days of samples draws no chart", () => {
+  const h = storageHarness();
+  assert.equal(h.run('storageSparkline({points:[{t:"2026-10-25T00:00:00Z",bytes:1}]}, "Used")'), null);
+  const chart = h.run('storageSparkline({points:[{t:"2026-10-24T00:00:00Z",bytes:3e12},{t:"2026-10-25T00:00:00Z",bytes:2e12}]}, "Used space")');
+  assert.ok(chart);
+});
+
+test("Stats says so when nothing has been measured yet, and while measuring", () => {
+  const h = storageHarness();
+  h.run("renderStorage({volumes:[],folders:[]})");
+  assert.match(h.elements.get("storage-status").textContent, /Not measured yet/);
+  assert.equal(h.elements.get("storage-refresh").disabled, false);
+  h.run("renderStorage({volumes:[],folders:[],measuring:true})");
+  assert.match(h.elements.get("storage-status").textContent, /Measuring now/);
+  assert.equal(h.elements.get("storage-refresh").disabled, true);
+  assert.equal(h.elements.get("storage-refresh").textContent, "Measuring…");
+});
+
+test("the status says where the numbers came from and surfaces what could not be measured", () => {
+  const h = storageHarness();
+  h.context.data = storageFixture({ notes: ["1 of 3 folders could not be sized completely."], error: "disk is full" });
+  h.run("renderStorage(data)");
+  const status = h.elements.get("storage-status").textContent;
+  assert.match(status, /inside the NAS/);
+  assert.match(status, /1 of 3 folders could not be sized completely/);
+  assert.match(status, /failed: disk is full/);
+  const mount = storageFixture();
+  mount.volumes[0].source = "mount";
+  mount.folders.forEach((f) => (f.source = "mount"));
+  h.context.data = mount;
+  h.run("renderStorage(data)");
+  assert.match(h.elements.get("storage-status").textContent, /through the network share/);
+});
+
+test("folders whose volume was not read are still listed", () => {
+  const h = storageHarness();
+  h.context.data = storageFixture({ volumes: [] });
+  h.run("renderStorage(data)");
+  const text = allText(h.elements.get("storage-volumes"));
+  assert.match(text, /Anime/);
+  assert.match(text, /Movies/);
+});
+
+test("measuring asks the server, then polls until it finishes; a late answer for another tab is dropped", async () => {
+  const h = storageHarness();
+  h.context.calls = [];
+  h.context.timers = [];
+  h.run('state.tab="stats"; setTimeout=(fn,ms)=>{timers.push(ms);return 1}; api=async(path,body)=>{calls.push([path,body]);return {volumes:[],folders:[],measuring:true}};');
+  await h.run("measureStorage()");
+  assert.equal(JSON.stringify(h.context.calls[0]), '["storage",{}]');
+  assert.equal(JSON.stringify(h.context.timers), "[3000]");
+  assert.equal(h.elements.get("storage-refresh").textContent, "Measuring…");
+  h.run("timers.length = 0; state.tab = 'jobs'");
+  await h.run("loadStorage()");
+  assert.equal(h.context.timers.length, 0, "a response arriving after leaving Stats must not keep polling");
+  h.run('state.tab="stats"; api=async()=>({volumes:[],folders:[],measuring:false}); timers.length = 0;');
+  await h.run("loadStorage()");
+  assert.equal(h.context.timers.length, 0, "no polling once the measurement is done");
+});
+
+test("Stats opens with the storage numbers and the markup and styles for them exist", () => {
+  for (const id of ["storage-refresh", "storage-status", "storage-volumes"]) assert.ok(markup.includes(`id="${id}"`), id);
+  for (const cls of [".storage-bar", ".storage-legend", ".storage-c0", ".storage-c5", ".storage-other", ".storage-free", ".storage-trend polyline"]) assert.ok(css.includes(cls), cls);
+  assert.match(source, /if \(tab !== "stats"\) clearTimeout\(state\.storageTimer\)/);
+  assert.match(source, /else if \(!fromRoute\) safe\(loadStorage\)/);
+});

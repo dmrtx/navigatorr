@@ -621,6 +621,14 @@
         </section>
         <section id="stats" class="panel tab-content" hidden>
           <div class="queue-toolbar"><h2>Stats</h2></div>
+          <section class="storage" aria-labelledby="storage-title">
+            <div class="storage-head">
+              <h3 id="storage-title">NAS storage</h3>
+              <button id="storage-refresh" type="button">Measure now</button>
+            </div>
+            <p id="storage-status" class="muted" role="status"></p>
+            <div id="storage-volumes"></div>
+          </section>
           <div class="savings-dashboard" aria-label="Space savings">
             <div>
               <span class="metadata">Space freed</span

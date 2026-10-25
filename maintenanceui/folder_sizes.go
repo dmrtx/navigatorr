@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 	"github.com/jakenesler/navigatorr/store"
 )
 
@@ -32,6 +33,9 @@ type folderSize struct {
 }
 type folderSnapshot struct {
 	Size folderSize `json:"size"`
+	// Source is "helper" when the NAS measured the folder from inside, which
+	// leaves no directory stamps to compare against.
+	Source string `json:"source,omitempty"`
 	// This fingerprint describes names, sizes and timestamps. It is not a
 	// content hash and must never authorize a replacement.
 	Fingerprint string            `json:"fingerprint"`
@@ -49,7 +53,7 @@ type folderSizeCache struct {
 	slots   chan struct{}
 }
 
-func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.Store) folderSize {
+func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.Store, meter nasMeter) folderSize {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.entries == nil {
@@ -95,8 +99,8 @@ func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.St
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		value := previous
-		if previous.Size.Status != "ready" || time.Since(previous.Size.MeasuredAt) >= 30*time.Minute || folderDirectoriesChanged(ctx, path, previous.Directories, resolver) {
-			value = measureFolderSnapshot(ctx, path, resolver, 100000)
+		if previous.Size.Status != "ready" || time.Since(previous.Size.MeasuredAt) >= helperRemeasure(previous, 30*time.Minute) || (previous.Source != "helper" && folderDirectoriesChanged(ctx, path, previous.Directories, resolver)) {
+			value = measureFolderSnapshot(ctx, path, resolver, 100000, meter)
 			if value.Size.Status != "ready" && previous.Size.Status == "ready" {
 				value = previous
 				value.Size.Note = "Could not refresh the size; showing the last complete measurement."
@@ -141,10 +145,39 @@ func withinFolder(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && rel != ".." && !filepath.IsAbs(rel) && len(rel) > 0 && (len(rel) < 3 || rel[:3] != ".."+string(os.PathSeparator))
 }
-func measureFolderSize(ctx context.Context, path string, resolver *fsop.Resolver, limit int) folderSize {
-	return measureFolderSnapshot(ctx, path, resolver, limit).Size
+
+// helperRemeasure is how long a size measured by the NAS helper is trusted. The
+// helper leaves no directory stamps to detect a change with, but its walk is
+// cheap, so it is simply repeated sooner.
+func helperRemeasure(previous folderSnapshot, otherwise time.Duration) time.Duration {
+	if previous.Source == "helper" {
+		return 2 * time.Minute
+	}
+	return otherwise
 }
-func measureFolderSnapshot(ctx context.Context, path string, resolver *fsop.Resolver, limit int) folderSnapshot {
+func measureFolderSize(ctx context.Context, path string, resolver *fsop.Resolver, limit int) folderSize {
+	return measureFolderSnapshot(ctx, path, resolver, limit, nil).Size
+}
+
+// measureFolderSnapshot sizes a folder, by the NAS helper when one covers it and
+// answers, and by walking the share otherwise.
+func measureFolderSnapshot(ctx context.Context, path string, resolver *fsop.Resolver, limit int, meter nasMeter) folderSnapshot {
+	if meter != nil {
+		if _, mapped := meter.Remote(path); mapped {
+			if res, err := meter.Usage(ctx, path, nil); err == nil {
+				now := time.Now().UTC()
+				total := res.Bytes
+				snap := folderSnapshot{Size: folderSize{Status: "ready", Bytes: &total, MeasuredAt: now}, Source: "helper", CheckedAt: now,
+					Fingerprint: fmt.Sprintf("helper:%d:%d:%d", res.Bytes, res.Files, res.Dirs)}
+				if res.Skipped > 0 {
+					snap.Size.Note = fmt.Sprintf("%d entries could not be read; the size may be a little low.", res.Skipped)
+				}
+				return snap
+			} else if !nashelper.ShouldFallBack(err) {
+				return folderSnapshot{Size: folderSize{Status: "unavailable", Note: "Folder size could not be measured."}, CheckedAt: time.Now().UTC()}
+			}
+		}
+	}
 	var total int64
 	visited := 0
 	hash := sha256.New()

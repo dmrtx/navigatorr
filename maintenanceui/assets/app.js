@@ -170,6 +170,7 @@ function bytes(n) {
   const v = Number(n);
   if (!Number.isFinite(v)) return "—";
   if (v < 0) return `−${bytes(-v)}`;
+  if (v >= 1e12) return `${(v / 1e12).toFixed(2)} TB`;
   if (v >= 1e9) return `${(v / 1e9).toFixed(2)} GB`;
   if (v >= 1e6) return `${(v / 1e6).toFixed(1)} MB`;
   if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
@@ -778,6 +779,7 @@ async function applyNavigation(route) {
     if (tab === "recipes" && route.profile && !(recipeIsDirty() && route.profile === state.recipe?.name)) await readRecipe(route.profile);
     if (tab === "advanced" && route.copies) await loadBackups();
     if (tab === "jobs" || tab === "stats") await loadJobs();
+    if (tab === "stats") void safe(loadStorage);
     if (current() && route.job) await openJob(route.job);
   } finally {
     if (revision === state.routeRevision) { state.applyingNavigation=false; writeNavigation(true); }
@@ -801,6 +803,8 @@ function selectTab(tab, fromRoute = false) {
   if (typeof window !== "undefined") window.scrollTo({ top: 0 });
   writeNavigation();
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
+  if (tab !== "stats") clearTimeout(state.storageTimer);
+  else if (!fromRoute) safe(loadStorage);
   // The node's job settings come from the worker activity report.
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   if (tab === "advanced") void loadKeepLanguages();
@@ -3633,6 +3637,179 @@ function renderSavings(data) {
       node("p", "No verified replacements yet.", "muted"),
     );
 }
+// Stats: how full the NAS is, what each served folder holds, and how that has
+// moved. The numbers come from the server's periodic measurement.
+function storageSpan(change, span) {
+  if (change == null) return null;
+  if (change < 0) return `${bytes(-change)} freed ${span}`;
+  if (change > 0) return `${bytes(change)} more ${span}`;
+  return `No change ${span}`;
+}
+// The changes a trend can honestly report; a window with no old enough sample
+// is left out rather than guessed.
+function storageChanges(trend) {
+  const parts = [
+    storageSpan(trend?.change_7d, "in 7 days"),
+    storageSpan(trend?.change_30d, "in 30 days"),
+  ].filter(Boolean);
+  if (!parts.length) {
+    const all = storageSpan(trend?.change_all, "since the first measurement");
+    if (all) parts.push(all);
+  }
+  return parts;
+}
+function storageDate(iso) {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("en", { month: "short", day: "numeric" });
+}
+function storageSparkline(trend, label) {
+  const points = (trend?.points || []).filter((p) => Number.isFinite(Number(p.bytes)));
+  if (points.length < 2) return null;
+  const values = points.map((p) => Number(p.bytes));
+  const low = Math.min(...values), high = Math.max(...values);
+  const span = high - low || 1;
+  const wrap = node("div", "", "storage-trend");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 300 56");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("role", "img");
+  svg.setAttribute(
+    "aria-label",
+    `${label} from ${bytes(values[0])} on ${storageDate(points[0].t)} to ${bytes(values.at(-1))} on ${storageDate(points.at(-1).t)}`,
+  );
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+  line.setAttribute(
+    "points",
+    values.map((v, i) => `${((i / (values.length - 1)) * 300).toFixed(1)},${(52 - ((v - low) / span) * 48).toFixed(1)}`).join(" "),
+  );
+  svg.append(line);
+  const axis = node("div", "", "storage-trend-axis metadata");
+  axis.append(node("span", storageDate(points[0].t)), node("span", storageDate(points.at(-1).t)));
+  wrap.append(svg, axis);
+  return wrap;
+}
+function storageLegendRow(name, path, size, total, detail, swatch) {
+  const row = node("li", "", "storage-row");
+  row.append(node("i", "", `storage-swatch ${swatch}`));
+  const label = node("span", name, "storage-name");
+  if (path) label.title = path;
+  const figures = node("span", "", "storage-figures");
+  figures.append(node("strong", bytes(size)));
+  if (total > 0) figures.append(node("span", `${Math.round((size / total) * 100)}%`, "metadata"));
+  row.append(label, figures);
+  if (detail?.length) row.append(node("span", detail.join(" · "), "storage-detail metadata"));
+  return row;
+}
+function storageVolumeCard(data, volume, index) {
+  const card = node("article", "", "storage-volume");
+  const many = data.volumes.length > 1;
+  const total = Number(volume.total_bytes) || 0;
+  const used = Number(volume.used_bytes) || 0;
+  const head = node("div", "", "storage-volume-head");
+  head.append(
+    node("h4", many ? `Volume ${index + 1}` : "NAS", "storage-volume-name"),
+    node("strong", `${bytes(used)} used of ${bytes(total)}`, "storage-volume-used"),
+  );
+  card.append(head);
+  const free = Number(volume.free_bytes) || 0;
+  card.append(
+    node(
+      "p",
+      `${bytes(free)} free${total ? ` · ${Math.round((used / total) * 100)}% full` : ""}`,
+      "metadata storage-volume-free",
+    ),
+  );
+  const folders = (data.folders || []).filter((f) => f.volume === volume.id);
+  const counted = folders.filter((f) => !f.inside);
+  const scale = Math.max(total, counted.reduce((n, f) => n + f.bytes, 0) + (volume.other_bytes || 0), 1);
+  const bar = node("div", "", "storage-bar");
+  bar.dataset.bar = "";
+  bar.setAttribute("role", "img");
+  bar.setAttribute(
+    "aria-label",
+    `${bytes(used)} of ${bytes(total)} used: ${counted.map((f) => `${f.name} ${bytes(f.bytes)}`).join(", ")}${volume.other_bytes ? `, other ${bytes(volume.other_bytes)}` : ""}`,
+  );
+  counted.forEach((f, i) => {
+    const seg = node("i", "", `storage-c${i % 6}`);
+    seg.style.width = `${Math.max(0, (f.bytes / scale) * 100).toFixed(2)}%`;
+    bar.append(seg);
+  });
+  if (volume.other_bytes > 0) {
+    const seg = node("i", "", "storage-other");
+    seg.style.width = `${((volume.other_bytes / scale) * 100).toFixed(2)}%`;
+    bar.append(seg);
+  }
+  card.append(bar);
+  const list = node("ul", "", "storage-legend");
+  let swatch = 0;
+  for (const f of folders) {
+    const detail = f.inside ? [`inside ${f.inside.split("/").pop()}`] : storageChanges(f.trend);
+    list.append(storageLegendRow(f.name, f.path, f.bytes, total, detail, f.inside ? "storage-nested" : `storage-c${swatch++ % 6}`));
+  }
+  if (volume.other_bytes > 0) list.append(storageLegendRow("Everything else", "", volume.other_bytes, total, ["Not in a folder the console serves"], "storage-other"));
+  list.append(storageLegendRow("Free", "", free, total, [], "storage-free"));
+  card.append(list);
+  const changes = storageChanges(volume.trend);
+  const spark = storageSparkline(volume.trend, "Used space");
+  if (spark || changes.length) {
+    const trend = node("div", "", "storage-volume-trend");
+    trend.append(node("h5", "Recovery", "storage-trend-title"));
+    if (changes.length) trend.append(node("p", changes.join(" · "), "storage-changes"));
+    if (spark) trend.append(spark);
+    card.append(trend);
+  }
+  return card;
+}
+function renderStorage(data) {
+  state.storage = data;
+  const measuring = Boolean(data.measuring);
+  $("storage-refresh").disabled = measuring || !serverReachable;
+  $("storage-refresh").textContent = measuring ? "Measuring…" : "Measure now";
+  const host = $("storage-volumes");
+  host.replaceChildren();
+  const volumes = data.volumes || [];
+  volumes.forEach((volume, index) => host.append(storageVolumeCard(data, volume, index)));
+  const known = new Set(volumes.map((v) => v.id));
+  const loose = (data.folders || []).filter((f) => !known.has(f.volume));
+  if (loose.length) {
+    const list = node("ul", "", "storage-legend");
+    loose.forEach((f, i) => list.append(storageLegendRow(f.name, f.path, f.bytes, 0, storageChanges(f.trend), `storage-c${i % 6}`)));
+    host.append(list);
+  }
+  const status = [];
+  if (measuring) status.push("Measuring now. A large library can take a few minutes.");
+  else if (data.measured_at) {
+    const when = new Date(data.measured_at).toLocaleString("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const sources = new Set([...volumes, ...(data.folders || [])].map((x) => x.source));
+    status.push(`Last measured ${when}${sources.size === 1 && sources.has("helper") ? ", inside the NAS" : sources.has("mount") ? ", through the network share" : ""}. It repeats every 6 hours.`);
+  } else if (!volumes.length) status.push("Not measured yet. It runs by itself shortly after start; use Measure now to run it immediately.");
+  if (data.error) status.push(`The last measurement failed: ${data.error}`);
+  for (const note of data.notes || []) status.push(note);
+  $("storage-status").textContent = status.join(" ");
+}
+async function loadStorage() {
+  const revision = (state.storageRevision = (state.storageRevision || 0) + 1);
+  const data = await api("storage");
+  if (revision !== state.storageRevision || state.tab !== "stats") return;
+  renderStorage(data);
+  clearTimeout(state.storageTimer);
+  if (data.measuring) state.storageTimer = setTimeout(() => void safe(loadStorage), 3000);
+}
+async function measureStorage() {
+  const revision = (state.storageRevision = (state.storageRevision || 0) + 1);
+  $("storage-refresh").disabled = true;
+  let data;
+  try {
+    data = await api("storage", {});
+  } catch (e) {
+    $("storage-refresh").disabled = !serverReachable;
+    throw e;
+  }
+  if (revision !== state.storageRevision || state.tab !== "stats") return;
+  renderStorage(data);
+  clearTimeout(state.storageTimer);
+  if (data.measuring) state.storageTimer = setTimeout(() => void safe(loadStorage), 3000);
+}
 async function jobControl(id, name, args = {}, {onAccepted, decision} = {}) {
   if (jobIsBusy(id)) return;
   state.busyJobs.add(id);
@@ -6057,6 +6234,7 @@ async function refreshWorkerActivity(force) {
   } finally { state.activityRequest = false; }
 }
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
+$("storage-refresh").addEventListener("click", () => void safe(measureStorage));
 // A chosen filter lights the filter button, since the select itself is only an icon.
 function markQueueFilter() {
   $("job-filter-pick").classList.toggle("on", $("job-filter").value !== "all");

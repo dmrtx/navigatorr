@@ -89,7 +89,7 @@ func TestFolderSizesAreAuthenticatedBoundedAndCached(t *testing.T) {
 	// A newly constructed UI cache reads the persisted total immediately.
 	c := &s.folderSizes
 	cold := &folderSizeCache{}
-	restored := cold.get(folder, deps.Fs, deps.Store)
+	restored := cold.get(folder, deps.Fs, deps.Store, nil)
 	if restored.Status != "ready" || *restored.Bytes != 12 {
 		t.Fatal("lost total on restart", restored)
 	}
@@ -149,7 +149,7 @@ func TestFolderScansFinishWithoutBrowserPollingAndCacheSurvivesStoreReopen(t *te
 		path := filepath.Join(root, fmt.Sprint(i))
 		os.Mkdir(path, 0700)
 		os.WriteFile(filepath.Join(path, "video.mkv"), make([]byte, i+1), 0600)
-		cache.get(path, resolver, st)
+		cache.get(path, resolver, st, nil)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for {
@@ -174,7 +174,7 @@ func TestFolderScansFinishWithoutBrowserPollingAndCacheSurvivesStoreReopen(t *te
 	}
 	defer st.Close()
 	cold := &folderSizeCache{}
-	restored := cold.get(filepath.Join(root, "5"), resolver, st)
+	restored := cold.get(filepath.Join(root, "5"), resolver, st, nil)
 	if restored.Status != "ready" || restored.Bytes == nil || *restored.Bytes != 6 || restored.Updating {
 		t.Fatal("cache did not survive database reopen", restored)
 	}

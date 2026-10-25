@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 18
+const SchemaVersion = 19
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -394,6 +394,25 @@ var migrations = []migration{
 		// A step that waits on something outside (an encode, a batch) is polled
 		// every few seconds. Repeated polls update one row and count here.
 		`ALTER TABLE action_steps_log ADD COLUMN observations INTEGER NOT NULL DEFAULT 1`,
+	}},
+	{version: 19, statements: []string{
+		// How full the NAS and each library root were over time, so the space
+		// recovered by converting and replacing files can be seen as it happens.
+		// scope is 'volume' (path is one root on it; total and free are the
+		// volume's) or 'folder' (path is a served root; used is its size).
+		// volume names the volume a sample belongs to, by one of its roots.
+		`CREATE TABLE storage_samples (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			taken_at TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			path TEXT NOT NULL,
+			volume TEXT NOT NULL DEFAULT '',
+			used_bytes INTEGER NOT NULL,
+			total_bytes INTEGER NOT NULL DEFAULT 0,
+			free_bytes INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX idx_storage_samples_series ON storage_samples(scope, path, taken_at)`,
 	}},
 }
 
