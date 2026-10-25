@@ -506,45 +506,50 @@ design goal (no recovery copy, no read of the original) is not met until it is c
 original, and accepted it by size + mtime. Promotion keeps to that: the original is the
 file whose size and mtime equal the transcode's (`promotionOriginalStatMatches`).
 
-**Proposal.** For a metadata-mode promotion the helper's `Sample` of the original, taken in
-`stepPromotePreserve`, becomes the proof:
+**Proposal (revised after review).** For a `filesystem` metadata-mode promotion the helper's
+`Sample` of the original, taken when the recovery mode is chosen in `stepPromotePreserve`
+(`promotionChooseByHelperSample`), becomes the proof. Sonarr and Radarr keep the copy
+(`original_not_read_again`) until this is measured on `filesystem`.
 
-1. Preconditions, all required, else the current copy path (reason unchanged):
-   `Sample.Identity.Complete`, `Identity.Size == OriginalBytes`,
-   `Identity.MtimeNs == OriginalStatMod` (nanoseconds). This is the same trust as the
-   mount stat check, from the NAS filesystem instead of the SMB cache, plus an inode,
-   generation, ctime and a digest of 8 MiB of the file.
-2. `OriginalHelper = {Identity, Sample, Process}` from that `Sample`;
-   `RecoverySample` is set to the same digest when empty (both use `internal/sampledigest`,
-   which is what the existing metadata-mode checks of a recovery file compare against).
-3. The helper-observed probe of the recovery directory and `RecoveryProof = "helper"`
-   as in stage 5. Mode is chosen once (`RecoveryMode` empty), exactly as now.
-4. Everything stage 5 does for the move itself is unchanged: before the rename the helper
-   `Sample` must equal the proof in every field including ctime, else a full read of the
-   original compared with `OriginalSHA` (rare: something touched the file; it is also the
-   truthful check, since `OriginalSHA` is the real digest); after the rename the same
-   inode (all fields but ctime) and the same digest, else a full read accepted only if
-   it equals `OriginalSHA`.
-5. After the move, metadata-mode checks of the recovery file keep their cheap form: a
-   sampled-range comparison of `BackupPath` with `RecoverySample` over the mount (about
-   8 MiB), never a full read.
+1. Preconditions, all required, else the copy with a reason that says which one failed:
+   `Identity.Complete`; `Identity.Size == OriginalBytes`; `Identity.MtimeNs` equal to
+   `OriginalStatMod` **after cutting both to 100 ns** (the mount reports SMB's 100 ns units, the NAS
+   filesystem the exact nanosecond; an exact comparison would never match and leave this stage
+   inactive). A mismatch is `helper_stat_mismatch` with the size flag and the mtime difference as
+   detail, never a path. The helper's digest must also equal the digest the mount computes over
+   the same ranges (`helper_and_mount_disagree`): a helper that points at another file than the
+   mount is found before the library path is touched. A leftover recovery file, or a sample
+   already recorded, keeps the copy (`earlier_recovery_file_present`). A helper that is down, an
+   incomplete identity or an unreadable mount keep `original_not_read_again`.
+2. `OriginalHelper = {Identity, Sample, Process}` and `RecoverySample = Sample`, saved in the same
+   `savePromotion` as the mode, before any intent. `RecoverySample` is mandatory: a move-aside
+   promotion without it fails closed (`verifyPromotionRecovery`), because after the move there is
+   nothing left to take the digest from.
+3. The helper-observed probe of the recovery directory and `RecoveryProof = "helper"` as in stage 5.
+   Mode is chosen once.
+4. Before the intent (`MoveAsideStartedAt == ""`), a restart or a long wait costs nothing:
+   `promotionReproveOriginalByHelper` accepts the file when the helper's identity (ctime included)
+   and digest equal the persisted proof. The process stamp does not matter here, since the basis of
+   the trust (stat + sampled digest) is persisted too. Any doubt, or an intent already durable,
+   reads the original in full against `OriginalSHA`, as in stage 5.
+5. The rename, the post-rename check (same inode, same digest, else a full read accepted only if it
+   equals `OriginalSHA`) and every later check of the recovery file (sampled ranges of `BackupPath`
+   against `RecoverySample` over the mount, about 8 MiB) are unchanged. With the intent durable
+   and the original still in place, a promotion that never read it keeps to its stat
+   (`verifyPromotionOriginalStable`), as before the move; the same holds for the copy fallback
+   after a refused rename.
 
-**What must not change.** No path may fall to a full read of the original in the normal case;
-no helper answer ever decides "the original is gone"; the mode never changes after the
-intent is durable; restore/move-back/discard keep stage 5 semantics.
+**Residual risk, unchanged.** A rewrite outside the sampled ranges with the mtime restored is not
+seen, exactly as with the mount's size + mtime today. The helper adds the inode, the change time
+at choice time and the agreement of two independent paths. A bound on the change time against the
+transcode's time was considered and left out: the transcode records no pin time, and a
+chmod/xattr by the NAS would turn it into a copy for no gain.
 
-**Questions for review.**
-1. Is the helper `Sample` (identity + 8 MiB digest + mtime/size equal to the transcode's)
-   at least as strong as the mount's size + mtime for deciding "this is the file that
-   was transcoded"? Where could it be weaker (mtime restored after a rewrite, a rewrite
-   outside the sampled ranges)? Is it acceptable that, as today, bytes outside the
-   sampled ranges are never compared in this mode?
-2. Does every metadata-mode check that runs after the move (restore, move back, discard,
-   duplicate guard, `promotionOriginalProved`, `verifyPromotionRecovery`) handle a
-   promotion with `RecoveryProof="helper"` and `OriginalSHA` never read? Which one still
-   assumes a copy or a mount fingerprint?
-3. The preserve step is re-run after a restart. What happens if the process changed
-   between the proof and the rename (proof from an earlier process counts for nothing)?
-   Is a full read of 1-2 GB acceptable there?
-4. Should a Sonarr/Radarr (non-filesystem) metadata-mode promotion get the same
-   treatment, or only `service == filesystem` first?
+**Full reads that remain, by design** (none loses data): a crash or restart after the intent is
+durable (`promote_move_aside.go`, `promotionVerifyRecovered`), a user restore or move back after a
+restart (`promotionFinishMoveBack`), and a helper that is down or cannot answer after the rename.
+
+**What must not change.** No path may fall to a full read of the original in the normal case; no
+helper answer ever decides "the original is gone"; the mode never changes after the intent is
+durable; restore/move-back/discard keep stage 5 semantics.
+

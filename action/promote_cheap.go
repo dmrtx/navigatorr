@@ -199,6 +199,11 @@ func (e *Engine) verifyPromotionRecovery(ctx context.Context, p *promotionState,
 		return e.verifyPromotionHashStable(ctx, path, p.OriginalSHA)
 	}
 	want := p.RecoverySample
+	if want == "" && p.movesAside() {
+		// The original is the recovery once moved: there is nothing left to take
+		// the digest from.
+		return fmt.Errorf("the recovery sample of the original is missing")
+	}
 	if want == "" {
 		if err := e.promotionOriginalStatMatches(ctx, p); err != nil {
 			return err

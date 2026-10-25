@@ -650,7 +650,7 @@ func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState)
 		return promotionRecoveryCopy, recoveryReasonAlwaysCopy, ""
 	}
 	if p.originalByMetadata() {
-		return promotionRecoveryCopy, recoveryReasonOriginalNotRead, ""
+		return e.promotionChooseByHelperSample(ctx, p)
 	}
 	helper := promotionKnownHelper(ctx, p.OriginalPath, p.OriginalSHA)
 	if helper == nil && promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
@@ -933,10 +933,12 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 		if p.helperProof() && p.MoveAsideStartedAt == "" {
 			// Before any intent the original is still where this process proved
 			// it: the helper's identity says so without another full read.
-			_, err := e.promotionVerifyByHelper(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalHelper, false)
+			_, err := e.promotionVerifyOriginalByHelper(ctx, p)
 			return err
 		}
-		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
+		// An intent is durable and the original is still in place: a promotion
+		// that never read it keeps to its stat, as it did before the move.
+		return e.verifyPromotionOriginalStable(ctx, p)
 	}
 	if !p.BackupVerified || p.BackupPath == "" {
 		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")

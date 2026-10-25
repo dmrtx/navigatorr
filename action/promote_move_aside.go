@@ -160,7 +160,7 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 			// A proof the helper cannot give leaves the original read in full,
 			// and the moved file is read in full too. Only a mount proof
 			// refuses to move a file it has no identity for.
-			proved, err := e.promotionVerifyByHelper(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalHelper, false)
+			proved, err := e.promotionVerifyOriginalByHelper(ctx, p)
 			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%w: %v", errPromotionOriginalGone, err)
 			}
@@ -316,7 +316,7 @@ func (e *Engine) promotionResumeFallbackCopy(ctx context.Context, ec *ExecutionC
 	progress := &promotionPreserveProgress{e: e, ec: ec, p: p}
 	defer delete(ec.State, "work_progress")
 	ctx = context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 		return err
 	}
 	return e.promotionMakeRecoveryCopy(ctx, ec, p, progress)
