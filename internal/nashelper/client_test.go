@@ -523,14 +523,64 @@ func TestClientHashGivesUpAfterRepeatedFailedPollsAndCancels(t *testing.T) {
 	waitDeletes(t, f, 1)
 }
 
-func TestClientHashUnknownStateAndHelperCancelFallBack(t *testing.T) {
-	for name, state := range map[string]string{"unknown": "exploded", "cancelled by helper": JobCancelled} {
+func TestClientHashOddJobsFallBackAndCancelOnlyWhenTheyShould(t *testing.T) {
+	cases := []struct {
+		name    string
+		job     Job
+		deletes int64
+	}{
+		{"unknown state", Job{ID: "j1", InstanceID: "A", State: "exploded"}, 1},
+		{"id without instance", Job{ID: "j1", State: JobRunning}, 1},
+		{"cancelled by the helper", Job{ID: "j1", InstanceID: "A", State: JobCancelled}, 0},
+		{"failed without an error", Job{ID: "j1", InstanceID: "A", State: JobFailed}, 0},
+		{"done without a result", Job{ID: "j1", InstanceID: "A", State: JobDone}, 1},
+	}
+	for _, tc := range cases {
 		f := &fakeHelper{t: t}
-		f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: state} }
+		f.start = func() Job { return tc.job }
 		c := fakeClient(t, f)
 		if _, err := c.Hash(context.Background(), "/data/a.bin", nil); !ShouldFallBack(err) {
-			t.Errorf("%s: got %v", name, err)
+			t.Errorf("%s: got %v", tc.name, err)
 		}
+		if tc.deletes > 0 {
+			waitDeletes(t, f, tc.deletes)
+		} else {
+			time.Sleep(50 * time.Millisecond)
+			if f.deletes.Load() != 0 {
+				t.Errorf("%s: a job the helper already ended must not be cancelled", tc.name)
+			}
+		}
+	}
+}
+
+func TestClientHashToleratesPollsThatTheHelperRefuses(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(n int64) (Job, int) {
+		if n == 1 {
+			return Job{}, http.StatusServiceUnavailable
+		}
+		return Job{ID: "j1", InstanceID: "A", State: JobDone, Result: &HashResult{SHA256: "ab", Bytes: 1}}, http.StatusOK
+	}
+	c := fakeClient(t, f)
+	if _, err := c.Hash(context.Background(), "/data/a.bin", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClientHashPassesOnAnAnswerFromAFailedJob(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(int64) (Job, int) {
+		return Job{ID: "j1", InstanceID: "A", State: JobFailed, Error: &Error{Code: CodeChanged, Message: "x"}}, http.StatusOK
+	}
+	c := fakeClient(t, f)
+	_, err := c.Hash(context.Background(), "/data/a.bin", nil)
+	if !IsAnswer(err) || ShouldFallBack(err) {
+		t.Fatalf("got %v", err)
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("a failed job is already over")
 	}
 }
 
@@ -539,7 +589,8 @@ func TestClientHashCancelsTheJobWhenTheCallerGivesUp(t *testing.T) {
 	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
 	f.poll = func(int64) (Job, int) { return Job{ID: "j1", InstanceID: "A", State: JobRunning}, http.StatusOK }
 	c := fakeClient(t, f)
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// Long enough for the first poll to be in flight when the deadline passes.
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	_, err := c.Hash(ctx, "/data/a.bin", nil)
 	if !errors.Is(err, context.DeadlineExceeded) || ShouldFallBack(err) {

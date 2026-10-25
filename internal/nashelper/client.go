@@ -203,16 +203,20 @@ func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) 
 	if err := c.pathCall(ctx, c.timeout, "/v1/hash", local, &job); err != nil {
 		return HashResponse{}, err
 	}
-	if job.ID == "" || job.InstanceID == "" {
-		return HashResponse{}, fmt.Errorf("%w: hash started without a job id or instance", ErrUnavailable)
+	if job.ID == "" {
+		return HashResponse{}, fmt.Errorf("%w: hash started without a job id", ErrUnavailable)
 	}
-	instance := job.InstanceID
+	// From here the job exists on the helper: every way out cancels it.
 	finished := false
 	defer func() {
 		if !finished {
 			c.cancelJob(job.ID)
 		}
 	}()
+	if job.InstanceID == "" {
+		return HashResponse{}, fmt.Errorf("%w: hash started without an instance", ErrUnavailable)
+	}
+	instance := job.InstanceID
 	wait := pollMin
 	failures := 0
 	for {
@@ -258,13 +262,17 @@ func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) 
 			case errors.As(err, &apiErr) && apiErr.Code == CodeNotFound:
 				// The helper forgot the job: it restarted, or the job aged out.
 				return HashResponse{}, fmt.Errorf("%w: the hash job is gone", ErrRestarted)
-			case errors.Is(err, ErrUnavailable):
+			case IsAnswer(err):
+				finished = true
+				return HashResponse{}, err
+			default:
+				// Dropped connection, a 5xx, a busy or refused answer: give the
+				// helper a couple of chances before reading the file the old way.
 				if failures++; failures >= maxPollFailures {
 					return HashResponse{}, err
 				}
 				continue
 			}
-			return HashResponse{}, err
 		}
 		failures = 0
 		if next.InstanceID != instance {

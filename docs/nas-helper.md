@@ -233,7 +233,10 @@ absence is confirmed with a `stat` on the mount before any destructive decision.
 a stored identity is never compared with one from another instance. `Hash` has no
 timeout of its own (the caller passes a deadline), tolerates two failed polls in a
 row, and cancels its job on every exit before a result. `Sample` always needs a
-deadline from the caller.
+deadline from the caller. A caller that wraps a helper call in a shorter deadline of
+its own gets its own deadline back, not a fallback. The helper stops a hash job
+nobody has asked about for two minutes (a caller that died, or never received the
+id), so an abandoned job cannot keep reading or hold a slot.
 
 Required from the second review for the helper's API: no expected value is
 ever sent to it; a job is created for the step that uses it; the sampling
