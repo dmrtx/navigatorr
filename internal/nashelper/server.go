@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	simdsha256 "github.com/minio/sha256-simd"
+
 	"github.com/jakenesler/navigatorr/internal/sampledigest"
 )
 
@@ -458,7 +460,9 @@ func (s *Server) hashFile(ctx context.Context, j *job) (*HashResult, error) {
 		return nil, err
 	}
 	j.total.Store(before.Size)
-	h := sha256.New()
+	// The standard library uses the SHA extensions only on CPUs that also have
+	// AVX2, which the NAS's Celeron lacks (98 MB/s against 555 MB/s here).
+	h := simdsha256.New()
 	buf := make([]byte, hashChunk)
 	var n int64
 	for {
