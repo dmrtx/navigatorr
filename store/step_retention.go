@@ -11,8 +11,8 @@ const (
 	// pollRetention keeps recent polls whole, so a person watching a job sees
 	// its last hour as it happened.
 	pollRetention = time.Hour
-	// pruneBatch bounds one delete: a row can hold a whole batch's payload, so
-	// a batch holds the store lock for a moment and no longer.
+	// pruneBatch is how many rows one page reads under the store lock; a row
+	// can hold a whole batch's payload, so a page is kept short.
 	pruneBatch = 100
 	// reclaimMinBytes and reclaimMinShare say when freed pages are worth giving
 	// back to the filesystem.
@@ -22,30 +22,33 @@ const (
 	retentionEvery = 6 * time.Hour
 )
 
-// PruneSupersededPolls deletes the poll rows of waiting steps that a later row
-// of the same step has replaced and that are older than before. The last row of
-// every step stays: it is the step's latest observation, the only one the job
-// pages read. Rows with any other status stay whatever their age.
+// CollapseOldPolls merges the poll rows that earlier versions wrote one per
+// poll. Within a step, each unbroken run of waiting_external rows older than
+// before becomes its last row, which takes the run's observation count and
+// keeps the run's latest outputs and time. A run is cut by any other row of the
+// step, or by a poll newer than before, so the record of a wait (that it
+// happened, how many polls, the last thing seen) stays and only the copies go.
 //
-// The groups are found through the (instance, step) index, which holds neither
-// the status nor the payload, so the scan does not read the large rows.
-func (s *Store) PruneSupersededPolls(ctx context.Context, before time.Time) (int64, error) {
+// The steps are found through the (instance, step) index, which holds neither
+// the status nor the payload. Rows are then read in small keyset pages, each
+// under the store lock for a moment, because an old row can hold a whole
+// batch's payload and reading its status means reading past it.
+func (s *Store) CollapseOldPolls(ctx context.Context, before time.Time) (int64, error) {
+	type group struct {
+		instance string
+		step     int
+	}
+	var groups []group
 	s.mu.Lock()
-	rows, err := s.db.QueryContext(ctx, `SELECT instance_id, step_index, MAX(id) FROM action_steps_log
+	rows, err := s.db.QueryContext(ctx, `SELECT instance_id, step_index FROM action_steps_log
 		GROUP BY instance_id, step_index HAVING COUNT(*) > 1`)
 	if err != nil {
 		s.mu.Unlock()
 		return 0, err
 	}
-	type group struct {
-		instance string
-		step     int
-		last     int64
-	}
-	var groups []group
 	for rows.Next() {
 		var g group
-		if err := rows.Scan(&g.instance, &g.step, &g.last); err != nil {
+		if err := rows.Scan(&g.instance, &g.step); err != nil {
 			rows.Close()
 			s.mu.Unlock()
 			return 0, err
@@ -60,31 +63,91 @@ func (s *Store) PruneSupersededPolls(ctx context.Context, before time.Time) (int
 	}
 
 	cutoff := before.UTC().Format(time.RFC3339)
-	var deleted int64
+	type poll struct {
+		id, observations int64
+		old              bool
+		waiting          bool
+	}
+	var merged int64
 	for _, g := range groups {
+		var pending *poll
+		var after int64
 		for {
 			if err := ctx.Err(); err != nil {
-				return deleted, err
+				return merged, err
 			}
 			s.mu.Lock()
-			res, err := s.db.ExecContext(ctx, `DELETE FROM action_steps_log WHERE id IN (
-					SELECT id FROM action_steps_log
-					WHERE instance_id=? AND step_index=? AND id<? AND status='waiting_external' AND created_at<?
-					LIMIT ?)`, g.instance, g.step, g.last, cutoff, pruneBatch)
+			page, err := s.db.QueryContext(ctx, `SELECT id, status, observations, created_at FROM action_steps_log
+				WHERE instance_id=? AND step_index=? AND id>? ORDER BY id LIMIT ?`, g.instance, g.step, after, pruneBatch)
+			var polls []poll
+			if err == nil {
+				for page.Next() {
+					var p poll
+					var status, created string
+					if err = page.Scan(&p.id, &status, &p.observations, &created); err != nil {
+						break
+					}
+					p.waiting = status == "waiting_external"
+					p.old = created < cutoff
+					polls = append(polls, p)
+				}
+				if err == nil {
+					err = page.Err()
+				}
+				page.Close()
+			}
 			s.mu.Unlock()
 			if err != nil {
-				return deleted, err
+				return merged, err
 			}
-			n, _ := res.RowsAffected()
-			deleted += n
-			if n < pruneBatch {
+			if len(polls) == 0 {
 				break
 			}
-			// Let a writer in between batches.
+			after = polls[len(polls)-1].id
+			for i := range polls {
+				p := polls[i]
+				if !p.waiting || !p.old {
+					pending = nil
+					continue
+				}
+				if pending != nil {
+					// The earlier poll hands its count to this one and goes.
+					if err := s.mergePoll(ctx, pending.id, p.id, pending.observations); err != nil {
+						return merged, err
+					}
+					p.observations += pending.observations
+					merged++
+				}
+				pending = &p
+			}
+			if len(polls) < pruneBatch {
+				break
+			}
+			// Let a writer in between pages.
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	return deleted, nil
+	return merged, nil
+}
+
+// mergePoll adds the count of poll row from to row into, then deletes from, in
+// one transaction. The addition is relative, so a poll landing on into at the
+// same moment is not lost.
+func (s *Store) mergePoll(ctx context.Context, from, into, observations int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE action_steps_log SET observations=observations+? WHERE id=?`, observations, into); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM action_steps_log WHERE id=?`, from); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // ReclaimSpace gives free pages back to the filesystem once enough have piled
@@ -127,9 +190,18 @@ func (s *Store) ReclaimSpace(ctx context.Context) (int64, error) {
 	return free * pageSize, nil
 }
 
+// checkpointTruncate empties the WAL so the pages just released leave the disk.
+// A reader in another process can keep it from finishing; that is reported, not
+// counted as success.
 func checkpointTruncate(ctx context.Context, conn *sql.Conn) error {
 	var busy, logFrames, checkpointed int64
-	return conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	if err := conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return err
+	}
+	if busy != 0 {
+		return fmt.Errorf("the log could not be emptied: another connection is reading")
+	}
+	return nil
 }
 
 // RunRetention tidies the store shortly after start and then every few hours,
@@ -143,11 +215,11 @@ func (s *Store) RunRetention(ctx context.Context, logf func(format string, args 
 		case <-time.After(wait):
 		}
 		wait = retentionEvery
-		deleted, err := s.PruneSupersededPolls(ctx, time.Now().Add(-pollRetention))
+		merged, err := s.CollapseOldPolls(ctx, time.Now().Add(-pollRetention))
 		if err != nil {
 			logf("step log retention: %v", err)
-		} else if deleted > 0 {
-			logf("step log retention: removed %d superseded poll records", deleted)
+		} else if merged > 0 {
+			logf("step log retention: merged %d repeated poll records", merged)
 		}
 		freed, err := s.ReclaimSpace(ctx)
 		if err != nil {

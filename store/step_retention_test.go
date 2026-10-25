@@ -55,50 +55,72 @@ func TestRepeatedWaitingPollUpdatesOneRow(t *testing.T) {
 	}
 }
 
-// Rows written one per poll, as earlier versions did, are collapsed once old.
-func TestPruneSupersededPollsKeepsLatestAndOtherStatuses(t *testing.T) {
+// Rows written one per poll, as earlier versions did, are merged once old.
+func TestCollapseOldPollsKeepsTheRecordOfEachWait(t *testing.T) {
 	s := openTest(t)
 	for _, id := range []string{"old", "busy"} {
 		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_batch"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	insert := func(instance string, step int, status, created string) {
+	insert := func(instance string, step int, status, created, out string) {
 		t.Helper()
-		if _, err := s.db.Exec(`INSERT INTO action_steps_log (instance_id, step_index, step_name, primitive, status, created_at) VALUES (?,?,?,?,?,?)`,
-			instance, step, "step", "step", status, created); err != nil {
+		if _, err := s.db.Exec(`INSERT INTO action_steps_log (instance_id, step_index, step_name, primitive, outputs_json, status, created_at) VALUES (?,?,?,?,?,?,?)`,
+			instance, step, "step", "step", out, status, created); err != nil {
 			t.Fatal(err)
 		}
 	}
 	old := time.Now().Add(-48 * time.Hour).UTC().Format(time.RFC3339)
 	recent := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	// 250 polls (more than one page), then a failure, then two more polls of
+	// the same step, one old and one recent.
 	for i := 0; i < 250; i++ {
-		insert("old", 0, "waiting_external", old)
+		insert("old", 0, "waiting_external", old, fmt.Sprintf(`{"n":%d}`, i))
 	}
-	insert("old", 0, "failed", old)
-	insert("old", 1, "waiting_external", old)
+	insert("old", 0, "failed", old, `{"n":"failed"}`)
+	insert("old", 0, "waiting_external", old, `{"n":"again"}`)
+	insert("old", 0, "waiting_external", recent, `{"n":"live"}`)
+	insert("old", 1, "waiting_external", old, `{"n":"lone"}`)
 	for i := 0; i < 3; i++ {
-		insert("busy", 0, "waiting_external", recent)
+		insert("busy", 0, "waiting_external", recent, `{"n":"busy"}`)
 	}
-	deleted, err := s.PruneSupersededPolls(context.Background(), time.Now().Add(-time.Hour))
+	merged, err := s.CollapseOldPolls(context.Background(), time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deleted != 250 {
-		t.Fatalf("deleted %d, want 250", deleted)
+	if merged != 249 {
+		t.Fatalf("merged %d rows, want 249", merged)
 	}
-	count := func(instance string) (n int) {
-		_ = s.db.QueryRow(`SELECT COUNT(*) FROM action_steps_log WHERE instance_id=?`, instance).Scan(&n)
-		return
+	rows := func(instance string) []string {
+		steps, err := s.GetActionSteps(instance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, step := range steps {
+			out = append(out, fmt.Sprintf("%d/%s/%d/%s", step.StepIndex, step.Status, step.Observations, step.OutputsJSON))
+		}
+		return out
 	}
-	// "old": the failed row and the lone waiting row of step 1. "busy": all
-	// three, since they are recent.
-	if count("old") != 2 || count("busy") != 3 {
-		t.Fatalf("rows left: old=%d busy=%d", count("old"), count("busy"))
+	got := strings.Join(rows("old"), "\n")
+	want := strings.Join([]string{
+		`0/waiting_external/250/{"n":249}`,
+		`0/failed/1/{"n":"failed"}`,
+		`0/waiting_external/1/{"n":"again"}`,
+		`0/waiting_external/1/{"n":"live"}`,
+		`1/waiting_external/1/{"n":"lone"}`,
+	}, "\n")
+	if got != want {
+		t.Fatalf("rows:\n%s\nwant:\n%s", got, want)
 	}
-	again, err := s.PruneSupersededPolls(context.Background(), time.Now().Add(-time.Hour))
-	if err != nil || again != 0 {
-		t.Fatalf("second pass deleted %d, %v", again, err)
+	if got := len(rows("busy")); got != 3 {
+		t.Fatalf("recent polls must stay whole: %d rows", got)
+	}
+	if _, total, err := s.GetActionStepSummaries("old", 25); err != nil || total != 254 {
+		t.Fatalf("observations = %d, %v; want 254", total, err)
+	}
+	if again, err := s.CollapseOldPolls(context.Background(), time.Now().Add(-time.Hour)); err != nil || again != 0 {
+		t.Fatalf("second pass merged %d, %v", again, err)
 	}
 }
 
@@ -132,7 +154,7 @@ func TestReclaimSpaceShrinksTheFile(t *testing.T) {
 	if before < 100<<20 {
 		t.Fatalf("setup: file is only %d bytes", before)
 	}
-	if _, err := s.PruneSupersededPolls(context.Background(), time.Now()); err != nil {
+	if _, err := s.CollapseOldPolls(context.Background(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	freed, err := s.ReclaimSpace(context.Background())

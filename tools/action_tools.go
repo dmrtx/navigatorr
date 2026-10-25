@@ -558,7 +558,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 			}
 			if totalLoggedSteps > len(loggedSteps) {
 				compactMap["total_steps_logged"] = totalLoggedSteps
-				compactMap["steps_note"] = fmt.Sprintf("Showing latest observation per logical step (up to 25); %d audit records retained. Use action_detail(id=%q, section='steps') for history.", totalLoggedSteps, id)
+				compactMap["steps_note"] = fmt.Sprintf("Showing latest observation per logical step (up to 25); the step log holds %d observations in all (repeated polls of a waiting step share one record). Use action_detail(id=%q, section='steps') for the records.", totalLoggedSteps, id)
 			}
 			return toolBoundedJSON(compactMap, MaxActionResponseBytes, nil), nil
 		},
