@@ -298,6 +298,9 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 	// A copy-mode promotion proves its files like any other: the helper proof
 	// belonged to the move aside that was refused.
 	p.RecoveryProof, p.OriginalHelper, p.BackupHelper = "", nil, nil
+	// So did the sample taken for it: no recovery exists yet, and the copy takes
+	// its own from the original, whose stat must still match.
+	p.RecoverySample = ""
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}

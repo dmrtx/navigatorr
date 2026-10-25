@@ -2,9 +2,12 @@ package action
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -233,5 +236,82 @@ func TestMetadataRecoveryWithoutASampleIsNotTakenFromTheLibraryPath(t *testing.T
 	e := &Engine{}
 	if err := e.verifyPromotionRecovery(context.Background(), p, "/nowhere"); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("a move-aside recovery proved without a sample: %v", err)
+	}
+}
+
+// The sample taken at choice time is not a recovery: until a copy is published
+// or the original is moved, a changed mtime is a changed original.
+func TestMetadataPromotionStatStaysStrictUntilARecoveryExists(t *testing.T) {
+	resetHelperProbes()
+	h := newPromotionHarness(t)
+	attachProofHelper(t, h, true)
+	failMountProbe(h)
+	p := metadataPlanned(t, h)
+	if mode, _, _ := h.engine.promotionChooseByHelperSample(context.Background(), p); mode != promotionRecoveryMoveAside {
+		t.Fatal("not moved aside")
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(p.OriginalPath, later, later); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := h.engine.promotionOriginalProved(ctx, p); !errors.Is(err, errPromotionOriginalChanged) {
+		t.Fatalf("a new mtime was accepted on the strength of a sample alone: %v", err)
+	}
+	if err := h.engine.verifyPromotionOriginalStable(ctx, p); !errors.Is(err, errPromotionOriginalChanged) {
+		t.Fatalf("the stable check accepted it: %v", err)
+	}
+	p.MovedAside = true
+	if err := h.engine.promotionOriginalProved(ctx, p); err != nil {
+		t.Fatalf("a moved original that reproduces its sample was refused: %v", err)
+	}
+}
+
+// A rename the NAS refuses falls back to a copy that is proved like any other
+// copy of a promotion that never reads its original.
+func TestMetadataPromotionRefusedRenameCopiesWithoutReadingTheOriginal(t *testing.T) {
+	resetHelperProbes()
+	h := newPromotionHarness(t)
+	markSourceByMetadata(t, h)
+	attachProofHelper(t, h, true)
+	failMountProbe(h)
+	h.engine.promotionCloneHook = func(d, s *os.File) error { _, err := io.Copy(d, s); return err }
+	h.engine.promotionMoveAsideHook = func(from, to string) error {
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EXDEV}
+	}
+	reads := countReads(h.engine)
+	r := runLocalPromotion(t, h)
+	r = h.finish(h.resume(r.ID, "approve"))
+	if r.Status != StatusCompleted {
+		t.Fatalf("promotion: %s %s", r.Status, r.Error)
+	}
+	p := movedAsideState(t, h, r.ID)
+	if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryModeReason != recoveryReasonRenameRefused || p.RecoveryProof != "" || p.OriginalHelper != nil || p.MovedAside || p.RecoveryCopy == nil {
+		t.Fatalf("fallback evidence: %+v", p)
+	}
+	if n := reads.of(h.original); n != 0 {
+		t.Fatalf("the fallback read %d bytes of the original", n)
+	}
+}
+
+// Touching the original without a restart (ctime moves, bytes do not) is doubt
+// too: it is read in full.
+func TestMetadataPromotionReadsATouchedOriginalInFull(t *testing.T) {
+	resetHelperProbes()
+	h := newPromotionHarness(t)
+	ph := attachProofHelper(t, h, true)
+	failMountProbe(h)
+	p := metadataPlanned(t, h)
+	if mode, _, _ := h.engine.promotionChooseByHelperSample(context.Background(), p); mode != promotionRecoveryMoveAside {
+		t.Fatal("not moved aside")
+	}
+	if err := os.Chmod(p.OriginalPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if h.engine.promotionReproveOriginalByHelper(context.Background(), p) != nil {
+		t.Fatal("a touched original was re-proved")
+	}
+	if _, err := h.engine.promotionVerifyOriginalByHelper(context.Background(), p); err != nil || ph.hashed(filepath.Base(p.OriginalPath)) == 0 {
+		t.Fatalf("touched original: err %v", err)
 	}
 }
