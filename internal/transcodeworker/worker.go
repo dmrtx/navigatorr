@@ -250,6 +250,7 @@ type Worker struct {
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache
 	videoInUseFn    func() (int, bool)
+	x265InUseFn     func() (int, bool) // like videoInUseFn, for the x265 jobs under an x265 cap
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
 	afterSpawnHook  func(jobDir string, pid int)
@@ -1314,11 +1315,11 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 			return started, errors.Join(append(errs, err)...)
 		}
 		limits := w.slotLimits()
-		video, podcast, err := w.countActiveJobsByKind("")
+		use, err := w.countActiveJobsByKind("")
 		if err != nil {
 			errs = append(errs, err)
 		}
-		if err != nil || (!limits.hasRoom(slotKindVideo, video, podcast) && !limits.hasRoom(slotKindPodcast, video, podcast)) {
+		if err != nil || (!limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use)) {
 			return started, errors.Join(errs...)
 		}
 		queued, scanErr := w.listQueuedJobsObserved()
@@ -1330,11 +1331,11 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		}
 		progressed := false
 		for _, q := range queued {
-			if !limits.hasRoom(slotKindVideo, video, podcast) && !limits.hasRoom(slotKindPodcast, video, podcast) {
+			if !limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use) {
 				return started, errors.Join(errs...)
 			}
-			if !limits.hasRoom(jobSlotKind(q), video, podcast) {
-				continue // its pool is full; the other kind may still start
+			if !limits.hasRoom(jobSlotOf(q), use) {
+				continue // its pool (or the x265 cap) is full; another job may still start
 			}
 			jobDir := filepath.Join(w.cfg.StateDir, q.ID)
 			jobLock, err := acquireJobLock(jobDir)
@@ -1365,14 +1366,14 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					}
 				}
 				// Re-check capacity under both locks before spawning.
-				kind := jobSlotKind(latest)
-				curVideo, curPodcast, err := w.countActiveJobsByKind("")
+				slot := jobSlotOf(latest)
+				cur, err := w.countActiveJobsByKind("")
 				if err != nil {
 					errs = append(errs, err)
 				}
-				if err != nil || !limits.hasRoom(kind, curVideo, curPodcast) {
+				if err != nil || !limits.hasRoom(slot, cur) {
 					if err == nil {
-						video, podcast = curVideo, curPodcast
+						use = cur
 					}
 					return
 				}
@@ -1401,12 +1402,8 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					_ = SaveJobAtomic(jobFile, latest)
 					return
 				}
-				video, podcast = curVideo, curPodcast
-				if kind == slotKindPodcast {
-					podcast++
-				} else {
-					video++
-				}
+				use = cur
+				use.add(slot)
 				started++
 				progressed = true
 			}()
@@ -1434,28 +1431,21 @@ func (w *Worker) ScheduleQueued(ctx context.Context, selfExe, configPath string)
 
 // countActiveJobs counts every live slot holder, whatever its kind.
 func (w *Worker) countActiveJobs(excludeID string) (int, error) {
-	video, podcast, err := w.countActiveJobsByKind(excludeID)
-	return video + podcast, err
+	use, err := w.countActiveJobsByKind(excludeID)
+	return use.Video + use.Podcast, err
 }
 
 // countActiveJobsByKind counts live transcode slot holders, podcast jobs apart
-// from the rest (video).
-func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, err error) {
+// from the rest (video), and the x265 encodes among the video jobs.
+func (w *Worker) countActiveJobsByKind(excludeID string) (use slotCounts, err error) {
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, 0, nil
+			return slotCounts{}, nil
 		}
-		return 0, 0, err
+		return slotCounts{}, err
 	}
 
-	add := func(kind slotKind) {
-		if kind == slotKindPodcast {
-			podcast++
-		} else {
-			video++
-		}
-	}
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || name == excludeID || strings.HasPrefix(name, ".") {
@@ -1475,16 +1465,16 @@ func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, er
 						continue
 					}
 					if w.jobAlive(job) {
-						add(jobSlotKind(job))
+						use.add(jobSlotOf(job))
 						continue
 					}
 					if job.Status == "running" {
 						latest, err := w.reconcileStoppedRunner(entryDir, jobPath)
 						if err != nil {
-							return 0, 0, err
+							return slotCounts{}, err
 						}
 						if latest.Status == "running" && latest.PID > 0 {
-							add(jobSlotKind(latest)) // a runner claimed the job after the initial read
+							use.add(jobSlotOf(latest)) // a runner claimed the job after the initial read
 						}
 					} else {
 						// Queued with a stale PID: treat as non-active without
@@ -1498,7 +1488,7 @@ func (w *Worker) countActiveJobsByKind(excludeID string) (video, podcast int, er
 			}
 		}
 	}
-	return video, podcast, nil
+	return use, nil
 }
 
 // InternalRun is invoked by the background decoupled process.

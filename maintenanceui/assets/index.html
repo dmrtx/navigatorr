@@ -858,6 +858,17 @@
               </div>
               <p class="muted">x265 jobs share the CPUs, so two at once are not faster in total; VideoToolbox encodes and quality checks overlap well.</p>
               <p id="worker-parallel-note" class="metadata" role="status"></p>
+              <div id="worker-x265-row" class="settings-row" hidden>
+                <span>x265 at a time<span id="worker-x265-limit" class="metadata"></span></span>
+                <form id="worker-x265-form" class="inline-form">
+                  <select id="x265-limit" aria-label="x265 encodes at a time on this node" aria-describedby="worker-x265-limit worker-x265-note">
+                    <option value="0">No limit</option>
+                    <option value="1">1</option>
+                  </select>
+                  <button id="worker-x265-apply" type="submit" class="primary">Apply</button>
+                </form>
+              </div>
+              <p id="worker-x265-note" class="metadata" role="status"></p>
               <details id="worker-slot-split" class="worker-slot-split" hidden>
                 <summary>Assign slots to video and podcast</summary>
                 <form id="worker-slot-form">

@@ -298,7 +298,7 @@ func TestEarlierJobsAreAssignedTheFirstNamedWorker(t *testing.T) {
 	seedActionInstance(t, st, "legacy-podcast", "clean_podcast_ads", StatusWaitingExternal, 1, "", map[string]any{}, map[string]any{"external_reference": "pod-1"})
 	seedActionInstance(t, st, "not-sent", "transcode_media", StatusPending, 0, "", map[string]any{}, map[string]any{})
 	seedActionInstance(t, st, "named", "transcode_media", StatusRunning, 3, "", map[string]any{}, map[string]any{"job_id": "job-2", workerStateKey: "m4"})
-	if _, err := st.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 3); err != nil {
+	if _, err := st.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	// The single base_url form names earlier jobs video-worker, as running a

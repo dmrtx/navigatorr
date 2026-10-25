@@ -17,7 +17,8 @@ import (
 // fakeSlotWorker stands in for the HTTP worker: it keeps one split and can be
 // made old, unreachable or strict. With limit 0 it predates the ceiling
 // override and refuses a push that carries one, as an old worker refuses the
-// unknown field.
+// unknown field. With x265Capable it also reports and takes the x265 limit; an
+// older one refuses a push that carries it.
 type fakeSlotWorker struct {
 	transcode.Executor
 	ceiling, cpus  int
@@ -27,6 +28,7 @@ type fakeSlotWorker struct {
 	getErr, putErr error
 	puts           int
 	lastPush       transcode.SlotSplit
+	x265Capable    bool
 }
 
 func (f *fakeSlotWorker) slots() transcode.WorkerSlots {
@@ -45,6 +47,9 @@ func (f *fakeSlotWorker) slots() transcode.WorkerSlots {
 	} else {
 		out.Video = transcode.SlotPool{Total: ceiling}
 		out.Podcast = transcode.SlotPool{Total: ceiling}
+	}
+	if f.x265Capable {
+		out.X265 = &transcode.SlotPool{Total: f.split.X265Slots}
 	}
 	return out
 }
@@ -68,7 +73,10 @@ func (f *fakeSlotWorker) SetSlots(_ context.Context, split transcode.SlotSplit) 
 			f.override = 0
 		}
 	}
-	f.split = transcode.SlotSplit{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots}
+	if split.X265Slots > 0 && !f.x265Capable {
+		return transcode.WorkerSlots{}, nil, &httpclient.SlotSplitRejectedError{Message: `invalid slot split: json: unknown field "x265_slots"`}
+	}
+	f.split = transcode.SlotSplit{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, X265Slots: split.X265Slots}
 	return f.slots(), nil, nil
 }
 
@@ -227,7 +235,7 @@ func TestWorkerSlotsSyncIsRateLimitedAndLeavesUnconfiguredNodesAlone(t *testing.
 	if worker.puts != 0 {
 		t.Fatal("a node nobody configured must not be pushed to")
 	}
-	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 0); err != nil {
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 2, 1, 0, 0); err != nil {
 		t.Fatal(err)
 	}
 	worker.putErr = errors.New("down")
@@ -372,7 +380,7 @@ func TestWorkerSlotsOldWorkerShowsTheCeilingReadOnly(t *testing.T) {
 func TestWorkerSlotsSyncRestoresTheCeilingOnlyOnWorkersThatTakeIt(t *testing.T) {
 	worker := &fakeSlotWorker{ceiling: 1, cpus: 10, limit: 10}
 	s, _ := slotUI(t, worker)
-	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3); err != nil {
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	// The worker restarted with its state directory wiped: back to its config.
@@ -384,7 +392,7 @@ func TestWorkerSlotsSyncRestoresTheCeilingOnlyOnWorkersThatTakeIt(t *testing.T) 
 	// An older worker is compared on the split only and never pushed a ceiling.
 	old := &fakeSlotWorker{ceiling: 1, cpus: 10}
 	s2, _ := slotUI(t, old)
-	if _, err := s2.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3); err != nil {
+	if _, err := s2.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 3, 0); err != nil {
 		t.Fatal(err)
 	}
 	observed = old.slots()
@@ -398,4 +406,112 @@ func TestWorkerSlotsSyncRestoresTheCeilingOnlyOnWorkersThatTakeIt(t *testing.T) 
 func defaultNode(s *Server) transcode.NamedWorker {
 	w, _ := s.engine.Deps().Workers.Get(transcode.DefaultWorkerName)
 	return w
+}
+
+func TestWorkerSlotsX265LimitIsStoredAndPushed(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 2, cpus: 10, limit: 10, x265Capable: true}
+	s, h := slotUI(t, worker)
+	if got := slotsGet(t, h); got["x265_adjustable"] != true || got["worker"].(map[string]any)["x265"] == nil {
+		t.Fatalf("a current worker reports its x265 pool: %v", got)
+	}
+	w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"x265_slots":1}`, true)
+	var saved map[string]any
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &saved) != nil || saved["applied"] != true {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if worker.lastPush.X265Slots != 1 || worker.slots().X265.Total != 1 {
+		t.Fatalf("worker not pushed: %+v", worker.lastPush)
+	}
+	row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+	if row == nil || row.X265Slots != 1 || !row.Shared() {
+		t.Fatalf("not stored: %+v", row)
+	}
+	if settings := slotsGet(t, h)["settings"].(map[string]any); settings["x265_slots"] != float64(1) {
+		t.Fatalf("settings view: %v", settings)
+	}
+	// A request that does not mention the limit (an older page) keeps it.
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 200 || worker.lastPush.X265Slots != 1 {
+		t.Fatal(w.Code, w.Body.String(), worker.lastPush)
+	}
+	// An explicit zero removes it.
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1,"x265_slots":0}`, true); w.Code != 200 || worker.lastPush.X265Slots != 0 {
+		t.Fatal(w.Code, w.Body.String(), worker.lastPush)
+	}
+	// Over the video slots, or negative, is refused and nothing changes.
+	pushes := worker.puts
+	for _, body := range []string{`{"video_slots":1,"podcast_slots":1,"x265_slots":2}`, `{"video_slots":0,"podcast_slots":0,"x265_slots":3}`, `{"video_slots":0,"podcast_slots":0,"x265_slots":-1}`} {
+		if w := request(h, "POST", "/api/maintenance/worker-slots", body, true); w.Code != 400 {
+			t.Errorf("%s: %d", body, w.Code)
+		}
+	}
+	if worker.puts != pushes {
+		t.Fatal("a refused limit reached the worker")
+	}
+}
+
+func TestWorkerSlotsLowerCeilingClearsAnX265LimitThatNoLongerFits(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 3, cpus: 10, limit: 10, x265Capable: true}
+	s, h := slotUI(t, worker)
+	w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"ceiling":2,"x265_slots":3}`, true)
+	var saved map[string]any
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &saved) != nil || worker.lastPush.X265Slots != 0 || len(saved["warnings"].([]any)) == 0 {
+		t.Fatal(w.Code, w.Body.String(), worker.lastPush)
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row.X265Slots != 0 || row.Ceiling != 2 {
+		t.Fatalf("%+v", row)
+	}
+}
+
+func TestWorkerSlotsOldWorkerNeverGetsTheX265Limit(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 2, cpus: 10, limit: 10}
+	s, h := slotUI(t, worker)
+	if got := slotsGet(t, h); got["x265_adjustable"] != false {
+		t.Fatalf("a worker without the x265 pool is not adjustable: %v", got)
+	}
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"x265_slots":1}`, true); w.Code != 409 {
+		t.Fatalf("asking an old worker for a limit is a 409: %d %s", w.Code, w.Body.String())
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil {
+		t.Fatalf("a refused limit was stored: %+v", row)
+	}
+	// A stored limit is not pushed to a worker that cannot take it, and does
+	// not count as a mismatch there.
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	observed := worker.slots()
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+	if worker.puts != 0 {
+		t.Fatalf("an old worker was pushed %+v", worker.lastPush)
+	}
+	// Changing only the split keeps the stored limit without asking the old
+	// worker for it.
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 200 {
+		t.Fatalf("a split that does not mention the limit is accepted: %d %s", w.Code, w.Body.String())
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil || row.X265Slots != 1 || row.VideoSlots != 1 {
+		t.Fatalf("the split must keep the stored limit: %+v", row)
+	}
+	if worker.lastPush.X265Slots != 0 {
+		t.Fatalf("an old worker was sent the limit: %+v", worker.lastPush)
+	}
+}
+
+func TestWorkerSlotsSyncRestoresTheX265LimitAfterAWorkerWipe(t *testing.T) {
+	worker := &fakeSlotWorker{ceiling: 2, cpus: 10, limit: 10, x265Capable: true}
+	s, _ := slotUI(t, worker)
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 0, 0, 0, 1); err != nil {
+		t.Fatal(err)
+	}
+	observed := worker.slots()
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+	if worker.puts != 1 || worker.lastPush.X265Slots != 1 || worker.slots().X265.Total != 1 {
+		t.Fatalf("stored x265 limit not restored: %+v", worker.lastPush)
+	}
+	// Agreeing is not pushed again.
+	observed = worker.slots()
+	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+	if worker.puts != 1 {
+		t.Fatal("a matching worker was pushed")
+	}
 }
