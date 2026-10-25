@@ -5755,6 +5755,14 @@ test("only a job that left no file and replaced nothing is Not converted", () =>
   assert.equal(status({ candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } }), "Completed");
   assert.equal(status({ status: "failed", error: "transcode candidate rejected by user decision; candidate file removed" }), "Rejected");
   assert.equal(status({ status: "failed", error: "ffmpeg exited with status 1" }), "Failed");
+  // Declining the replacement review touched nothing: it is not a failure.
+  const declined = { action_name: "promote_transcode_candidate", status: "failed", error: "candidate promotion rejected; original and candidate remain untouched" };
+  assert.equal(status(declined), "Kept original");
+  assert.equal(status({ ...declined, error: "candidate promotion rejected; original and candidate remain untouched", promotion: undefined }), "Kept original");
+  assert.equal(status({ ...declined, error: "integrity violation: SHA-256 changed" }), "Failed");
+  h.context.declinedJob = notConvertedJob(declined);
+  assert.match(h.run("shortJobReason(declinedJob.error)"), /declined by you/);
+  assert.equal(h.run("statusClass(queuePresentation(declinedJob).status)"), "neutral");
   assert.equal(status({ status: "cancelled" }), "Cancelled");
   assert.equal(status({ action_name: "promote_transcode_candidate" }), "Completed");
   // A job with a retired candidate is not Not converted, but keeps its reason in the details.
