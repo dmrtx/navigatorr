@@ -2,12 +2,12 @@ package action
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/jakenesler/navigatorr/internal/sampledigest"
 )
 
 // Promotion without reading the original again.
@@ -30,11 +30,11 @@ import (
 // one whose original changed) keeps every full read.
 
 // promotionSampleChunk is the size of each sampled range.
-const promotionSampleChunk = 1 << 20
+const promotionSampleChunk = sampledigest.Chunk
 
 // promotionSampleRanges is how many interior ranges are sampled besides the
 // first and the last. A file this many chunks long or shorter is read whole.
-const promotionSampleRanges = 6
+const promotionSampleRanges = sampledigest.Ranges
 
 // originalByMetadata reports whether the original is proved by its size and
 // modification time rather than by its digest.
@@ -110,23 +110,8 @@ func (e *Engine) verifyPromotionOriginalStable(ctx context.Context, p *promotion
 }
 
 // promotionSampleOffsets are the starts of the ranges sampled from a file of
-// the given size: all of it when short, else the first, the last and evenly
-// spaced ranges between, aligned to 4 KiB.
-func promotionSampleOffsets(size int64) []int64 {
-	if size <= promotionSampleChunk*(promotionSampleRanges+2) {
-		var offsets []int64
-		for off := int64(0); off < size; off += promotionSampleChunk {
-			offsets = append(offsets, off)
-		}
-		return offsets
-	}
-	last := size - promotionSampleChunk
-	offsets := []int64{0}
-	for i := int64(1); i <= promotionSampleRanges; i++ {
-		offsets = append(offsets, (last*i/(promotionSampleRanges+1))&^4095)
-	}
-	return append(offsets, last)
-}
+// the given size.
+func promotionSampleOffsets(size int64) []int64 { return sampledigest.Offsets(size) }
 
 // promotionSampleDigest hashes size and the sampled ranges of path. It fails
 // when path is not exactly size bytes long.
@@ -157,23 +142,7 @@ func (e *Engine) promotionSampleDigest(ctx context.Context, path string, size in
 	if opened.Size() != size {
 		return "", fmt.Errorf("integrity violation: %s is %d bytes, expected %d", path, opened.Size(), size)
 	}
-	h := sha256.New()
-	fmt.Fprintf(h, "%d\n", size)
-	buf := make([]byte, promotionSampleChunk)
-	for _, off := range promotionSampleOffsets(size) {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n := int64(len(buf))
-		if rest := size - off; rest < n {
-			n = rest
-		}
-		if _, err := f.ReadAt(buf[:n], off); err != nil {
-			return "", err
-		}
-		h.Write(buf[:n])
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return sampledigest.Digest(ctx, f, size)
 }
 
 // promotionSampleDigestStable retries promotionSampleDigest while the
