@@ -97,7 +97,12 @@ func (r *Roots) Resolver() string { return r.resolver }
 var errClosed = &Error{Code: CodeInternal, Message: "the helper is shutting down"}
 
 // Open opens a regular file under a root for reading.
-func (r *Roots) Open(path string) (*os.File, error) {
+func (r *Roots) Open(path string) (*os.File, error) { return r.open(path, false) }
+
+// OpenDir opens a directory under a root, or a root itself, for listing.
+func (r *Roots) OpenDir(path string) (*os.File, error) { return r.open(path, true) }
+
+func (r *Roots) open(path string, wantDir bool) (*os.File, error) {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
 		return nil, errOutside
@@ -109,7 +114,14 @@ func (r *Roots) Open(path string) (*os.File, error) {
 	}
 	for i, root := range r.paths {
 		if clean == root {
-			return nil, errNotFile
+			if !wantDir {
+				return nil, errNotFile
+			}
+			fd, err := unix.Openat(r.fds[i], ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return nil, &os.PathError{Op: "open root", Path: root, Err: err}
+			}
+			return os.NewFile(uintptr(fd), clean), nil
 		}
 		prefix := strings.TrimSuffix(root, "/") + "/"
 		if !strings.HasPrefix(clean, prefix) {
@@ -142,7 +154,11 @@ func (r *Roots) Open(path string) (*os.File, error) {
 			f.Close()
 			return nil, err
 		}
-		if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		switch {
+		case wantDir && st.Mode&syscall.S_IFMT != syscall.S_IFDIR:
+			f.Close()
+			return nil, errNotDir
+		case !wantDir && st.Mode&syscall.S_IFMT != syscall.S_IFREG:
 			f.Close()
 			return nil, errNotFile
 		}

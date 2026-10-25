@@ -54,6 +54,7 @@ type Server struct {
 	tokenHash [sha256.Size]byte
 	instance  string
 	sem       chan struct{}
+	usageSem  chan struct{}
 	logf      func(string, ...any)
 
 	baseCtx context.Context
@@ -98,6 +99,7 @@ func NewServer(cfg Config) (*Server, error) {
 		tokenHash: sha256.Sum256([]byte(cfg.Token)),
 		instance:  hex.EncodeToString(idBytes),
 		sem:       make(chan struct{}, cfg.MaxHashes),
+		usageSem:  make(chan struct{}, 1),
 		logf:      cfg.Logf,
 		baseCtx:   ctx,
 		cancel:    cancel,
@@ -129,6 +131,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/identity", s.identity)
 	mux.HandleFunc("POST /v1/sample", s.sample)
 	mux.HandleFunc("POST /v1/hash", s.startHash)
+	mux.HandleFunc("GET /v1/volumes", s.volumes)
+	mux.HandleFunc("POST /v1/usage", s.startUsage)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.getJob)
 	mux.HandleFunc("DELETE /v1/jobs/{id}", s.cancelJob)
 	return s.authenticated(mux)
@@ -165,7 +169,7 @@ func statusFor(code string) int {
 		return http.StatusNotFound
 	case CodeOutside, CodeDenied:
 		return http.StatusForbidden
-	case CodeNotFile:
+	case CodeNotFile, CodeNotDir:
 		return http.StatusUnprocessableEntity
 	case CodeChanged, CodeCancelled:
 		return http.StatusConflict
@@ -326,6 +330,7 @@ type job struct {
 	mu       sync.Mutex
 	state    string
 	result   *HashResult
+	usage    *UsageResult
 	err      *Error
 	finished time.Time
 }
@@ -333,7 +338,7 @@ type job struct {
 func (s *Server) snapshot(j *job) Job {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return Job{ID: j.id, InstanceID: s.instance, State: j.state, BytesRead: j.read.Load(), TotalBytes: j.total.Load(), Result: j.result, Error: j.err}
+	return Job{ID: j.id, InstanceID: s.instance, State: j.state, BytesRead: j.read.Load(), TotalBytes: j.total.Load(), Result: j.result, Usage: j.usage, Error: j.err}
 }
 
 func (s *Server) startHash(w http.ResponseWriter, r *http.Request) {
