@@ -21,6 +21,7 @@ const state = {
   jobsRevision: 0,
   detailRevision: 0,
   detailAutoOpened: new Set(),
+  openFiles: new Set(),
   detailCostsOpen: false,
   authRevision: 0,
   authMode: "token",
@@ -74,8 +75,13 @@ function button(text, onClick, className = "") {
     b.disabled = true;
     b.setAttribute("aria-busy", "true");
     b.classList.add("button-pending");
+    const spinner = node("span", "", "spinner");
+    spinner.dataset.spinner = "";
+    spinner.setAttribute("aria-hidden", "true");
+    b.prepend ? b.prepend(spinner) : b.append(spinner);
     try { return await result; }
     finally {
+      spinner.remove?.();
       b.removeAttribute("aria-busy");
       b.classList.remove("button-pending");
       b.disabled = !serverReachable || jobIsBusy(b.dataset.jobControl) || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
@@ -570,6 +576,7 @@ function renderCommandHistory(now = Date.now()) {
   const commands = state.detail ? jobCommands(state.detail) : [];
   $("detail-commands").hidden = !commands.length;
   $("detail-command-list").replaceChildren(...commands.map((command) => commandHistoryItem(command, now)));
+  syncDetailSections();
 }
 const commandPolls = new Map();
 function waitCommand(request, receipt) {
@@ -3175,28 +3182,93 @@ function replacementHeadline(job) {
 // The progress block of a batch whose replacement was approved and is still
 // running, or stopped on a failure: a headline, a bar of finished files, and
 // one line per file.
-function replacementProgressBlock(job) {
+// How much of an approved replacement is done, counting each file by the step
+// it is on, so the bar moves while a big file is backed up and does not sit at
+// "0 of 6" until the first one finishes.
+const replacementStepShare = {checking: .05, backup: .1, backup_check: .5, swap: .6, final_check: .85, done: 1};
+function replacementFraction(r) {
+  if (!r?.total) return 0;
+  const members = r.members || [];
+  if (!members.length) return Math.min(1, r.done / r.total);
+  let done = 0;
+  for (const member of members) {
+    if (member.phase === "backup" && member.percent != null) done += .1 + .4 * Math.max(0, Math.min(100, member.percent)) / 100;
+    else done += replacementStepShare[member.phase] || 0;
+  }
+  return Math.max(r.done / r.total, Math.min(1, done / r.total));
+}
+function replacementProgressModel(job) {
   const r = job.replacement;
   if (!r?.approved || !r.total) return null;
   const active = operationIsActive(job.status);
   if (!active && !r.failed && r.done >= r.total) return null;
   const stopped = !active && r.failed > 0;
-  const block = node("div", "", `job-progress batch-progress replacement-progress${stopped ? " failed" : ""}`);
-  const heading = stopped ? replacementHeadline(job) : `Replacing ${fileCount(r.total)} · ${r.done} of ${r.total} done`;
-  block.append(node("strong", heading, "replacement-headline"));
-  const bar = document.createElement("progress");
-  bar.max = r.total;
-  bar.value = r.done;
-  bar.setAttribute("aria-label", `${r.done} of ${r.total} files replaced`);
-  block.append(bar);
+  const heading = stopped ? replacementHeadline(job) : `Replacing ${fileCount(r.total)} \u00b7 ${r.done} of ${r.total} done`;
+  return {
+    kind: "replacement",
+    className: `job-progress batch-progress replacement-progress${stopped ? " failed" : ""}`,
+    parts: [
+      {type: "text", tag: "strong", text: heading, cls: "replacement-headline"},
+      {type: "progress", max: r.total, value: r.done, fraction: replacementFraction(r), label: `${r.done} of ${r.total} files replaced`},
+      {type: "files", members: r.members || []},
+    ],
+  };
+}
+// One progress model, two looks: the queue rows draw it as small text and
+// native bars; the job dialog lays the same parts out itself.
+function segmentShare(batch, runningFill) {
+  const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
+  const parts = segmentParts(batch);
+  const total = Math.max(batch.total, parts.reduce((sum, part) => sum + part.n, 0));
+  const done = ["completed", "failed", "policy", "skip", "rejected"].reduce((sum, key) => sum + count(key), 0);
+  const running = count("running") * (Number.isFinite(runningFill) ? Math.max(0, Math.min(1, runningFill)) : 0);
+  return {total, share: Math.min(1, (done + running) / Math.max(1, total - count("cancelled")))};
+}
+function renderProgressPart(part) {
+  if (part.type === "text") {
+    const result = node(part.tag || "span", part.text, part.cls);
+    if (part.title) result.title = part.title;
+    return result;
+  }
+  if (part.type === "meter") {
+    const meter = document.createElement("meter");
+    meter.min = part.min;
+    meter.max = part.max;
+    meter.value = part.value;
+    meter.setAttribute("aria-label", part.label);
+    return meter;
+  }
+  if (part.type === "progress") {
+    const bar = document.createElement("progress");
+    bar.max = part.max;
+    bar.value = part.value;
+    bar.setAttribute("aria-label", part.label);
+    return bar;
+  }
+  if (part.type === "segments") {
+    const segments = batchSegments(part.batch, part.runningFill);
+    segments.bar.title = part.title;
+    return segments.bar;
+  }
   const list = node("ul", "", "replacement-files");
-  for (const member of r.members || []) {
+  for (const member of part.members) {
     const item = node("li", "", `replacement-file ${member.phase}`);
     item.append(node("span", member.name, "replacement-file-name"), node("span", replacementStepText(member), "replacement-file-step metadata"));
     list.append(item);
   }
-  block.append(list);
-  return block;
+  return list;
+}
+function renderProgressModel(model) {
+  if (!model) return null;
+  const result = node("div", "", model.className);
+  for (const part of model.parts) result.append(renderProgressPart(part));
+  return result;
+}
+// The progress block of a batch whose replacement was approved and is still
+// running, or stopped on a failure: a headline, a bar of finished files, and
+// one line per file.
+function replacementProgressBlock(job) {
+  return renderProgressModel(replacementProgressModel(job));
 }
 async function copyText(text, done) {
   if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return notify("Copying is not available here.");
@@ -3226,14 +3298,19 @@ function whereBlock(where, {heading = true} = {}) {
 // legend counting finished, failed, running, needing a decision, left alone,
 // stopped, and the rest waiting.
 const segmentKinds = [["completed", "done", "ok"], ["failed", "failed", "err"], ["running", "running", "run"], ["waiting_decision", "need you", "rev"], ["policy", "below minimum savings", "skip"], ["skip", "skipped", "skip"], ["rejected", "rejected", "skip"], ["cancelled", "cancelled", "cancel"]];
-function batchSegments(batch, runningFill) {
+function segmentParts(batch) {
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total < 2) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
   const parts = segmentKinds.map(([key, label, kind]) => ({kind, label, n: key === "waiting_decision" ? count("waiting_decision") || count("review") : count(key)})).filter(part => part.n > 0);
   const known = parts.reduce((sum, part) => sum + part.n, 0);
   const waiting = Math.max(0, batch.total - known);
   if (waiting) parts.push({kind: "wait", label: "waiting", n: waiting});
-  const total = Math.max(batch.total, known);
+  return parts;
+}
+function batchSegments(batch, runningFill) {
+  const parts = segmentParts(batch);
+  if (!parts) return null;
+  const {total, share} = segmentShare(batch, runningFill);
   const bar = node("div", "", "batch-segments");
   bar.setAttribute("role", "img");
   const legend = parts.map(part => `${part.n} ${part.label}`).join(" \u00b7 ");
@@ -3241,16 +3318,13 @@ function batchSegments(batch, runningFill) {
   // One fill, not one colour per state: the words under the bar say what each
   // file is doing. Running files count only as far as their measured steps, so
   // a file still waiting for a worker slot does not read as a finished bar.
-  const done = ["completed", "failed", "policy", "skip", "rejected"].reduce((sum, key) => sum + count(key), 0);
-  const running = count("running") * (Number.isFinite(runningFill) ? Math.max(0, Math.min(1, runningFill)) : 0);
-  const share = Math.min(1, (done + running) / Math.max(1, total - count("cancelled")));
   const fill = node("i", "", "segment-ok");
   fill.style.width = `${share * 100}%`;
   bar.append(fill);
   return {bar, legend, kinds: parts.length};
 }
-function batchProgress(job, {segments = false} = {}) {
-  const replacing = replacementProgressBlock(job);
+function batchProgressModel(job, {segments = false} = {}) {
+  const replacing = replacementProgressModel(job);
   if (replacing) return replacing;
   const batch = visibleBatch(job);
   if (["completed", "failed", "cancelled"].includes(job.status)) return null;
@@ -3300,23 +3374,23 @@ function batchProgress(job, {segments = false} = {}) {
     estimate = conversion * .85 + replacement * .15;
   }
   const percent = Math.min(active ? 99 : 100, estimate * 100);
-  const result = node("div", "", `job-progress batch-progress ${queuePresentation(job).status === "Failed" ? "failed" : queuePresentation(job).status === "Cancelled" ? "cancelled" : ""}`);
-  const counts = node("span", `${processed} / ${batch.total} files finished`, "batch-progress-count");
-  counts.title = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
-  const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
-  value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
-  const parts = segments ? batchSegments(batch, count("running") ? partial / Math.min(count("running"), Math.max(1, byFile.size)) : undefined) : null;
-  if (parts) {
-    // The bar shows each file's state; the percent keeps the estimate.
-    parts.bar.title = value.title;
-    // The legend already counts the files, so the "N / M finished" line is left out.
-    result.append(value, parts.bar, node("span", parts.legend, "batch-legend metadata"));
+  const presented = queuePresentation(job).status;
+  const className = `job-progress batch-progress ${presented === "Failed" ? "failed" : presented === "Cancelled" ? "cancelled" : ""}`;
+  const countText = `${processed} / ${batch.total} files finished`;
+  const countTitle = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
+  const valueText = `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`;
+  const valueTitle = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
+  const runningFill = count("running") ? partial / Math.min(count("running"), Math.max(1, byFile.size)) : undefined;
+  const spread = segments ? segmentParts(batch) : null;
+  const parts = [];
+  if (spread) {
+    // The bar shows each file's state; the percent keeps the estimate. The
+    // legend already counts the files, so the "N / M finished" line is left out.
+    parts.push({type: "text", tag: "strong", text: valueText, cls: "batch-progress-percent", title: valueTitle}, {type: "segments", batch, runningFill, title: valueTitle, fraction: segmentShare(batch, runningFill).share},
+      {type: "text", text: spread.map(part => `${part.n} ${part.label}`).join(" \u00b7 "), cls: "batch-legend metadata"});
   } else {
-    const bar = document.createElement("progress");
-    bar.max = workTotal;
-    bar.value = percent / 100 * workTotal;
-    bar.setAttribute("aria-label", active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${workTotal} files processed`);
-    result.append(counts, value, bar);
+    parts.push({type: "text", text: countText, cls: "batch-progress-count", title: countTitle}, {type: "text", tag: "strong", text: valueText, cls: "batch-progress-percent", title: valueTitle},
+      {type: "progress", max: workTotal, value: percent / 100 * workTotal, fraction: percent / 100, label: active ? `Estimated overall workflow progress ${percent.toFixed(1)}%` : `${processed} of ${workTotal} files processed`});
   }
 
   // A time is shown only when the worker measured one.
@@ -3326,67 +3400,55 @@ function batchProgress(job, {segments = false} = {}) {
   if (active) {
     const phases = [...byFile.values()].map(a=>a.label);
     // The legend of a segmented bar already counts the files needing a decision.
-    const waiting = !parts && count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
-    const phaseText = [...phases, waiting, parts && etas.length && left > 0 ? `about ${left} ${left === 1 ? "file" : "files"} left` : ""].filter(Boolean).join(" \u00b7 ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files");
-    const phase = node("span", phaseText, "batch-progress-phase metadata");
+    const waiting = !spread && count("waiting_decision") ? `${count("waiting_decision")} ${count("waiting_decision") === 1 ? "file needs" : "files need"} your decision` : "";
+    const phaseText = [...phases, waiting, spread && etas.length && left > 0 ? `about ${left} ${left === 1 ? "file" : "files"} left` : ""].filter(Boolean).join(" \u00b7 ") || (processed === batch.total ? "Finishing batch / replacement checks" : "Waiting for worker / preparing selected files");
     // One line, whatever the numbers say; the whole text is the tooltip.
-    phase.title = phaseText;
-    result.append(phase);
+    parts.push({type: "text", text: phaseText, cls: "batch-progress-phase metadata", title: phaseText});
   }
   // The line is always there while a plain bar runs, so the row keeps its height
   // when an estimate appears or goes away; a segmented bar folds it into the phase line.
-  if (active && !parts) {
-    const explanation = node("span", etaText || "\u00a0", "batch-progress-explanation metadata");
-    if (etas.length) explanation.title = etaText;
-    result.append(explanation);
-  }
-  return result;
+  if (active && !spread) parts.push({type: "text", text: etaText || "\u00a0", cls: "batch-progress-explanation metadata", title: etas.length ? etaText : ""});
+  return {kind: "batch", className, parts};
 }
-function telemetry(job, options) {
-  const batch = batchProgress(job, options);
+function batchProgress(job, options) {
+  return renderProgressModel(batchProgressModel(job, options));
+}
+function telemetryModel(job, options) {
+  const batch = batchProgressModel(job, options);
   if (batch) return batch;
   const w = job.worker;
-  const result = node(
-    "div",
-    "",
-    `job-progress ${w ? "worker-progress" : "workflow-progress"}`,
-  );
+  const model = {kind: "worker", className: `job-progress ${w ? "worker-progress" : "workflow-progress"}`, parts: []};
+  const text = (value, cls = "metadata", sentence = false) => model.parts.push({type: "text", text: value, cls, sentence});
   if (job.activities?.length > 1) {
-    result.append(node("span",`${job.activities.length} active files · See worker slots above for each file and phase`,"metadata"));
-    return result;
+    text(`${job.activities.length} active files · See worker slots above for each file and phase`);
+    return model;
   }
   const observation = workerProgressObservation(job);
   if (observation.message) {
-    result.className = `job-progress ${observation.warning ? "stalled-progress" : "workflow-progress"}`;
+    model.className = `job-progress ${observation.warning ? "stalled-progress" : "workflow-progress"}`;
     const measured = w?.progress ?? w?.last_known_progress?.progress;
     const last = measured != null && Number.isFinite(Number(measured))
       ? ` Last reported: ${Number(measured).toFixed(1)}%.` : "";
-    result.append(node("span", observation.message + (observation.warning ? last : ""), "metadata"));
-    return result;
+    text(observation.message + (observation.warning ? last : ""), "metadata", true);
+    return model;
   }
   const after = postEncodeWork(job);
   if (after) {
-    result.append(node("span", [job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.step, after.label].filter(Boolean).join(" · "), "metadata"));
+    text([job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.step, after.label].filter(Boolean).join(" · "));
     if (after.read != null && after.total > 0) {
-      const meter = document.createElement("meter");
-      meter.min = 0;
-      meter.max = after.total;
-      meter.value = after.read;
-      meter.setAttribute("aria-label", `${after.measure || "Original checked"} ${(after.read / after.total * 100).toFixed(1)}%`);
-      result.append(meter, node("span", `${bytes(after.read)} / ${bytes(after.total)}`, "metadata"));
+      model.parts.push({type: "meter", min: 0, max: after.total, value: after.read, label: `${after.measure || "Original checked"} ${(after.read / after.total * 100).toFixed(1)}%`}, {type: "text", text: `${bytes(after.read)} / ${bytes(after.total)}`, cls: "metadata", unit: true});
     }
     if (postEncodeWorkerPhases.includes(w?.transcode_phase) && w.last_progress_at)
-      result.append(node("span", `Encode finished ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at"));
-    return result;
+      text(`Encode finished ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at");
+    return model;
   }
   if (!w) {
     const stages = job.stages || [];
     const current = stages[job.current_step];
-    const text = current
+    text(current
       ? `Step ${job.current_step + 1}/${stages.length} · ${stageLabel(current.name)}`
-      : job.waiting_reason || "Starting job";
-    result.append(node("span", text, "metadata"));
-    return result;
+      : job.waiting_reason || "Starting job", "metadata", Boolean(job.waiting_reason));
+    return model;
   }
   const phase = w.transcode_phase || w.phase;
   const phases = {
@@ -3406,37 +3468,27 @@ function telemetry(job, options) {
   ];
   const eta = job.savings?.eta_seconds;
   parts.push(encodeEta(job.id || "job", w, eta));
-  result.append(
-    node("span", parts.filter(Boolean).join(" · ") || job.progress, "metadata"),
-  );
+  text(parts.filter(Boolean).join(" · ") || job.progress);
   const measured = w.progress ?? w.last_known_progress?.progress;
   if (!["queued", "preparing"].includes(phase) && measured != null && Number.isFinite(Number(measured))) {
     const p = Math.max(0, Math.min(100, Number(measured)));
-    const meter = document.createElement("meter");
-    meter.min = 0;
-    meter.max = 100;
-    meter.value = p;
-    meter.setAttribute("aria-label", `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${p.toFixed(1)}%`);
-    result.append(meter, node("span", `${w.progress_is_stale ? "Last measured: " : ""}${p.toFixed(1)}%`, "metadata"));
+    model.parts.push({type: "meter", min: 0, max: 100, value: p, label: `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${p.toFixed(1)}%`}, {type: "text", text: `${w.progress_is_stale ? "Last measured: " : ""}${p.toFixed(1)}%`, cls: "metadata", unit: true});
   }
   // In a queue row the heartbeat line says when the last measurement moved, so the time is left out.
   if (w.last_progress_at && !(options?.segments && observation.active))
-    result.append(
-      node(
-        "span",
-        `${postEncodeWorkerPhases.includes(w.transcode_phase) ? "Encode finished" : "Measured"} ${new Date(w.last_progress_at).toLocaleTimeString()}`,
-        "metadata progress-observed-at",
-      ),
-    );
+    text(`${postEncodeWorkerPhases.includes(w.transcode_phase) ? "Encode finished" : "Measured"} ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at");
   if (observation.active) {
     const last = activityElapsed(w.last_progress_at);
-    result.append(node("span", `${heartbeatAlive(observation.heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation"));
+    text(`${heartbeatAlive(observation.heartbeat) ? `Worker heartbeat ${activityElapsed(w.worker_heartbeat_at)} ago` : "Worker heartbeat unavailable"}${last ? ` · Last advance ${last} ago` : ""}`, "metadata progress-observation");
     if (phase === "analysing_video")
-      result.append(node("span", "The first x265 pass analyzes the video. Encoding progress starts during the second pass.", "metadata progress-observation"));
+      text("The first x265 pass analyzes the video. Encoding progress starts during the second pass.", "metadata progress-observation", true);
     if (phase === "validating_quality")
-      result.append(node("span", "Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation"));
+      text("Final quality validation can take several minutes. The percentage reflects the last encoding measurement.", "metadata progress-observation", true);
   }
-  return result;
+  return model;
+}
+function telemetry(job, options) {
+  return renderProgressModel(telemetryModel(job, options));
 }
 // The encode a ladder run is on, from the "(step N of M)" the server writes
 // into its status messages: "x265 CRF 20 (step 1 of 3)", "quality 65 (step 2 of 5)".
@@ -3475,16 +3527,16 @@ function detailFacts(job) {
   return facts;
 }
 // The one progress line of a running file: "42.5% · 1.35× · ~25 min left",
-// with a small dot for the worker's heartbeat. Batches, several active files,
-// post-encode checks and worker messages keep telemetry()'s richer text.
-function detailProgress(job) {
+// with a dot for the worker's heartbeat. Batches, several active files,
+// post-encode checks and worker messages keep telemetry's richer text.
+function detailProgressModel(job) {
   const w = job.worker;
   const observation = workerProgressObservation(job);
   // A wait, an offline worker, the original's check or a batch says more than
-  // the stepper does; otherwise, without a worker, the stepper already names
-  // the current step.
-  if (job.activities?.length > 1 || batchProgress(job) || postEncodeWork(job) || observation.message) return telemetry(job);
-  if (!w) return job.stages?.[job.current_step] ? null : telemetry(job);
+  // the step line does; otherwise, without a worker, the step line already
+  // names the current step.
+  if (job.activities?.length > 1 || batchProgressModel(job) || postEncodeWork(job) || observation.message) return telemetryModel(job);
+  if (!w) return job.stages?.[job.current_step] ? null : telemetryModel(job);
   const phase = w.transcode_phase || w.phase;
   const measured = w.progress ?? w.last_known_progress?.progress;
   const known = !["queued", "preparing"].includes(phase) && measured != null && Number.isFinite(Number(measured));
@@ -3494,22 +3546,12 @@ function detailProgress(job) {
     ? [`${w.progress_is_stale ? "Last measured " : ""}${percent.toFixed(1)}%`, phase === "encoding" ? null : workerPhaseLabel(phase)]
     : [workerPhaseLabel(phase), w.queue_position > 0 ? `Queue #${w.queue_position}` : null];
   parts.push(live && w.speed > 0 ? `${Number(w.speed).toFixed(2)}×` : null, encodeEta(job.id || "job", w, job.savings?.eta_seconds));
-  const line = node("div", "", "job-progress worker-progress detail-progress");
-  if (percent != null) {
-    const meter = document.createElement("meter");
-    meter.min = 0;
-    meter.max = 100;
-    meter.value = percent;
-    meter.setAttribute("aria-label", `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${percent.toFixed(1)}%`);
-    line.append(meter);
-  }
-  line.append(node("span", parts.filter(Boolean).join(" · "), "detail-progress-text"));
-  if (observation.active && observation.heartbeat !== "unknown") {
-    const dot = node("span", heartbeatAlive(observation.heartbeat) ? "Worker live" : "Worker silent", `live-dot ${observation.heartbeat}`);
-    dot.title = `Last heartbeat ${new Date(w.worker_heartbeat_at).toLocaleTimeString()}`;
-    line.append(dot);
-  }
-  return line;
+  const model = {kind: "file", className: "job-progress worker-progress detail-progress", parts: []};
+  if (percent != null) model.parts.push({type: "meter", min: 0, max: 100, value: percent, label: `${w.progress_is_stale ? "Last measured" : "Worker"} progress ${percent.toFixed(1)}%`});
+  model.parts.push({type: "text", text: parts.filter(Boolean).join(" · "), cls: "detail-progress-text"});
+  if (observation.active && observation.heartbeat !== "unknown")
+    model.parts.push({type: "dot", state: observation.heartbeat, text: heartbeatAlive(observation.heartbeat) ? "Worker live" : "Worker silent", title: `Last heartbeat ${new Date(w.worker_heartbeat_at).toLocaleTimeString()}`});
+  return model;
 }
 function stageLabel(name) {
   const labels = {
@@ -4856,6 +4898,30 @@ const mainQueueActions = ["Replace file", "Review replacements", "Review replace
 // Icon actions a row keeps in view when it cannot show them all, most useful first.
 const keptQueueIcons = ["Pause batch", "Resume batch", "Cancel", "Archive", "Stop batch · keep originals"];
 const visibleQueueIcons = 3;
+// The "..." menu: the same buttons, with their handlers and state, listed in a
+// popup that closes on a choice and returns focus to its toggle.
+function moreActionsMenu(items, menuFor, {toggleClass = "more-toggle", icon = null} = {}) {
+  const more = node("details", "", "more-actions");
+  more.dataset.menuFor = menuFor || "";
+  const toggle = node("summary", icon ? "" : "⋯", toggleClass);
+  toggle.setAttribute("aria-label", "More actions");
+  toggle.title = "More actions";
+  if (icon) toggle.append(icon);
+  const menu = node("div", "", "more-menu");
+  menu.append(...items);
+  more.append(toggle, menu);
+  // Capture runs before the item's own handler: the menu closes and focus
+  // returns to its toggle, so a confirmation dialog hands focus back there.
+  more.addEventListener("click", (e) => {
+    if (!e.target?.closest?.(".more-menu button")) return;
+    more.open = false;
+    toggle.focus?.({ preventScroll: true });
+  }, true);
+  more.addEventListener("focusout", (e) => {
+    if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
+  });
+  return more;
+}
 function compactQueueActions(actions) {
   // A card offers at most one labelled main action, which the row shows as a
   // link at the end of its sentence. The other actions are icon buttons named
@@ -4887,29 +4953,7 @@ function compactQueueActions(actions) {
     overflow = icons.filter((b) => !kept.has(b));
   }
   const rail = [main, ...icons.filter((b) => !overflow.includes(b))].filter(Boolean);
-  if (overflow.length) {
-    const more = node("details", "", "more-actions");
-    more.dataset.menuFor = buttons[0]?.dataset.jobControl || "";
-    const toggle = node("summary", "", "action-icon more-toggle");
-    toggle.setAttribute("aria-label", "More actions");
-    toggle.title = "More actions";
-    const dots = actionIcon("More actions");
-    if (dots) toggle.append(dots);
-    const menu = node("div", "", "more-menu");
-    menu.append(...overflow);
-    more.append(toggle, menu);
-    // Capture runs before the item's own handler: the menu closes and focus
-    // returns to its toggle, so a confirmation dialog hands focus back there.
-    more.addEventListener("click", (e) => {
-      if (!e.target?.closest?.(".more-menu button")) return;
-      more.open = false;
-      toggle.focus?.({ preventScroll: true });
-    }, true);
-    more.addEventListener("focusout", (e) => {
-      if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
-    });
-    rail.push(more);
-  }
+  if (overflow.length) rail.push(moreActionsMenu(overflow, buttons[0]?.dataset.jobControl, {toggleClass: "action-icon more-toggle", icon: actionIcon("More actions")}));
   actions.replaceChildren(...rail);
 }
 // More actions menus close on Escape and on a press anywhere outside them.
@@ -6040,6 +6084,175 @@ function renderPhaseCosts(host, job) {
   }
   detail.append(table); host.append(detail);
 }
+// ---- The job dialog ----
+// Five sections in one fixed order: header, status, files, details and actions.
+// A state changes what a section says, never which sections exist or where
+// they sit; a section with nothing to say is hidden, not left as a gap.
+//
+// Every progress bar is the same component: bar() below. Text that stays on
+// one line says so (data-single-line) and carries its full text as a tooltip.
+function bar(fraction, label, kind = "hero") {
+  const percent = Math.round(Math.max(0, Math.min(1, Number.isFinite(fraction) ? fraction : 0)) * 1000) / 10;
+  const track = node("div", "", "bar");
+  track.dataset.bar = kind;
+  track.setAttribute("role", "progressbar");
+  track.setAttribute("aria-label", label);
+  track.setAttribute("aria-valuemin", "0");
+  track.setAttribute("aria-valuemax", "100");
+  track.setAttribute("aria-valuenow", String(percent));
+  const fill = node("i");
+  fill.dataset.fill = "";
+  fill.style.width = `${percent}%`;
+  track.append(fill);
+  return track;
+}
+function oneLine(text, className = "") {
+  const line = node("p", text, className);
+  line.dataset.singleLine = "";
+  line.title = text;
+  return line;
+}
+function dotLine(tone, text, title = "") {
+  const line = node("p", "", "jd-line jd-live");
+  const dot = node("span", "", `jd-dot ${tone}`);
+  dot.dataset.dot = "";
+  const label = node("span", text);
+  label.dataset.singleLine = "";
+  if (title) line.title = title;
+  line.append(dot, label);
+  return line;
+}
+// A progress model laid out for the dialog: one headline, one bar, then lines.
+function detailHero(model, status = "") {
+  if (!model) return null;
+  const stopped = /\b(failed|cancelled)\b/.test(model.className);
+  const hero = node("div", "", `jd-hero hero-${model.kind}${stopped ? " stopped" : ""}`);
+  const gauge = model.parts.find(part => ["meter", "progress", "segments"].includes(part.type));
+  const fraction = !gauge ? null : gauge.fraction ?? (gauge.value - (gauge.min || 0)) / ((gauge.max - (gauge.min || 0)) || 1);
+  const texts = model.parts.filter(part => part.type === "text" && part.text.trim());
+  const find = name => texts.find(part => part.cls.split(" ").includes(name));
+  let headline = "", rest = texts;
+  if (model.kind === "batch") {
+    const percent = find("batch-progress-percent"), count = find("batch-progress-count");
+    headline = [percent?.text, count?.text].filter(Boolean).join(" · ");
+    rest = texts.filter(part => part !== percent && part !== count);
+    // A segmented bar's legend is the count of each state.
+    const legend = find("batch-legend");
+    if (legend) { headline = [percent?.text, legend.text].filter(Boolean).join(" · "); rest = rest.filter(part => part !== legend); }
+  } else if (model.kind === "replacement" || model.kind === "file") {
+    headline = texts[0]?.text || "";
+    rest = texts.slice(1);
+  } else {
+    const unit = texts.find(part => part.unit);
+    const first = unit || texts[0];
+    headline = first?.text || "";
+    rest = texts.filter(part => part !== first);
+    // The measurement leads when there is one; otherwise the first line does,
+    // unless it is a sentence that reads better as a note.
+    if (!unit && first?.sentence) { headline = ""; rest = texts; }
+  }
+  // The chip above already names the phase; the headline keeps only what it adds.
+  const lead = `${status} \u00b7 `;
+  if (status && headline.toLowerCase().startsWith(lead.toLowerCase())) headline = headline.slice(lead.length);
+  if (headline) hero.append(oneLine(headline, "jd-headline"));
+  if (gauge) hero.append(bar(fraction, gauge.label || gauge.title || "Progress"));
+  for (const part of rest) {
+    const line = part.sentence ? node("p", part.text, "jd-line jd-sentence") : oneLine(part.text, "jd-line");
+    hero.append(line);
+  }
+  for (const part of model.parts) if (part.type === "dot") hero.append(dotLine(heartbeatAlive(part.state) ? "ok" : part.state === "delayed" ? "warn" : "bad", part.text, part.title));
+  return hero;
+}
+// Everything the status section says about a job, in one order: the progress,
+// the step, the counts or facts, then the sentences that explain the outcome.
+const saidText = text => text.toLowerCase().replace(/[·•:,.]/g, " ").replace(/\s+/g, " ").trim();
+// What is left of a sentence once the parts the status block already says are
+// taken out: a chip that reads "Candidates ready" makes "6 candidates ready" noise.
+function unsaid(text, said) {
+  return text.split(/\s·\s/).filter(part => {
+    const n = saidText(part);
+    return n && !["file", "batch"].includes(n) && !said.some(s => s === n || (n.length > 8 && s.includes(n)) || (s.length > 8 && n.includes(s)));
+  }).join(" · ");
+}
+function detailStatusNodes(job, presentation) {
+  const out = [];
+  // Everything the block has said so far, so a later line never says it again.
+  const said = [saidText(presentation.status)];
+  const facts = detailFacts(job);
+  const model = presentation.showTelemetry ? detailProgressModel(job) : batchProgressModel(job);
+  const hero = detailHero(model, presentation.status);
+  if (hero) {
+    out.push(hero);
+    for (const line of hero.children) if (line.textContent) said.push(saidText(line.textContent));
+  }
+  const step = stepText(job);
+  if (step) {
+    out.push(oneLine(step, "jd-line jd-step"));
+    said.push(saidText(step));
+  }
+  if (job.batch?.total > 1 && !job.batch.dry_run) {
+    // An approved replacement says replaced and failed in its own headline; a chip
+    // of completed encodes beside "1 failed" would contradict it, so only the
+    // other counts (skipped, rejected, ...) stay.
+    const holder = node("div");
+    renderBatchCounts(holder, visibleBatch(job), job.replacement?.approved ? ["completed", "failed"] : []);
+    for (const badge of holder.children[0]?.children || []) said.push(saidText(badge.textContent));
+    out.push(...holder.children);
+  }
+  if (facts.length) {
+    const chips = node("ul", "", "detail-facts");
+    for (const fact of facts) { chips.append(node("li", fact, "detail-fact")); said.push(saidText(fact)); }
+    out.push(chips);
+  }
+  const notes = [];
+  const note = (text, className = "") => {
+    const rest = unsaid(text, said);
+    if (!rest) return;
+    said.push(saidText(rest));
+    notes.push(node("p", rest, `jd-note ${className}`.trim()));
+  };
+  // A failed replacement's headline already is the summary.
+  const headline = model?.kind === "replacement" ? model.parts[0].text : "";
+  const repeated = Boolean(headline) && presentation.summary.includes(headline);
+  if (!repeated && !(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) note(presentation.summary, "muted");
+  const addOutcome = (text) => {
+    // "Open job for details" is the queue row's pointer to this dialog.
+    if (!text || /^(Open job for error details|Finished · Open job for details)$/.test(text)) return;
+    note(text, "job-outcome metadata");
+  };
+  if (job.podcast) { const p = job.podcast; note(`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`, "metadata"); if (p.output_path && job.status === "completed") note(`Validated MP3: ${p.output_path}`, "metadata"); }
+  if (job.transcode) {
+    // A waiting decision repeats its reason below, and a result card
+    // explains the outcome itself; show it only once.
+    const hasReport = hasResultReport(job.benchmark);
+    if (job.status !== "waiting_decision" && !hasReport && !(presentation.showTelemetry && ladderStep(job))) addOutcome(jobOutcomeText(job));
+    if (job.transcode.tested_candidates) note(`${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata");
+  }
+  const report = resultReport(job);
+  if (report) notes.push(report);
+  const tracks = trackReport(job);
+  if (tracks) notes.push(tracks);
+  if (!presentation.showTelemetry && !model && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
+  if (job.batch?.outcome === "no_changes") notes.push(skippedBatchOutcome(job));
+  if (job.batch?.dry_run) note(queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice");
+  const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
+  if (raw && shortJobReason(raw) !== raw && !workerBusyFailure(raw)) {
+    const technical = node("details", "", "technical-reason");
+    technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
+    notes.push(technical);
+  }
+  if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
+    const reason = job.batch_files.reasons[0];
+    note(`${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted");
+  }
+  out.push(...notes);
+  return out;
+}
+// A section whose rows are all hidden is hidden too.
+function syncDetailSections() {
+  const rows = ["detail-related", "detail-commands", "detail-row-plan", "detail-row-steps", "detail-costs", "detail-row-path", "detail-row-log"];
+  $("detail-rows").hidden = !rows.some(key => !$(key).hidden && $(key).children.length > 0);
+}
 async function openJob(id) {
   state.detail = id;
   state.chunk = 0;
@@ -6051,17 +6264,20 @@ async function openJob(id) {
   state.detailRevision++;
   // A new job starts with every row closed; failures open the relevant one.
   state.detailAutoOpened = new Set();
+  state.openFiles = new Set();
   state.detailCostsOpen = false;
   if (!$("job-detail").open) $("job-detail").showModal();
   writeNavigation();
   $("job-detail-title").textContent = "Job details";
-  $("job-detail-title").title = "";
+  $("job-detail-title").title = "Job details";
   $("copy-detail-path").hidden = true;
   $("detail-status").replaceChildren();
   $("detail-summary").replaceChildren(node("p", "Loading job…", "muted"));
   $("detail-controls").replaceChildren();
+  $("detail-controls").hidden = true;
   $("detail-related").replaceChildren();
   resetDetailRows();
+  syncDetailSections();
   await refreshDetail();
 }
 async function refreshDetail() {
@@ -6079,73 +6295,16 @@ async function refreshDetail() {
       return;
     state.detailJob = job;
     const focus = focusedControl($("detail-controls"));
+    const menu = openActionMenu($("detail-controls"));
     const presentation = queuePresentation(job);
     const summary = $("detail-summary");
     const path = detailPath(job);
-    $("job-detail-title").textContent = job.batch || job.source_path || job.promotion ? presentation.title : job.id;
-    $("job-detail-title").title = path;
+    const title = job.batch || job.source_path || job.promotion ? presentation.title : job.id;
+    $("job-detail-title").textContent = title;
+    $("job-detail-title").title = path || title;
     $("copy-detail-path").hidden = !path;
     $("detail-status").replaceChildren(statusBadge(presentation.status));
-    summary.replaceChildren();
-    const facts = detailFacts(job);
-    if (facts.length) {
-      const chips = node("ul", "", "detail-facts");
-      for (const fact of facts) chips.append(node("li", fact, "detail-fact"));
-      summary.append(chips);
-    }
-    // The progress line and the stepper come first; a step shown there is not
-    // repeated as a sentence below.
-    const progress = presentation.showTelemetry ? detailProgress(job) : batchProgress(job);
-    if (progress) summary.append(progress);
-    const stepper = renderStepper(job);
-    if (stepper) summary.append(stepper);
-    // The chips already carry a running conversion's size and encode, so its
-    // summary line is left out then; the outcome dedupe below still counts it
-    // as shown. Other jobs, such as a replacement, keep their line.
-    // A failed replacement's headline already is the summary.
-    const headline = progress?.querySelector?.(".replacement-headline")?.textContent;
-    const repeated = Boolean(headline) && presentation.summary.includes(headline);
-    if (!repeated && !(presentation.showTelemetry && facts.length && job.action_name === "transcode_media")) summary.append(node("p", presentation.summary, "muted"));
-    // The summary line already says why a file was skipped. An outcome line that
-    // only repeats text already shown is left out, so the reason appears once.
-    const shownOutcomes = [presentation.summary];
-    const addOutcome = (text) => {
-      // "Open job for details" is the queue row's pointer to this dialog.
-      if (!text || /^(Open job for error details|Finished · Open job for details)$/.test(text) || shownOutcomes.some(shown => shown.includes(text))) return;
-      shownOutcomes.push(text);
-      summary.append(node("p", text, "job-outcome metadata"));
-    };
-    if (job.podcast) { const p=job.podcast; summary.append(node("p",`${p.classified_blocks || 0}/${p.total_blocks || 0} transcript blocks classified · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · ${p.known_ad_units || 0} units verified by known ads`,"metadata")); if (p.output_path && job.status === "completed") summary.append(node("p",`Validated MP3: ${p.output_path}`,"metadata")); }
-    if (job.transcode) {
-      // A waiting decision repeats its reason below, and a result card
-      // explains the outcome itself; show it only once.
-      const hasReport = hasResultReport(job.benchmark);
-      if (job.status !== "waiting_decision" && !hasReport && !(presentation.showTelemetry && ladderStep(job))) addOutcome(jobOutcomeText(job));
-      if (job.transcode.tested_candidates) summary.append(node("p", `${job.transcode.tested_candidates} configurations tested${job.transcode.verified_samples ? ` · ${job.transcode.verified_samples} quality samples verified` : ""}`, "metadata"));
-    }
-    const report = resultReport(job);
-    if (report) summary.append(report);
-    const tracks = trackReport(job);
-    if (tracks) summary.append(tracks);
-    if (!presentation.showTelemetry && !progress && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
-    if (job.batch?.outcome === "no_changes") summary.append(skippedBatchOutcome(job));
-    if (job.batch?.dry_run) summary.append(node("p", queueOutcome(job) + (job.batch.queued > 0 && !job.preview_execution_action_id ? ". Review the eligible files, then choose Start batch to convert them." : "."), "preview-notice"));
-    const raw = job.status === "waiting_decision" ? job.waiting_reason : job.status === "failed" ? job.error : "";
-    if (raw && shortJobReason(raw) !== raw && !workerBusyFailure(raw)) {
-      const technical = node("details", "", "technical-reason");
-      technical.append(node("summary", "Technical details"), node("p", raw, "metadata"));
-      summary.append(technical);
-    }
-    // An approved replacement says replaced and failed in its own headline; a chip
-    // of completed encodes beside "1 failed" would contradict it, so only the
-    // other counts (skipped, rejected, ...) stay.
-    if (job.batch?.total > 1 && !job.batch.dry_run) renderBatchCounts(summary, visibleBatch(job), job.replacement?.approved ? ["completed", "failed"] : []);
-    const where = whereBlock(job.where);
-    if (where) summary.append(where);
-    if (visibleBatch(job)?.failed && job.batch_files?.reasons?.length) {
-      const reason = job.batch_files.reasons[0];
-      summary.append(node("p", `${batchReasonLabel(job,reason)}: ${shortJobReason(reason.reason)}`, "muted"));
-    }
+    summary.replaceChildren(...detailStatusNodes(job, presentation));
     summary.dataset.operationId = job.id;
     renderCommandIndicators();
     renderDetailRows(job);
@@ -6155,11 +6314,14 @@ async function refreshDetail() {
       if (action.id === job.id) continue;
       related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
     }
+    syncDetailSections();
     const controls = $("detail-controls");
-    controls.replaceChildren(jobControls(job, true));
+    controls.replaceChildren(...detailActionBar(job));
+    controls.hidden = !controls.children.length;
     $("batch-items-panel").hidden = !job.batch;
     if (job.batch) await loadBatchItems(id, revision, job.batch.total);
     restoreControl(controls, focus);
+    restoreActionMenu(controls, menu);
   } catch (error) {
     if (
       state.detail === id &&
@@ -6171,11 +6333,41 @@ async function refreshDetail() {
         button("Retry", refreshDetail, "quiet"),
       );
       $("detail-controls").replaceChildren();
+      $("detail-controls").hidden = true;
       $("detail-related").replaceChildren();
       $("batch-items-panel").hidden = true;
       resetDetailRows();
+      syncDetailSections();
     }
   }
+}
+// The action bar: at most one filled main action, one quiet second action and
+// a More menu for the rest, so a state never shows a wall of buttons.
+const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "Change settings", "Change goal", "Show in Files", "View replacement", "View batch"];
+const destructiveActions = ["Cancel", "Stop batch · keep originals"];
+function detailActionBar(job) {
+  const buttons = [...jobControls(job, true).children];
+  if (!buttons.length) return [];
+  const labelOf = b => b.textContent.trim();
+  const primary = mainQueueActions.map(label => buttons.find(b => labelOf(b) === label)).find(Boolean) || null;
+  const rank = b => { const i = detailSecondaryActions.indexOf(labelOf(b)); return i < 0 ? detailSecondaryActions.length : i; };
+  const rest = buttons.filter(b => b !== primary).sort((a, b) => rank(a) - rank(b));
+  const ordered = [primary, ...rest].filter(Boolean);
+  const shown = ordered.length <= 2 ? ordered : ordered.slice(0, 2);
+  const overflow = ordered.slice(shown.length);
+  for (const b of buttons) {
+    b.setAttribute("aria-label", labelOf(b));
+    b.title ||= labelOf(b);
+  }
+  for (const b of shown) {
+    b.querySelector?.("svg")?.remove?.();
+    b.className = `${b === primary ? "jd-primary" : "jd-secondary"}${destructiveActions.includes(labelOf(b)) ? " jd-danger" : ""}`;
+  }
+  for (const b of overflow) {
+    b.querySelector?.("svg")?.remove?.();
+    b.className = `jd-menu-item${destructiveActions.includes(labelOf(b)) ? " jd-danger" : ""}`;
+  }
+  return [...shown, ...(overflow.length ? [moreActionsMenu(overflow, job.id)] : [])];
 }
 function batchFileActivity(item, job) {
   if (job?.batch?.dry_run) return "";
@@ -6230,40 +6422,148 @@ async function retryFileReplacement(item, batchID) {
   const name = item.display_label || (item.file_path || "").split("/").pop();
   await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
 }
-// A file's actions sit under a "..." menu so a row is never a wall of buttons.
-// Only a file that needs the person to act, because saving or encoding stopped,
-// keeps one button in view.
-const fileRowRecovery = ["Try again", "Encode again"];
-function foldBatchFileActions(actions, itemKey) {
-  const buttons = [...actions.children];
-  if (!buttons.length) return;
-  const main = buttons.find(b => fileRowRecovery.includes(b.textContent));
-  const rest = buttons.filter(b => b !== main);
-  const more = node("details", "", "more-actions");
-  more.dataset.menuFor = itemKey || "";
-  const toggle = node("summary", "\u22ef", "more-toggle");
-  toggle.setAttribute("aria-label", "More actions");
-  toggle.title = "More actions";
-  const menu = node("div", "", "more-menu");
-  for (const control of rest) control.setAttribute("aria-label", control.textContent);
-  menu.append(...rest);
-  more.append(toggle, menu);
-  more.addEventListener("click", e => {
-    if (!e.target?.closest?.(".more-menu button")) return;
-    more.open = false;
-    toggle.focus?.({preventScroll: true});
-  }, true);
-  // Near the bottom of the dialog the menu opens upward, so it is never cut off.
-  more.addEventListener("toggle", () => {
-    if (!more.open) return;
-    const edge = more.closest?.("dialog")?.getBoundingClientRect?.().bottom ?? window.innerHeight;
-    const room = edge - toggle.getBoundingClientRect().bottom;
-    more.classList.toggle("up", room < menu.getBoundingClientRect().height + 12);
+// One row per file. Collapsed it is a single control showing the name, what
+// the file saves and where it stands; opening it shows the one-sentence story
+// and every action for that file, so a long batch is a list, not a wall of
+// buttons. Which rows are open survives each refresh (state.openFiles).
+const fileStateLabel = (item, job) => {
+  const queued = item.replacement_plan === "queued";
+  return item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : job?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
+};
+function batchFileRow(item, id) {
+  const job = state.detailJob;
+  const member = job?.replacement?.members?.find(m => m.item_key === item.item_key);
+  const queued = item.replacement_plan === "queued";
+  const failure = item.replacement_failure;
+  const label = fileStateLabel(item, job);
+  const fileName = item.display_label || (item.file_path || "").split("/").pop();
+  // A row that needs the person opens itself once per job, so "Try again" is
+  // never hidden behind a tap; closing it afterwards sticks.
+  const needsYou = Boolean(failure || item.retry_action_id || ["failed", "waiting_decision"].includes(item.status));
+  const autoKey = `file:${item.item_key}`;
+  if (needsYou && !state.detailAutoOpened.has(autoKey)) {
+    state.detailAutoOpened.add(autoKey);
+    state.openFiles.add(item.item_key);
+  }
+  const open = state.openFiles.has(item.item_key);
+  const row = node("div", "", "jd-file");
+  row.setAttribute("role", "listitem");
+  row.dataset.fileRow = "";
+  row.dataset.open = String(open);
+  row.dataset.itemKey = item.item_key;
+  const bodyId = `file-body-${String(item.item_key).replace(/[^A-Za-z0-9-]/g, c => `_${c.charCodeAt(0).toString(16)}_`)}`;
+  const head = node("button", "", "jd-file-head");
+  head.type = "button";
+  head.setAttribute("aria-expanded", String(open));
+  head.setAttribute("aria-controls", bodyId);
+  head.dataset.fileToggle = item.item_key;
+  head.title = fileName;
+  const name = node("span", fileName, "jd-file-name");
+  name.dataset.singleLine = "";
+  const meta = node("span", "", "jd-file-meta");
+  meta.dataset.singleLine = "";
+  const badge = statusBadge(label, item.replacement_status || label);
+  meta.append(badge);
+  if (item.saved_bytes > 0) meta.append(node("span", `−${bytes(item.saved_bytes)}`, "jd-file-saved"));
+  meta.title = [label, item.saved_bytes > 0 ? `Smaller than the original by ${bytes(item.saved_bytes)}` : ""].filter(Boolean).join(" · ");
+  const chevron = node("span", "", "jd-chevron");
+  chevron.setAttribute("aria-hidden", "true");
+  head.append(name, meta, chevron);
+  const body = node("div", "", "jd-file-body");
+  body.id = bodyId;
+  body.dataset.rowBody = "";
+  body.hidden = !open;
+  head.addEventListener("click", () => {
+    const next = body.hidden;
+    body.hidden = !next;
+    row.dataset.open = String(next);
+    head.setAttribute("aria-expanded", String(next));
+    if (next) state.openFiles.add(item.item_key); else state.openFiles.delete(item.item_key);
   });
-  more.addEventListener("focusout", e => {
-    if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
-  });
-  actions.replaceChildren(...(main ? [main] : []), more);
+  row.append(head, body);
+
+  const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
+  const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, job);
+  if (activity) body.append(node("p", activity, "jd-note batch-file-activity"));
+
+  const actions = node("div", "", "jd-file-actions");
+  // Buttons that only open something stay usable while the batch is busy.
+  const add = (text, fn, {navigation = false, target = id, primary = text === "Replace file", requiresWorker = false, into = actions} = {}) => {
+    const control = button(text, fn, primary ? "jd-primary" : "jd-secondary");
+    control.dataset.jobControl = target;
+    if (requiresWorker) control.dataset.requiresWorker = "true";
+    control.dataset.batchItemKey = item.item_key;
+    if (navigation) control.dataset.navigation = "true";
+    control.disabled = jobControlDisabled(control);
+    into.append(control);
+  };
+  if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
+  // The encode finished and only saving it failed: one button tries the same
+  // file again, on the worker that holds it. No settings change, no re-encode.
+  if (item.status === "waiting_decision" && item.child_action_id && item.waiting_decisions?.includes("recheck")) {
+    add("Try again", () => jobControl(item.child_action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}), {target: item.child_action_id, primary: true, requiresWorker: true});
+  }
+  if (failure) {
+    const card = node("div", "", "replacement-failure jd-note");
+    card.setAttribute("role", "group");
+    card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
+    body.append(card);
+    if (item.retry_action_id) add(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
+    if (item.replacement_action_id) add("View details", () => openJob(item.replacement_action_id), {navigation: true, primary: false});
+    if (failure.detail) {
+      const technical = node("details", "", "technical-reason");
+      technical.append(node("summary", "Technical details"), node("p", failure.detail, "metadata"));
+      body.append(technical);
+    }
+  } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
+  const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
+  if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+  // A cancelled or failed file can be encoded again as it was set up, without
+  // reopening the goal dialog.
+  if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
+    add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
+  if (filesRouteFor(item.file_path))
+    add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
+  if (item.child_action_id && !item.replacement_action_id) add("Open job", () => openJob(item.child_action_id), {navigation: true, target: item.child_action_id, primary: false});
+  if (review && !item.replacement_action_id && !item.child_action_id) add("Review", review, {navigation: true, primary: false});
+
+  const where = whereBlock(item.where, {heading: false});
+  if (where) {
+    const details = node("details", "", "batch-where");
+    details.append(node("summary", "Where"), where);
+    body.append(details);
+  }
+  if (item.tracks_message) body.append(node("p", item.tracks_message, "muted batch-file-tracks"));
+  // A finished candidate repeats its batch's goal and its own status, so only
+  // files that still need a look say which goal they follow.
+  const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
+  if (settled) {
+    // Nothing to add.
+  } else if (item.mode && item.mode !== job?.mode) body.append(node("p", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
+  else if (item.requested_profile || item.profile) body.append(node("p", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
+  if (item.previous_attempts?.length) {
+    const history = node("details", "", "batch-attempt-history");
+    history.append(node("summary", `${item.previous_attempts.length} previous ${item.previous_attempts.length === 1 ? "attempt" : "attempts"}`));
+    item.previous_attempts.forEach((attempt, index) => {
+      const open = button(`Attempt ${index + 1} · ${names[attempt.status] || attempt.status}`, () => openJob(attempt.child_action_id), "jd-secondary");
+      open.dataset.jobControl = attempt.child_action_id;
+      open.dataset.navigation = "true";
+      open.dataset.batchItemKey = item.item_key;
+      open.disabled = jobControlDisabled(open);
+      history.append(open);
+    });
+    body.append(history);
+  }
+  const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
+  // The recipe's reason says why a file was or was not converted; once it is
+  // being replaced or has a candidate it explains nothing more.
+  const visibleReasons = item.replacement_action_id || item.replacement_plan || item.replaced || item.candidate_ready ? [] : [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
+  if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
+  for (const reason of visibleReasons) body.append(node("p", reason, "muted jd-note"));
+  if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) body.append(node("p", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
+  if (item.candidate_ready && !state.info.allow_destructive) body.append(node("p", "Replacement is disabled in server settings", "muted jd-note"));
+  if (actions.children.length) body.append(actions);
+  return row;
 }
 // The most the server returns at once; a batch of 148 files is two pages.
 const batchItemsPage = 100;
@@ -6279,130 +6579,12 @@ async function loadBatchItems(id, revision) {
     !$("job-detail").open
   )
     return;
-  const focus = focusedControl($("batch-items-list"));
-  // The list redraws every few seconds: an open file menu and a focused file name stay as they were.
-  const menu = openActionMenu($("batch-items-list"));
-  const nameFocus = document.activeElement?.dataset?.nameLink ? document.activeElement.dataset.batchItemKey : null;
-  $("batch-items-list").replaceChildren();
-  for (const item of response.items || []) {
-    const row = node("div", "", "batch-item-row");
-    const member = state.detailJob?.replacement?.members?.find(m => m.item_key === item.item_key);
-    const queued = item.replacement_plan === "queued";
-    const failure = item.replacement_failure;
-    const label = item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : state.detailJob?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
-    const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
-    // The name opens the file, so there is no separate View file button.
-    const fileName = item.display_label || (item.file_path || "").split("/").pop();
-    const nameCell = node("span", item.child_action_id ? "" : fileName, "metadata batch-file-name");
-    if (item.child_action_id) {
-      const link = jobLink(fileName, item.child_action_id);
-      link.dataset.nameLink = "true";
-      link.dataset.batchItemKey = item.item_key;
-      nameCell.append(link);
-    }
-    nameCell.title = fileName;
-    // One line per file: name, how much it saves, state, then the main action.
-    const savedCell = item.saved_bytes > 0 ? node("span", `\u2212${bytes(item.saved_bytes)}`, "batch-file-saved") : null;
-    if (savedCell) savedCell.title = "Smaller than the original by this much";
-    row.append(nameCell);
-    if (savedCell) {
-      row.className += " has-saved";
-      row.append(savedCell);
-    }
-    row.append(statusBadge(label, item.replacement_status || label, review));
-    const actions = node("div", "", "batch-file-actions");
-    // Buttons that only open something stay usable while the batch is busy.
-    const add = (label, fn, {navigation = false, target = id, primary = label === "Replace file", requiresWorker = false} = {}) => {
-      const control = button(label, fn, primary ? "primary" : "");
-      control.dataset.jobControl = target;
-      if (requiresWorker) control.dataset.requiresWorker = "true";
-      control.dataset.batchItemKey = item.item_key;
-      if (navigation) control.dataset.navigation = "true";
-      control.disabled = jobControlDisabled(control);
-      actions.append(control);
-    };
-    if (item.candidate_ready && !item.replacement_plan && state.info.allow_destructive) add("Replace file", () => replaceBatchFile(id, item.child_action_id));
-    // The encode finished and only saving it failed: one button tries the same
-    // file again, on the worker that holds it. No settings change, no re-encode.
-    if (item.status === "waiting_decision" && item.child_action_id && item.waiting_decisions?.includes("recheck")) {
-      add("Try again", () => jobControl(item.child_action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}), {target: item.child_action_id, primary: true, requiresWorker: true});
-    }
-    if (failure) {
-      const card = node("div", "", "replacement-failure");
-      card.setAttribute("role", "group");
-      card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
-      const options = node("div", "", "batch-file-actions");
-      const choose = (label, fn, opts = {}) => {
-        const control = button(label, fn, opts.primary ? "primary" : "");
-        control.dataset.jobControl = opts.target || id;
-        control.dataset.batchItemKey = item.item_key;
-        if (opts.navigation) control.dataset.navigation = "true";
-        control.disabled = jobControlDisabled(control);
-        options.append(control);
-      };
-      if (item.retry_action_id) choose(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
-      if (item.replacement_action_id) choose("View details", () => openJob(item.replacement_action_id), {navigation: true});
-      card.append(options);
-      if (failure.detail) {
-        const technical = node("details", "", "technical-reason");
-        technical.append(node("summary", "Technical details"), node("p", failure.detail, "metadata"));
-        card.append(technical);
-      }
-      row.append(card);
-    } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
-    const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
-    if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
-    // A cancelled or failed file can be encoded again as it was set up, without
-    // reopening the goal dialog.
-    if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
-      add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
-    if (filesRouteFor(item.file_path))
-      add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
-    foldBatchFileActions(actions, item.item_key);
-    if (actions.children.length) row.append(actions);
-    const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, state.detailJob);
-    if (activity) row.append(node("span", activity, "batch-file-activity"));
-    const where = whereBlock(item.where, {heading: false});
-    if (where) {
-      const details = node("details", "", "batch-where");
-      details.append(node("summary", "Where"), where);
-      row.append(details);
-    }
-
-    if (item.tracks_message) row.append(node("span", item.tracks_message, "muted batch-file-tracks"));
-    // A finished candidate repeats its batch's goal and its own status, so only
-    // files that still need a look say which goal they follow.
-    const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
-    if (settled) {
-      // Nothing to add.
-    } else if (item.mode && item.mode !== state.detailJob?.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
-    else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
-    if (item.previous_attempts?.length) {
-      const history=node("details","","batch-attempt-history");
-      history.append(node("summary",`${item.previous_attempts.length} previous ${item.previous_attempts.length===1 ? "attempt" : "attempts"}`));
-      item.previous_attempts.forEach((attempt,index)=>history.append(button(`Attempt ${index+1} · ${names[attempt.status] || attempt.status}`,()=>openJob(attempt.child_action_id),"quiet")));
-      row.append(history);
-    }
-    const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];
-    // The recipe's reason says why a file was or was not converted; once it is
-    // being replaced or has a candidate it explains nothing more.
-    const visibleReasons = item.replacement_action_id || item.replacement_plan || item.replaced || item.candidate_ready ? [] : [...new Set(reasons.filter(reason => reason && !/^(explicit profile requested|eligible for transcode|per-source bounded samples required before full encode|New settings requested(; previous attempt retained in history)?)$/i.test(reason)).map(shortJobReason))];
-    if (!visibleReasons.length && item.status === "skip") visibleReasons.push("This file was omitted by the processing plan; original kept. View the file details or change settings to try again.");
-    for (const reason of visibleReasons) row.append(node("span", reason, "muted"));
-    if (item.candidate_ready && belowTargetLabel(item.size_budget_outcome)) row.append(node("span", belowTargetLabel(item.size_budget_outcome), "badge size-budget-badge"));
-    // The status already says "Candidate ready"; only a reason it cannot be replaced is added.
-    if (item.candidate_ready && !state.info.allow_destructive) row.append(node("span", "Replacement is disabled in server settings", "muted"));
-    for (const control of row.querySelectorAll("button")) {
-      control.dataset.batchItemKey = item.item_key;
-      // Buttons made without a target only open something.
-      if (!control.dataset.jobControl) control.dataset.navigation = "true";
-      control.dataset.jobControl ||= item.child_action_id || id;
-    }
-    $("batch-items-list").append(row);
-  }
-  restoreControl($("batch-items-list"), focus);
-  restoreActionMenu($("batch-items-list"), menu);
-  if (nameFocus) [...$("batch-items-list").querySelectorAll("[data-name-link]")].find(link => link.dataset.batchItemKey === nameFocus)?.focus({preventScroll: true});
+  const list = $("batch-items-list");
+  const focus = focusedControl(list);
+  const toggled = document.activeElement?.dataset?.fileToggle || null;
+  list.replaceChildren(...(response.items || []).map(item => batchFileRow(item, id)));
+  restoreControl(list, focus);
+  if (toggled) [...list.querySelectorAll("[data-file-toggle]")].find(t => t.dataset.fileToggle === toggled)?.focus({preventScroll: true});
   $("batch-items-note").textContent =
     `${response.items?.length || 0} of ${response.total} files`;
   state.batchItemsHasMore = response.has_more;
@@ -6544,36 +6726,22 @@ function renderStages(job) {
   }
 }
 
-// The pipeline as small dots joined by a thin line, one dot per step, with
-// the current step named under it. A step is done, current, pending or failed.
-const stepSymbols = {done: "✓", failed: "!", current: "", pending: ""};
-function renderStepper(job) {
+// Where the job is in its steps, in one line: "Step 6 of 7 · Convert file".
+// Done jobs say nothing here; the All steps row lists every step.
+function stepText(job) {
   const stages = effectiveStages(job);
-  if (!stages.length) return null;
+  if (!stages.length) return "";
   const active = ["running", "waiting_external", "waiting_decision"].includes(job.status);
   const stateOf = (stage, index) => ["failed", "rejected"].includes(stage.status) ? "failed"
     : active && (index === job.current_step || stage.status === "running") ? "current"
     : ["completed", "skip", "partial"].includes(stage.status) ? "done" : "pending";
   const states = stages.map(stateOf);
-  const wrap = node("div", "", "job-steps-wrap");
-  const list = node("ol", "", "job-steps");
-  list.setAttribute("aria-label", "Steps");
-  for (const [index, stage] of stages.entries()) {
-    const label = stageLabel(stage.name);
-    const item = node("li", "", `job-step ${states[index]}`);
-    item.title = label;
-    item.setAttribute("aria-label", `Step ${index + 1} of ${stages.length}, ${label}: ${states[index]}`);
-    if (states[index] === "current") item.setAttribute("aria-current", "step");
-    item.append(node("span", stepSymbols[states[index]], "job-step-dot"));
-    list.append(item);
-  }
   const at = states.includes("failed") ? states.indexOf("failed") : states.indexOf("current");
-  const text = at >= 0
-    ? `${states[at] === "failed" ? "Failed at step" : "Step"} ${at + 1} of ${stages.length} · ${stageLabel(stages[at].name)}`
-    : states.every(value => value === "done") ? `All ${stages.length} steps done`
-    : `Next: ${stageLabel(stages[Math.max(0, states.indexOf("pending"))].name)}`;
-  wrap.append(list, node("p", text, "job-steps-current"));
-  return wrap;
+  if (at >= 0) return `${states[at] === "failed" ? "Failed at step" : "Step"} ${at + 1} of ${stages.length} \u00b7 ${stageLabel(stages[at].name)}`;
+  // "Next" only means something while the job can still move on; a finished,
+  // stopped or cancelled one has no next step to name.
+  if (states.every(value => value === "done") || ["completed", "cancelled", "failed", "rejected", "skip", "archived"].includes(job.status)) return "";
+  return `Next: ${stageLabel(stages[Math.max(0, states.indexOf("pending"))].name)}`;
 }
 // Compact replacements can be re-grabbed by Radarr/Sonarr. The tracking
 // shown is read-only; Navigatorr never changes monitoring or profiles.

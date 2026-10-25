@@ -1234,8 +1234,7 @@ main {
    job detail dialog. In the rows one main action is labelled and filled; every
    other action is a square icon button named by aria-label and title.
    ::after keeps the shared touch target without making the visible box larger. */
-.job-row .job-actions button,
-#detail-controls .job-actions button {
+.job-row .job-actions button {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1257,8 +1256,7 @@ main {
   flex: 0 0 auto;
   max-width: 100%;
 }
-.job-row .job-actions button::after,
-#detail-controls .job-actions button::after {
+.job-row .job-actions button::after {
   content: "";
   position: absolute;
   top: 50%;
@@ -1267,27 +1265,23 @@ main {
   height: max(100%, var(--control-size));
   transform: translateY(-50%);
 }
-.job-row .job-actions button svg,
-#detail-controls .job-actions button svg {
+.job-row .job-actions button svg {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
 }
 /* While a request is pending the spinner takes the icon's place and size, so
    the button keeps its width and its neighbours do not move. */
-.job-row .job-actions button.button-pending svg,
-#detail-controls .job-actions button.button-pending svg {
+.job-row .job-actions button.button-pending svg {
   display: none;
 }
-.job-row .job-actions button.button-pending::before,
-#detail-controls .job-actions button.button-pending::before {
+.job-row .job-actions button.button-pending::before {
   box-sizing: border-box;
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
 }
-.job-row .job-actions button.primary,
-#detail-controls .job-actions button.primary {
+.job-row .job-actions button.primary {
   border-color: var(--forest);
   background: var(--forest);
   color: var(--on-forest);
@@ -1530,10 +1524,6 @@ main {
   color: var(--muted);
   min-height: 32px;
 }
-#batch-items-panel h3 {
-  margin: 12px 0 6px;
-  font: 600 13px/1.4 var(--body);
-}
 .job-summary {
   margin: 0;
   display: -webkit-box;
@@ -1634,7 +1624,6 @@ main {
 .batch-progress.failed progress::-webkit-progress-value { background: var(--danger); }
 .batch-progress.failed progress::-moz-progress-bar { background: var(--danger); }
 .batch-progress.cancelled { color: var(--muted); }
-#detail-summary > .batch-progress { margin: 10px 0; }
 /* A worker slot reuses the batch bar. The batch rules above size the labels for
    a tall footer row; inside a slot they keep their natural line height. */
 .worker-slot .batch-progress.slot-progress .batch-progress-count,
@@ -1725,121 +1714,6 @@ main {
   max-height: none;
   overflow: visible;
 }
-.batch-item-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
-  align-items: center;
-  column-gap: 10px;
-  row-gap: 4px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-}
-/* Anything not named below (what a file is doing, why it was skipped) runs
-   under the line at full width. */
-.batch-item-row > * { grid-column: 1 / -1; min-width: 0; margin: 0; }
-.batch-item-row > .batch-file-name {
-  grid-column: 1;
-  grid-row: 1;
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 1; min-width: 56px; color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
-.batch-item-row > .status-badge { grid-column: 3; grid-row: 1; min-width: 108px; min-height: 22px; padding: 2px 8px; border-radius: 11px; justify-content: center; font-size: 12px; white-space: nowrap; }
-/* A row with no menu still leaves the menu's place empty, so the actions line up. */
-.batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { content: ""; flex: 0 0 32px; }
-.batch-item-row > .batch-file-actions { grid-column: 4; grid-row: 1; display: flex; justify-content: flex-end; gap: 6px; min-width: 150px; margin: 0; }
-.batch-item-row > .batch-file-activity, .batch-item-row > .muted { color: var(--ink); font-size: 13px; line-height: 1.4; }
-.batch-item-row > .batch-file-activity { color: var(--muted); font-size: 12px; }
-.batch-item-row > .batch-file-tracks, .batch-item-row > .batch-file-profile { color: var(--muted); font-size: 12px; line-height: 1.4; }
-.batch-item-row .batch-file-actions button {
-  min-height: 30px;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: 15px;
-  background: none;
-  color: var(--ink);
-  font-size: 13px;
-  white-space: nowrap;
-}
-.batch-item-row .batch-file-actions button:hover { background: var(--hover); }
-.batch-item-row .batch-file-actions button.primary { border-color: var(--forest); color: var(--forest); }
-/* The failure card keeps its own button row under the line. */
-.batch-item-row > .replacement-failure .batch-file-actions { grid-column: auto; grid-row: auto; flex-wrap: wrap; }
-@media (max-width: 560px) {
-  /* Narrow screens, two lines per file: name and state on top; the actions
-     and, to their right, what it saves underneath. */
-  .batch-item-row { grid-template-columns: minmax(0, 1fr) auto; }
-  .batch-item-row > .batch-file-name {
-    grid-column: 1;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-  .batch-item-row > .status-badge { grid-column: 2; min-width: 0; }
-  .batch-item-row > .batch-file-actions { grid-column: 1; grid-row: 2; justify-content: flex-start; min-width: 0; }
-  .batch-item-row > .batch-file-saved { grid-column: 2; grid-row: 2; align-self: center; min-width: 0; text-align: right; }
-  .batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { content: none; }
-  .batch-item-row .more-menu { right: auto; left: 0; }
-}
-.batch-item-row .batch-file-name a { color: var(--ink); text-decoration: none; border-bottom: 1px solid var(--line); }
-.batch-item-row .batch-file-name a:hover, .batch-item-row .batch-file-name a:focus-visible { color: var(--forest); border-bottom-color: var(--forest); }
-.batch-item-row .more-actions { position: relative; display: inline-flex; }
-.batch-item-row .more-actions > summary {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  color: var(--ink);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-  list-style: none;
-}
-.batch-item-row .more-actions > summary::-webkit-details-marker { display: none; }
-.batch-item-row .more-actions > summary:hover, .batch-item-row .more-actions[open] > summary { background: var(--hover); }
-.batch-item-row .more-menu {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 4px);
-  right: 0;
-  display: grid;
-  min-width: 190px;
-  max-width: calc(100vw - 32px);
-  padding: 4px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface);
-  box-shadow: 0 6px 18px var(--shadow);
-}
-.batch-item-row .batch-file-actions .more-menu button {
-  justify-content: flex-start;
-  min-height: 34px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 6px;
-  text-align: left;
-}
-/* Near the bottom of the dialog the menu opens upward so it is never cut off. */
-.batch-item-row .more-actions.up .more-menu { top: auto; bottom: calc(100% + 4px); }
-/* Fingers need bigger targets than a pointer does. */
-@media (pointer: coarse) {
-  .batch-item-row .batch-file-actions { gap: 10px; }
-  .batch-item-row .batch-file-actions button { min-height: 44px; padding: 0 16px; border-radius: 22px; }
-  .batch-item-row .more-actions > summary { width: 44px; height: 44px; border-radius: 22px; }
-  .batch-item-row .batch-file-actions .more-menu button { min-height: 44px; border-radius: 8px; }
-  .batch-item-row > .batch-file-actions:has(> button):not(:has(.more-actions))::after { flex-basis: 44px; }
-}
-
 /* Savings and completed replacement history. */
 .savings-dashboard {
   display: grid;
@@ -2045,10 +1919,6 @@ dialog::backdrop {
 dialog .submit-actions {
   justify-content: flex-end;
   margin: 8px 0 0;
-}
-#detail-controls .job-actions {
-  justify-content: flex-end;
-  gap: 12px 6px;
 }
 dialog .submit-actions button {
   width: auto;
@@ -2362,13 +2232,11 @@ pre {
     color: var(--forest);
     text-decoration: underline;
   }
-  .job-row .job-actions button:hover,
-  #detail-controls .job-actions button:hover {
+  .job-row .job-actions button:hover {
     border-color: var(--muted);
     background: var(--hover);
   }
-  .job-row .job-actions button.primary:hover,
-  #detail-controls .job-actions button.primary:hover {
+  .job-row .job-actions button.primary:hover {
     border-color: var(--forest-strong);
     background: var(--forest-strong);
   }
@@ -2859,49 +2727,6 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .size-budget-points, .size-budget-siblings ul { margin: 4px 0 0; padding-left: 1.2rem; }
 .size-budget-warning { color: var(--warning-strong); background: var(--warning-wash); border: 1px solid var(--warning-line); border-radius: 6px; padding: 6px 8px; }
 
-/* Job details: a one-line header, fact chips, one progress line, a stepper,
-   then quiet collapsible rows. */
-.detail-heading { justify-content: flex-start; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
-.detail-heading h2 { flex: 1 1 auto; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-.detail-heading .icon-button { flex: 0 0 var(--control-size); color: var(--icon); }
-.detail-heading .icon-button svg { width: 16px; height: 16px; }
-.detail-status { flex: 0 0 auto; }
-.detail-status .badge { margin: 0; font-size: 11px; }
-.detail-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; padding: 0; list-style: none; }
-.detail-fact { padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--subtle); color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
-.detail-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; margin: 8px 0; }
-.detail-progress > meter { grid-column: 1 / -1; grid-row: 1; height: 6px; }
-.detail-progress-text { grid-column: 1; grid-row: 2; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.live-dot { grid-column: 2; grid-row: 2; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; cursor: help; }
-.live-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--forest); }
-.live-dot.delayed::before { background: var(--warning); }
-.live-dot.stale::before { background: var(--danger); }
-.job-steps-wrap { margin: 10px 0 6px; }
-.job-steps { display: flex; align-items: center; margin: 0; padding: 0; list-style: none; }
-.job-step { flex: 1 1 0; min-width: 0; display: flex; align-items: center; }
-.job-step:last-child { flex: 0 0 auto; }
-.job-step::after { content: ""; flex: 1 1 auto; height: 2px; margin: 0 4px; border-radius: 1px; background: var(--track); }
-.job-step:last-child::after { display: none; }
-.job-step.done::after { background: var(--forest); }
-.job-step-dot { flex: 0 0 16px; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 50%; background: var(--track); color: var(--on-primary); font-size: 10px; font-weight: 700; line-height: 1; }
-.job-step.done .job-step-dot { background: var(--forest); }
-.job-step.current .job-step-dot { background: var(--surface); box-shadow: inset 0 0 0 2px var(--forest); }
-.job-step.current .job-step-dot::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--forest); }
-.job-step.failed .job-step-dot { background: var(--danger); color: var(--on-forest); }
-.job-steps-current { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
-.detail-rows { margin-top: 14px; border-top: 1px solid var(--line); }
-.detail-row, #detail-costs > .phase-costs { margin: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.detail-row > summary, .phase-costs.detail-row > summary { display: flex; align-items: center; gap: 8px; min-height: var(--control-size); cursor: pointer; font-size: 13px; font-weight: 600; list-style: none; }
-.detail-row > summary::-webkit-details-marker { display: none; }
-.detail-row > summary::before { content: "▸"; color: var(--muted); }
-.detail-row[open] > summary::before { content: "▾"; }
-.detail-row[hidden] { display: none; }
-.detail-row > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
-.detail-row > :not(summary) { margin-bottom: 10px; }
-.detail-row .stage-list { margin: 0 0 10px; }
-.detail-row .stage-list li:last-child { border-bottom: 0; }
-#detail-path p { margin: 4px 0; overflow-wrap: anywhere; }
-
 /* Replacement review: one dialog lists the files with what each saves, then one button. */
 #batch-review { max-width: 560px; }
 #batch-review-data, #file-review-data { margin: 8px 0; }
@@ -2923,7 +2748,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .text-button:hover { background: var(--hover); }
 
 /* Replacement progress: a headline, finished files, and one line per file. */
-.job-footer > .replacement-progress, #detail-summary > .replacement-progress { flex: 1 1 100%; max-width: none; max-height: none; overflow: visible; flex-direction: column; align-items: stretch; gap: 6px; }
+.job-footer > .replacement-progress { flex: 1 1 100%; max-width: none; height: auto; max-height: none; overflow: visible; flex-direction: column; align-items: stretch; gap: 6px; }
 .replacement-progress progress { order: 0; flex: 0 0 auto; width: 100%; max-width: 420px; height: 6px; }
 .replacement-headline { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .replacement-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
@@ -2937,7 +2762,6 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 /* A file whose replacement stopped: why, that the original is intact, what to do. */
 .replacement-failure { flex-basis: 100%; margin: 4px 0; padding: 8px 10px; border-left: 3px solid var(--danger); border-radius: 3px; background: var(--danger-wash); color: var(--ink); }
 .replacement-failure p { margin: 4px 0; }
-.replacement-failure .batch-file-actions { margin-top: 6px; }
 .batch-where, .replacement-where { flex-basis: 100%; font-size: 12px; }
 .batch-where > summary { cursor: pointer; color: var(--muted); min-height: var(--action-height); display: flex; align-items: center; }
 .replacement-where { margin: 8px 0; }
@@ -3015,4 +2839,159 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
     padding: 0 8px;
   }
   .job-row > .job-actions { top: calc(10px + (24px - var(--action-height)) / 2); }
+}
+
+/* ---- Job detail dialog ----------------------------------------------------
+   Five sections in one order: header, status, files, details, actions. The
+   header and the action bar stay pinned; on a phone the dialog is a full-screen
+   sheet. Every progress bar is .bar, every pending button shows .spinner, every
+   line that must stay on one line is [data-single-line]. */
+#job-detail { padding: 0; }
+#job-detail[open] { display: flex; flex-direction: column; }
+#job-detail > * { flex: 0 0 auto; min-width: 0; }
+#job-detail [hidden] { display: none !important; }
+#job-detail [data-single-line] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+#job-detail .dialog-connection { margin: 0; padding: 6px 16px; }
+.jd-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 52px;
+  padding: 4px 8px 4px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.jd-header h2 { flex: 1 1 auto; margin: 0; font-size: 16px; line-height: 1.3; }
+.jd-header .icon-button { flex: 0 0 44px; display: inline-grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; color: var(--icon); font-size: 24px; line-height: 1; }
+.jd-header .icon-button svg { width: 18px; height: 18px; }
+.jd-status { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 16px 12px; }
+.detail-status { display: flex; }
+.detail-status .badge { margin: 0; }
+#detail-summary { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
+#detail-summary > * { margin: 0; min-width: 0; }
+.jd-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+.jd-headline { margin: 0; font: 600 15px/1.35 var(--body); font-variant-numeric: tabular-nums; }
+.jd-line { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.jd-sentence, .jd-note { margin: 0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.jd-step { color: var(--ink); }
+.jd-live { display: flex; align-items: center; gap: 6px; }
+.jd-dot { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: var(--forest); }
+.jd-dot.warn { background: var(--warning); }
+.jd-dot.bad { background: var(--danger); }
+.bar { display: block; position: relative; width: 100%; overflow: hidden; border-radius: 3px; background: var(--track); }
+.bar[data-bar="hero"] { height: 6px; }
+.bar[data-bar="mini"] { height: 3px; }
+.bar > i { display: block; height: 100%; border-radius: inherit; background: var(--forest); }
+.detail-facts { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.detail-fact { padding: 3px 9px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--subtle); color: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
+#detail-summary .batch-counts { display: flex; flex-wrap: wrap; gap: 6px; }
+#detail-summary .batch-counts .badge { margin: 0; }
+
+/* Files of a batch: one collapsed row each. */
+.jd-files { padding: 0 16px; }
+.jd-files-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px 0 8px; border-top: 1px solid var(--line); }
+.jd-files-head h3 { margin: 0; font: 600 14px/1.4 var(--body); }
+.jd-files-head p { margin: 0; color: var(--muted); font-size: 12px; }
+#batch-items-list { border-top: 1px solid var(--line); }
+.jd-file { border-bottom: 1px solid var(--line); }
+.jd-file-head { display: grid; grid-template-columns: minmax(0, 1fr) 20px; grid-template-areas: "name chevron" "meta chevron"; align-items: center; column-gap: 8px; row-gap: 2px; width: 100%; min-height: 48px; padding: 6px 0; border: 0; border-radius: 0; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.jd-file-head:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.jd-file-name { grid-area: name; font-size: 14px; font-weight: 500; line-height: 1.35; }
+.jd-file-meta { grid-area: meta; display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.3; }
+.jd-file-meta .status-badge { flex: 0 1 auto; min-width: 0; min-height: 0; margin: 0; padding: 1px 8px; font-size: 12px; }
+.jd-file-meta .status-badge > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jd-file-saved { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.jd-chevron { grid-area: chevron; justify-self: center; width: 8px; height: 8px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg); }
+.jd-file[data-open="true"] .jd-chevron { transform: rotate(225deg); }
+.jd-file-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 8px 0 12px; }
+.jd-file-body > * { margin: 0; min-width: 0; }
+.jd-file-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.jd-files .pagination { display: flex; gap: 8px; padding: 10px 0; }
+.jd-files .pagination button { flex: 1 1 0; min-height: 44px; }
+
+/* Rows under the summary: quiet disclosures. */
+.detail-rows { padding: 0 16px 8px; border-top: 1px solid var(--line); margin-top: 8px; }
+.detail-rows > * + * { margin-top: 0; }
+.detail-rows .workflow-history { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+.detail-rows .workflow-history:empty { display: none; }
+.command-history { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.detail-row, #detail-costs > .phase-costs { margin: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.detail-row > summary, .phase-costs.detail-row > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; font-size: 14px; font-weight: 600; list-style: none; }
+.detail-row > summary::-webkit-details-marker { display: none; }
+.detail-row > summary::before { content: "\25B8"; color: var(--muted); }
+.detail-row[open] > summary::before { content: "\25BE"; }
+.detail-row > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.detail-row > :not(summary) { margin-bottom: 10px; }
+.detail-row .stage-list { margin: 0 0 10px; }
+.detail-row .stage-list li:last-child { border-bottom: 0; }
+#detail-path p { margin: 4px 0; overflow-wrap: anywhere; }
+
+/* Buttons: one height, one shape, wherever they sit in the dialog. */
+.jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 4px 12px;
+  border: 1px solid var(--control-line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: 500 14px/1.2 var(--body);
+  text-align: center;
+}
+.jd-primary { border-color: var(--forest); background: var(--forest); color: var(--on-forest); }
+.jd-danger { color: var(--danger); border-color: var(--danger); }
+.jd-primary:disabled, .jd-secondary:disabled { border-color: var(--disabled-line); background: var(--disabled); color: var(--on-disabled); }
+.jd-primary:focus-visible, .jd-secondary:focus-visible, .jd-menu-item:focus-visible, .more-actions > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* The action bar: pinned to the bottom, at most three controls. */
+.jd-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.jd-actions > .jd-primary { flex: 3 1 0; min-width: 0; }
+.jd-actions > .jd-secondary { flex: 2 1 0; min-width: 0; }
+.jd-actions .more-actions { position: relative; flex: 0 0 44px; }
+.jd-actions .more-actions > summary { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--control-line); border-radius: 6px; font-size: 20px; line-height: 1; list-style: none; cursor: pointer; }
+.jd-actions .more-actions > summary::-webkit-details-marker { display: none; }
+.jd-actions .more-actions[open] > summary { background: var(--hover); }
+.jd-actions .more-menu { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 4; display: grid; gap: 4px; min-width: 200px; max-width: calc(100vw - 32px); padding: 6px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); box-shadow: 0 8px 24px var(--shadow); }
+.jd-menu-item { justify-content: flex-start; border-color: transparent; text-align: left; white-space: nowrap; }
+.jd-actions svg { display: none; }
+.jd-actions .action-label { display: inline; }
+
+/* A pending button shows one real spinner in place of its icon. */
+.spinner { display: none; }
+#job-detail .button-pending::before { content: none; }
+#job-detail .button-pending { padding-inline: 6px; gap: 4px; }
+#job-detail .spinner { display: inline-block; box-sizing: border-box; flex: 0 0 14px; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: pending-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { #job-detail .spinner { animation: none; } }
+
+/* A phone gets the whole screen. */
+@media (max-width: 640px) {
+  #job-detail { inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; }
+  .jd-header { padding-top: calc(4px + env(safe-area-inset-top)); }
+}
+/* Inside the dialog nothing is smaller than 12px, badges included. */
+#job-detail .badge, #job-detail .status-symbol { font-size: 12px; line-height: 1.3; }
+.jd-header { gap: 6px; }
+.jd-file-meta .status-badge { min-height: 0; }
+#job-detail .technical-reason > summary { display: flex; align-items: center; min-height: 44px; cursor: pointer; font-size: 13px; }
+@media (max-width: 300px) {
+  .jd-actions { flex-wrap: wrap; }
+  .jd-actions > :first-child { flex-basis: 100%; }
+  .jd-actions { padding-top: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
 }

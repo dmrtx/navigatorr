@@ -1,0 +1,14 @@
+{
+  "name": "navigatorr-layout-checks",
+  "private": true,
+  "type": "module",
+  "description": "Real-browser layout checks for the maintenance console (mobile first).",
+  "scripts": {
+    "verify": "node verify.mjs",
+    "verify:full": "LAYOUT_PROFILE=full node verify.mjs",
+    "inspect": "node inspect.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.56.1"
+  }
+}
