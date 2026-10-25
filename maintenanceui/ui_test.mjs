@@ -864,6 +864,107 @@ test("a folder row is never part of a range", () => {
   assert.deepEqual(picked(h), ["a", "b"]);
 });
 
+// Dragging over the checkboxes, and "Select range" for screens with no Shift key.
+// A tap as the page sees it: the click, then the change event that records the row.
+const tapRow = (h, row, shiftKey = false) => { clickRow(h, row, shiftKey); h.run(`state.folderSelected.${row.checked ? "add" : "delete"}(${JSON.stringify(row.dataset.selection)})`); };
+const withRects = rows => rows.forEach((row, i) => { row.getBoundingClientRect = () => ({ top: i * 40, bottom: i * 40 + 40 }); });
+const pointer = (h, type, rowIndex, extra = {}) => { const list = h.elements.get("library-items"); const row = extra.target; const event = { type, pointerId: 1, pointerType: "touch", button: 0, isPrimary: true, clientY: rowIndex * 40 + 20, target: row, preventDefault() {}, ...extra }; list.listeners.get(type)(event); };
+const dragFrom = (h, rows, from) => pointer(h, "pointerdown", from, { target: rows[from] });
+const dragTo = (h, to) => pointer(h, "pointermove", to);
+const dragEnd = (h, to, type = "pointerup") => pointer(h, type, to);
+
+test("dragging down the checkboxes ticks every file crossed; a tap on one row is left alone", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "b", "c", "d", "e"], ["dir"]);
+  withRects(rows);
+  // Down and up on the same row: nothing is ticked by the drag, the click does it.
+  dragFrom(h, rows, 1); dragTo(h, 1); dragEnd(h, 1);
+  assert.deepEqual(picked(h), []);
+  tapRow(h, rows[0]);
+  assert.deepEqual(picked(h), ["a"]);
+  // Down on an empty row and drag down: that row and every one crossed are ticked.
+  dragFrom(h, rows, 1); dragTo(h, 2); dragTo(h, 3);
+  assert.deepEqual(picked(h), ["a", "b", "c", "d"]);
+  // Back up one: the row left behind returns to how it was.
+  dragTo(h, 2);
+  assert.deepEqual(picked(h), ["a", "b", "c"]);
+  dragEnd(h, 2);
+  // The click that follows the release does not flip the last row back.
+  let prevented = false;
+  h.elements.get("library-items").listeners.get("click")({ target: rows[2], shiftKey: false, preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.deepEqual(picked(h), ["a", "b", "c"]);
+  // The row the drag ended on is where Shift+click extends from.
+  tapRow(h, rows[4], true);
+  assert.deepEqual(picked(h), ["a", "b", "c", "d", "e"]);
+});
+
+test("a drag that starts on a ticked row unticks, upward too; a cancelled drag puts everything back", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "b", "c", "d"]);
+  withRects(rows);
+  rows.forEach(row => { row.checked = true; });
+  h.run('state.folderSelected=new Set(["/m/a","/m/b","/m/c","/m/d"])');
+  dragFrom(h, rows, 3); dragTo(h, 2); dragTo(h, 1);
+  assert.deepEqual(picked(h), ["a"]);
+  dragEnd(h, 1, "pointercancel");
+  assert.deepEqual(picked(h), ["a", "b", "c", "d"]);
+  assert.deepEqual(rows.map(r => r.checked), [true, true, true, true]);
+  // After a cancel no click is swallowed.
+  let prevented = false;
+  h.elements.get("library-items").listeners.get("click")({ target: rows[0], shiftKey: false, preventDefault() { prevented = true; } });
+  assert.equal(prevented, false);
+});
+
+test("a drag cannot start on a folder row, with a second finger or with another mouse button", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "dir", "b", "c"], ["dir"]);
+  withRects(rows);
+  dragFrom(h, rows, 1); dragTo(h, 2); dragTo(h, 3); dragEnd(h, 3);
+  assert.deepEqual(picked(h), []);
+  pointer(h, "pointerdown", 0, { target: rows[0], pointerType: "mouse", button: 2 }); dragTo(h, 2); dragEnd(h, 2);
+  pointer(h, "pointerdown", 0, { target: rows[0], isPrimary: false }); dragTo(h, 2); dragEnd(h, 2);
+  assert.deepEqual(picked(h), []);
+  // A folder row in the middle of a drag is skipped, not ticked.
+  dragFrom(h, rows, 0); dragTo(h, 1); dragTo(h, 2); dragEnd(h, 2);
+  assert.deepEqual(picked(h), ["a", "b"]);
+});
+
+test("Select range arms the next tap as a Shift+click, only once a file is ticked", () => {
+  const h = harness();
+  const rows = selectionRows(h, ["a", "b", "c", "d"]);
+  h.run("controls=()=>{}");
+  const button = h.elements.get("select-range");
+  // Nothing ticked yet: the button does not arm.
+  button.listeners.get("click")();
+  assert.equal(h.run("state.rangeArmed"), false);
+  tapRow(h, rows[1]);
+  assert.equal(h.run("rangeAnchorReady()"), true);
+  button.listeners.get("click")();
+  assert.equal(h.run("state.rangeArmed"), true);
+  // Tapping the same button again cancels it.
+  button.listeners.get("click")();
+  assert.equal(h.run("state.rangeArmed"), false);
+  button.listeners.get("click")();
+  tapRow(h, rows[3]);
+  assert.deepEqual(picked(h), ["b", "c", "d"]);
+  assert.equal(h.run("state.rangeArmed"), false);
+  // An armed tap on a ticked row still ticks the range rather than clearing it.
+  rows[1].checked = false; h.run('state.folderSelected.delete("/m/b")');
+  tapRow(h, rows[1]);
+  h.run("state.selectionAnchor='/m/d'");
+  button.listeners.get("click")();
+  tapRow(h, rows[2]);
+  assert.deepEqual(picked(h), ["b", "c", "d"]);
+  // Unticking the anchor row disarms and hides the button in the real controls().
+  const fresh = harness();
+  const list = selectionRows(fresh, ["a", "b", "c"]);
+  fresh.run('fileSelectionChanged=()=>{};state.libraryLoading=false;state.selectionLoading=false;state.selectionAnchor="/m/a";state.rangeArmed=true;');
+  list[0].checked = false;
+  fresh.run("state.rangeArmed=rangeAnchorReady()&&state.rangeArmed");
+  assert.equal(fresh.run("state.rangeArmed"), false);
+});
+
 test("Encode again sends the file back through the goal it already has", () => {
   const h = harness();
   const request = plan => h.run(`sameSettingsRequest(${JSON.stringify(plan)})`);

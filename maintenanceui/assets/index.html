@@ -261,6 +261,13 @@
                 <span id="selection-count" class="metadata"></span>
                 <button id="sort-size" class="quiet column-sort" aria-label="Sort by size">Size <span id="sort-size-direction" aria-hidden="true"></span></button>
               </div>
+              <div id="range-bar" class="range-bar" role="group" aria-label="Select several files" hidden>
+                <span id="range-hint" class="metadata"
+                  ><span class="hint-pointer">Drag over the checkboxes, or Shift+click or Shift+↑/↓, to select several files.</span
+                  ><span class="hint-touch">Drag down the checkboxes to select several files.</span></span
+                ><button id="select-range" class="quiet" aria-pressed="false" hidden>Select range</button
+                ><span id="range-status" class="metadata" aria-live="polite"></span>
+              </div>
               <div id="library-items" class="library-items"></div>
               <div class="list-footer">
                 <button id="library-more" class="quiet" hidden>Load more</button
