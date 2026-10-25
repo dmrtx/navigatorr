@@ -490,3 +490,66 @@ is in `promote_move_aside.go`. State: `recovery_proof`, `original_helper`,
   or an earlier process means a full read (through the mount if the helper is gone).
 - `duplicateBackupGuard` refuses any promotion that moves aside.
 - A proof from the same process also counts across waits, as the mount fingerprints do.
+
+### Stage 5b design: move aside for promotions that never read the original
+
+Found on the first real Replace file after stage 5 was deployed (Monogatari S02E02,
+1.78 GB, filesystem service, 2026-10-25): `recovery_mode: copy`,
+`recovery_mode_reason: original_not_read_again`, a 6 s `copy_file_range` copy on the NAS.
+Stage 5 never engaged. Every promotion admitted by the hash-once flow
+(`originalByMetadata`, `OriginalStatMod != ""`) returns early in `promotionChooseRecovery`
+because no full read of the original happens in the promotion, so no helper proof
+(`promotionKnownHelper`) and no mount fingerprint exist. That is the common case, so the
+design goal (no recovery copy, no read of the original) is not met until it is covered.
+
+**Trust model today.** The transcode pinned `OriginalSHA` once, while the worker copied the
+original, and accepted it by size + mtime. Promotion keeps to that: the original is the
+file whose size and mtime equal the transcode's (`promotionOriginalStatMatches`).
+
+**Proposal (revised after review).** For a `filesystem` metadata-mode promotion the helper's
+`Sample` of the original, taken when the recovery mode is chosen in `stepPromotePreserve`
+(`promotionChooseByHelperSample`), becomes the proof. Sonarr and Radarr keep the copy
+(`original_not_read_again`) until this is measured on `filesystem`.
+
+1. Preconditions, all required, else the copy with a reason that says which one failed:
+   `Identity.Complete`; `Identity.Size == OriginalBytes`; `Identity.MtimeNs` equal to
+   `OriginalStatMod` **after cutting both to 100 ns** (the mount reports SMB's 100 ns units, the NAS
+   filesystem the exact nanosecond; an exact comparison would never match and leave this stage
+   inactive). A mismatch is `helper_stat_mismatch` with the size flag and the mtime difference as
+   detail, never a path. The helper's digest must also equal the digest the mount computes over
+   the same ranges (`helper_and_mount_disagree`): a helper that points at another file than the
+   mount is found before the library path is touched. A leftover recovery file, or a sample
+   already recorded, keeps the copy (`earlier_recovery_file_present`). A helper that is down, an
+   incomplete identity or an unreadable mount keep `original_not_read_again`.
+2. `OriginalHelper = {Identity, Sample, Process}` and `RecoverySample = Sample`, saved in the same
+   `savePromotion` as the mode, before any intent. `RecoverySample` is mandatory: a move-aside
+   promotion without it fails closed (`verifyPromotionRecovery`), because after the move there is
+   nothing left to take the digest from.
+3. The helper-observed probe of the recovery directory and `RecoveryProof = "helper"` as in stage 5.
+   Mode is chosen once.
+4. Before the intent (`MoveAsideStartedAt == ""`), a restart or a long wait costs nothing:
+   `promotionReproveOriginalByHelper` accepts the file when the helper's identity (ctime included)
+   and digest equal the persisted proof. The process stamp does not matter here, since the basis of
+   the trust (stat + sampled digest) is persisted too. Any doubt, or an intent already durable,
+   reads the original in full against `OriginalSHA`, as in stage 5.
+5. The rename, the post-rename check (same inode, same digest, else a full read accepted only if it
+   equals `OriginalSHA`) and every later check of the recovery file (sampled ranges of `BackupPath`
+   against `RecoverySample` over the mount, about 8 MiB) are unchanged. With the intent durable
+   and the original still in place, a promotion that never read it keeps to its stat
+   (`verifyPromotionOriginalStable`), as before the move; the same holds for the copy fallback
+   after a refused rename.
+
+**Residual risk, unchanged.** A rewrite outside the sampled ranges with the mtime restored is not
+seen, exactly as with the mount's size + mtime today. The helper adds the inode, the change time
+at choice time and the agreement of two independent paths. A bound on the change time against the
+transcode's time was considered and left out: the transcode records no pin time, and a
+chmod/xattr by the NAS would turn it into a copy for no gain.
+
+**Full reads that remain, by design** (none loses data): a crash or restart after the intent is
+durable (`promote_move_aside.go`, `promotionVerifyRecovered`), a user restore or move back after a
+restart (`promotionFinishMoveBack`), and a helper that is down or cannot answer after the rename.
+
+**What must not change.** No path may fall to a full read of the original in the normal case; no
+helper answer ever decides "the original is gone"; the mode never changes after the intent is
+durable; restore/move-back/discard keep stage 5 semantics.
+

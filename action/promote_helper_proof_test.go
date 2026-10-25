@@ -10,7 +10,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -18,6 +20,8 @@ import (
 
 	"github.com/jakenesler/navigatorr/internal/nashelper"
 )
+
+var digestField = regexp.MustCompile(`"digest":"[^"]*"`)
 
 // proofHelper serves the harness root through a real helper. The test
 // filesystem has no btrfs identity, so every answer is rewritten to claim a
@@ -33,6 +37,24 @@ type proofHelper struct {
 	// justHashed lets the sample that closes a hash through: only a sample on
 	// its own can be answered not_found.
 	justHashed atomic.Bool
+	// hashedBodies keeps the request body of every hash.
+	hashedMu     sync.Mutex
+	hashedBodies []string
+	// digest, when set, replaces the digest every sample answers with.
+	digest atomic.Pointer[string]
+}
+
+// hashed counts the full hashes whose request named something containing sub.
+func (ph *proofHelper) hashed(sub string) int {
+	ph.hashedMu.Lock()
+	defer ph.hashedMu.Unlock()
+	n := 0
+	for _, b := range ph.hashedBodies {
+		if strings.Contains(b, sub) {
+			n++
+		}
+	}
+	return n
 }
 
 func attachProofHelper(t *testing.T, h *promotionHarness, complete bool) *proofHelper {
@@ -53,6 +75,9 @@ func attachProofHelper(t *testing.T, h *promotionHarness, complete bool) *proofH
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/hash":
 			ph.hashes.Add(1)
+			ph.hashedMu.Lock()
+			ph.hashedBodies = append(ph.hashedBodies, string(body))
+			ph.hashedMu.Unlock()
 			ph.justHashed.Store(true)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/sample":
 			ph.samples.Add(1)
@@ -66,6 +91,9 @@ func attachProofHelper(t *testing.T, h *promotionHarness, complete bool) *proofH
 		out := rec.Body.Bytes()
 		// The test filesystem's own answer depends on the OS (Linux reports a
 		// complete identity on ext4), so pin it either way.
+		if d := ph.digest.Load(); d != nil && r.URL.Path == "/v1/sample" {
+			out = digestField.ReplaceAll(out, []byte(`"digest":"`+*d+`"`))
+		}
 		if complete {
 			out = bytes.ReplaceAll(out, []byte(`"complete":false`), []byte(`"complete":true`))
 		} else {

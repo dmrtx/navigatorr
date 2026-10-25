@@ -79,7 +79,10 @@ func (e *Engine) promotionOriginalStatMatches(ctx context.Context, p *promotionS
 // recovery copy's, which is what recovering from it needs.
 func (e *Engine) promotionOriginalProved(ctx context.Context, p *promotionState) error {
 	err := e.promotionOriginalStatMatches(ctx, p)
-	if !errors.Is(err, errPromotionOriginalChanged) || p.RecoverySample == "" {
+	// RecoverySample alone does not say a recovery exists: a move aside records it
+	// at choice time. Only a published copy or a moved original makes the
+	// sampled ranges a stand-in for the stat.
+	if !errors.Is(err, errPromotionOriginalChanged) || p.RecoverySample == "" || !(p.BackupVerified || p.MovedAside) {
 		return err
 	}
 	got, sampleErr := e.promotionSampleDigestStable(ctx, p.OriginalPath, p.OriginalBytes)
@@ -199,6 +202,11 @@ func (e *Engine) verifyPromotionRecovery(ctx context.Context, p *promotionState,
 		return e.verifyPromotionHashStable(ctx, path, p.OriginalSHA)
 	}
 	want := p.RecoverySample
+	if want == "" && p.movesAside() {
+		// The original is the recovery once moved: there is nothing left to take
+		// the digest from.
+		return fmt.Errorf("the recovery sample of the original is missing")
+	}
 	if want == "" {
 		if err := e.promotionOriginalStatMatches(ctx, p); err != nil {
 			return err
