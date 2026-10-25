@@ -652,7 +652,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		if operationActive(r.inst.Status) {
 			activeWorkflows[roots[r.inst.ID]] = true
 		}
-		if r.inst.Status == store.ActionStatusWaitingDecision {
+		// A batch paused on request waits for Resume, not for a decision about a file.
+		if r.inst.Status == store.ActionStatusWaitingDecision && !(r.inst.ActionName == "transcode_batch" && operationValue(r, "paused") == true) {
 			decisionWorkflows[roots[r.inst.ID]] = true
 		}
 	}

@@ -7698,3 +7698,12 @@ test("files in a worker's line are not counted or labelled as running", () => {
   h.run('progressJob.activities=[{worker:{transcode_phase:"encoding"}},{worker:{transcode_phase:"queued"}}];');
   assert.equal(h.run('queuePresentation(progressJob).status'), "In progress");
 });
+
+test("a batch paused on request reads Paused, not Needs decision", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.status="waiting_decision";progressJob.paused=true;progressJob.waiting_options=[{decision:"resume"}];');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Paused");
+  assert.equal(h.run('statusClass("Paused")'), "neutral");
+  h.run('progressJob.paused=false;');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
+});
