@@ -868,14 +868,17 @@ function drainSummary(drain) {
   if (!drain?.enabled) return null;
   if (drain.ready_for_deploy) return {state: "ready", label: "Paused", text: "Paused — ready to deploy"};
   const parts = [];
-  if (drain.running) parts.push(`${filesWord(drain.running)} still encoding`);
+  const waiting = Math.min(drain.waiting || 0, drain.running || 0);
+  const encoding = (drain.running || 0) - waiting;
+  if (encoding) parts.push(`${filesWord(encoding)} still encoding`);
+  if (waiting) parts.push(`${waiting} waiting for a turn on a worker`);
   if (drain.publication_pending) parts.push(`${filesWord(drain.publication_pending)} encoded but not saved yet`);
   return {state: "pausing", label: "Pausing", text: `Pausing — ${parts.join(", ") || "checking the workers"}`};
 }
-const drainJobLabels = {running: "Encoding", publication_pending: "Not saved yet"};
+const drainJobLabels = {running: "Encoding", waiting: "Waiting for a turn", publication_pending: "Not saved yet"};
 function drainJobRow(job) {
   const row = node("div", "", "worker-drain-job");
-  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
+  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.waiting ? "waiting" : job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
   const actions = node("div", "", "batch-file-actions");
   if (job.state === "publication_pending") {
     const retry = button("Try again", () => jobControl(job.action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}).then(() => refreshWorkers()), "primary");

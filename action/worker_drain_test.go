@@ -211,6 +211,10 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 	running := submitted()
 	running["worker"] = transcode.DefaultWorkerName
 	seedActionInstance(t, st, "running", "transcode_media", StatusWaitingExternal, 4, "", map[string]any{"path": "/Volumes/media/one.mkv"}, running)
+	// Accepted by the worker but still in its queue: open, yet not encoding.
+	lined := submitted()
+	lined["worker"], lined["transcode_status"] = transcode.DefaultWorkerName, "queued"
+	seedActionInstance(t, st, "lined", "transcode_media", StatusWaitingExternal, 4, "", map[string]any{"path": "/Volumes/media/seven.mkv"}, lined)
 	pending := submitted()
 	pending["recovery_required"] = true
 	seedActionInstance(t, st, "unsaved", "transcode_media", StatusWaitingDecision, 4, "", map[string]any{"path": "/Volumes/media/two.mkv"}, pending)
@@ -238,17 +242,17 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 
 	setDrain(t, e, true)
 	got := e.WorkerDrainStatus(ctx)
-	if got.Running != 1 || got.PublicationPending != 1 || got.Queued != 1 || got.ReadyForDeploy {
+	if got.Running != 2 || got.Waiting != 1 || got.PublicationPending != 1 || got.Queued != 1 || got.ReadyForDeploy {
 		t.Fatalf("counts: %+v", got)
 	}
 	states := drainJobStates(got)
-	if states["running"] != "running" || states["unsaved"] != "publication_pending" || states["held"] != "queued" || len(states) != 3 {
+	if states["running"] != "running" || states["lined"] != "running" || states["unsaved"] != "publication_pending" || states["held"] != "queued" || len(states) != 4 {
 		t.Fatalf("jobs: %+v", got.Jobs)
 	}
 	if got.Jobs[0].ActionID != "unsaved" || got.Jobs[0].File != "ep.mkv" {
 		t.Fatalf("publication-pending jobs go first with the file name only: %+v", got.Jobs)
 	}
-	if len(got.Workers) != 1 || got.Workers[0].ReadyForDeploy || got.Workers[0].Running != 1 || got.Workers[0].PublicationPending != 1 {
+	if len(got.Workers) != 1 || got.Workers[0].ReadyForDeploy || got.Workers[0].Running != 2 || got.Workers[0].Waiting != 1 || got.Workers[0].PublicationPending != 1 {
 		t.Fatalf("workers: %+v", got.Workers)
 	}
 
@@ -260,6 +264,7 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 		}
 	}
 	finish("running")
+	finish("lined")
 	if got = e.WorkerDrainStatus(ctx); got.ReadyForDeploy || got.PublicationPending != 1 {
 		t.Fatalf("an unsaved encode still blocks a deploy: %+v", got)
 	}

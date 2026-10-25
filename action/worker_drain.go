@@ -137,7 +137,7 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 			continue
 		}
 		name := e.resolveWorker(r.Worker)
-		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state}
+		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state, Waiting: state == transcode.DrainJobRunning && r.WorkerQueued}
 		if r.Path != "" {
 			job.File, job.Path = filepath.Base(r.Path), r.Path
 		}
@@ -146,8 +146,14 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 		switch state {
 		case transcode.DrainJobRunning:
 			out.Running++
+			if job.Waiting {
+				out.Waiting++
+			}
 			if w != nil {
 				w.Running++
+				if job.Waiting {
+					w.Waiting++
+				}
 				w.InFlight = append(w.InFlight, job)
 			} else {
 				unmatched++

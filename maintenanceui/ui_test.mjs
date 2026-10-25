@@ -7211,6 +7211,25 @@ test("a draining worker shows its progress, lists open jobs and offers Resume", 
   assert.deepEqual(buttonLabels(rows[1]), ["Try again", "View file", "Show in Files"]);
 });
 
+test("the pause banner tells files encoding from files waiting for a turn on a worker", () => {
+  const h = harness();
+  h.context.info = drainInfo({
+    running: 4, waiting: 2, queued: 5,
+    workers: [{ name: "alpha", reachable: true, running: 4, waiting: 2, ready_for_deploy: false, reason: "4 running" }],
+    jobs: [
+      { action_id: "t-1", worker: "alpha", file: "Encoding.mkv", state: "running" },
+      { action_id: "t-2", worker: "alpha", file: "Lined.mkv", state: "running", waiting: true },
+    ],
+  });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 2 files still encoding, 2 waiting for a turn on a worker");
+  const labels = h.elements.get("worker-drain-jobs").children.map((row) => flatten(row).filter((e) => e.className === "badge").map((e) => e.textContent).join());
+  assert.deepEqual(labels, ["Encoding · alpha", "Waiting for a turn · alpha"]);
+  h.context.info = drainInfo({ running: 3, waiting: 3 });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 3 waiting for a turn on a worker");
+});
+
 test("worker drain reports ready for deploy only when the server says so", () => {
   const h = harness();
   h.context.info = drainInfo({ ready_for_deploy: true });
