@@ -7124,6 +7124,7 @@ test("Show in Files opens the Files tab on the folder and file, inside the root 
   assert.equal(params.get("source"), "folder:/media/tv");
   assert.equal(params.get("folder"), "/media/tv/Show/Season 4");
   assert.equal(params.get("file"), "/media/tv/Show/Season 4/Show S04E13.mkv");
+  assert.equal(params.get("locate"), "1", "showing a file does not open its encoding form");
   // A sibling folder that merely shares a prefix is not inside the root.
   assert.equal(query("/media2/clip.mkv"), null);
   assert.equal(query("relative/clip.mkv"), null);
@@ -7133,6 +7134,8 @@ test("Show in Files opens the Files tab on the folder and file, inside the root 
   const route = h.run(`navigationRoute("?${params.toString().replace(/"/g, "")}")`);
   assert.equal(route.tab, "library");
   assert.equal(route.file, "/media/tv/Show/Season 4/Show S04E13.mkv");
+  assert.equal(route.locate, true);
+  assert.equal(h.run('navigationRoute("?view=files&file=%2Fa.mkv")').locate, false);
 });
 
 test("Show in Files goes to the file, and says so when the file is outside the media folders", async () => {
@@ -7697,4 +7700,69 @@ test("files in a worker's line are not counted or labelled as running", () => {
   assert.equal(h.run('queuePresentation(progressJob).status'), "Queued on worker");
   h.run('progressJob.activities=[{worker:{transcode_phase:"encoding"}},{worker:{transcode_phase:"queued"}}];');
   assert.equal(h.run('queuePresentation(progressJob).status'), "In progress");
+});
+
+test("Show in Files only locates the file: it is ticked and in view, and its encoding form stays closed", async () => {
+  const h = harness();
+  h.context.calls = [];
+  h.run(`controls = () => {}; loadJobs = async () => {}; state.info = {roots: ["/media"], services: []};
+    loadLibrary = async () => {};
+    api = async () => ({items: [{path: "/media/tv/ep.mkv", is_dir: false}]});
+    locateFileRow = async (path) => calls.push(path);`);
+  await h.run('applyNavigation(navigationRoute("?view=files&source=folder%3A%2Fmedia&folder=%2Fmedia%2Ftv&file=%2Fmedia%2Ftv%2Fep.mkv&locate=1"))');
+  assert.deepEqual(h.context.calls, ["/media/tv/ep.mkv"]);
+  assert.equal(h.run("state.fileStep"), "browse");
+  assert.equal(h.elements.get("path").value, "");
+  // A saved link that asks for the form (configure=1) still opens it.
+  await h.run('applyNavigation(navigationRoute("?view=files&source=folder%3A%2Fmedia&folder=%2Fmedia%2Ftv&file=%2Fmedia%2Ftv%2Fep.mkv&configure=1"))');
+  assert.equal(h.run("state.fileStep"), "configure");
+  assert.equal(h.elements.get("path").value, "/media/tv/ep.mkv");
+});
+
+test("locating a file loads further pages of its folder until the row is there", async () => {
+  const h = harness();
+  h.context.ticked = [];
+  h.context.loads = 0;
+  h.run(`state.libraryHasMore = true;
+    let present = false;
+    const row = {dataset: {selection: "/media/z.mkv"}, closest: () => ({classList: {add() {}}, scrollIntoView() { scrolled = true; }})};
+    var scrolled = false;
+    fileChecks = () => present ? [row] : [];
+    loadLibrary = async () => { loads++; if (loads === 3) present = true; };
+    selectOneFile = (key) => ticked.push(key);
+    fileSelectionChanged = () => {};`);
+  await h.run('locateFileRow("/media/z.mkv")');
+  assert.equal(h.context.loads, 3);
+  assert.deepEqual(h.context.ticked, ["/media/z.mkv"]);
+  assert.equal(h.run("scrolled"), true);
+  // A row that never turns up ends when the folder has no more pages.
+  h.context.loads = 0;
+  h.run('state.libraryHasMore = false; fileChecks = () => [];');
+  await h.run('locateFileRow("/media/missing.mkv")');
+  assert.equal(h.context.loads, 0);
+});
+
+test("returning to Activity restores how far down the list was; other tabs and re-clicks start at the top", async () => {
+  const h = harness();
+  const scrolls = [];
+  h.context.window = { scrollY: 1400, scrollTo: ({ top }) => scrolls.push(top), history: { pushState() {}, replaceState() {} }, location: { pathname: "/", search: "" } };
+  h.run('controls = () => {}; loadJobs = async () => {}; loadLibrary = async () => {}; state.tab = "jobs";');
+  h.run('selectTab("library")');
+  assert.equal(h.run("state.jobsScroll"), 1400);
+  h.context.window.scrollY = 0;
+  h.run('selectTab("jobs")');
+  assert.deepEqual(scrolls, [0, 1400]);
+  assert.equal(h.run("state.jobsRestore"), 1400);
+  // Tapping Activity while on it goes to the top, not back to an old position.
+  h.run('selectTab("jobs")');
+  assert.equal(scrolls.at(-1), 0);
+  assert.equal(h.run("state.jobsRestore"), null);
+  // The list is rebuilt after loading, so the position is set again once it is as long as it was.
+  const h2 = harness();
+  const scrolls2 = [];
+  h2.context.window = { scrollY: 0, scrollTo: ({ top }) => scrolls2.push(top), history: { pushState() {}, replaceState() {} }, location: { pathname: "/", search: "" } };
+  h2.run('api = async () => ({jobs: [{id: "j1", action_name: "transcode_media", status: "completed"}], total: 1, has_more: false}); state.tab = "jobs"; state.jobsRestore = 900;');
+  await h2.run("loadJobs()");
+  assert.deepEqual(scrolls2, [900]);
+  assert.equal(h2.run("state.jobsRestore"), null);
 });
