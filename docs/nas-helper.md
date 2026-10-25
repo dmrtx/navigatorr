@@ -206,7 +206,10 @@ bytes on the network.
 
 1. Shared sampled-range digest package (no behaviour change).
 2. The read-only helper binary (`identity`, `hash`, `sample`).
-3. Coordinator client and configuration (off when unset).
+3. Coordinator client and configuration (off when unset). Done: `nas_helper`
+   config block, `internal/nashelper` client (restart detection by instance id,
+   no redirects, job cancelled when the caller gives up), a `nas_helper`
+   section in `diagnostics`; nothing else reads it yet.
 4. Candidate checks through the helper: plan hash against the worker's
    attestation (required), SMB sample cross-check, identity between waits,
    full local read by the helper before recovery data is removed. Any helper

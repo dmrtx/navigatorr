@@ -10,6 +10,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/sabnzbd"
@@ -33,6 +34,10 @@ type DiagnosticsDeps struct {
 	SabClient *sabnzbd.Client
 	Store     *store.Store
 	Workers   *transcode.WorkerSet
+	// NASHelper is the optional read-only helper on the NAS; NASHelperErr is why
+	// it could not be built when it is configured but unusable.
+	NASHelper    *nashelper.Client
+	NASHelperErr error
 }
 
 func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
@@ -269,6 +274,13 @@ func registerDiagnosticsTools(s *server.MCPServer, d DiagnosticsDeps) {
 			}
 			if tcInfo != nil {
 				res["transcode"] = tcInfo
+			}
+			if d.Config != nil && d.Config.NASHelper.Enabled() {
+				helperInfo := inspectNASHelper(ctx, d.Config.NASHelper, d.NASHelper, d.NASHelperErr, checkConn)
+				res["nas_helper"] = helperInfo
+				if st := helperInfo["status"]; st != "ok" && st != "not_checked" {
+					res["status"] = "degraded"
+				}
 			}
 
 			return toolJSON(res), nil

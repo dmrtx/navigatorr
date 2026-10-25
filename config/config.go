@@ -35,6 +35,7 @@ type Config struct {
 	Concurrency       ConcurrencyConfig        `yaml:"concurrency"`
 	MCP               MCPConfig                `yaml:"mcp"`
 	Web               WebConfig                `yaml:"web"`
+	NASHelper         NASHelperConfig          `yaml:"nas_helper"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 	LoadedPath        string                   `yaml:"-"`
@@ -1025,6 +1026,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.Web.ValidateAuth(); err != nil {
 		return nil, err
+	}
+	if err := cfg.NASHelper.Validate(); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	if err := cfg.Transcode.Validate(); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)

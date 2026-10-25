@@ -258,6 +258,16 @@ queue:
   token: "imaginary-secure-bearer-token"
   path: ""                      # Defaults to ~/.config/navigatorr/queue.json
 
+# Optional read-only helper that runs on the NAS next to the library
+# (docs/nas-helper.md). Off when `url` is empty. Stage 3 only reports it in
+# diagnostics; later stages use it to hash and identify files locally on the NAS.
+# nas_helper:
+#   url: "http://nas.example:8099"
+#   token_file: "/run/secrets/navigatorr-nas-helper-token"  # at least 32 characters
+#   path_mappings:                # coordinator path -> the path the helper sees
+#     - local: /volume1/Media
+#       remote: /volume1/Media
+
 # ==============================================================================
 # 7. PERSISTENT STATE & DATABASE (SQLITE)
 # ==============================================================================
