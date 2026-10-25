@@ -55,6 +55,15 @@ func sameHelperFile(a, b nashelper.Identity) bool {
 	return a == b
 }
 
+// sameHelperInode is the same file, size included, whatever its times say.
+func sameHelperInode(a, b nashelper.Identity) bool {
+	if !a.Complete || !b.Complete {
+		return false
+	}
+	a.MtimeNs, b.MtimeNs, a.CtimeNs, b.CtimeNs = 0, 0, 0, 0
+	return a == b
+}
+
 // promotionKnownHelper is the helper proof this execution's full hash of path to
 // sha recorded, or nil when there was none or it was not complete.
 func promotionKnownHelper(ctx context.Context, path, sha string) *helperProof {
@@ -213,6 +222,45 @@ func (e *Engine) helperIdentity(ctx context.Context, path string) (nashelper.Ide
 	return res.Identity, nil
 }
 
+// helperProbeQuiet is how long a probe file's identity must stay unchanged before
+// it counts as settled; helperProbePoll is how often it is read.
+var (
+	helperProbeQuiet = 3 * time.Second
+	helperProbePoll  = 200 * time.Millisecond
+	// helperProbeSettleLimit bounds the wait for a file whose times never settle.
+	helperProbeSettleLimit = 15 * time.Second
+)
+
+// helperIdentityQuiet is helperIdentity once the file's identity has stopped
+// changing for helperProbeQuiet. A file whose times keep moving is not settled
+// and says nothing yet about the filesystem.
+func (e *Engine) helperIdentityQuiet(ctx context.Context, path string) (nashelper.Identity, error) {
+	cur, err := e.helperIdentity(ctx, path)
+	if err != nil {
+		return nashelper.Identity{}, err
+	}
+	start := time.Now()
+	stableSince := start
+	for time.Since(stableSince) < helperProbeQuiet {
+		if time.Since(start) > helperProbeSettleLimit {
+			return nashelper.Identity{}, errors.New("the probe file's times kept changing after it was written")
+		}
+		select {
+		case <-ctx.Done():
+			return nashelper.Identity{}, ctx.Err()
+		case <-time.After(helperProbePoll):
+		}
+		next, err := e.helperIdentity(ctx, path)
+		if err != nil {
+			return nashelper.Identity{}, err
+		}
+		if next != cur {
+			cur, stableSince = next, time.Now()
+		}
+	}
+	return cur, nil
+}
+
 func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelper.Identity, error) {
 	fs := promotionFilesystemName(dir)
 	fail := func(step, detail string, err error, definitive bool) error {
@@ -237,7 +285,10 @@ func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelpe
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepCreate, "", err, false)
 	}
-	created, err := e.helperIdentity(ctx, from)
+	// The file was just written over the mount. Samba applies a write's
+	// timestamps up to a couple of seconds after the handle closes, which is not
+	// a rename changing anything: wait until they stop moving.
+	created, err := e.helperIdentityQuiet(ctx, from)
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepStat, "", err, false)
 	}
@@ -247,11 +298,14 @@ func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelpe
 	if err := renamePromotionNoReplace(from, to); err != nil {
 		return nashelper.Identity{}, fail(probeStepRename, "", err, promotionCopyUnsupported(err))
 	}
-	moved, err := e.helperIdentity(ctx, to)
+	// A rename never touches the modification time, so what is compared is the
+	// file itself; the identity is read once its times have settled again, and
+	// becomes the baseline of the change-time check below.
+	moved, err := e.helperIdentityQuiet(ctx, to)
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepStat, "", err, false)
 	}
-	if !sameHelperFile(created, moved) {
+	if !sameHelperInode(created, moved) {
 		return nashelper.Identity{}, fail(probeStepRenameInode, "changed: "+helperIdentityDiff(created, moved), nil, true)
 	}
 	// A no-replace rename onto an existing file must be refused: restoring the
