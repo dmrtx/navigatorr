@@ -172,9 +172,9 @@ func TestSchedulerSplitNeverAdmitsPastEitherPool(t *testing.T) {
 	if err != nil || started != 3 {
 		t.Fatalf("started %d, err %v; want 1 video + 2 podcast", started, err)
 	}
-	video, podcast, err := w.countActiveJobsByKind("")
-	if err != nil || video != 1 || podcast != 2 {
-		t.Fatalf("running video %d podcast %d, err %v", video, podcast, err)
+	use, err := w.countActiveJobsByKind("")
+	if err != nil || use.Video != 1 || use.Podcast != 2 {
+		t.Fatalf("running video %d podcast %d, err %v", use.Video, use.Podcast, err)
 	}
 }
 
@@ -428,18 +428,19 @@ func TestSplitNeverAdmitsPastTheCeiling(t *testing.T) {
 	if err != nil || started != 1 {
 		t.Fatalf("started %d (err %v); one slot of the ceiling is free", started, err)
 	}
-	video, podcast, _ := w.countActiveJobsByKind("")
-	if video+podcast > 4 {
-		t.Fatalf("%d video + %d podcast jobs on a 4-slot worker", video, podcast)
+	use, _ := w.countActiveJobsByKind("")
+	if use.Video+use.Podcast > 4 {
+		t.Fatalf("%d video + %d podcast jobs on a 4-slot worker", use.Video, use.Podcast)
 	}
 }
 
 func TestSlotLimitsHasRoomHonoursTheCeilingInEveryMode(t *testing.T) {
 	split := slotLimits{Ceiling: 4, Video: 3, Podcast: 1, Split: true}
-	if split.hasRoom(slotKindVideo, 0, 4) || split.hasRoom(slotKindPodcast, 4, 0) || !split.hasRoom(slotKindVideo, 2, 1) {
+	video, podcast := jobSlot{kind: slotKindVideo}, jobSlot{kind: slotKindPodcast}
+	if split.hasRoom(video, slotCounts{Podcast: 4}) || split.hasRoom(podcast, slotCounts{Video: 4}) || !split.hasRoom(video, slotCounts{Video: 2, Podcast: 1}) {
 		t.Fatal("split mode must stop at the ceiling and at the pool")
 	}
-	if shared := (slotLimits{Ceiling: 2, Video: 2, Podcast: 2}); shared.hasRoom(slotKindVideo, 1, 1) || !shared.hasRoom(slotKindPodcast, 1, 0) {
+	if shared := (slotLimits{Ceiling: 2, Video: 2, Podcast: 2}); shared.hasRoom(video, slotCounts{Video: 1, Podcast: 1}) || !shared.hasRoom(podcast, slotCounts{Video: 1}) {
 		t.Fatal("shared mode")
 	}
 }

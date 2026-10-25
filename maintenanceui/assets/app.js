@@ -5460,8 +5460,13 @@ function slotPools(activity) {
 }
 function renderSlotUsage(activity) {
   const slots = activity.slots, usage = $("worker-slot-usage");
-  usage.hidden = !slots?.split;
-  if (slots?.split) usage.textContent = `Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total} · Ceiling ${slots.ceiling}`;
+  const x265 = slots?.x265?.total > 0 ? slots.x265 : null;
+  usage.hidden = !slots?.split && !x265;
+  if (!usage.hidden) usage.textContent = [
+    slots.split ? `Video ${slots.video.used}/${slots.video.total} · Podcast ${slots.podcast.used}/${slots.podcast.total}` : null,
+    x265 ? `x265 ${x265.used}/${x265.total}` : null,
+    `Ceiling ${slots.ceiling}`,
+  ].filter(Boolean).join(" · ");
   $("worker-slot-split").hidden = !slots || slots.ceiling < 2;
   if (!slots) return;
   $("worker-slot-ceiling").textContent = `This node runs ${slots.ceiling} parallel jobs${slots.host_cpus ? ` on ${slots.host_cpus} CPUs` : ""}. Video and podcast slots together cannot exceed them.`;
@@ -5498,18 +5503,19 @@ function renderNodePicker(nodes, selected) {
 // A picked node that does not report: its settings cannot be read or saved.
 function renderUnavailableNode(selected) {
   state.workerSlots = null;
-  state.slotFormDirty = state.parallelFormDirty = false;
+  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = false;
   $("settings-node").hidden = false;
   $("worker-parallel-summary").hidden = true;
   $("worker-parallel-form").hidden = true;
+  $("worker-x265-row").hidden = true;
   $("worker-slot-split").hidden = true;
   $("worker-slot-usage").hidden = true;
   $("worker-parallel-limit").textContent = `${selected.name} is unavailable. Its settings can be changed once it reports again.`;
 }
 $("settings-node-pick").addEventListener("change", () => {
   state.slotNode = $("settings-node-pick").value;
-  state.slotFormDirty = state.parallelFormDirty = false;
-  $("worker-parallel-note").textContent = $("worker-slot-note").textContent = "";
+  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = false;
+  $("worker-parallel-note").textContent = $("worker-slot-note").textContent = $("worker-x265-note").textContent = "";
   renderWorkerActivity(state.activityData);
 });
 async function saveWorkerSlots(video, podcast) {
@@ -5551,6 +5557,46 @@ function renderParallelJobs(activity) {
     $("parallel-jobs").max = limit;
   }
 }
+// How many x265 encodes the node runs at once, next to the parallel jobs. Only
+// a worker that reports the x265 pool takes the limit; with one parallel job
+// there is nothing to share, so the row stays out of the way until a limit is set.
+function renderX265Limit(activity) {
+  const slots = activity.slots, pool = slots?.x265;
+  const row = $("worker-x265-row"), pick = $("x265-limit");
+  row.hidden = !pool || (slots.ceiling < 2 && !pool.total);
+  if (row.hidden) { $("worker-x265-note").textContent = ""; return; }
+  $("worker-x265-limit").textContent = pool.total
+    ? `At most ${pool.total} x265 ${pool.total === 1 ? "encode" : "encodes"} at once · ${pool.used} running now. VideoToolbox encodes use the other slots.`
+    : "No limit. x265 encodes can fill every slot.";
+  // Never overwrite what is being picked and has not been saved.
+  if (state.x265FormDirty || $("worker-x265-form").contains(document.activeElement)) return;
+  if (![...pick.options].some(o => o.value === String(pool.total))) {
+    const extra = node("option", String(pool.total));
+    extra.value = String(pool.total);
+    pick.append(extra);
+  }
+  pick.value = String(pool.total);
+}
+async function saveX265Limit(limit) {
+  const note = $("worker-x265-note"), slots = state.workerSlots;
+  note.textContent = "Saving…";
+  try {
+    const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
+    const result = await api(workerSlotsPath(), {...split, x265_slots: limit});
+    state.x265FormDirty = false;
+    const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
+    for (const warning of result.warnings || []) parts.push(warning);
+    note.textContent = parts.join(" ");
+    void refreshWorkerActivity(true);
+  } catch (e) {
+    note.textContent = e.message;
+  }
+}
+$("worker-x265-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveX265Limit(Number($("x265-limit").value));
+});
+$("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; });
 // The rule a lower ceiling applies to the split (transcode.FitSlotSplit),
 // shown before saving.
 function parallelSplitNote(ceiling) {
@@ -5614,6 +5660,7 @@ function renderWorkerActivity(data) {
   renderNodePicker(nodes, selected);
   if (selected.available && selected.activity) {
     renderParallelJobs(selected.activity);
+    renderX265Limit(selected.activity);
     renderSlotUsage(selected.activity);
   } else {
     renderUnavailableNode(selected);
@@ -5732,7 +5779,10 @@ function slotEntries(activity, name) {
   }
   return entries;
 }
-const slotKind = job => job.kind === "podcast" ? "Podcast processing" : "Full conversion";
+// The encoder a full conversion runs, from the encode the action gave it
+// ("x265 CRF 22", "VideoToolbox quality 65"); unknown for a job without one.
+const slotEncoder = job => /x265/i.test(job.encoding || "") ? "x265" : /videotoolbox/i.test(job.encoding || "") ? "VideoToolbox" : "";
+const slotKind = job => job.kind === "podcast" ? "Podcast processing" : ["Full conversion", slotEncoder(job)].filter(Boolean).join(" · ");
 // Phone layout: a free slot is one line, a busy one the file, its bar and one
 // line of facts. Everything about the job is on the row; nothing needs a tap.
 function slotRow(entry) {

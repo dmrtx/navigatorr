@@ -2000,6 +2000,72 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   assert.equal(h.elements.get("settings-node").hidden,true);
 });
 
+test("the x265 limit is offered only by a worker that reports it, keeps unsaved picks and is saved without touching the split", async () => {
+  const h=harness();
+  h.context.calls=[];
+  h.run('api=async(path,body)=>{calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
+  h.elements.get("x265-limit").options=[{value:"0"},{value:"1"}];
+  const slots=x265=>({ceiling:2,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:false,video:{total:2,used:1},podcast:{total:2,used:0},...(x265?{x265}:{})});
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:1,jobs:[],slots:slots({total:0,used:0})}};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-x265-row").hidden,false);
+  assert.equal(h.elements.get("x265-limit").value,"0");
+  assert.match(h.elements.get("worker-x265-limit").textContent,/^No limit/);
+  assert.equal(h.elements.get("worker-slot-usage").hidden,true);
+  // A limit is shown with its use, in the usage line too.
+  h.context.activity.activity.slots=slots({total:1,used:1});
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("x265-limit").value,"1");
+  assert.match(h.elements.get("worker-x265-limit").textContent,/At most 1 x265 encode at once · 1 running now/);
+  assert.equal(h.elements.get("worker-slot-usage").hidden,false);
+  assert.equal(h.elements.get("worker-slot-usage").textContent,"x265 1/1 · Ceiling 2");
+  // An unsaved pick survives the next poll.
+  h.elements.get("x265-limit").value="0";
+  h.elements.get("x265-limit").listeners.get("change")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("x265-limit").value,"0");
+  // Saving sends the limit with the split the worker runs, and no ceiling.
+  await h.run('saveX265Limit(1)');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:0,podcast_slots:0,x265_slots:1}]);
+  assert.match(h.elements.get("worker-x265-note").textContent,/Applied\. Takes effect as the next job starts/);
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("x265-limit").value,"1");
+  h.context.activity.activity.slots={...slots({total:1,used:0}),split:true,video:{total:1,used:0},podcast:{total:1,used:0}};
+  h.run('renderWorkerActivity(activity)');
+  await h.run('saveX265Limit(0)');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[1])),["worker-slots",{video_slots:1,podcast_slots:1,x265_slots:0}]);
+  // The parallel jobs form leaves the limit alone: it sends no x265 field.
+  h.run('renderWorkerActivity(activity)');
+  await h.run('saveParallelJobs(3)');
+  assert.equal("x265_slots" in h.context.calls[2][1],false);
+  // A worker that predates the limit never shows it; one parallel job hides it until a limit is set.
+  h.context.activity.activity.slots=slots(null);
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-x265-row").hidden,true);
+  h.context.activity.activity.slots={...slots({total:0,used:0}),ceiling:1};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-x265-row").hidden,true);
+  h.context.activity.activity.slots={...slots({total:1,used:0}),ceiling:1};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-x265-row").hidden,false);
+});
+
+test("the slot table names the encoder of a full conversion", () => {
+  const h=harness();
+  h.elements.get("x265-limit").options=[{value:"0"},{value:"1"}];
+  const job=(id,file,encoding)=>({id,file,kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10,encoding});
+  assert.equal(h.run('slotKind({kind:"transcode",encoding:"x265 CRF 22 (step 1 of 3)"})'),"Full conversion · x265");
+  assert.equal(h.run('slotKind({kind:"transcode",encoding:"VideoToolbox at quality 65 (step 1 of 4)"})'),"Full conversion · VideoToolbox");
+  assert.equal(h.run('slotKind({kind:"transcode"})'),"Full conversion");
+  assert.equal(h.run('slotKind({kind:"podcast",encoding:"x265"})'),"Podcast processing");
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[job("a","one.mkv","x265 CRF 22"),job("b","two.mkv","VideoToolbox quality 65")],
+    slots:{ceiling:2,split:false,video:{total:2,used:2},podcast:{total:2,used:0},x265:{total:1,used:1}}}};
+  h.run('renderWorkerActivity(activity)');
+  const rows=slotRows(h);
+  assert.match(rows[0].children[2].textContent,/Full conversion · x265/);
+  assert.match(rows[1].children[2].textContent,/Full conversion · VideoToolbox/);
+});
+
 test("worker activity gives each node a row that opens onto its slots, and a table of what runs for wide screens", () => {
   const h=harness();
   h.elements.get("settings-node-pick").options=[];

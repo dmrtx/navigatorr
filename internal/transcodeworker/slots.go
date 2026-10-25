@@ -51,12 +51,49 @@ func jobSlotKind(job *JobRecord) slotKind {
 	return slotKindVideo
 }
 
+// jobIsX265 reports whether a video job encodes with libx265 and so draws on
+// the x265 cap. VideoToolbox and video-copy jobs do not.
+func jobIsX265(job *JobRecord) bool {
+	return jobSlotKind(job) == slotKindVideo && job != nil && job.Plan != nil && norm(job.Plan.VideoCodec) == transcode.VideoCodecLibX265
+}
+
+// jobSlot is the pools a job draws on: its kind, and whether it also counts
+// against the x265 cap.
+type jobSlot struct {
+	kind slotKind
+	x265 bool
+}
+
+func jobSlotOf(job *JobRecord) jobSlot {
+	return jobSlot{kind: jobSlotKind(job), x265: jobIsX265(job)}
+}
+
+// slotCounts is the slots in use: video and podcast jobs, and how many of the
+// video jobs are x265 encodes.
+type slotCounts struct {
+	Video, Podcast, X265 int
+}
+
+func (c *slotCounts) add(s jobSlot) {
+	switch {
+	case s.kind == slotKindPodcast:
+		c.Podcast++
+	case s.x265:
+		c.Video++
+		c.X265++
+	default:
+		c.Video++
+	}
+}
+
 // slotSplitRecord is the stored ceiling override and split. Ceiling zero (or
-// absent, in a file written before overrides existed) follows the config.
+// absent, in a file written before overrides existed) follows the config, and
+// an absent X265Slots (a file written before the cap existed) is no cap.
 type slotSplitRecord struct {
 	VideoSlots   int       `json:"video_slots"`
 	PodcastSlots int       `json:"podcast_slots"`
 	Ceiling      int       `json:"ceiling,omitempty"`
+	X265Slots    int       `json:"x265_slots,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -66,23 +103,24 @@ type slotLimits struct {
 	Video   int // pool size for video work; the ceiling when !Split
 	Podcast int // pool size for podcast work; the ceiling when !Split
 	Split   bool
+	X265    int // most x265 encodes at once inside the video pool; 0 is no cap
 }
 
-// hasRoom reports whether one more job of kind may start given the jobs
-// already running. The ceiling caps both kinds together in every mode: a
+// hasRoom reports whether one more job of the given class may start given the
+// jobs already running. The ceiling caps both kinds together in every mode: a
 // split saved while jobs of the other kind run (or one that lowers a pool
 // under running jobs) must not let the worker exceed it.
-func (l slotLimits) hasRoom(kind slotKind, video, podcast int) bool {
-	if video+podcast >= l.Ceiling {
+func (l slotLimits) hasRoom(s jobSlot, use slotCounts) bool {
+	if use.Video+use.Podcast >= l.Ceiling {
 		return false
 	}
-	if !l.Split {
-		return true
+	if s.kind == slotKindPodcast {
+		return !l.Split || use.Podcast < l.Podcast
 	}
-	if kind == slotKindPodcast {
-		return podcast < l.Podcast
+	if l.Split && use.Video >= l.Video {
+		return false
 	}
-	return video < l.Video
+	return !s.x265 || l.X265 == 0 || use.X265 < l.X265
 }
 
 // videoPool is how many video jobs can run at once under these limits.
@@ -91,6 +129,15 @@ func (l slotLimits) videoPool() int {
 		return l.Ceiling
 	}
 	return l.Video
+}
+
+// x265Pool is how many x265 encodes can run together under these limits: the
+// x265 cap when there is one, else every video slot, as before the cap existed.
+func (l slotLimits) x265Pool() int {
+	if l.X265 > 0 {
+		return l.X265
+	}
+	return l.videoPool()
 }
 
 // slotSplitCache re-reads the split file only when its stat changes, so the
@@ -187,14 +234,20 @@ func (w *Worker) storedSlots() (slotSplitRecord, bool) {
 func (w *Worker) slotLimits() slotLimits {
 	rec, ok := w.storedSlots()
 	ceiling, _ := w.ceilingFrom(rec, ok)
-	shared := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling}
+	limits := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling}
 	if !ok {
-		return shared
+		return limits
 	}
-	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: rec.VideoSlots, PodcastSlots: rec.PodcastSlots}, ceiling, 0); err != nil || (rec.VideoSlots == 0 && rec.PodcastSlots == 0) {
-		return shared
+	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: rec.VideoSlots, PodcastSlots: rec.PodcastSlots}, ceiling, 0); err == nil && (rec.VideoSlots != 0 || rec.PodcastSlots != 0) {
+		limits = slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true}
 	}
-	return slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true}
+	// A cap larger than the video pool that is in force (the ceiling or the
+	// split was lowered since) is ignored rather than clamped, as a split that
+	// no longer fits is.
+	if rec.X265Slots > 0 && rec.X265Slots <= limits.videoPool() {
+		limits.X265 = rec.X265Slots
+	}
+	return limits
 }
 
 // slotSplitInvalidError is an operator mistake in a split, as opposed to the
@@ -231,24 +284,21 @@ func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
 		if override == w.configCeiling() {
 			override = 0
 		}
-		var reset bool
-		if split, reset = transcode.FitSlotSplit(split, ceiling); reset {
-			notes = append(notes, transcode.SlotSplitResetNote(ceiling))
-		}
+		split, notes = transcode.FitSlotSplit(split, ceiling)
 	}
 	warnings, err := transcode.ValidateSlotSplit(split, ceiling, hostCPUCount())
 	if err != nil {
 		return nil, &slotSplitInvalidError{err}
 	}
 	warnings = append(notes, warnings...)
-	if split.Shared() && override == 0 {
+	if split.Shared() && override == 0 && split.X265Slots == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 		w.noteSlotSplitChanged()
 		return warnings, nil
 	}
-	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: override, UpdatedAt: time.Now().UTC()}, "", "  ")
+	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: override, X265Slots: split.X265Slots, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -278,9 +328,9 @@ func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
 // countActiveJobsByKind it never reconciles a stopped runner, so the
 // observational endpoints and thread sizing leave job records alone.
 type slotUse struct {
-	Video, Podcast int
-	Queued         []*JobRecord // durable queued jobs without a runner yet
-	kinds          map[string]slotKind
+	slotCounts
+	Queued []*JobRecord // durable queued jobs without a runner yet
+	kinds  map[string]slotKind
 }
 
 // observeSlotUse scans the state directory. A job counts when its record
@@ -292,13 +342,6 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 	if err != nil {
 		return use, err
 	}
-	add := func(kind slotKind) {
-		if kind == slotKindPodcast {
-			use.Podcast++
-		} else {
-			use.Video++
-		}
-	}
 	for _, entry := range entries {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
@@ -308,7 +351,7 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 			use.kinds[job.ID] = jobSlotKind(job)
 			if (job.Status == "running" || job.Status == "queued") && job.PID > 0 {
 				if !checkAlive || w.jobAlive(job) {
-					add(jobSlotKind(job))
+					use.add(jobSlotOf(job))
 				}
 			} else if job.Status == "queued" {
 				use.Queued = append(use.Queued, job)
@@ -322,9 +365,9 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 func (w *Worker) slotsStatus() transcode.WorkerSlots {
 	l := w.slotLimits()
 	_, source := w.ceilingFrom(w.storedSlots())
-	out := transcode.WorkerSlots{Ceiling: l.Ceiling, CeilingLimit: w.slotCeilingLimit(), CeilingSource: source, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}}
+	out := transcode.WorkerSlots{Ceiling: l.Ceiling, CeilingLimit: w.slotCeilingLimit(), CeilingSource: source, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}, X265: &transcode.SlotPool{Total: l.X265}}
 	if use, err := w.observeSlotUse(false); err == nil {
-		out.Video.Used, out.Podcast.Used = use.Video, use.Podcast
+		out.Video.Used, out.Podcast.Used, out.X265.Used = use.Video, use.Podcast, use.X265
 	}
 	return out
 }
@@ -338,6 +381,7 @@ type videoInUseCache struct {
 	mu    sync.Mutex
 	at    time.Time
 	video int
+	x265  int
 	ok    bool
 }
 
@@ -359,7 +403,7 @@ func (w *Worker) videoJobsSharingCPU() int {
 	c.mu.Lock()
 	if time.Since(c.at) > videoInUseTTL || c.at.IsZero() {
 		use, err := w.observeSlotUse(true)
-		c.at, c.video, c.ok = time.Now(), use.Video, err == nil
+		c.at, c.video, c.x265, c.ok = time.Now(), use.Video, use.X265, err == nil
 	}
 	n, ok := c.video, c.ok
 	c.mu.Unlock()
@@ -367,6 +411,39 @@ func (w *Worker) videoJobsSharingCPU() int {
 		return n
 	}
 	return max(1, w.slotLimits().videoPool())
+}
+
+// x265JobsSharingCPU is how many x265 encodes the host CPUs are shared between
+// right now, for sizing an x265 thread pool under limits l. Without an x265
+// cap that is every running video job (videoJobsSharingCPU), unchanged. With
+// one, a VideoToolbox job beside an x265 encode does not take threads from it,
+// so only the x265 encodes count. With none counted (or the count
+// unavailable) it assumes the x265 pool is full.
+func (w *Worker) x265JobsSharingCPU(l slotLimits) int {
+	if l.X265 == 0 {
+		return w.videoJobsSharingCPU()
+	}
+	if w == nil || w.cfg == nil {
+		return 1
+	}
+	if w.x265InUseFn != nil {
+		if n, ok := w.x265InUseFn(); ok && n > 0 {
+			return n
+		}
+		return max(1, l.x265Pool())
+	}
+	c := &w.videoInUse
+	c.mu.Lock()
+	if time.Since(c.at) > videoInUseTTL || c.at.IsZero() {
+		use, err := w.observeSlotUse(true)
+		c.at, c.video, c.x265, c.ok = time.Now(), use.Video, use.X265, err == nil
+	}
+	n, ok := c.x265, c.ok
+	c.mu.Unlock()
+	if ok && n > 0 {
+		return n
+	}
+	return max(1, l.x265Pool())
 }
 
 // slotChangeRecheck lets saving a split start the background self-check of its

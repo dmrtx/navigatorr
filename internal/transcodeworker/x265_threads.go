@@ -76,36 +76,37 @@ func x265PoolsWarning(pools, cpus int) string {
 }
 
 // x265ThreadParams is the partition the next encode runs with. The pool is
-// sized from the video jobs actually running (see videoJobsSharingCPU), so one
-// video job alone keeps x265's default and uses every CPU, and jobs that run
-// together split the host between them. A partition the startup self-check
+// sized from the video jobs actually running (see x265JobsSharingCPU: only the
+// x265 encodes once x265 is capped), so one job alone keeps x265's default and
+// uses every CPU, and jobs that run together split the host between them. A partition the startup self-check
 // found changes the encoded frames is turned off.
 func (w *Worker) x265ThreadParams() string {
 	if w == nil || w.cfg == nil {
 		return ""
 	}
-	// More video jobs than the pool can briefly run while a lowered pool
-	// drains; size for the pool, the largest count the self-check proved.
-	// The limits are read once so the size and the proved set agree even if
-	// the split changes meanwhile.
-	pool := w.slotLimits().videoPool()
-	params := w.x265ThreadParamsForJobs(min(w.videoJobsSharingCPU(), pool))
+	// More jobs than the pool can briefly run while a lowered pool drains;
+	// size for the pool, the largest count the self-check proved. The limits
+	// are read once so the size and the proved set agree even if the split
+	// changes meanwhile.
+	limits := w.slotLimits()
+	pool := limits.x265Pool()
+	params := w.x265ThreadParamsForJobs(min(w.x265JobsSharingCPU(limits), pool))
 	if params == "" || w.x265PartitionDisabled(strings.Join(w.x265PartitionCandidatesFor(pool), ",")) {
 		return ""
 	}
 	return params
 }
 
-// configuredX265ThreadParams is the partition when every video slot is busy,
+// configuredX265ThreadParams is the partition when every x265 slot is busy,
 // the smallest pool the worker will hand an encode.
 func (w *Worker) configuredX265ThreadParams() string {
 	if w == nil || w.cfg == nil {
 		return ""
 	}
-	return w.x265ThreadParamsForJobs(w.slotLimits().videoPool())
+	return w.x265ThreadParamsForJobs(w.slotLimits().x265Pool())
 }
 
-// x265ThreadParamsForJobs partitions x265 thread pools between jobs video jobs
+// x265ThreadParamsForJobs partitions x265 thread pools between jobs x265 encodes
 // running together: x265_pools wins when positive, -1 disables partitioning,
 // and 0 splits the host CPUs evenly across jobs.
 func (w *Worker) x265ThreadParamsForJobs(jobs int) string {
@@ -124,16 +125,16 @@ func (w *Worker) x265ThreadParamsForJobs(jobs int) string {
 }
 
 // x265PartitionCandidates lists every distinct partition the worker can hand an
-// encode under the current slot limits: one per count of video jobs running
+// encode under the current slot limits: one per count of x265 encodes running
 // together. The self-check proves all of them frame-identical to the default.
 func (w *Worker) x265PartitionCandidates() []string {
 	if w == nil || w.cfg == nil {
 		return nil
 	}
-	return w.x265PartitionCandidatesFor(w.slotLimits().videoPool())
+	return w.x265PartitionCandidatesFor(w.slotLimits().x265Pool())
 }
 
-// x265PartitionCandidatesFor is x265PartitionCandidates for a video pool of
+// x265PartitionCandidatesFor is x265PartitionCandidates for an x265 pool of
 // pool slots.
 func (w *Worker) x265PartitionCandidatesFor(pool int) []string {
 	if w == nil || w.cfg == nil || w.cfg.X265Pools < 0 {

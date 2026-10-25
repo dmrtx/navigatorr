@@ -784,7 +784,7 @@ func ResolveServeConfig(cfg *WorkerConfig, listenFlag, tokenFlag, tokenFileFlag,
 	return ServeConfig{Listen: listen, Token: resolved, SelfExe: selfExe, ConfigPath: configPath}, nil
 }
 
-// maxHTTPSlotsBodyBytes bounds a slot split request: three small integers.
+// maxHTTPSlotsBodyBytes bounds a slot split request: a few small integers.
 const maxHTTPSlotsBodyBytes = 1 << 10
 
 // handleSlots serves GET /v1/slots (the ceiling, the split and their use) and

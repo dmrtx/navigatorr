@@ -38,12 +38,13 @@ func (s *Server) slotNode(r *http.Request) (transcode.NamedWorker, bool) {
 }
 
 // Configured is about the split; Ceiling 0 means the node follows its own
-// max_parallel_jobs.
+// max_parallel_jobs and X265Slots 0 means no limit on x265 encodes.
 type workerSlotSettingsView struct {
 	Configured   bool   `json:"configured"`
 	VideoSlots   int    `json:"video_slots"`
 	PodcastSlots int    `json:"podcast_slots"`
 	Ceiling      int    `json:"ceiling"`
+	X265Slots    int    `json:"x265_slots"`
 	Revision     int64  `json:"revision"`
 	UpdatedAt    string `json:"updated_at,omitempty"`
 }
@@ -52,14 +53,24 @@ func slotSettingsView(row *store.WorkerSlotSettings) workerSlotSettingsView {
 	if row == nil {
 		return workerSlotSettingsView{}
 	}
-	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Ceiling: row.Ceiling, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
+	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Ceiling: row.Ceiling, X265Slots: row.X265Slots, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
 }
 
-// slotsMatch reports whether the worker runs the stored ceiling and split. A
-// worker that cannot take a ceiling is only compared on the split.
+// slotsMatch reports whether the worker runs the stored ceiling, split and
+// x265 limit. A worker that cannot take a ceiling or an x265 limit is only
+// compared on the rest.
 func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) bool {
 	if row != nil && row.Ceiling > 0 && worker.CeilingAdjustable() && worker.Ceiling != row.Ceiling {
 		return false
+	}
+	if worker.X265Capable() {
+		stored := 0
+		if row != nil {
+			stored = row.X265Slots
+		}
+		if worker.X265.Total != stored {
+			return false
+		}
 	}
 	if row == nil || row.Shared() {
 		return !worker.Split
@@ -67,12 +78,16 @@ func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) boo
 	return worker.Split && worker.Video.Total == row.VideoSlots && worker.Podcast.Total == row.PodcastSlots
 }
 
-// slotPush is what the server sends for a stored row: the ceiling only to a
-// worker that accepts it, since an older one refuses the unknown field.
+// slotPush is what the server sends for a stored row: the ceiling and the x265
+// limit only to a worker that accepts them, since an older one refuses the
+// unknown fields.
 func slotPush(row store.WorkerSlotSettings, worker transcode.WorkerSlots) transcode.SlotSplit {
 	split := transcode.SlotSplit{VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots}
 	if worker.CeilingAdjustable() {
 		split.Ceiling = row.Ceiling
+	}
+	if worker.X265Capable() {
+		split.X265Slots = row.X265Slots
 	}
 	return split
 }
@@ -113,6 +128,7 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 	default:
 		view["available"], view["worker"], view["applied"] = true, slots, slotsMatch(row, slots)
 		view["ceiling_adjustable"] = slots.CeilingAdjustable()
+		view["x265_adjustable"] = slots.X265Capable()
 		if !slots.CeilingAdjustable() {
 			view["ceiling_message"] = "The video worker predates setting parallel jobs here. Update it to change them."
 		}
@@ -132,6 +148,8 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		VideoSlots   int `json:"video_slots"`
 		PodcastSlots int `json:"podcast_slots"`
 		Ceiling      int `json:"ceiling"`
+		// X265Slots omitted keeps the stored limit.
+		X265Slots *int `json:"x265_slots"`
 	}
 	if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid slot assignment")
@@ -144,6 +162,10 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 	}
 	if body.Ceiling < 0 {
 		fail(w, 400, "parallel jobs must be at least 1")
+		return
+	}
+	if body.X265Slots != nil && *body.X265Slots < 0 {
+		fail(w, 400, "x265 at a time must be at least 1, or 0 for no limit")
 		return
 	}
 	current, err := ctrl.Slots(r.Context())
@@ -161,6 +183,16 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 	if previous != nil {
 		ceiling = previous.Ceiling
 	}
+	switch {
+	case body.X265Slots != nil:
+		split.X265Slots = *body.X265Slots
+	case previous != nil:
+		split.X265Slots = previous.X265Slots
+	}
+	if split.X265Slots > 0 && !current.X265Capable() {
+		fail(w, 409, "The video worker predates limiting x265 here. Update it first.")
+		return
+	}
 	var notes []string
 	if body.Ceiling > 0 {
 		switch {
@@ -170,10 +202,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 				return
 			}
 			ceiling = body.Ceiling
-			var reset bool
-			if split, reset = transcode.FitSlotSplit(split, ceiling); reset {
-				notes = append(notes, transcode.SlotSplitResetNote(ceiling))
-			}
+			split, notes = transcode.FitSlotSplit(split, ceiling)
 		case body.Ceiling != current.Ceiling:
 			fail(w, 409, "The video worker predates setting parallel jobs here. Update it first.")
 			return
@@ -189,7 +218,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		return
 	}
 	warnings = append(notes, warnings...)
-	row, err := st.SetWorkerSlotSettings(node, split.VideoSlots, split.PodcastSlots, ceiling)
+	row, err := st.SetWorkerSlotSettings(node, split.VideoSlots, split.PodcastSlots, ceiling, split.X265Slots)
 	if err != nil {
 		fail(w, 500, "worker slot settings not saved")
 		return
@@ -205,7 +234,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		// "shared" row would make the resync clear a split the worker runs.
 		var revertErr error
 		if previous != nil {
-			_, revertErr = st.SetWorkerSlotSettings(node, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling)
+			_, revertErr = st.SetWorkerSlotSettings(node, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling, previous.X265Slots)
 		} else {
 			revertErr = st.DeleteWorkerSlotSettings(node)
 		}
