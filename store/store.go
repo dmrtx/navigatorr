@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 16
+const SchemaVersion = 17
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -370,6 +370,25 @@ var migrations = []migration{
 	{version: 16, statements: []string{
 		// Most x265 encodes a node runs at once; 0 is no cap.
 		`ALTER TABLE worker_slot_settings ADD COLUMN x265_slots INTEGER NOT NULL DEFAULT 0`,
+	}},
+	{version: 17, statements: []string{
+		// One small row per action whose revision the database moves on every
+		// write, so the maintenance snapshot can tell which of its many large
+		// payloads changed without reading them (see ListMaintenanceActionSnapshot).
+		`CREATE TABLE action_instance_revs (id TEXT PRIMARY KEY, action_name TEXT NOT NULL, rev INTEGER NOT NULL) WITHOUT ROWID`,
+		`INSERT INTO action_instance_revs (id, action_name, rev) SELECT id, action_name, 1 FROM action_instances`,
+		`CREATE TRIGGER action_instance_revs_insert AFTER INSERT ON action_instances BEGIN
+			INSERT INTO action_instance_revs (id, action_name, rev) VALUES (NEW.id, NEW.action_name, 1)
+			ON CONFLICT(id) DO UPDATE SET action_name = excluded.action_name, rev = rev + 1;
+		END`,
+		`CREATE TRIGGER action_instance_revs_update AFTER UPDATE ON action_instances BEGIN
+			DELETE FROM action_instance_revs WHERE id = OLD.id AND OLD.id <> NEW.id;
+			INSERT INTO action_instance_revs (id, action_name, rev) VALUES (NEW.id, NEW.action_name, 1)
+			ON CONFLICT(id) DO UPDATE SET action_name = excluded.action_name, rev = rev + 1;
+		END`,
+		`CREATE TRIGGER action_instance_revs_delete AFTER DELETE ON action_instances BEGIN
+			DELETE FROM action_instance_revs WHERE id = OLD.id;
+		END`,
 	}},
 }
 

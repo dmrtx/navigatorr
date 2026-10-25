@@ -1622,6 +1622,31 @@ test("late detail response cannot overwrite the newly opened job", async () => {
   assert.equal(h.run("state.detailJob.id"), "b");
 });
 
+test("a job the list already holds is shown at once, before the server answers", async () => {
+  const h = harness(), answer = deferred();
+  h.run('state.operationJobs = new Map([["wf", {id:"known", workflow_id:"wf", status:"failed", action_name:"transcode_media", source_path:"/media/a.mkv"}]]); api = async () => ({jobs:[await answerPromise]}); tool = async () => ({data:{}});');
+  h.context.answerPromise = answer.promise;
+  const opening = h.run('openJob("known")');
+  // Nothing has come back yet, and the dialog already says what the list knew.
+  assert.equal(h.run("state.detailJob.id"), "known");
+  assert.equal(h.elements.get("detail-summary").dataset.operationId, "known");
+  answer.resolve({id: "known", workflow_id: "wf", status: "completed", action_name: "transcode_media", source_path: "/media/a.mkv"});
+  await opening;
+  assert.equal(h.run("state.detailJob.status"), "completed", "the server's answer corrects it");
+});
+
+test("an archived job is announced before the list reloads", async () => {
+  const h = harness(), reload = deferred(), order = [];
+  h.context.record = (what) => order.push(what);
+  h.run('state.info = {}; api = async () => ({archived:true}); notify = (m) => record("notify"); loadJobs = async () => { record("reload"); await reloadPromise; };');
+  h.context.reloadPromise = reload.promise;
+  const archiving = h.run('archiveJob({id:"done"}, true)');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(order, ["notify", "reload"], "the person is told before the reload finishes");
+  reload.resolve();
+  await archiving;
+});
+
 test("inline retry controls retain the rendered job id", async () => {
   const h = harness(),
     calls = [];

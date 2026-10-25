@@ -4271,8 +4271,8 @@ async function archiveJob(job, archived) {
     await api("archive", {id:job.id,archived});
     if (auth !== state.authRevision || $("workspace").hidden) return;
     if (state.detailJob?.id === job.id) $("job-detail").close();
-    await loadJobs();
     notify(archived ? "Job archived. Find it under Archived to restore it." : "Job restored to the queue.");
+    await loadJobs();
   } finally {
     state.busyJobs.delete(job.id);
     setConnection(serverReachable);
@@ -6278,7 +6278,42 @@ async function openJob(id) {
   $("detail-related").replaceChildren();
   resetDetailRows();
   syncDetailSections();
+  // The list already holds this job: show it at once and let the server's
+  // answer correct it, instead of a blank "Loading job…".
+  const known = [...(state.operationJobs?.values() || [])].find(job => job.id === id);
+  if (known) paintDetail(known);
   await refreshDetail();
+}
+// Paints a job into the open dialog. The same blocks, in the same order, whether
+// the job came from the list a moment ago or from the server just now.
+function paintDetail(job) {
+  state.detailJob = job;
+  const focus = focusedControl($("detail-controls"));
+  const menu = openActionMenu($("detail-controls"));
+  const presentation = queuePresentation(job);
+  const summary = $("detail-summary");
+  const path = detailPath(job);
+  const title = job.batch || job.source_path || job.promotion ? presentation.title : job.id;
+  $("job-detail-title").textContent = title;
+  $("job-detail-title").title = path || title;
+  $("copy-detail-path").hidden = !path;
+  $("detail-status").replaceChildren(statusBadge(presentation.status));
+  summary.replaceChildren(...detailStatusNodes(job, presentation));
+  summary.dataset.operationId = job.id;
+  renderCommandIndicators();
+  renderDetailRows(job);
+  const related = $("detail-related");
+  related.replaceChildren();
+  for (const action of job.workflow_actions || []) {
+    if (action.id === job.id) continue;
+    related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
+  }
+  syncDetailSections();
+  const controls = $("detail-controls");
+  controls.replaceChildren(...detailActionBar(job));
+  controls.hidden = !controls.children.length;
+  $("batch-items-panel").hidden = !job.batch;
+  return {focus, menu};
 }
 async function refreshDetail() {
   const id = state.detail,
@@ -6293,32 +6328,8 @@ async function refreshDetail() {
       !$("job-detail").open
     )
       return;
-    state.detailJob = job;
-    const focus = focusedControl($("detail-controls"));
-    const menu = openActionMenu($("detail-controls"));
-    const presentation = queuePresentation(job);
-    const summary = $("detail-summary");
-    const path = detailPath(job);
-    const title = job.batch || job.source_path || job.promotion ? presentation.title : job.id;
-    $("job-detail-title").textContent = title;
-    $("job-detail-title").title = path || title;
-    $("copy-detail-path").hidden = !path;
-    $("detail-status").replaceChildren(statusBadge(presentation.status));
-    summary.replaceChildren(...detailStatusNodes(job, presentation));
-    summary.dataset.operationId = job.id;
-    renderCommandIndicators();
-    renderDetailRows(job);
-    const related = $("detail-related");
-    related.replaceChildren();
-    for (const action of job.workflow_actions || []) {
-      if (action.id === job.id) continue;
-      related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
-    }
-    syncDetailSections();
+    const {focus, menu} = paintDetail(job);
     const controls = $("detail-controls");
-    controls.replaceChildren(...detailActionBar(job));
-    controls.hidden = !controls.children.length;
-    $("batch-items-panel").hidden = !job.batch;
     if (job.batch) await loadBatchItems(id, revision, job.batch.total);
     restoreControl(controls, focus);
     restoreActionMenu(controls, menu);
