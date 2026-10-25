@@ -7359,6 +7359,15 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.equal(h.run("batchSegments(batch)"), null);
 });
 
+test("running files fill their segment only as far as their measured steps", () => {
+  const h = harness();
+  h.context.batch = { total: 2, running: 2 };
+  const run = h.run("batchSegments(batch, 0.57)").bar.children[0];
+  assert.match(run.style.background, /var\(--info\) 57%, var\(--info-wash\) 57%/);
+  // Without a measurement the segment stays a plain running colour.
+  assert.equal(h.run("batchSegments(batch)").bar.children[0].style.background, undefined);
+});
+
 test("a job title is a real link to the job that still opens in place on a plain click", () => {
   const h = harness();
   h.run('globalThis.opened = []; openJob = id => opened.push(id);');

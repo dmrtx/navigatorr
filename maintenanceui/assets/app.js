@@ -3222,7 +3222,7 @@ function whereBlock(where, {heading = true} = {}) {
 // What each file of a batch is doing, as one bar and a legend: finished, failed,
 // running, needing a decision, left alone, stopped, and the rest waiting.
 const segmentKinds = [["completed", "done", "ok"], ["failed", "failed", "err"], ["running", "running", "run"], ["waiting_decision", "need you", "rev"], ["policy", "below minimum savings", "skip"], ["skip", "skipped", "skip"], ["rejected", "rejected", "skip"], ["cancelled", "cancelled", "cancel"]];
-function batchSegments(batch) {
+function batchSegments(batch, runningFill) {
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total < 2) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
   const parts = segmentKinds.map(([key, label, kind]) => ({kind, label, n: key === "waiting_decision" ? count("waiting_decision") || count("review") : count(key)})).filter(part => part.n > 0);
@@ -3237,6 +3237,12 @@ function batchSegments(batch) {
   for (const part of parts) {
     const segment = node("i", "", `segment-${part.kind}`);
     segment.style.width = `${part.n / total * 100}%`;
+    // Running files are only as full as their measured steps, so a file still
+    // waiting for a worker slot does not read as a finished bar.
+    if (part.kind === "run" && Number.isFinite(runningFill)) {
+      const fill = `${Math.round(Math.max(0, Math.min(1, runningFill)) * 100)}%`;
+      segment.style.background = `linear-gradient(to right, var(--info) ${fill}, var(--info-wash) ${fill})`;
+    }
     bar.append(segment);
   }
   return {bar, legend, kinds: parts.length};
@@ -3297,7 +3303,7 @@ function batchProgress(job, {segments = false} = {}) {
   counts.title = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
   value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
-  const parts = segments ? batchSegments(batch) : null;
+  const parts = segments ? batchSegments(batch, count("running") ? partial / Math.min(count("running"), Math.max(1, byFile.size)) : undefined) : null;
   if (parts) {
     // The bar shows each file's state; the percent keeps the estimate.
     parts.bar.title = value.title;
