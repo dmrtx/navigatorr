@@ -52,9 +52,10 @@ func jobSlotKind(job *JobRecord) slotKind {
 }
 
 // jobIsX265 reports whether a video job encodes with libx265 and so draws on
-// the x265 cap. VideoToolbox and video-copy jobs do not.
+// the x265 cap. VideoToolbox and video-copy jobs do not, and neither does a job
+// whose encode is finished: it only finalizes its output and never runs ffmpeg.
 func jobIsX265(job *JobRecord) bool {
-	return jobSlotKind(job) == slotKindVideo && job != nil && job.Plan != nil && norm(job.Plan.VideoCodec) == transcode.VideoCodecLibX265
+	return jobSlotKind(job) == slotKindVideo && job != nil && !job.EncodeComplete && job.Plan != nil && norm(job.Plan.VideoCodec) == transcode.VideoCodecLibX265
 }
 
 // jobSlot is the pools a job draws on: its kind, and whether it also counts

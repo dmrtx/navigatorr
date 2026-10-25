@@ -42,6 +42,7 @@ func TestJobIsX265ClassifiesByPlanEncoder(t *testing.T) {
 		{"nil job", nil, false},
 		{"no plan", &JobRecord{}, false},
 		{"libx265", &JobRecord{Plan: &transcode.Plan{VideoCodec: "libx265"}}, true},
+		{"libx265 already encoded", &JobRecord{EncodeComplete: true, Plan: &transcode.Plan{VideoCodec: "libx265"}}, false},
 		{"normalized", &JobRecord{Plan: &transcode.Plan{VideoCodec: " LibX265 "}}, true},
 		{"videotoolbox", &JobRecord{Plan: &transcode.Plan{VideoCodec: "hevc_videotoolbox"}}, false},
 		{"video copy", &JobRecord{Plan: &transcode.Plan{VideoCodec: transcode.VideoCodecCopy}}, false},
@@ -98,7 +99,7 @@ func TestSchedulerSkipsQueuedX265AtCapAndStartsVideoToolbox(t *testing.T) {
 	if started, _ := w.ScheduleQueued(context.Background(), "exe", ""); started != 0 {
 		t.Fatalf("started %d past the ceiling", started)
 	}
-	// The x265 encode ends; the queued x265 takes its slot once VideoToolbox does too.
+	// The x265 encode ends; the queued x265 takes its slot beside the running VideoToolbox job.
 	stub.kill("running-x265")
 	done, _ := LoadJob(filepath.Join(w.cfg.StateDir, "running-x265", "job.json"))
 	done.Status = "completed"
@@ -315,5 +316,39 @@ func TestSlotsEndpointX265Cap(t *testing.T) {
 	resp := doRequest(t, srv, "GET", "/v1/slots", "", "secret")
 	if !strings.Contains(resp.Body.String(), `"x265":{"total":0,"used":0}`) {
 		t.Fatalf("GET /v1/slots: %s", resp.Body.String())
+	}
+}
+
+// A job that finished encoding only publishes its output: it never runs
+// ffmpeg, so the x265 cap must not hold its resume back.
+func TestResumePostEncodeIgnoresTheX265Cap(t *testing.T) {
+	tempDir := t.TempDir()
+	extRoot := filepath.Join(tempDir, "external")
+	cfg := pr6b2Config(tempDir, func(c *WorkerConfig) {
+		c.ExternalRoots = []string{extRoot}
+		c.MaxParallelJobs = 2
+	})
+	w := NewWorker(cfg)
+	stub := newStubSpawn()
+	stub.install(w)
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{X265Slots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	// The cap is full: one x265 encode is running.
+	seedEncoderJob(t, w, stub, "running-x265", "running", "libx265", true, time.Hour)
+
+	const postID = "post-encode-x265"
+	localCandidate := filepath.Join(cfg.StateDir, "_work", postID, "candidate.mkv")
+	pr6b2SeedPostEncode(t, cfg, postID, localCandidate, filepath.Join(extRoot, "out.mkv"))
+	post := pr6b1LoadJob(t, cfg.StateDir, postID)
+	post.Plan.VideoCodec = transcode.VideoCodecLibX265
+	pr6b2Seed(t, cfg.StateDir, post)
+
+	started, err := w.ResumePostEncode(context.Background(), "test-exe", "")
+	if err != nil || started != 1 {
+		t.Fatalf("started %d, err %v; finalization must resume beside a full x265 cap", started, err)
+	}
+	if got := pr6b1LoadJob(t, cfg.StateDir, postID); got.PID == 0 {
+		t.Fatalf("post-encode job was not resumed: %+v", got)
 	}
 }

@@ -2003,7 +2003,8 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
 test("the x265 limit is offered only by a worker that reports it, keeps unsaved picks and is saved without touching the split", async () => {
   const h=harness();
   h.context.calls=[];
-  h.run('api=async(path,body)=>{calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
+  h.context.stored={video_slots:0,podcast_slots:0};
+  h.run('api=async(path,body)=>{if(!body)return {settings:stored};calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
   h.elements.get("x265-limit").options=[{value:"0"},{value:"1"}];
   const slots=x265=>({ceiling:2,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:false,video:{total:2,used:1},podcast:{total:2,used:0},...(x265?{x265}:{})});
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:1,jobs:[],slots:slots({total:0,used:0})}};
@@ -2024,16 +2025,18 @@ test("the x265 limit is offered only by a worker that reports it, keeps unsaved 
   h.elements.get("x265-limit").listeners.get("change")();
   h.run('renderWorkerActivity(activity)');
   assert.equal(h.elements.get("x265-limit").value,"0");
-  // Saving sends the limit with the split the worker runs, and no ceiling.
+  // Saving sends the limit with the stored split, and no ceiling.
   await h.run('saveX265Limit(1)');
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:0,podcast_slots:0,x265_slots:1}]);
   assert.match(h.elements.get("worker-x265-note").textContent,/Applied\. Takes effect as the next job starts/);
   h.run('renderWorkerActivity(activity)');
   assert.equal(h.elements.get("x265-limit").value,"1");
+  // The split sent back is the stored one, even while the worker still runs another.
   h.context.activity.activity.slots={...slots({total:1,used:0}),split:true,video:{total:1,used:0},podcast:{total:1,used:0}};
+  h.context.stored={video_slots:2,podcast_slots:1};
   h.run('renderWorkerActivity(activity)');
   await h.run('saveX265Limit(0)');
-  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[1])),["worker-slots",{video_slots:1,podcast_slots:1,x265_slots:0}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[1])),["worker-slots",{video_slots:2,podcast_slots:1,x265_slots:0}]);
   // The parallel jobs form leaves the limit alone: it sends no x265 field.
   h.run('renderWorkerActivity(activity)');
   await h.run('saveParallelJobs(3)');

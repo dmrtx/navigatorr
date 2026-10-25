@@ -189,7 +189,9 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 	case previous != nil:
 		split.X265Slots = previous.X265Slots
 	}
-	if split.X265Slots > 0 && !current.X265Capable() {
+	// Only a limit asked for now needs the worker to take it; one inherited from
+	// the stored row is kept (slotPush never sends it to a worker that cannot).
+	if body.X265Slots != nil && *body.X265Slots > 0 && !current.X265Capable() {
 		fail(w, 409, "The video worker predates limiting x265 here. Update it first.")
 		return
 	}

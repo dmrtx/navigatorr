@@ -40,6 +40,21 @@ func TestValidateSlotSplitWarnsAboutPoolsUnlessX265IsCapped(t *testing.T) {
 	if warnings, err := ValidateSlotSplit(split, 3, 6); err != nil || len(warnings) != 0 {
 		t.Fatalf("one x265 at a time never partitions: %v %v", warnings, err)
 	}
+	// A cap of two on 8 CPUs partitions into 4 threads each: nothing to warn about.
+	split = SlotSplit{VideoSlots: 4, PodcastSlots: 1, X265Slots: 2}
+	if warnings, err := ValidateSlotSplit(split, 5, 8); err != nil || len(warnings) != 0 {
+		t.Fatalf("two x265 encodes on 8 CPUs: %v %v", warnings, err)
+	}
+	// ...but four video slots without a cap would run four.
+	split.X265Slots = 0
+	if warnings, err := ValidateSlotSplit(split, 5, 8); err != nil || len(warnings) != 1 {
+		t.Fatalf("four video slots on 8 CPUs: %v %v", warnings, err)
+	}
+	// The warning counts the x265 encodes that can run together.
+	split = SlotSplit{VideoSlots: 4, PodcastSlots: 1, X265Slots: 2}
+	if warnings, err := ValidateSlotSplit(split, 5, 7); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "2 x265 slots") {
+		t.Fatalf("two x265 encodes on 7 CPUs: %v %v", warnings, err)
+	}
 }
 
 func TestFitSlotSplitX265(t *testing.T) {

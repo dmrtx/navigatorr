@@ -135,10 +135,15 @@ func ValidateSlotSplit(split SlotSplit, ceiling, hostCPUs int) (warnings []strin
 		if split.VideoSlots > hostCPUs {
 			return nil, fmt.Errorf("video_slots %d exceeds the worker's %d CPUs", split.VideoSlots, hostCPUs)
 		}
-		// With x265 capped at one the other video jobs are not x265 encodes,
-		// which never partition, so there is no pool split to warn about.
-		if split.VideoSlots > 1 && split.X265Slots != 1 && hostCPUs/split.VideoSlots < MinX265PoolThreads {
-			warnings = append(warnings, fmt.Sprintf("%d video slots on %d CPUs leave fewer than %d threads per encode, so x265 cannot partition its thread pools: encodes that run together each default to every CPU and compete", split.VideoSlots, hostCPUs, MinX265PoolThreads))
+		// The encodes that partition x265's thread pools are the x265 ones, at
+		// most X265Slots of the video slots: with one at a time there is no
+		// pool split to warn about.
+		encodes, what := split.VideoSlots, "video slots"
+		if split.X265Slots > 0 && split.X265Slots < encodes {
+			encodes, what = split.X265Slots, "x265 slots"
+		}
+		if encodes > 1 && hostCPUs/encodes < MinX265PoolThreads {
+			warnings = append(warnings, fmt.Sprintf("%d %s on %d CPUs leave fewer than %d threads per encode, so x265 cannot partition its thread pools: encodes that run together each default to every CPU and compete", encodes, what, hostCPUs, MinX265PoolThreads))
 		}
 	}
 	return warnings, nil

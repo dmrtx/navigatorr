@@ -484,6 +484,17 @@ func TestWorkerSlotsOldWorkerNeverGetsTheX265Limit(t *testing.T) {
 	if worker.puts != 0 {
 		t.Fatalf("an old worker was pushed %+v", worker.lastPush)
 	}
+	// Changing only the split keeps the stored limit without asking the old
+	// worker for it.
+	if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 200 {
+		t.Fatalf("a split that does not mention the limit is accepted: %d %s", w.Code, w.Body.String())
+	}
+	if row, _ := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName); row == nil || row.X265Slots != 1 || row.VideoSlots != 1 {
+		t.Fatalf("the split must keep the stored limit: %+v", row)
+	}
+	if worker.lastPush.X265Slots != 0 {
+		t.Fatalf("an old worker was sent the limit: %+v", worker.lastPush)
+	}
 }
 
 func TestWorkerSlotsSyncRestoresTheX265LimitAfterAWorkerWipe(t *testing.T) {

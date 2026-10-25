@@ -5578,11 +5578,13 @@ function renderX265Limit(activity) {
   pick.value = String(pool.total);
 }
 async function saveX265Limit(limit) {
-  const note = $("worker-x265-note"), slots = state.workerSlots;
+  const note = $("worker-x265-note");
   note.textContent = "Saving…";
   try {
-    const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
-    const result = await api(workerSlotsPath(), {...split, x265_slots: limit});
+    // The split to send back is the stored one, not what the worker runs: they
+    // differ while the worker has not yet taken a saved split.
+    const stored = (await api(workerSlotsPath()))?.settings;
+    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
     state.x265FormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
