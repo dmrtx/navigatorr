@@ -57,8 +57,11 @@ export async function runTransitions({ browserChannel = process.env.LAYOUT_BROWS
           await page.waitForFunction(i => document.querySelector("#detail-summary")?.dataset.operationId === i && !/Loading job/.test(document.querySelector("#detail-summary").textContent), id, { timeout: 5000 });
         } else {
           // What a poll does: the dialog is open, the server's answer has changed.
+          const stamp = await page.evaluate(said);
           await page.evaluate(() => dispatchEvent(new Event("online")));
-          await page.waitForTimeout(400);
+          // Wait for the dialog to change; if it never does, the check below says it is stale.
+          await page.waitForFunction(`(${said.toString()})() !== ${JSON.stringify(stamp)}`, null, { timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(150);
         }
         await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
         const here = await page.evaluate(edges);

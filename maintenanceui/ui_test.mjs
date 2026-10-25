@@ -3493,12 +3493,14 @@ test("batch outcome buttons reveal current decisions, readable skips and ready r
   assert.match(text(rows[1]),/quality target; original kept/);
   assert.match(text(rows[2]),/Needs attention.*Search reached its limit.*Change goal/);
   assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
-  // A row is closed until it is opened; all of a file's actions wait inside it.
-  for (const row of rows) {
-    assert.equal(row.dataset.open, "false");
-    assert.equal(row.children[1].hidden, true);
+  // A row is closed until it is opened, except one that needs a decision, which
+  // opens itself once; all of a file's actions wait inside the row.
+  rows.forEach((row, index) => {
+    const needsYou = index === 2;
+    assert.equal(row.dataset.open, String(needsYou));
+    assert.equal(row.children[1].hidden, !needsYou);
     assert.equal(row.children[0].children.some(el=>el.className.includes("status-action")), false, "the state is a label, not a second button");
-  }
+  });
   const click = (row,label)=>all(row).find(el=>el.textContent===label).listeners.get("click")();
   await click(rows[1],"Change goal");
   await click(rows[2],"Open job");
@@ -7157,6 +7159,26 @@ test("a batch file is one collapsed line: its name, its state and saving; the ac
   rows[0].children[0].listeners.get("click")();
   assert.equal(rows[0].dataset.open, "true");
   assert.equal(rows[0].children[1].hidden, false);
+});
+
+test("a file that failed opens itself once, and closing it sticks across refreshes", async () => {
+  const items = [
+    { item_key: "k-f", display_label: "Failed.mkv", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-ok", display_label: "Fine.mkv", status: "completed", child_action_id: "t-ok" },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;state.detailAutoOpened=new Set();state.openFiles=new Set();$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch-a",2)');
+  let rows = itemRows(h);
+  assert.deepEqual(rows.map((row) => row.dataset.open), ["true", "false"]);
+  assert.equal(rows[0].children[1].hidden, false);
+  // The person closes it; the next refresh does not open it again.
+  rows[0].children[0].listeners.get("click")();
+  assert.equal(rows[0].dataset.open, "false");
+  await h.run('loadBatchItems("batch-a",2)');
+  rows = itemRows(h);
+  assert.deepEqual(rows.map((row) => row.dataset.open), ["false", "false"]);
 });
 
 test("every batch row offers Show in Files when its file is inside the media folders", async () => {

@@ -119,7 +119,7 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
   const server = await startServer(live);
   const browser = await chromium.launch(process.env.LAYOUT_BROWSER ? { channel: process.env.LAYOUT_BROWSER } : {});
   const rules = install();
-  const report = { profile, cells: all.length, failed: 0, retried: 0, violations: [], errors: [] };
+  const report = { profile, cells: all.length, failed: 0, retried: 0, acts: {}, violations: [], errors: [] };
   // One context per screen shape: the viewport, touch and theme are fixed for
   // the context, the scenarios swap inside it.
   const groups = new Map();
@@ -165,7 +165,7 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
             // lays the page out at 213px. Emulate that, not a scaled page.
             await page.setViewportSize({ width: Math.round(screen.width / cell.zoom), height: Math.round(screen.height / cell.zoom) });
             await open(page, w.id);
-            if (cell.act) await act(page, cell.act);
+            if (cell.act) { const applied = await act(page, cell.act); report.acts[cell.act] = (report.acts[cell.act] || 0) + (applied ? 1 : 0); }
             for (const where of ["top", "bottom"]) {
               await page.evaluate(position => { const d = document.querySelector("#job-detail"); d.scrollTop = position === "top" ? 0 : d.scrollHeight; }, where);
               await page.evaluate(() => new Promise(r => requestAnimationFrame(r)));
@@ -197,6 +197,13 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(workers, queue.length)) }, work));
+  // A touch state that applied to no cell at all tested nothing: the menu or the
+  // toggles it needs have disappeared.
+  for (const what of new Set(all.map(c => c.act).filter(Boolean)))
+    if (!report.acts[what]) {
+      report.failed++;
+      report.violations.push({ cell: `(coverage) ${what}`, scenario: "", screen: "", name: "", size: "", theme: "", zoom: 1, rule: "coverage", message: `no scenario had anything to "${what}"`, where: "" });
+    }
   await browser.close();
   await server.close();
   await writeReport(report);
@@ -211,7 +218,7 @@ function tally(violations, by) {
 
 async function writeReport(report) {
   await writeFile(`${out}report.json`, JSON.stringify(report, null, 1));
-  const lines = [`# Layout report (${report.profile})`, "", `${report.failed} of ${report.cells} cells have violations (${report.violations.length} findings); ${report.retried} cells needed a second load.`, ""];
+  const lines = [`# Layout report (${report.profile})`, "", `${report.failed} of ${report.cells} cells have violations (${report.violations.length} findings); ${report.retried} cells needed a second load. Touch states applied: ${Object.entries(report.acts).map(([k, n]) => `${k} ${n}`).join(", ") || "none"}.`, ""];
   lines.push("## By rule", ...tally(report.violations, v => v.rule).map(([k, n]) => `- ${k}: ${n}`), "");
   lines.push("## By scenario", ...tally(report.violations, v => v.scenario).map(([k, n]) => `- ${k}: ${n}`), "");
   lines.push("## By screen", ...tally(report.violations, v => v.screen).map(([k, n]) => `- ${k}: ${n}`), "");

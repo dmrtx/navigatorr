@@ -49,13 +49,10 @@ jobs:
 
   # The job detail is laid out in a real browser at every phone, tablet and
   # desktop size, in both themes, at 150% zoom and with long, unbroken and CJK
-  # names (maintenanceui/layout). Linux fonts measure a little differently from
-  # the macOS ones the rules were tuned on, so a failure here does not block a
-  # merge until this has run green once; the report is uploaded either way.
+  # names (maintenanceui/layout). The report is uploaded when it fails.
   layout:
     name: layout (browser)
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
       - name: Checkout repository

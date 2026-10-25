@@ -6437,13 +6437,21 @@ function batchFileRow(item, id) {
   const failure = item.replacement_failure;
   const label = fileStateLabel(item, job);
   const fileName = item.display_label || (item.file_path || "").split("/").pop();
+  // A row that needs the person opens itself once per job, so "Try again" is
+  // never hidden behind a tap; closing it afterwards sticks.
+  const needsYou = Boolean(failure || item.retry_action_id || ["failed", "waiting_decision"].includes(item.status));
+  const autoKey = `file:${item.item_key}`;
+  if (needsYou && !state.detailAutoOpened.has(autoKey)) {
+    state.detailAutoOpened.add(autoKey);
+    state.openFiles.add(item.item_key);
+  }
   const open = state.openFiles.has(item.item_key);
   const row = node("div", "", "jd-file");
   row.setAttribute("role", "listitem");
   row.dataset.fileRow = "";
   row.dataset.open = String(open);
   row.dataset.itemKey = item.item_key;
-  const bodyId = `file-body-${String(item.item_key).replace(/[^\w-]/g, "_")}`;
+  const bodyId = `file-body-${String(item.item_key).replace(/[^A-Za-z0-9-]/g, c => `_${c.charCodeAt(0).toString(16)}_`)}`;
   const head = node("button", "", "jd-file-head");
   head.type = "button";
   head.setAttribute("aria-expanded", String(open));
@@ -6536,7 +6544,14 @@ function batchFileRow(item, id) {
   if (item.previous_attempts?.length) {
     const history = node("details", "", "batch-attempt-history");
     history.append(node("summary", `${item.previous_attempts.length} previous ${item.previous_attempts.length === 1 ? "attempt" : "attempts"}`));
-    item.previous_attempts.forEach((attempt, index) => history.append(button(`Attempt ${index + 1} · ${names[attempt.status] || attempt.status}`, () => openJob(attempt.child_action_id), "jd-secondary")));
+    item.previous_attempts.forEach((attempt, index) => {
+      const open = button(`Attempt ${index + 1} · ${names[attempt.status] || attempt.status}`, () => openJob(attempt.child_action_id), "jd-secondary");
+      open.dataset.jobControl = attempt.child_action_id;
+      open.dataset.navigation = "true";
+      open.dataset.batchItemKey = item.item_key;
+      open.disabled = jobControlDisabled(open);
+      history.append(open);
+    });
     body.append(history);
   }
   const reasons = item.waiting_reason ? [item.waiting_reason] : item.reason_code ? [item.reason_code] : item.error ? [item.error] : item.reasons || [];

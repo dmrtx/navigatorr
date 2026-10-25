@@ -308,6 +308,9 @@ export function install() {
       // The open More menu lists what is behind its toggle; only the bar itself is counted.
       const n = [...bar.querySelectorAll("button, a[href], summary")].filter(c => visible(c) && !c.closest(".more-menu")).length;
       if (n > b.maxBarControls) add("too-many-controls", `${n} controls in the action bar (max ${b.maxBarControls})`, bar);
+      // Two buttons and a More menu, or two buttons: a third plain button is a wall in the making.
+      const plain = [...bar.querySelectorAll("button")].filter(c => visible(c) && !c.closest(".more-menu")).length;
+      if (plain > 2) add("too-many-controls", `${plain} buttons beside the More menu (max 2)`, bar);
     }
     for (const row of dialog.querySelectorAll("[data-file-row]")) {
       if (!visible(row)) continue;
