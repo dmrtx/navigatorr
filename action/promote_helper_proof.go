@@ -55,6 +55,15 @@ func sameHelperFile(a, b nashelper.Identity) bool {
 	return a == b
 }
 
+// sameHelperInode is the same file, size included, whatever its times say.
+func sameHelperInode(a, b nashelper.Identity) bool {
+	if !a.Complete || !b.Complete {
+		return false
+	}
+	a.MtimeNs, b.MtimeNs, a.CtimeNs, b.CtimeNs = 0, 0, 0, 0
+	return a == b
+}
+
 // promotionKnownHelper is the helper proof this execution's full hash of path to
 // sha recorded, or nil when there was none or it was not complete.
 func promotionKnownHelper(ctx context.Context, path, sha string) *helperProof {
@@ -218,9 +227,9 @@ func (e *Engine) helperIdentity(ctx context.Context, path string) (nashelper.Ide
 var (
 	helperProbeQuiet = 3 * time.Second
 	helperProbePoll  = 200 * time.Millisecond
+	// helperProbeSettleLimit bounds the wait for a file whose times never settle.
+	helperProbeSettleLimit = 15 * time.Second
 )
-
-const helperProbeSettleLimit = 15 * time.Second
 
 // helperIdentityQuiet is helperIdentity once the file's identity has stopped
 // changing for helperProbeQuiet. A file whose times keep moving is not settled
@@ -289,11 +298,14 @@ func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelpe
 	if err := renamePromotionNoReplace(from, to); err != nil {
 		return nashelper.Identity{}, fail(probeStepRename, "", err, promotionCopyUnsupported(err))
 	}
-	moved, err := e.helperIdentity(ctx, to)
+	// A rename never touches the modification time, so what is compared is the
+	// file itself; the identity is read once its times have settled again, and
+	// becomes the baseline of the change-time check below.
+	moved, err := e.helperIdentityQuiet(ctx, to)
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepStat, "", err, false)
 	}
-	if !sameHelperFile(created, moved) {
+	if !sameHelperInode(created, moved) {
 		return nashelper.Identity{}, fail(probeStepRenameInode, "changed: "+helperIdentityDiff(created, moved), nil, true)
 	}
 	// A no-replace rename onto an existing file must be refused: restoring the

@@ -138,7 +138,7 @@ func failMountProbe(h *promotionHarness) {
 }
 
 func resetHelperProbes() {
-	helperProbeQuiet, helperProbePoll = 40*time.Millisecond, 5*time.Millisecond
+	helperProbeQuiet, helperProbePoll, helperProbeSettleLimit = 40*time.Millisecond, 5*time.Millisecond, 15*time.Second
 	promotionHelperProbesMu.Lock()
 	promotionHelperProbes = map[string]helperProbeVerdict{}
 	promotionHelperProbesMu.Unlock()

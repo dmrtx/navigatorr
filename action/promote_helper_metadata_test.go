@@ -345,19 +345,17 @@ func TestHelperProbeWaitsForTheProbeFileTimesToSettle(t *testing.T) {
 // says nothing, and is asked again next time.
 func TestHelperProbeThatNeverSettlesIsNotCached(t *testing.T) {
 	resetHelperProbes()
-	helperProbeQuiet = time.Hour
-	t.Cleanup(func() { helperProbeQuiet = 40 * time.Millisecond })
+	helperProbeSettleLimit = 100 * time.Millisecond
 	h := newPromotionHarness(t)
-	attachProofHelper(t, h, true)
+	ph := attachProofHelper(t, h, true)
+	ph.delayed.Store(1 << 30)
 	dir := filepath.Join(h.root, "recovery")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	err := h.engine.promotionProbeHelper(ctx, dir, nashelper.Identity{Complete: true})
+	err := h.engine.promotionProbeHelper(context.Background(), dir, nashelper.Identity{Complete: true})
 	var failure *promotionProbeFailure
-	if err == nil || (errors.As(err, &failure) && failure.Definitive) {
+	if err == nil || !strings.Contains(err.Error(), "kept changing") || (errors.As(err, &failure) && failure.Definitive) {
 		t.Fatalf("probe: %v", err)
 	}
 	promotionHelperProbesMu.Lock()
@@ -365,5 +363,25 @@ func TestHelperProbeThatNeverSettlesIsNotCached(t *testing.T) {
 	promotionHelperProbesMu.Unlock()
 	if cached != 0 {
 		t.Fatal("an unsettled probe was cached")
+	}
+}
+
+// A rename never changes the modification time, so a time that moves with the
+// rename is a late write, not a verdict on the filesystem; a different inode is.
+func TestHelperProbeComparesTheInodeAcrossTheRename(t *testing.T) {
+	a := nashelper.Identity{FSID: "f", Subvol: "1", Generation: "2", Ino: 3, Size: 4, MtimeNs: 5, CtimeNs: 6, Complete: true}
+	b := a
+	b.MtimeNs, b.CtimeNs = 50, 60
+	if !sameHelperInode(a, b) {
+		t.Fatal("a late time was taken for another file")
+	}
+	b.Ino = 30
+	if sameHelperInode(a, b) {
+		t.Fatal("another inode was taken for the same file")
+	}
+	b = a
+	b.Complete = false
+	if sameHelperInode(a, b) {
+		t.Fatal("an incomplete identity proved a file")
 	}
 }
