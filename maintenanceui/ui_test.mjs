@@ -3286,7 +3286,8 @@ test("cached selection details show meaningful settings without another profile 
 
 test("batch file context distinguishes scheduling, paused work and actual worker phases", () => {
   const h = harness();
-  assert.match(h.run('batchFileActivity({status:"queued"},{status:"running"})'), /Not sent to the worker yet/);
+  // A file waiting its turn says nothing more than its Queued badge.
+  assert.equal(h.run('batchFileActivity({status:"queued"},{status:"running"})'), "");
   assert.match(h.run('batchFileActivity({status:"queued"},{paused:true})'), /Resume the batch/);
   assert.match(h.run('batchFileActivity({status:"queued",child_action_id:"child"},{})'), /File task created/);
   assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{transcode_phase:"validating_quality"}}]})'), 'Measuring final quality');
@@ -7133,13 +7134,13 @@ test("a batch file is one line: a name that opens the file, its saving, one acti
   assert.match(saved(rows[0]).textContent, /1\.90 GB/);
   assert.ok(rows[0].className.includes("has-saved"));
   assert.equal(saved(rows[1]), undefined);
-  // Replace file stays in view; the other actions sit in the menu with their controls intact.
+  // A file that needs nothing from the person shows only the menu; Replace file is in it, controls intact.
   const actions = flat(rows[0]).find((e) => /batch-file-actions/.test(e.className || ""));
-  assert.equal(actions.children[0].textContent, "Replace file");
-  const more = actions.children[1];
+  assert.equal(actions.children.length, 1);
+  const more = actions.children[0];
   assert.equal(more.dataset.menuFor, "k-c");
   const menu = flat(more).filter((e) => e.textContent && e.textContent !== "\u22ef" && e.dataset?.jobControl);
-  assert.deepEqual(menu.map((e) => e.textContent), ["Show in Files"]);
+  assert.deepEqual(menu.map((e) => e.textContent), ["Replace file", "Show in Files"]);
   assert.ok(menu.every((e) => e.dataset.batchItemKey === "k-c"));
   // The primary action of a cancelled file is Encode again.
   const cancelled = flat(rows[1]).find((e) => /batch-file-actions/.test(e.className || ""));
@@ -7358,16 +7359,16 @@ test("the header keeps only brand and worker status; install, open path and relo
 // Imported last, so the harness above is defined before any test starts.
 await import("./theme_test.mjs");
 
-test("a batch shows one segmented bar with a legend of what each file is doing", () => {
+test("a batch shows one bar for how far along it is and a legend of what each file is doing", () => {
   const h = harness();
   h.context.batch = { total: 12, completed: 3, running: 2, failed: 1 };
   const parts = h.run("batchSegments(batch)");
   assert.equal(parts.legend, "3 done · 1 failed · 2 running · 6 waiting");
-  const widths = parts.bar.children.map(child => [child.className, Math.round(parseFloat(child.style.width))]);
-  assert.deepEqual(widths, [["segment-ok", 25], ["segment-err", 8], ["segment-run", 17], ["segment-wait", 50]]);
+  // One fill: the finished and failed files, a third of the batch.
+  assert.deepEqual(parts.bar.children.map(child => [child.className, Math.round(parseFloat(child.style.width))]), [["segment-ok", 33]]);
   h.context.batch = { total: 8, completed: 6, review: 2 };
   assert.equal(h.run("batchSegments(batch).legend"), "6 done · 2 need you");
-  // A single colour is reported so the queue row can leave the bar out.
+  // A single state is reported so the queue row can leave the bar out.
   h.context.batch = { total: 13, completed: 13 };
   assert.equal(h.run("batchSegments(batch).kinds"), 1);
   h.context.batch = { total: 8, completed: 6, review: 2 };
@@ -7378,13 +7379,15 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.equal(h.run("batchSegments(batch)"), null);
 });
 
-test("running files fill their segment only as far as their measured steps", () => {
+test("running files add to the bar only as far as their measured steps", () => {
   const h = harness();
   h.context.batch = { total: 2, running: 2 };
-  const run = h.run("batchSegments(batch, 0.57)").bar.children[0];
-  assert.match(run.style.background, /var\(--info\) 57%, var\(--info-wash\) 57%/);
-  // Without a measurement the segment stays a plain running colour.
-  assert.equal(h.run("batchSegments(batch)").bar.children[0].style.background, undefined);
+  assert.equal(Math.round(parseFloat(h.run("batchSegments(batch, 0.5)").bar.children[0].style.width)), 50);
+  // Without a measurement they add nothing.
+  assert.equal(parseFloat(h.run("batchSegments(batch)").bar.children[0].style.width), 0);
+  // A cancelled file is not work left to do.
+  h.context.batch = { total: 4, completed: 1, cancelled: 2 };
+  assert.equal(Math.round(parseFloat(h.run("batchSegments(batch)").bar.children[0].style.width)), 50);
 });
 
 test("a job title is a real link to the job that still opens in place on a plain click", () => {
