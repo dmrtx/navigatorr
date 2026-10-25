@@ -863,5 +863,11 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	writeHTTPJSON(w, http.StatusOK, map[string]any{"hold": s.worker.Held()})
+	reply := map[string]any{"hold": s.worker.Held()}
+	// Jobs the worker is running right now, so the server can tell a queued
+	// job that already started from one still waiting.
+	if active, err := s.worker.countActiveJobs(""); err == nil {
+		reply["active"] = active
+	}
+	writeHTTPJSON(w, http.StatusOK, reply)
 }

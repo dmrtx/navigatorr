@@ -883,17 +883,17 @@ func TestSetHoldAndOldWorker(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&in)
 			held = in.Hold
 		}
-		_ = json.NewEncoder(w).Encode(map[string]bool{"hold": held})
+		_ = json.NewEncoder(w).Encode(map[string]any{"hold": held, "active": 2})
 	}))
 	defer srv.Close()
 	e, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, Token: "tok", RequestTimeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := e.SetHold(context.Background(), true); err != nil || !got {
+	if got, err := e.SetHold(context.Background(), true); err != nil || !got.Hold || !got.ActiveKnown || got.Active != 2 {
 		t.Fatalf("set: %v %v", got, err)
 	}
-	if got, err := e.Hold(context.Background()); err != nil || !got {
+	if got, err := e.Hold(context.Background()); err != nil || !got.Hold {
 		t.Fatalf("get: %v %v", got, err)
 	}
 	old := httptest.NewServer(http.NotFoundHandler())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,8 +69,8 @@ func TestHoldSurvivesARestartAndUnreadableRecordHolds(t *testing.T) {
 
 func TestHoldEndpoint(t *testing.T) {
 	worker, srv, _, _ := newHTTPTestSetup(t, "secret")
-	if resp := doRequest(t, srv, "GET", "/v1/hold", "", "secret"); resp.Code != 200 || resp.Body.String() == "" {
-		t.Fatalf("get: %d", resp.Code)
+	if resp := doRequest(t, srv, "GET", "/v1/hold", "", "secret"); resp.Code != 200 || !strings.Contains(resp.Body.String(), `"active":0`) {
+		t.Fatalf("get: %d %s", resp.Code, resp.Body.String())
 	}
 	if resp := doRequest(t, srv, "PUT", "/v1/hold", `{"hold":true}`, "secret"); resp.Code != 200 || !worker.Held() {
 		t.Fatalf("put true: %d held=%v", resp.Code, worker.Held())
@@ -82,5 +83,40 @@ func TestHoldEndpoint(t *testing.T) {
 	}
 	if resp := doRequest(t, srv, "PUT", "/v1/hold", `{"hold":true}`, "wrong"); resp.Code != 401 && resp.Code != 403 {
 		t.Fatalf("auth: %d", resp.Code)
+	}
+}
+
+// Setting the hold waits for a scheduler pass that is running, so no job can
+// start after the worker has confirmed it.
+func TestSetHoldWaitsForTheCapacityLock(t *testing.T) {
+	stub := newStubSpawn()
+	w, _, _ := newPR3Worker(t, 2, stub)
+	lock, err := acquireCapacityLock(filepath.Clean(w.cfg.StateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- w.SetHold(true) }()
+	select {
+	case <-done:
+		t.Fatal("SetHold returned while a scheduler pass held the capacity lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	lock.Unlock()
+	if err := <-done; err != nil || !w.Held() {
+		t.Fatalf("SetHold after the pass: %v held=%v", err, w.Held())
+	}
+}
+
+// A job submitted while held stays queued.
+func TestSubmitWhileHeldStaysQueued(t *testing.T) {
+	stub := newStubSpawn()
+	w, _, _ := newPR3Worker(t, 2, stub)
+	if err := w.SetHold(true); err != nil {
+		t.Fatal(err)
+	}
+	seedEncoderJob(t, w, stub, "later", "queued", "libx265", false, time.Minute)
+	if started, err := w.ScheduleQueued(context.Background(), "exe", ""); err != nil || started != 0 || jobStarted(t, w, "later") {
+		t.Fatalf("started %d, err %v", started, err)
 	}
 }

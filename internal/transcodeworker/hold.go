@@ -62,6 +62,16 @@ func (w *Worker) SetHold(hold bool) error {
 	}
 	w.holdWrite.Lock()
 	defer w.holdWrite.Unlock()
+	if hold {
+		// A scheduler pass in progress holds the capacity lock and may still be
+		// starting jobs. Wait for it, so that once the hold is confirmed no
+		// pass can start another job.
+		capLock, err := acquireCapacityLock(filepath.Clean(w.cfg.StateDir))
+		if err != nil {
+			return err
+		}
+		defer capLock.Unlock()
+	}
 	if !hold {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

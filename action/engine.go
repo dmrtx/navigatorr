@@ -38,6 +38,9 @@ type Engine struct {
 	// hashSlots bounds whole-file hashes of NAS media across every caller, so
 	// parallel continuations never saturate the share the worker reads from.
 	hashSlots chan struct{}
+
+	// holdSyncing is set while a background worker-hold check runs.
+	holdSyncing atomic.Bool
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the
 	// durable queue order lives in each waiter's state (worker_slot_wait_since).

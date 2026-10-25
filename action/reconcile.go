@@ -46,6 +46,7 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 			d := newReconcileDispatcher()
 			defer d.wg.Wait()
 			for {
+				e.startWorkerHoldSync(ctx)
 				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}

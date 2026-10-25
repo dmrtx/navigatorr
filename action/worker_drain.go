@@ -132,6 +132,14 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 		}
 		byWorker[w.Name] = &transcode.DrainWorker{Name: w.Name, Reachable: reachable}
 	}
+	// Jobs the database says are encoding, per worker: a worker that holds its
+	// queue may keep no more running jobs than these.
+	encoding := map[string]int{}
+	for _, r := range rows {
+		if classifyDrainRow(r) == transcode.DrainJobRunning && !r.WorkerQueued {
+			encoding[e.resolveWorker(r.Worker)]++
+		}
+	}
 	for _, r := range rows {
 		state := classifyDrainRow(r)
 		if state == "" {
@@ -141,8 +149,13 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 		// A job still in its worker's queue, on a worker that confirmed it is
 		// holding that queue, will not start before Resume: it is held back
 		// like a file the server has not sent, and it does not block a deploy.
-		if state == transcode.DrainJobRunning && r.WorkerQueued && e.workerHolding(name) {
-			state = transcode.DrainJobQueued
+		// The stored status can lag the worker, so the worker's own count of
+		// running jobs must not exceed the encodes the database knows of;
+		// otherwise a queued job may already have started.
+		if state == transcode.DrainJobRunning && r.WorkerQueued {
+			if active, ok := e.workerHolding(name); ok && active <= encoding[name] {
+				state = transcode.DrainJobQueued
+			}
 		}
 		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state, Waiting: state == transcode.DrainJobRunning && r.WorkerQueued}
 		if r.Path != "" {
