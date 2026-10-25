@@ -310,3 +310,11 @@ untouched.
 - The helper path takes no engine hash slot but yields the reconcile slot before
   it waits. `promotionReadHook` counts mount bytes only.
 - `Identity.Complete` is recorded now and becomes a requirement in stage 5.
+
+Where the earlier text of this design differs from the above, the above wins:
+`Identity.Complete` is recorded, not required (stage 5 requires it); a helper
+`not_found` is a fallback class (`helper_disagrees`), never a not-exist answer; and
+the audit trail is `integrity_reads` (last read per path), next to the cache's
+`integrity_checks`. A hash that stalls after it started reading opens the breaker;
+one still queued does not. A file whose size differs from the mount's, while the
+helper's identity held steady, is a disagreement, not a retryable change.

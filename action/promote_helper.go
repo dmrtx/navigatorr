@@ -147,10 +147,10 @@ func (h *helperProgress) watch(ctx context.Context, after time.Duration) {
 	}
 }
 
-func (h *helperProgress) state() (observed error, stalled bool) {
+func (h *helperProgress) state() (observed error, stalled bool, read int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.observed, h.stalled
+	return h.observed, h.stalled, h.last
 }
 
 func sameHelperIdentity(a, b nashelper.Identity) bool {
@@ -188,8 +188,8 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 	yieldReconcileSlot(ctx)
 
 	var res nashelper.HashResponse
-	asked := 0
-	for attempt := 0; ; attempt++ {
+	asked, busy := 0, 0
+	for {
 		hashCtx, cancel := context.WithCancel(ctx)
 		prog := &helperProgress{path: path, total: opened.Size(), observer: observer, cancel: cancel, advanced: time.Now(), finishedC: make(chan struct{})}
 		if observer != nil {
@@ -202,15 +202,22 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 		res, err = client.Hash(hashCtx, resolved, prog.report)
 		close(prog.finishedC)
 		cancel()
-		observed, stalled := prog.state()
+		observed, stalled, readSoFar := prog.state()
 		switch {
 		case observed != nil:
 			return "", 0, true, observed
 		case ctx.Err() != nil:
 			return "", 0, true, ctx.Err()
-		case stalled:
-			return fallback("stalled", errors.New("no progress"))
 		case err == nil:
+			// A hash that finished is good even if the watchdog fired in the same
+			// instant.
+		case stalled:
+			// A job that was reading and stopped means a helper in trouble: leave
+			// it alone for a while. One still queued is only waiting its turn.
+			if readSoFar > 0 {
+				e.helperBreaker.trip(time.Now())
+			}
+			return fallback("stalled", errors.New("no progress"))
 		case nashelper.IsAnswer(err):
 			var apiErr *nashelper.Error
 			errors.As(err, &apiErr)
@@ -227,9 +234,10 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 			}
 			return fallback("helper_restarted", err)
 		case isHelperBusy(err):
-			if attempt < helperBusyRetries {
+			if busy < helperBusyRetries {
+				busy++
 				select {
-				case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+				case <-time.After(time.Duration(busy) * 200 * time.Millisecond):
 					continue
 				case <-ctx.Done():
 					return "", 0, true, ctx.Err()
@@ -273,7 +281,10 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 		return "", 0, true, &promotionFileChangedError{path: path, phase: "hashing"}
 	}
 	if res.Bytes != opened.Size() {
-		return "", 0, true, &promotionFileChangedError{path: path, phase: "hashing"}
+		// The helper's view held steady across the hash and the sample, so a size
+		// that differs from the mount's descriptor is a different file under this
+		// path, not one being written. Re-reading would only repeat it.
+		return "", 0, true, &promotionHelperDisagreeError{path: path, what: "sizes differ"}
 	}
 	if helperSample.Digest != mountSample {
 		return "", 0, true, &promotionHelperDisagreeError{path: path, what: "sampled ranges differ"}

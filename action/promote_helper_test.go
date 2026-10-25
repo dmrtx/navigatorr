@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,7 +30,15 @@ type helperRig struct {
 	reads  *readCounter
 	hits   atomic.Int64
 	ts     *httptest.Server
+	real   http.Handler
+	// intercept, when set, may answer a request itself (true) or let the real
+	// helper have it.
+	intercept atomic.Pointer[func(w http.ResponseWriter, r *http.Request) bool]
+	posts     atomic.Int64
+	deletes   atomic.Int64
 }
+
+func (r *helperRig) on(f func(w http.ResponseWriter, req *http.Request) bool) { r.intercept.Store(&f) }
 
 // newHelperRig serves root through a real helper; remote is the directory the
 // helper is told the mount's files live in (root when empty).
@@ -59,10 +69,21 @@ func newHelperRig(t *testing.T, remote string, content []byte) *helperRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(srv.Close)
-	rig := &helperRig{root: root, path: path}
+	rig := &helperRig{root: root, path: path, real: srv.Handler()}
 	rig.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rig.hits.Add(1)
-		srv.Handler().ServeHTTP(w, r)
+		switch r.Method {
+		case http.MethodPost:
+			if r.URL.Path == "/v1/hash" {
+				rig.posts.Add(1)
+			}
+		case http.MethodDelete:
+			rig.deletes.Add(1)
+		}
+		if f := rig.intercept.Load(); f != nil && (*f)(w, r) {
+			return
+		}
+		rig.real.ServeHTTP(w, r)
 	}))
 	t.Cleanup(rig.ts.Close)
 	sum := sha256.Sum256(content)
@@ -237,10 +258,32 @@ func TestPromotionHashReadsThroughTheMountWhenTheHelperDoesNotSeeTheFile(t *test
 	}
 }
 
-func TestPromotionHashStopsWhenTheObserverStops(t *testing.T) {
+func jsonReply(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+}
+
+const runningJob = `{"id":"j1","instance_id":"i1","state":"running","bytes_read":"4096","total_bytes":"12000"}`
+
+func TestPromotionHashStopsAHalfDoneHashWhenTheObserverStops(t *testing.T) {
 	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/hash":
+			jsonReply(w, http.StatusAccepted, runningJob)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+			jsonReply(w, http.StatusOK, runningJob)
+		case r.Method == http.MethodDelete:
+			jsonReply(w, http.StatusOK, `{}`)
+		default:
+			return false
+		}
+		return true
+	})
 	stop := errors.New("operator cancelled")
-	ctx := context.WithValue(context.Background(), promotionHashProgressKey{}, promotionHashProgress(func(_ string, read, _ int64) error {
+	ec := &ExecutionContext{State: map[string]any{}}
+	ctx := context.WithValue(withPromotionVerifiedFiles(context.Background(), ec), promotionHashProgressKey{}, promotionHashProgress(func(_ string, read, _ int64) error {
 		if read > 0 {
 			return stop
 		}
@@ -249,6 +292,204 @@ func TestPromotionHashStopsWhenTheObserverStops(t *testing.T) {
 	if _, _, err := rig.engine.promotionHash(ctx, rig.path); !errors.Is(err, stop) {
 		t.Fatalf("got %v, want the observer's error", err)
 	}
+	if rig.deletes.Load() == 0 {
+		t.Fatal("the job was left running on the helper")
+	}
+	if reads, _ := ec.State["integrity_reads"].(map[string]any); len(reads) != 0 {
+		t.Fatalf("an aborted read was recorded: %+v", reads)
+	}
+}
+
+func TestPromotionHashTurnsAHelperChangedAnswerIntoAFileChangedRetry(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/hash":
+			jsonReply(w, http.StatusAccepted, runningJob)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+			jsonReply(w, http.StatusOK, `{"id":"j1","instance_id":"i1","state":"failed","bytes_read":"4096","total_bytes":"12000","error":{"code":"changed_while_reading","message":"x"}}`)
+		default:
+			return false
+		}
+		return true
+	})
+	_, _, err := rig.engine.promotionHash(context.Background(), rig.path)
+	var changed *promotionFileChangedError
+	if !errors.As(err, &changed) || !transientPromotionHashError(err) {
+		t.Fatalf("got %v, want a retryable file-changed error", err)
+	}
+}
+
+func TestPromotionHashTreatsADifferentIdentityBetweenHashAndSampleAsAChange(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sample" {
+			return false
+		}
+		rec := httptest.NewRecorder()
+		rig.real.ServeHTTP(rec, r)
+		var got nashelper.SampleResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Error(err)
+		}
+		got.Identity.Ino++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(got)
+		return true
+	})
+	_, _, err := rig.engine.promotionHash(context.Background(), rig.path)
+	if !transientPromotionHashError(err) {
+		t.Fatalf("got %v, want a retryable file-changed error", err)
+	}
+}
+
+func TestPromotionHashRefusesAHelperFileOfAnotherSize(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote")
+	rig := newHelperRig(t, remote, nil)
+	if err := os.WriteFile(filepath.Join(remote, "media.mkv"), []byte("a shorter file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := rig.engine.promotionHash(context.Background(), rig.path)
+	var disagree *promotionHelperDisagreeError
+	if !errors.As(err, &disagree) || transientPromotionHashError(err) {
+		t.Fatalf("got %v, want a non-retryable disagreement", err)
+	}
+	if rig.posts.Load() != 1 {
+		t.Fatalf("the helper was asked %d times to hash a file that cannot match", rig.posts.Load())
+	}
+}
+
+func TestPromotionHashAsksAgainAfterAHelperRestartThenFallsBack(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/") {
+			r.URL.Path = "/v1/jobs/does-not-exist"
+			rig.real.ServeHTTP(w, r)
+			return true
+		}
+		return false
+	})
+	ec := &ExecutionContext{State: map[string]any{}}
+	sum, _, err := rig.engine.promotionHash(withPromotionVerifiedFiles(context.Background(), ec), rig.path)
+	if err != nil || sum != rig.sum {
+		t.Fatalf("hash %s, %v", sum, err)
+	}
+	if rig.posts.Load() != 1+helperAskAgain {
+		t.Fatalf("helper asked %d times", rig.posts.Load())
+	}
+	if rec := readRecord(t, ec, rig.path); rec["reason"] != "helper_restarted" {
+		t.Fatalf("record %+v", rec)
+	}
+	if rig.engine.helperBreaker.open(time.Now()) {
+		t.Fatal("a restart must not open the breaker")
+	}
+}
+
+func TestPromotionHashRetriesABusyHelperThenFallsBack(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/hash" {
+			jsonReply(w, http.StatusTooManyRequests, `{"error":{"code":"busy","message":"x"}}`)
+			return true
+		}
+		return false
+	})
+	ec := &ExecutionContext{State: map[string]any{}}
+	sum, _, err := rig.engine.promotionHash(withPromotionVerifiedFiles(context.Background(), ec), rig.path)
+	if err != nil || sum != rig.sum {
+		t.Fatalf("hash %s, %v", sum, err)
+	}
+	if rig.posts.Load() != 1+helperBusyRetries {
+		t.Fatalf("helper asked %d times", rig.posts.Load())
+	}
+	if rec := readRecord(t, ec, rig.path); rec["reason"] != "helper_busy" {
+		t.Fatalf("record %+v", rec)
+	}
+}
+
+func TestPromotionHashFallsBackWhenTheSampleFailsAndClosesTheBreakerAfterASuccess(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.engine.helperBreaker.trip(time.Now().Add(-helperDownFor + time.Minute))
+	rig.engine.helperBreaker.reset()
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/sample" {
+			jsonReply(w, http.StatusInternalServerError, `{"error":{"code":"internal","message":"x"}}`)
+			return true
+		}
+		return false
+	})
+	ec := &ExecutionContext{State: map[string]any{}}
+	sum, _, err := rig.engine.promotionHash(withPromotionVerifiedFiles(context.Background(), ec), rig.path)
+	if err != nil || sum != rig.sum {
+		t.Fatalf("hash %s, %v", sum, err)
+	}
+	if rec := readRecord(t, ec, rig.path); rec["via"] != "smb_fallback" {
+		t.Fatalf("record %+v", rec)
+	}
+	rig.on(func(http.ResponseWriter, *http.Request) bool { return false })
+	if _, _, err := rig.engine.promotionHash(context.Background(), rig.path); err != nil {
+		t.Fatal(err)
+	}
+	if rig.engine.helperBreaker.open(time.Now()) {
+		t.Fatal("the breaker stayed open after a good hash")
+	}
+}
+
+func TestPromotionHashCallerCancelIsNotAFallback(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/hash":
+			jsonReply(w, http.StatusAccepted, runningJob)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+			jsonReply(w, http.StatusOK, runningJob)
+		case r.Method == http.MethodDelete:
+			jsonReply(w, http.StatusOK, `{}`)
+		default:
+			return false
+		}
+		return true
+	})
+	ec := &ExecutionContext{State: map[string]any{}}
+	ctx, cancel := context.WithTimeout(withPromotionVerifiedFiles(context.Background(), ec), 400*time.Millisecond)
+	defer cancel()
+	_, _, err := rig.engine.promotionHash(ctx, rig.path)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+	if rig.reads.of(rig.path) != 0 {
+		t.Fatal("a cancelled read fell back to the mount")
+	}
+	if reads, _ := ec.State["integrity_reads"].(map[string]any); len(reads) != 0 {
+		t.Fatalf("a cancelled read was recorded: %+v", reads)
+	}
+}
+
+func TestPromotionHashSharesTheBreakerAcrossConcurrentReads(t *testing.T) {
+	rig := newHelperRig(t, "", nil)
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if sum, _, err := rig.engine.promotionHash(context.Background(), rig.path); err != nil || sum != rig.sum {
+				t.Errorf("hash %s, %v", sum, err)
+			}
+		}()
+	}
+	wg.Wait()
+	rig.ts.Close()
+	var wg2 sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg2.Add(1)
+		go func() {
+			defer wg2.Done()
+			if sum, _, err := rig.engine.promotionHash(context.Background(), rig.path); err != nil || sum != rig.sum {
+				t.Errorf("hash %s, %v", sum, err)
+			}
+		}()
+	}
+	wg2.Wait()
 }
 
 func TestPromotionHashFallsBackWhenTheHelperStalls(t *testing.T) {
