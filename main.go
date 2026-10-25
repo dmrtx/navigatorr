@@ -220,6 +220,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: maintenance UI: %v\n", err)
 			os.Exit(1)
 		}
+		// How full the NAS and its folders are, sampled for the Stats tab. It
+		// stops before the store closes, like the retention pass.
+		storageCtx, stopStorage := context.WithCancel(context.Background())
+		webUI.SetStorageContext(storageCtx)
+		storageDone := make(chan struct{})
+		go func() {
+			defer close(storageDone)
+			webUI.RunStorageSampler(storageCtx)
+		}()
+		defer func() {
+			stopStorage()
+			<-storageDone
+			webUI.WaitStorage()
+		}()
 	}
 
 	if transportOpts.Transport == "streamable-http" {

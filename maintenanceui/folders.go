@@ -114,7 +114,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 			}
 			item := folderItem{Stat: stat}
 			if stat.IsDir && (order == "size_desc" || order == "size_asc") {
-				size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store)
+				size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store, s.nasMeter())
 				item.FolderSize = &size
 				pending = pending || size.Status != "ready" || size.Updating
 			}
@@ -141,7 +141,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 			item.Status = marks.file(item.Path)
 		}
 		if item.IsDir && r.URL.Query().Get("sizes") == "1" {
-			size := s.folderSizes.get(item.Path, resolver, s.engine.Deps().Store)
+			size := s.folderSizes.get(item.Path, resolver, s.engine.Deps().Store, s.nasMeter())
 			item.FolderSize = &size
 		}
 		page = append(page, item)

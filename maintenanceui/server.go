@@ -44,16 +44,19 @@ var allowedTools = map[string]bool{
 var allowedActions = map[string]bool{"clean_podcast_ads": true, "transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
-	cfg             *config.Config
-	registry        *arrservice.Registry
-	engine          *action.Engine
-	mcp             *server.MCPServer
-	access          *cloudflareAccessVerifier
-	accessOnly      bool
-	tokenHash       [32]byte
-	mu              sync.Mutex
-	sessions        map[string]time.Time
-	folderSizes     folderSizeCache
+	cfg         *config.Config
+	registry    *arrservice.Registry
+	engine      *action.Engine
+	mcp         *server.MCPServer
+	access      *cloudflareAccessVerifier
+	accessOnly  bool
+	tokenHash   [32]byte
+	mu          sync.Mutex
+	sessions    map[string]time.Time
+	folderSizes folderSizeCache
+	storage     storageState
+	// nas replaces the configured NAS helper in tests.
+	nas             nasMeter
 	folderListings  folderListingCache
 	fileStatusCache fileStatusCache
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
@@ -146,6 +149,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/candidate-decision", s.candidateDecision)
 	mux.HandleFunc("POST /api/maintenance/rerun", s.rerun)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
+	mux.HandleFunc("GET /api/maintenance/storage", s.storageStats)
+	mux.HandleFunc("POST /api/maintenance/storage", s.storageStats)
 	mux.HandleFunc("GET /api/maintenance/source-profile", s.sourceProfile)
 	mux.HandleFunc("GET /api/maintenance/source-tracks", s.sourceTracks)
 	mux.HandleFunc("GET /api/maintenance/podcasts", s.podcasts)
