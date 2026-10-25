@@ -1,0 +1,12 @@
+title = "navigatorr gitleaks config"
+
+[extend]
+useDefault = true
+
+# The NAS helper tests start a throwaway server with a fixed, obviously fake
+# token. It is not a credential, and it stays in history, which the full-history
+# scan reads, so allow exactly this value rather than the file.
+[[allowlists]]
+description = "fixed test token of the NAS helper tests"
+regexTarget = "match"
+regexes = ['''helperTestToken = "0123456789abcdef0123456789abcdef"''']
