@@ -466,3 +466,27 @@ Verdict was "approve with changes"; where this differs from the text above, this
    proof; a full helper hash adds nothing that protects data); a proof from an earlier
    process does not count in this stage; the helper proof is weaker than the mount
    probe only by losing its empirical check, which item 4 restores.
+
+#### As built (stage 5)
+
+`action/promote_helper_proof.go` holds the proof (`helperProof`, `promotionKnownHelper`,
+`promotionVerifyByHelper`, the helper-observed probe); `promotionConfirmMovedByHelper`
+is in `promote_move_aside.go`. State: `recovery_proof`, `original_helper`,
+`recovery_helper`. A promotion with no `recovery_proof` keeps the mount proof unchanged.
+
+- `promotionChooseRecovery` takes the helper proof when the original's last full hash
+  came through the helper with a complete identity and `promotionProbeHelper` passes for
+  the recovery directory. A definitive probe failure chooses a copy (reason
+  `mount_probe_failed`, with the probe's step as detail); a probe that could not run falls
+  through to the mount probe.
+- The probe verdict is cached per process and recovery directory; the check that the
+  original lives on the same filesystem and subvolume is made per promotion.
+- Before the rename: the helper's `Sample` of the original must equal the proof of this
+  process in every field (ctime included) and in digest, else the original is read in full.
+  After it: the same inode (ctime may move) and digest, else the moved file is read in full
+  and must equal `OriginalSHA`. A restart that finds the rename done reads the file in
+  full once and accepts that read.
+- Later checks, restore and move back use `promotionVerifyByHelper`; a helper that is down
+  or an earlier process means a full read (through the mount if the helper is gone).
+- `duplicateBackupGuard` refuses any promotion that moves aside.
+- A proof from the same process also counts across waits, as the mount fingerprints do.
