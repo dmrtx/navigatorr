@@ -37,8 +37,9 @@ func TestActionStepSummariesCollapsePollsWithoutReadingPayloads(t *testing.T) {
 		}
 	}
 	full, err := s.GetActionSteps("batch")
-	if err != nil || len(full) != 101 || full[0].OutputsJSON != payload {
-		t.Fatal("compact read changed audit history")
+	// The 99 polls of the waiting step share one row that counts them.
+	if err != nil || len(full) != 3 || full[0].OutputsJSON != payload || full[0].Observations != 99 || full[1].Status != "completed" {
+		t.Fatalf("compact read changed audit history: %d rows", len(full))
 	}
 }
 

@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 17
+const SchemaVersion = 18
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -389,6 +389,11 @@ var migrations = []migration{
 		`CREATE TRIGGER action_instance_revs_delete AFTER DELETE ON action_instances BEGIN
 			DELETE FROM action_instance_revs WHERE id = OLD.id;
 		END`,
+	}},
+	{version: 18, statements: []string{
+		// A step that waits on something outside (an encode, a batch) is polled
+		// every few seconds. Repeated polls update one row and count here.
+		`ALTER TABLE action_steps_log ADD COLUMN observations INTEGER NOT NULL DEFAULT 1`,
 	}},
 }
 

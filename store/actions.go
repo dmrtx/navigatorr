@@ -50,6 +50,8 @@ type ActionStepLog struct {
 	Error       string `json:"error,omitempty"`
 	DurationMs  int64  `json:"duration_ms"`
 	CreatedAt   string `json:"created_at"`
+	// Observations counts the polls a waiting row stands for; 1 for the rest.
+	Observations int64 `json:"observations,omitempty"`
 }
 
 // CreateActionInstance inserts a new action workflow instance.
@@ -329,12 +331,31 @@ func (s *Store) FindActionByIdempotencyKey(actionName, idempotencyKey string) (*
 	return &inst, nil
 }
 
-// LogActionStep appends an execution record for one step of an action.
+// LogActionStep appends an execution record for one step of an action. A poll
+// that finds the step still waiting, straight after the poll that put it
+// there, updates that row (latest outputs, time and a count) instead of adding
+// another: a batch polled every ten seconds otherwise wrote a copy of its whole
+// payload each time, about 2 GB a day.
 func (s *Store) LogActionStep(step ActionStepLog) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := nowStr()
+	if step.Status == "waiting_external" {
+		var id int64
+		var index int
+		var name, status string
+		err := s.db.QueryRow(`SELECT id, step_index, step_name, status FROM action_steps_log
+			WHERE instance_id=? ORDER BY id DESC LIMIT 1`, step.InstanceID).Scan(&id, &index, &name, &status)
+		if err == nil && index == step.StepIndex && name == step.StepName && status == step.Status {
+			_, err = s.db.Exec(`UPDATE action_steps_log SET outputs_json=?, duration_ms=?, created_at=?, observations=observations+1
+				WHERE id=?`, step.OutputsJSON, step.DurationMs, now, id)
+			return err
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+	}
 	_, err := s.db.Exec(`INSERT INTO action_steps_log (
 		instance_id, step_index, step_name, primitive, inputs_json,
 		outputs_json, status, error, duration_ms, created_at
@@ -351,7 +372,7 @@ func (s *Store) GetActionSteps(instanceID string) ([]ActionStepLog, error) {
 	defer s.mu.Unlock()
 
 	rows, err := s.db.Query(`SELECT id, instance_id, step_index, step_name, primitive,
-		inputs_json, outputs_json, status, error, duration_ms, created_at
+		inputs_json, outputs_json, status, error, duration_ms, created_at, observations
 		FROM action_steps_log WHERE instance_id=? ORDER BY step_index ASC, id ASC`, instanceID)
 	if err != nil {
 		return nil, err
@@ -364,7 +385,7 @@ func (s *Store) GetActionSteps(instanceID string) ([]ActionStepLog, error) {
 		if err := rows.Scan(
 			&step.ID, &step.InstanceID, &step.StepIndex, &step.StepName, &step.Primitive,
 			&step.InputsJSON, &step.OutputsJSON, &step.Status, &step.Error,
-			&step.DurationMs, &step.CreatedAt,
+			&step.DurationMs, &step.CreatedAt, &step.Observations,
 		); err != nil {
 			return nil, err
 		}
