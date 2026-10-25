@@ -150,7 +150,7 @@ func (e *Engine) prepareRestoredOriginalRetry(ctx context.Context, ec *Execution
 	if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 		return first, err
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 		return first, err
 	}
 	if err := e.promotionInspectAdopted(ctx, p, p.CandidatePath); err != nil {

@@ -317,8 +317,23 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(fmt.Errorf("integrity violation: original size changed since transcoding"))
 	}
 	p.OriginalBytes = original.Size()
+	// A transcode preflighted by metadata pinned the original's digest once.
+	// Promotion honours that: unchanged size and mtime are all it checks of the
+	// original from here on, and a changed original stops the plan before any
+	// file is read.
+	if size, mod, ok := recordedOriginalStat(source.State); ok && getString(source.State, originalIntegrityCheckKey) == "metadata" {
+		if size != original.Size() || !mod.Equal(original.ModTime()) {
+			return promoteFailed(fmt.Errorf("integrity violation: the original changed since it was transcoded (size or modification time)"))
+		}
+		p.OriginalStatMod = mod.UTC().Format(time.RFC3339Nano)
+	}
 	p.ExpectedVideoCodec = promotionPlanCodec(source)
-	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(ctx, p.CandidatePath)
+	// The converted file is the one read here; the review dialog shows how far.
+	progress := &promotionPreserveProgress{e: e, ec: ec, p: p}
+	defer delete(ec.State, "work_progress")
+	hashCtx := context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
+	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(hashCtx, p.CandidatePath)
+	delete(ec.State, "work_progress")
 	if err != nil {
 		return promoteFailed(err)
 	}
@@ -496,7 +511,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	// The step's own result replaces this progress; never leave a finished or
 	// abandoned read looking current.
 	defer delete(ec.State, "work_progress")
-	if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionOriginal(ctx, p); err != nil {
 		return promoteFailed(err)
 	}
 	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
@@ -587,13 +602,14 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 // aside. They are stored with the promotion so a copy that was not expected
 // can be explained afterwards; none carries a path.
 const (
-	recoveryReasonMoveAside     = "original_moves_aside"
-	recoveryReasonAlwaysCopy    = "copy_forced"
-	recoveryReasonNoFingerprint = "no_stable_identity_for_the_original"
-	recoveryReasonLeftover      = "earlier_recovery_file_present"
-	recoveryReasonMountProbe    = "mount_probe_failed"
-	recoveryReasonRenameRefused = "move_aside_refused"
-	recoveryReasonLegacy        = "recorded_before_the_mode_existed"
+	recoveryReasonMoveAside       = "original_moves_aside"
+	recoveryReasonAlwaysCopy      = "copy_forced"
+	recoveryReasonNoFingerprint   = "no_stable_identity_for_the_original"
+	recoveryReasonLeftover        = "earlier_recovery_file_present"
+	recoveryReasonMountProbe      = "mount_probe_failed"
+	recoveryReasonRenameRefused   = "move_aside_refused"
+	recoveryReasonLegacy          = "recorded_before_the_mode_existed"
+	recoveryReasonOriginalNotRead = "original_not_read_again"
 )
 
 // promotionChooseRecovery moves the original aside unless something rules it
@@ -604,6 +620,9 @@ const (
 func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState) (string, string, string) {
 	if e.promotionAlwaysCopy {
 		return promotionRecoveryCopy, recoveryReasonAlwaysCopy, ""
+	}
+	if p.originalByMetadata() {
+		return promotionRecoveryCopy, recoveryReasonOriginalNotRead, ""
 	}
 	if promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
 		return promotionRecoveryCopy, recoveryReasonNoFingerprint, ""
@@ -632,7 +651,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 		return err
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
 			return err
 		}
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
@@ -654,8 +673,14 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 			// copy instead of discarding it and copying the original again.
 			// An unstable or mismatched partial is never trusted for reuse.
 			if info.Size() == p.OriginalBytes && p.OriginalBytes > 0 {
-				hash, n, hashErr := e.promotionHashStable(ctx, partial)
-				if hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes {
+				var reusable bool
+				if p.originalByMetadata() {
+					reusable = e.verifyPromotionRecovery(ctx, p, partial) == nil
+				} else {
+					hash, n, hashErr := e.promotionHashStable(ctx, partial)
+					reusable = hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes
+				}
+				if reusable {
 					if err := e.promotionPublishPartial(ctx, ec, p, partial); err != nil {
 						return err
 					}
@@ -682,7 +707,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 		// flushed and closed, so this hashes a finished file, never an active
 		// writer. Stable hashing absorbs transient post-close metadata races.
 		// However the copy was made, this full read-back is what proves it.
-		if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionRecovery(ctx, p, partial); err != nil {
 			return err
 		}
 		// This is an independent copy in the promotion's private directory.
@@ -779,7 +804,7 @@ func (e *Engine) promotionPublishPartial(ctx context.Context, ec *ExecutionConte
 		return err
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
 			return err
 		}
 		return e.promotionRemovePartial(ctx, ec, p)
@@ -816,7 +841,7 @@ func (e *Engine) promotionRemovePartial(ctx context.Context, ec *ExecutionContex
 	} else if err != nil {
 		return err
 	}
-	if err := e.verifyPromotionHashStable(ctx, partial, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionRecovery(ctx, p, partial); err != nil {
 		return err
 	}
 	if err := e.savePromotion(ctx, ec, p); err != nil {
@@ -855,6 +880,9 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	}
 	if !p.BackupVerified || p.BackupPath == "" {
 		return fmt.Errorf("verified recovery copy is required before Sonarr mutations")
+	}
+	if p.originalByMetadata() {
+		return e.verifyPromotionRecovery(ctx, p, p.BackupPath)
 	}
 	_, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint)
 	return err

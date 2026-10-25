@@ -7431,3 +7431,19 @@ test("a selection is titled by what the server named it, a single file by its ow
   // Nothing better known: the old name stays.
   assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, files: []}}), "Selected files");
 });
+
+test("the replacement review says how far the converted file's check is and never mentions the original", () => {
+  const h = harness();
+  const check = (work) => h.run(`replacementCheck(${JSON.stringify({work})})`);
+  assert.match(check(undefined).text, /^Checking the converted file\. Nothing changes until you approve\.$/);
+  assert.equal(check(undefined).ratio, undefined);
+  assert.match(check({phase: "waiting_for_hash_slot", total_bytes: 4e9}).text, /^Waiting to check the converted file/);
+  const half = check({phase: "verifying_candidate", bytes_read: 2e9, total_bytes: 4e9});
+  assert.match(half.text, /^Checking the converted file · 50% · 2\.00 GB \/ 4\.00 GB\./);
+  assert.equal(half.ratio, 0.5);
+  // Only the whole file reads as 100%, and an overshoot never exceeds it.
+  assert.match(check({phase: "verifying_candidate", bytes_read: 4e9 - 1, total_bytes: 4e9}).text, / · 99% · /);
+  assert.equal(check({phase: "verifying_candidate", bytes_read: 9e9, total_bytes: 4e9}).ratio, 1);
+  // The original is not read for a review any more; its phase is not shown here.
+  assert.doesNotMatch(check({phase: "verifying_original", bytes_read: 1e9, total_bytes: 4e9}).text, /original|%/);
+});

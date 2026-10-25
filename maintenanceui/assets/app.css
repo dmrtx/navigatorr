@@ -1603,6 +1603,7 @@ main {
 .job-row .job-footer:has(.batch-progress-phase) > .job-actions { align-self: flex-start; }
 #backup-progress:not([hidden]) { display: flex; flex-direction: column; gap: 6px; border-left: 3px solid var(--forest); padding: 10px 12px; background: var(--success-wash); }
 #backup-progress progress { width: min(100%, 420px); height: 6px; accent-color: var(--forest); }
+.replacement-progress { width: min(100%, 420px); height: 6px; accent-color: var(--forest); }
 .cleanup-file { font-weight: 500; margin: 8px 0 4px; }
 .cleanup-space { color: var(--forest); margin-top: 0; }
 .cleanup-locations { padding-top: 8px; }
