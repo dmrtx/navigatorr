@@ -26,6 +26,7 @@ func TestFileStateOfReadsTheAttemptBeforeTheItemRow(t *testing.T) {
 		{"queued in a live batch", store.FileStatusRow{ItemStatus: "queued", BatchStatus: running}, fileQueued},
 		{"waiting for a slot", store.FileStatusRow{ItemStatus: "waiting_for_slot", BatchStatus: running}, fileQueued},
 		{"converting", store.FileStatusRow{ItemStatus: "running", BatchStatus: running, ChildStatus: running}, fileWorking},
+		{"in the worker's line is still waiting", store.FileStatusRow{ItemStatus: "running", BatchStatus: running, ChildStatus: store.ActionStatusWaitingExternal, ChildQueuedOnWorker: true}, fileQueued},
 		{"a decision is waiting", store.FileStatusRow{ItemStatus: "waiting_decision", BatchStatus: store.ActionStatusWaitingDecision}, fileAttention},
 		{"the attempt asks while the item row lags", store.FileStatusRow{ItemStatus: "running", BatchStatus: running, ChildStatus: store.ActionStatusWaitingDecision}, fileAttention},
 		{"queued leftovers of an ended batch say nothing", store.FileStatusRow{ItemStatus: "queued", BatchStatus: cancelled}, ""},
@@ -222,5 +223,26 @@ func TestLibraryMarksEpisodeFilesTitlesAndSeasons(t *testing.T) {
 		if group["seasonNumber"] == float64(2) && mark != nil {
 			t.Fatalf("season 2 marked: %+v", group)
 		}
+	}
+}
+
+func TestQueuedOnWorkerCountsOnlyRunningItemsStillInTheWorkersLine(t *testing.T) {
+	record := func(status, phase string) operationRecord {
+		return operationRecord{inst: store.ActionInstance{Status: status}, state: map[string]any{"transcode_phase": phase}}
+	}
+	records := map[string]operationRecord{
+		"line":     record(store.ActionStatusWaitingExternal, "queued"),
+		"encoding": record(store.ActionStatusWaitingExternal, "encoding"),
+		"done":     record(store.ActionStatusCompleted, "queued"),
+	}
+	items := []store.TranscodeBatchItem{
+		{Status: "running", ChildActionID: "line"},
+		{Status: "running", ChildActionID: "encoding"},
+		{Status: "running", ChildActionID: "done"},
+		{Status: "queued", ChildActionID: "line"},
+		{Status: "running", ChildActionID: "none"},
+	}
+	if got := queuedOnWorker(items, records); got != 1 {
+		t.Fatalf("queuedOnWorker = %d, want 1", got)
 	}
 }

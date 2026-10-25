@@ -88,6 +88,24 @@ func operationValue(r operationRecord, key string) any {
 	}
 	return r.state[key]
 }
+
+// operationQueuedOnWorker is true while the worker has accepted the job but is
+// still working through the jobs ahead of it.
+func operationQueuedOnWorker(r operationRecord) bool {
+	return operationActive(r.inst.Status) && operationString(operationValue(r, "transcode_phase")) == "queued"
+}
+
+// queuedOnWorker counts the batch items that are running only on paper: handed
+// to a worker, in its line, not encoding.
+func queuedOnWorker(items []store.TranscodeBatchItem, records map[string]operationRecord) int {
+	n := 0
+	for _, item := range items {
+		if item.Status == "running" && operationQueuedOnWorker(records[item.ChildActionID]) {
+			n++
+		}
+	}
+	return n
+}
 func operationActive(status string) bool {
 	return status != store.ActionStatusCompleted && status != store.ActionStatusFailed && status != store.ActionStatusCancelled
 }
@@ -945,6 +963,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 				job["remaining_candidates"] = remaining
 				job["replaced_files"] = replacedFiles
+				// A file handed to a worker counts as running in the batch, but one
+				// that is still in the worker's line is not being encoded yet.
+				if queued := queuedOnWorker(items, recordsByID); queued > 0 {
+					if batch := operationMap(job["batch"]); batch != nil {
+						batch["queued_on_worker"] = queued
+					}
+				}
 				if inferred {
 					batch := operationMap(job["batch"])
 					if batch == nil {

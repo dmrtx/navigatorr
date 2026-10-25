@@ -7682,3 +7682,19 @@ test("Stats opens with the storage numbers and the markup and styles for them ex
   assert.match(source, /if \(tab !== "stats"\) clearTimeout\(state\.storageTimer\)/);
   assert.match(source, /else if \(!fromRoute\) safe\(loadStorage\)/);
 });
+
+test("files in a worker's line are not counted or labelled as running", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.batch={total:6,running:4,queued_on_worker:3,completed:2};');
+  assert.equal(h.run('visibleBatch(progressJob).running'), 1);
+  assert.match(h.run('batchCounts(visibleBatch(progressJob), true)'), /1 active · 3 waiting for a worker/);
+  assert.equal(h.run('segmentParts(visibleBatch(progressJob)).find(part=>part.kind==="run").n'), 1);
+  // Never more than the server says is running.
+  h.run('progressJob.batch={total:3,running:1,queued_on_worker:5};');
+  assert.equal(h.run('visibleBatch(progressJob).running'), 0);
+  // A batch whose every active file is in a worker's line is queued, not in progress.
+  h.run('progressJob.status="waiting_external";progressJob.activities=[{worker:{transcode_phase:"queued"}},{worker:{transcode_phase:"queued"}}];progressJob.worker={transcode_phase:"queued",transcode_status:"queued"};');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Queued on worker");
+  h.run('progressJob.activities=[{worker:{transcode_phase:"encoding"}},{worker:{transcode_phase:"queued"}}];');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "In progress");
+});
