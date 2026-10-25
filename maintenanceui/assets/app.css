@@ -1679,6 +1679,13 @@ main {
 .worker-progress > .metadata:first-child {
   grid-column: 1;
 }
+/* In a queue row the label and the step keep one line each, so a longer phase
+   name never moves the bar; the full text is the tooltip. */
+.job-row .worker-progress > .single-line {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .job-progress meter {
   width: 100%;
   min-width: 0;
@@ -1699,6 +1706,8 @@ main {
 .worker-progress > meter + .metadata {
   grid-column: 2;
   grid-row: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 .worker-progress > .progress-observed-at,
 .worker-progress > .progress-observation {
@@ -2763,6 +2772,14 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .replacement-file-name { font-weight: 600; overflow-wrap: anywhere; }
 .replacement-file-step { color: var(--muted); overflow-wrap: anywhere; }
 .replacement-file.done .replacement-file-step { color: var(--forest); }
+/* A queue row keeps one line per file being worked on: the name gives way to the step. */
+.job-row .replacement-progress, .job-row .replacement-files { min-width: 0; }
+/* In a column, "flex: 1 0 100%" is a height of nothing: the bar keeps its own size. */
+.job-row .replacement-progress > progress { flex: 0 0 auto; height: 6px; border-radius: 3px; }
+.job-row .replacement-files { grid-template-columns: minmax(0, 1fr); }
+.job-row .replacement-file-name { flex: 1 1 0; min-width: 8ch; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.job-row .replacement-file { flex-wrap: nowrap; }
+.job-row .replacement-file-step { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .replacement-file.failed .replacement-file-step { color: var(--danger); }
 .terminal-job .replacement-progress progress { display: block; }
 
@@ -2827,6 +2844,8 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .track-report-row.dropped strong { font-weight: 400; color: var(--muted); }
 .track-report-row.kept .track-badge { border-color: var(--forest); color: var(--forest); }
 .batch-file-tracks { flex-basis: 100%; }
+/* The page keeps its scrollbar's room, so a modal that locks the page's scrolling moves nothing. */
+html { scrollbar-gutter: stable; }
 /* Phones: the title gets the whole line beside the number, however long it is,
    and the status badge sits under it instead of squeezing it. The corner
    buttons are centred on the title's first line. */
@@ -2846,6 +2865,16 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
     padding: 0 8px;
   }
   .job-row > .job-actions { top: calc(10px + (24px - var(--action-height)) / 2); }
+  /* The decision chip sits at the title's right edge: the title stops short of it. */
+  .job-row > .job-heading:has(> .decision-badge) > .job-title { padding-right: 26px; }
+}
+/* A very narrow screen (a small phone at 150% zoom) has no room for the corner
+   buttons beside the title: they move to their own line under it, so the title
+   keeps its width. */
+@media (max-width: 300px) {
+  .job-row.has-menu > .job-heading { padding-right: 0; }
+  .job-row > .job-actions { position: static; grid-column: 1; grid-row: 2; justify-content: flex-end; }
+  .job-row > .job-meta { grid-row: 3; }
 }
 
 /* ---- Job detail dialog ----------------------------------------------------

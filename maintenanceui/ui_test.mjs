@@ -4120,7 +4120,7 @@ test("preparing recovery names and measures each stage instead of a frozen step"
 
   h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
   const waiting = h.run('telemetry(promotionJob)');
-  assert.match(progressText(waiting), /Step 3\/8 · Verify original and prepare recovery · Waiting for a hash slot/);
+  assert.match(progressText(waiting), /Waiting for a hash slot.*Step 3\/8 · Verify original and prepare recovery/);
   assert.equal(meterOf(waiting), undefined);
 
   for (const [phase, label] of [
@@ -4131,7 +4131,7 @@ test("preparing recovery names and measures each stage instead of a frozen step"
   ]) {
     h.run(`promotionJob.work={phase:"${phase}",bytes_read:10e9,total_bytes:20e9};`);
     const element = h.run('telemetry(promotionJob)');
-    assert.match(progressText(element), new RegExp(`Step 3/8 · Verify original and prepare recovery · ${label} · 50%.*10\\.00 GB / 20\\.00 GB`));
+    assert.match(progressText(element), new RegExp(`${label} · 50%.*10\\.00 GB / 20\\.00 GB.*Step 3/8 · Verify original and prepare recovery`));
     assert.equal(meterOf(element).max, 20e9);
     assert.equal(meterOf(element).value, 10e9);
   }
@@ -4150,13 +4150,13 @@ test("preparing recovery names and measures each stage instead of a frozen step"
   assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 4\/8 · Import verified candidate/);
   // An original that cannot be moved aside is copied while it is removed.
   h.run('promotionJob.current_step=4;promotionJob.work={phase:"copying_recovery",bytes_read:5e9,total_bytes:20e9};');
-  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Copying the recovery copy · 25%.*5\.00 GB \/ 20\.00 GB/);
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Copying the recovery copy · 25%.*5\.00 GB \/ 20\.00 GB.*Step 5\/8 · Remove original library file/);
   h.run('promotionJob.work={phase:"waiting_for_hash_slot",total_bytes:20e9};');
-  assert.match(progressText(h.run('telemetry(promotionJob)')), /Step 5\/8 · Remove original library file · Waiting for a hash slot/);
+  assert.match(progressText(h.run('telemetry(promotionJob)')), /Waiting for a hash slot.*Step 5\/8 · Remove original library file/);
   // Its full read of the original is shown too, with a measured bar.
   h.run('promotionJob.work={phase:"verifying_original",bytes_read:5e9,total_bytes:20e9};');
   const reread = h.run('telemetry(promotionJob)');
-  assert.match(progressText(reread), /Step 5\/8 · Remove original library file · Re-checking the original · 25%.*5\.00 GB \/ 20\.00 GB/);
+  assert.match(progressText(reread), /Re-checking the original · 25%.*5\.00 GB \/ 20\.00 GB.*Step 5\/8 · Remove original library file/);
   assert.equal(meterOf(reread).max, 20e9);
   // Any other phase there is still not recovery work.
   h.run('promotionJob.work={phase:"verifying_candidate",bytes_read:5e9,total_bytes:20e9};');
@@ -6044,15 +6044,26 @@ test("the progress headline and one line per file describe the real stage, with 
   const block = h.run("replacementProgressBlock(job)");
   const text = textOf(block);
   assert.match(text, /Replacing 3 files · 1 of 3 done/);
-  assert.match(text, /Sample Show S01E01 Done · freed 1\.60 GB/);
+  // A row names the files being worked on; finished and waiting ones are in the headline's count.
   assert.match(text, /Sample Show S01E02 Backing up the original \(55%\)/);
-  assert.match(text, /Sample Show S01E03 Waiting/);
+  assert.doesNotMatch(text, /S01E01|S01E03/);
   assert.doesNotMatch(text, /Estimated workflow progress|Not time remaining|%\s*$/);
   // Each stage reads as a plain step.
   const steps = JSON.parse(h.run(`JSON.stringify(["checking","backup","backup_check","swap","final_check","done","waiting"].map(phase => replacementStepText({phase})))`));
   assert.deepEqual(steps, ["Checking the files", "Backing up the original", "Checking the backup", "Swapping in the new file", "Checking the new file", "Done", "Waiting"]);
   // The batch progress block is this block while a replacement runs.
   assert.match(textOf(h.run("batchProgress(job)")), /1 of 3 done/);
+});
+
+test("a row lists the files being worked on, at most four, and counts the rest", () => {
+  const h = harness();
+  h.context.job = replacingBatch({replacement: {approved: true, total: 8, done: 1, failed: 0, members: Array.from({length: 8}, (_, i) => ({item_key: `k${i}`, name: `Show S01E0${i + 1}`, phase: i === 0 ? "done" : i < 7 ? "backup" : "waiting"}))}});
+  const text = textOf(h.run("replacementProgressBlock(job)"));
+  assert.match(text, /Replacing 8 files · 1 of 8 done/);
+  assert.match(text, /S01E02/);
+  assert.match(text, /S01E05/);
+  assert.doesNotMatch(text, /S01E01|S01E06|S01E08/);
+  assert.match(text, /and 2 more/);
 });
 
 const failedReplacement = () => replacingBatch({
@@ -6304,23 +6315,24 @@ test("the single-file review uses the same card, the total it frees and a Keep o
   assert.equal(h.elements.get("reject-file-review").hidden, false);
 });
 
-test("the review's buttons stay off while the plan replaces the checking text, so a tap aimed at Replace file cannot land on Keep original", async () => {
+test("a review that opens by itself keeps its buttons off until the layout settles, so a stray tap cannot land on Replace file or Keep original", async () => {
   const h = harness();
   h.context.current = { id: "replace", status: "waiting_decision", waiting_options: [{ decision: "approve" }, { decision: "reject" }], replacement_facts: sampleFacts(4e9, 2.4e9), promotion: { original_path: "/media/Sample Show S01E01.mkv", candidate_path: "/media/.candidates/Sample Show S01E01.mkv", original_sha256: "o", candidate_sha256: "c", plan_digest: "sha256:plan" } };
-  h.run("api = async () => ({jobs:[current]});");
-  h.run('state.fileApproval = {id:"replace", digest:"", original:"", candidate:"", pending:true}; showFileReviewPending("Checking the converted file.");');
   const reject = h.elements.get("reject-file-review");
   const approve = h.elements.get("approve-file-review");
-  assert.equal(reject.hidden, false, "Keep original keeps its place while the plan is checked");
-  assert.equal(reject.disabled && approve.disabled, true);
   const timers = [];
   h.context.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return 1; };
-  h.run("serverReachable = true; showFileReview(current, state.fileApproval)");
-  assert.equal(reject.disabled && approve.disabled, true, "both stay off right after the plan appears");
+  h.run('serverReachable = true; state.fileApproval = {id:"replace", digest:"", original:"", candidate:""}; showFileReview(current, state.fileApproval, {unprompted: true})');
+  assert.equal(reject.disabled && approve.disabled, true, "both stay off right after it opens");
   assert.equal(timers.length, 1);
   assert.ok(timers[0].ms >= 500);
   timers[0].fn();
   assert.ok(!reject.disabled && !approve.disabled, "and wake once the layout has settled");
+  // A review the person asked for is ready at once.
+  timers.length = 0;
+  h.run('state.fileApproval = {id:"replace", digest:"", original:"", candidate:""}; showFileReview(current, state.fileApproval)');
+  assert.equal(timers.length, 0);
+  assert.ok(!reject.disabled && !approve.disabled);
 });
 
 // Languages to keep: the Settings editor, the goal form's track picker, and the
@@ -7512,18 +7524,3 @@ test("a selection is titled by what the server named it, a single file by its ow
   assert.equal(title({...base, batch: {title: "Selected files", total: 2}, batch_files: {file_count: 2, files: []}}), "Selected files");
 });
 
-test("the replacement review says how far the converted file's check is and never mentions the original", () => {
-  const h = harness();
-  const check = (work) => h.run(`replacementCheck(${JSON.stringify({work})})`);
-  assert.match(check(undefined).text, /^Checking the converted file\. Nothing changes until you approve\.$/);
-  assert.equal(check(undefined).ratio, undefined);
-  assert.match(check({phase: "waiting_for_hash_slot", total_bytes: 4e9}).text, /^Waiting to check the converted file/);
-  const half = check({phase: "verifying_candidate", bytes_read: 2e9, total_bytes: 4e9});
-  assert.match(half.text, /^Checking the converted file · 50% · 2\.00 GB \/ 4\.00 GB\./);
-  assert.equal(half.ratio, 0.5);
-  // Only the whole file reads as 100%, and an overshoot never exceeds it.
-  assert.match(check({phase: "verifying_candidate", bytes_read: 4e9 - 1, total_bytes: 4e9}).text, / · 99% · /);
-  assert.equal(check({phase: "verifying_candidate", bytes_read: 9e9, total_bytes: 4e9}).ratio, 1);
-  // The original is not read for a review any more; its phase is not shown here.
-  assert.doesNotMatch(check({phase: "verifying_original", bytes_read: 1e9, total_bytes: 4e9}).text, /original|%/);
-});

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { startServer } from "./server.mjs";
 import { scenarios, world, nameVariants, sizeVariants } from "./fixtures.mjs";
 import { budgets, install } from "./invariants.mjs";
+import { listBudgets, installList } from "./list_invariants.mjs";
 
 export const out = fileURLToPath(new URL("./out/", import.meta.url));
 
@@ -119,6 +120,7 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
   const server = await startServer(live);
   const browser = await chromium.launch(process.env.LAYOUT_BROWSER ? { channel: process.env.LAYOUT_BROWSER } : {});
   const rules = install();
+  const listRules = installList();
   const report = { profile, cells: all.length, failed: 0, retried: 0, acts: {}, violations: [], errors: [] };
   // One context per screen shape: the viewport, touch and theme are fixed for
   // the context, the scenarios swap inside it.
@@ -164,6 +166,16 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
             // Browser zoom shrinks the viewport in CSS pixels: 150% on a 320px phone
             // lays the page out at 213px. Emulate that, not a scaled page.
             await page.setViewportSize({ width: Math.round(screen.width / cell.zoom), height: Math.round(screen.height / cell.zoom) });
+            // The row the same job has in the Activity list, before it is opened.
+            if (!cell.act) {
+              const rowSelector = `.job-row[data-operation-id="${w.id}"]`;
+              await page.waitForSelector(rowSelector, { timeout: 5000 });
+              await page.evaluate(sel => { document.querySelector(sel).scrollIntoView({ block: "center" }); }, rowSelector);
+              await page.evaluate(() => new Promise(r => requestAnimationFrame(r)));
+              const listFound = await page.evaluate(`(${listRules.toString()})(${JSON.stringify(rowSelector)}, ${JSON.stringify(listBudgets)})`);
+              for (const v of listFound) if (!found.some(f => f.rule === v.rule && f.where === v.where && f.message === v.message)) found.push({ ...v, scroll: "list" });
+              if (listFound.length) await page.locator(rowSelector).screenshot({ path: `${out}${cellName(cell)}__row.png` }).catch(() => {});
+            }
             await open(page, w.id);
             if (cell.act) { const applied = await act(page, cell.act); report.acts[cell.act] = (report.acts[cell.act] || 0) + (applied ? 1 : 0); }
             for (const where of ["top", "bottom"]) {

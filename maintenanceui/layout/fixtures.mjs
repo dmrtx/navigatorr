@@ -59,6 +59,7 @@ function file(v, v2, n, extra = {}) {
 
 // ---- single files ----------------------------------------------------------
 
+const replaceStages = ["plan_promotion", "approve_promotion", "preserve_original", "import_candidate", "remove_old_file", "rename_candidate", "rescan_library", "finalize_promotion"];
 function single(v, s, over) {
   const sizes = sizeVariants[s] || sizeVariants.normal;
   return {
@@ -107,6 +108,8 @@ export const scenarios = [
   { id: "file-candidate-larger", build: (v) => ({ job: single(v, "larger", { status: "completed", candidate_ready: true, stages: encodeStages.map(x => ({ ...x, status: "completed" })), savings: { source_bytes: 1 * GB, candidate_bytes: 1.3 * GB, candidate_saved_bytes: -0.3 * GB } }) }) },
   { id: "file-not-converted", build: (v, s) => ({ job: single(v, s, { status: "completed", reason_code: "minimum_savings", error: "Minimum savings not met: estimated 3% < 10%", stages: encodeStages.map(x => ({ ...x, status: "completed" })) }) }) },
   { id: "file-replacing", build: (v, s) => ({ job: single(v, s, { status: "running", action_name: "promote_transcode_candidate", promotion: { original_path: path(v), new_path: path(v) }, stages: [{ name: "plan_promotion", status: "completed" }, { name: "approve_promotion", status: "completed" }, { name: "preserve_original", status: "running" }, { name: "import_candidate", status: "pending" }, { name: "finalize_promotion", status: "pending" }], current_step: 2 }) }) },
+  // The coordinator's own reads while a replacement is prepared: the row shows how far it is.
+  ...[["copy", "copying_recovery", 1.48 * GB], ["hash-wait", "waiting_for_hash_slot", 0], ["verify", "verifying_candidate", 0.2 * GB], ["verify-done", "verifying_recovery", 3.37 * GB - 1]].map(([name, phase, read]) => ({ id: `file-replacing-${name}`, build: (v, s) => ({ job: single(v, s, { status: "running", action_name: "promote_transcode_candidate", promotion: { original_path: path(v), new_path: path(v) }, stages: replaceStages.map((x, i) => ({ name: x, status: i < 2 ? "completed" : i === 2 ? "running" : "pending" })), current_step: 2, work: { phase, bytes_read: read, total_bytes: 3.37 * GB }, savings: { source_bytes: 3.37 * GB, candidate_bytes: 0.589 * GB } }) }) })),
   { id: "file-replaced", build: (v, s) => ({ job: single(v, s, { status: "completed", replaced: true, savings: { source_bytes: sizeVariants[s].source, candidate_bytes: sizeVariants[s].candidate, realized_saved_bytes: sizeVariants[s].source - sizeVariants[s].candidate }, stages: encodeStages.map(x => ({ ...x, status: "completed" })) }) }) },
   { id: "file-failed", build: (v, s) => ({ job: single(v, s, { status: "failed", error: "ffmpeg exited with status 1: Error while decoding stream #0:1: Invalid data found when processing input\n  at libavcodec/hevc_ps.c:1204", current_step: 2, stages: encodeStages.map((x, i) => ({ ...x, status: i < 2 ? "completed" : i === 2 ? "failed" : "pending", note: i === 2 ? "Worker reported exit 1" : undefined })) }) }) },
   { id: "file-failed-short", build: (v, s) => ({ job: single(v, s, { status: "failed", error: "Source file is missing", stages: encodeStages.map((x, i) => ({ ...x, status: i === 0 ? "failed" : "pending" })), current_step: 0 }) }) },
