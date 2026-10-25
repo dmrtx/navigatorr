@@ -23,12 +23,16 @@ import (
 )
 
 const (
-	hashChunk       = 1 << 20
-	jobRetention    = 15 * time.Minute
-	maxJobs         = 256
-	maxActiveJobs   = 32
-	maxRequestBytes = 64 << 10
-	minTokenLength  = 32
+	hashChunk    = 1 << 20
+	jobRetention = 15 * time.Minute
+	// defaultOrphanAfter is how long a job may go unasked-about before the helper
+	// stops reading for it. The client polls every couple of seconds, so a job
+	// nobody asks about belongs to a caller that is gone (or never got the id).
+	defaultOrphanAfter = 2 * time.Minute
+	maxJobs            = 256
+	maxActiveJobs      = 32
+	maxRequestBytes    = 64 << 10
+	minTokenLength     = 32
 )
 
 // Config configures a Server.
@@ -64,6 +68,8 @@ type Server struct {
 	// afterChunk runs after each chunk of a hash, so a test can change the file
 	// mid-read or hold a job.
 	afterChunk func(path string)
+
+	orphanAfter time.Duration
 }
 
 // NewServer opens the roots and returns a Server.
@@ -97,6 +103,8 @@ func NewServer(cfg Config) (*Server, error) {
 		cancel:    cancel,
 		jobs:      map[string]*job{},
 		now:       time.Now,
+
+		orphanAfter: defaultOrphanAfter,
 	}, nil
 }
 
@@ -309,8 +317,11 @@ type job struct {
 	path string
 
 	cancel context.CancelFunc
-	read   atomic.Int64
-	total  atomic.Int64
+	// asked is when a caller last asked about the job (unix nanoseconds, real
+	// clock), so an abandoned one can be stopped.
+	asked atomic.Int64
+	read  atomic.Int64
+	total atomic.Int64
 
 	mu       sync.Mutex
 	state    string
@@ -337,6 +348,7 @@ func (s *Server) startHash(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithCancel(s.baseCtx)
 	j := &job{id: hex.EncodeToString(idBytes), path: path, cancel: cancel, state: JobQueued}
+	j.asked.Store(time.Now().UnixNano())
 
 	s.mu.Lock()
 	s.expireLocked()
@@ -392,6 +404,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, &Error{Code: CodeNotFound, Message: "no such job"})
 		return
 	}
+	j.asked.Store(time.Now().UnixNano())
 	writeJSON(w, http.StatusOK, s.snapshot(j))
 }
 
@@ -428,6 +441,7 @@ func (s *Server) finish(j *job, res *HashResult, err error) {
 func (s *Server) runHash(ctx context.Context, j *job) {
 	defer s.wg.Done()
 	defer j.cancel()
+	go s.reapIfAbandoned(ctx, j)
 	select {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
@@ -444,6 +458,26 @@ func (s *Server) runHash(ctx context.Context, j *job) {
 	j.set(JobRunning)
 	res, err := s.hashFile(ctx, j)
 	s.finish(j, res, err)
+}
+
+// reapIfAbandoned cancels the job when nobody has asked about it for orphanAfter,
+// so a caller that died or never received the job id cannot leave the helper
+// reading a large file (and holding a slot) for nothing.
+func (s *Server) reapIfAbandoned(ctx context.Context, j *job) {
+	every := max(s.orphanAfter/4, 5*time.Millisecond)
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if time.Since(time.Unix(0, j.asked.Load())) > s.orphanAfter {
+				j.cancel()
+				return
+			}
+		}
+	}
 }
 
 // hashFile reads the whole file from local disk. The result stands only if the

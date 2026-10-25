@@ -7,6 +7,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/queue"
@@ -95,14 +96,22 @@ func RegisterDiagnostics(s *server.MCPServer, cfg *config.Config, registry *arrs
 		workers = transcodeWorkers[0]
 	}
 
+	var helper *nashelper.Client
+	var helperErr error
+	if cfg != nil {
+		helper, helperErr = NewNASHelperClient(cfg.NASHelper)
+	}
+
 	registerDiagnosticsTools(s, DiagnosticsDeps{
-		Config:    cfg,
-		Registry:  registry,
-		SpecStore: specStore,
-		TxClient:  txClient,
-		QbClient:  qbClient,
-		SabClient: sabClient,
-		Store:     mStore,
-		Workers:   workers,
+		NASHelper:    helper,
+		NASHelperErr: helperErr,
+		Config:       cfg,
+		Registry:     registry,
+		SpecStore:    specStore,
+		TxClient:     txClient,
+		QbClient:     qbClient,
+		SabClient:    sabClient,
+		Store:        mStore,
+		Workers:      workers,
 	})
 }

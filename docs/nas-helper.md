@@ -206,7 +206,10 @@ bytes on the network.
 
 1. Shared sampled-range digest package (no behaviour change).
 2. The read-only helper binary (`identity`, `hash`, `sample`).
-3. Coordinator client and configuration (off when unset).
+3. Coordinator client and configuration (off when unset). Done: `nas_helper`
+   config block, `internal/nashelper` client (restart detection by instance id,
+   no redirects, job cancelled when the caller gives up), a `nas_helper`
+   section in `diagnostics`; nothing else reads it yet.
 4. Candidate checks through the helper: plan hash against the worker's
    attestation (required), SMB sample cross-check, identity between waits,
    full local read by the helper before recovery data is removed. Any helper
@@ -218,6 +221,22 @@ bytes on the network.
    restore/discard/clean/duplicate rework (discard of a moved recovery must
    require the helper's hash of the replacement to equal the recorded one),
    and the tool descriptions. Not started.
+
+Client contract for stage 4 (from the stage 3 review): `IsAnswer(err)` is true only
+for `not_found`, `not_regular_file` and `changed_while_reading`; every other
+failure (unreachable, the client's own timeout, a path the helper does not serve,
+`permission_denied`, a restart, an unknown code) satisfies `ShouldFallBack(err)`
+and the file is read through the mount, recorded as a degradation. The caller's
+own cancellation is neither. A `not_found` is only as good as the path mapping, so
+absence is confirmed with a `stat` on the mount before any destructive decision.
+`Identity`, `Sample` and `Hash` return the helper's instance id with the result so
+a stored identity is never compared with one from another instance. `Hash` has no
+timeout of its own (the caller passes a deadline), tolerates two failed polls in a
+row, and cancels its job on every exit before a result. `Sample` always needs a
+deadline from the caller. A caller that wraps a helper call in a shorter deadline of
+its own gets its own deadline back, not a fallback. The helper stops a hash job
+nobody has asked about for two minutes (a caller that died, or never received the
+id), so an abandoned job cannot keep reading or hold a slot.
 
 Required from the second review for the helper's API: no expected value is
 ever sent to it; a job is created for the step that uses it; the sampling

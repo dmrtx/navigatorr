@@ -529,3 +529,53 @@ func TestRequestsAfterCloseAreRefused(t *testing.T) {
 		t.Fatalf("a closed server must not start jobs, got %d", status)
 	}
 }
+
+func TestAbandonedJobIsStopped(t *testing.T) {
+	f := newFixture(t, 1)
+	f.srv.orphanAfter = 100 * time.Millisecond
+	path, _ := f.write("big.bin", 8<<20)
+	f.srv.afterChunk = func(string) { time.Sleep(20 * time.Millisecond) }
+	status, body := f.call("POST", "/v1/hash", testToken, PathRequest{Path: path})
+	if status != http.StatusAccepted {
+		t.Fatalf("%d %s", status, body)
+	}
+	var j Job
+	if err := json.Unmarshal(body, &j); err != nil {
+		t.Fatal(err)
+	}
+	// Nobody asks about it: it must stop on its own and free its slot.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.srv.mu.Lock()
+		active := f.srv.activeLocked()
+		f.srv.mu.Unlock()
+		if active == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an abandoned job kept reading")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	final := f.waitJob(j.ID, JobCancelled)
+	if final.State != JobCancelled {
+		t.Fatalf("state %s", final.State)
+	}
+}
+
+func TestPolledJobIsNotReaped(t *testing.T) {
+	f := newFixture(t, 1)
+	f.srv.orphanAfter = 150 * time.Millisecond
+	path, data := f.write("a.bin", 6<<20)
+	f.srv.afterChunk = func(string) { time.Sleep(30 * time.Millisecond) }
+	status, body := f.call("POST", "/v1/hash", testToken, PathRequest{Path: path})
+	if status != http.StatusAccepted {
+		t.Fatalf("%d %s", status, body)
+	}
+	var j Job
+	_ = json.Unmarshal(body, &j)
+	final := f.waitJob(j.ID, JobDone, JobFailed, JobCancelled) // polls well inside orphanAfter
+	if final.State != JobDone || final.Result == nil || final.Result.Bytes != int64(len(data)) {
+		t.Fatalf("%+v", final)
+	}
+}
