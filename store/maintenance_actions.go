@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 )
 
@@ -209,8 +210,7 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 		inputs_json, outputs_json, state_json, waiting_reason, waiting_condition,
 		waiting_options_json, error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE action_name IN
-		('transcode_media','transcode_batch','benchmark_transcode','promote_transcode_candidate')
-		ORDER BY updated_at DESC, id`)
+		('transcode_media','transcode_batch','benchmark_transcode','promote_transcode_candidate')`)
 	if err != nil {
 		return nil, err
 	}
@@ -246,5 +246,14 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 	}
 	// Drop removed actions and enforce a bounded memory budget every snapshot.
 	s.maintenanceMemo = next
+	// Newest first. SQLite would sort the wide payload rows through temporary
+	// files, which made every request wait on disk; the rows are few and sort
+	// here by their short keys instead.
+	sort.Slice(actions, func(i, j int) bool {
+		if actions[i].UpdatedAt != actions[j].UpdatedAt {
+			return actions[i].UpdatedAt > actions[j].UpdatedAt
+		}
+		return actions[i].ID < actions[j].ID
+	})
 	return actions, nil
 }

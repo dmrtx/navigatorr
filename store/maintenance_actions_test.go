@@ -320,3 +320,36 @@ func TestMaintenanceSnapshotKeepsThePlanMembersWithoutCandidatePathsOrHashes(t *
 		}
 	}
 }
+
+func TestMaintenanceSnapshotIsNewestFirstThenByID(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, id := range []string{"b", "a", "old", "new", "other-kind"} {
+		name := "transcode_media"
+		if id == "other-kind" {
+			name = "validate_torrent"
+		}
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: name, Status: ActionStatusCompleted}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id, at := range map[string]string{"old": "2026-10-01T00:00:00Z", "a": "2026-10-10T00:00:00Z", "b": "2026-10-10T00:00:00Z", "new": "2026-10-20T00:00:00Z", "other-kind": "2026-10-25T00:00:00Z"} {
+		if _, err := s.db.Exec(`UPDATE action_instances SET updated_at=? WHERE id=?`, at, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, row := range rows {
+		got = append(got, row.ID)
+	}
+	if strings.Join(got, ",") != "new,a,b,old" {
+		t.Fatalf("order = %v, want newest first, ties by id, other kinds excluded", got)
+	}
+}
