@@ -117,7 +117,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	observer, _ := ctx.Value(promotionHashProgressKey{}).(promotionHashProgress)
 	var h hash.Hash
 	var n int64
-	helperSum, helperN, handled, err := e.promotionHelperHash(ctx, path, resolved, f, opened, observer)
+	helperSum, helperN, helperProof, handled, err := e.promotionHelperHash(ctx, path, resolved, f, opened, observer)
 	if err != nil {
 		return "", 0, err
 	}
@@ -161,7 +161,7 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if !handled {
 		sum = hex.EncodeToString(h.Sum(nil))
 	}
-	promotionRememberHash(ctx, path, sum, opened, finished)
+	promotionRememberHash(ctx, path, sum, opened, finished, helperProof)
 	return sum, n, nil
 }
 
@@ -585,12 +585,21 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		// The original stays where it is, verified and reserved, until right
 		// before it would be removed; see promotionMoveAside. This step's
 		// full hash is the identity that move must find again.
-		p.OriginalFingerprint = promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA)
-		if p.OriginalFingerprint == nil {
-			if p.MoveAsideStartedAt != "" {
-				return promoteFailed(fmt.Errorf("the original has no stable file identity after a move aside began; recovery retained"))
+		if p.helperProof() {
+			// Whatever this execution's full read left is kept; one from an
+			// earlier process stays as it was and proves nothing. Without a
+			// proof the move aside reads the original in full instead.
+			if known := promotionKnownHelper(ctx, p.OriginalPath, p.OriginalSHA); known != nil {
+				p.OriginalHelper = known
 			}
-			p.RecoveryMode, p.RecoveryModeReason = promotionRecoveryCopy, recoveryReasonNoFingerprint
+		} else {
+			p.OriginalFingerprint = promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA)
+			if p.OriginalFingerprint == nil {
+				if p.MoveAsideStartedAt != "" {
+					return promoteFailed(fmt.Errorf("the original has no stable file identity after a move aside began; recovery retained"))
+				}
+				p.RecoveryMode, p.RecoveryModeReason = promotionRecoveryCopy, recoveryReasonNoFingerprint
+			}
 		}
 	}
 	if p.movesAside() {
@@ -600,7 +609,7 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
-		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason, "recovery_mode_detail": p.RecoveryModeDetail}}, nil
+		return StepResult{Status: StepCompleted, Outputs: map[string]any{"recovery_path": p.BackupPath, "recovery_mode": p.RecoveryMode, "recovery_mode_reason": p.RecoveryModeReason, "recovery_mode_detail": p.RecoveryModeDetail, "recovery_proof": promotionOr(p.RecoveryProof, "mount")}}, nil
 	}
 	if err := e.promotionMakeRecoveryCopy(ctx, ec, p, progress); err != nil {
 		return promoteFailed(err)
@@ -643,12 +652,35 @@ func (e *Engine) promotionChooseRecovery(ctx context.Context, p *promotionState)
 	if p.originalByMetadata() {
 		return promotionRecoveryCopy, recoveryReasonOriginalNotRead, ""
 	}
-	if promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
+	helper := promotionKnownHelper(ctx, p.OriginalPath, p.OriginalSHA)
+	if helper == nil && promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
 		return promotionRecoveryCopy, recoveryReasonNoFingerprint, ""
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
 			return promotionRecoveryCopy, recoveryReasonLeftover, ""
+		}
+	}
+	if helper != nil {
+		// The NAS filesystem itself answers, so the mount's identity is not asked.
+		// A probe the helper could not run, or a recovery directory it does not
+		// serve, falls through to the mount probe below.
+		switch err := e.promotionProbeHelper(ctx, filepath.Dir(p.BackupPath), helper.Identity); {
+		case err == nil:
+			p.RecoveryProof = promotionProofHelper
+			return promotionRecoveryMoveAside, recoveryReasonMoveAside, ""
+		default:
+			var failure *promotionProbeFailure
+			if errors.As(err, &failure) && failure.Definitive {
+				logHelperProbe(p.Service, err)
+				return promotionRecoveryCopy, recoveryReasonMountProbe, promotionProbeDetail(err)
+			}
+			if ctx.Err() == nil {
+				logHelperProbe(p.Service, err)
+			}
+		}
+		if promotionKnownFingerprint(ctx, p.OriginalPath, p.OriginalSHA) == nil {
+			return promotionRecoveryCopy, recoveryReasonNoFingerprint, ""
 		}
 	}
 	if err := e.promotionProbeMount(filepath.Dir(p.BackupPath)); err != nil {
@@ -884,7 +916,7 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 		return err
 	}
 	if p.movesAside() && !p.MovedAside {
-		if p.BackupPath == "" || p.OriginalFingerprint == nil {
+		if p.BackupPath == "" || (!p.helperProof() && p.OriginalFingerprint == nil) {
 			return fmt.Errorf("verified original is required before library mutations")
 		}
 		if p.MoveAsideStartedAt == "" {
@@ -898,6 +930,12 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 			// a restart reaches: read the moved file in full.
 			return e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA)
 		}
+		if p.helperProof() && p.MoveAsideStartedAt == "" {
+			// Before any intent the original is still where this process proved
+			// it: the helper's identity says so without another full read.
+			_, err := e.promotionVerifyByHelper(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalHelper, false)
+			return err
+		}
 		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
 	}
 	if !p.BackupVerified || p.BackupPath == "" {
@@ -905,6 +943,10 @@ func (e *Engine) promotionVerifyRecovered(ctx context.Context, p *promotionState
 	}
 	if p.originalByMetadata() {
 		return e.verifyPromotionRecovery(ctx, p, p.BackupPath)
+	}
+	if p.helperProof() && p.MovedAside {
+		_, err := e.promotionVerifyByHelper(ctx, p.BackupPath, p.OriginalSHA, p.BackupHelper, false)
+		return err
 	}
 	_, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint)
 	return err

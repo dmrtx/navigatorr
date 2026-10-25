@@ -73,6 +73,11 @@ type promotionVerifiedFiles struct {
 type promotionVerifiedFile struct {
 	sha string
 	fp  promotionFingerprint
+	// fpValid is false when the mount gave no stable fingerprint for the read;
+	// only helper, when set, then says anything about the file.
+	fpValid bool
+	// helper is what the NAS helper reported for the full read, when it did it.
+	helper *helperProof
 }
 
 func withPromotionVerifiedFiles(ctx context.Context, ec *ExecutionContext) context.Context {
@@ -111,7 +116,7 @@ func (v *promotionVerifiedFiles) record(path, kind, sha string, fp promotionFing
 // promotionRememberHash keeps a full hash's fingerprint when the descriptor
 // showed the same identity before and after the read. A platform or mount
 // without inode numbers or ctime yields nothing, so later checks hash again.
-func promotionRememberHash(ctx context.Context, path, sha string, opened, finished os.FileInfo) {
+func promotionRememberHash(ctx context.Context, path, sha string, opened, finished os.FileInfo, helper *helperProof) {
 	v := promotionVerified(ctx)
 	if v == nil {
 		return
@@ -119,10 +124,16 @@ func promotionRememberHash(ctx context.Context, path, sha string, opened, finish
 	before, ok := promotionFileFingerprint(opened)
 	after, ok2 := promotionFileFingerprint(finished)
 	if !ok || !ok2 || before != after {
-		delete(v.files, path)
+		// A helper proof stands on its own, but nothing else about this read
+		// does: later checks of the path hash it again.
+		if helper != nil {
+			v.files[path] = promotionVerifiedFile{sha: sha, helper: helper}
+		} else {
+			delete(v.files, path)
+		}
 		return
 	}
-	v.files[path] = promotionVerifiedFile{sha: sha, fp: after}
+	v.files[path] = promotionVerifiedFile{sha: sha, fp: after, fpValid: true, helper: helper}
 	v.record(path, promotionCheckSHA256, sha, after)
 }
 
@@ -165,7 +176,7 @@ func (e *Engine) promotionStillVerified(ctx context.Context, path, expected stri
 		return false
 	}
 	known, ok := v.files[path]
-	if !ok || known.sha != expected {
+	if !ok || known.sha != expected || !known.fpValid {
 		return false
 	}
 	info, err := e.promotionStatIdentity(path)
@@ -199,9 +210,9 @@ func (e *Engine) promotionCarryRenamed(ctx context.Context, from, to string) {
 		return
 	}
 	fp, ok := promotionFileFingerprint(info)
-	if !ok || fp.Dev != known.fp.Dev || fp.Ino != known.fp.Ino || fp.Size != known.fp.Size || fp.MtimeNs != known.fp.MtimeNs {
+	if !ok || !known.fpValid || fp.Dev != known.fp.Dev || fp.Ino != known.fp.Ino || fp.Size != known.fp.Size || fp.MtimeNs != known.fp.MtimeNs {
 		return
 	}
-	v.files[to] = promotionVerifiedFile{sha: known.sha, fp: fp}
+	v.files[to] = promotionVerifiedFile{sha: known.sha, fp: fp, fpValid: true}
 	v.record(to, promotionCheckRenamed, known.sha, fp)
 }

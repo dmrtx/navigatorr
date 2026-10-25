@@ -167,18 +167,18 @@ func sameHelperIdentity(a, b nashelper.Identity) bool {
 // descriptor is opened first, the helper hashes (identity A), the mount's sampled
 // ranges are read from the same descriptor, and the helper samples the file again
 // and must report identity A and the same sample digest.
-func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string, f *os.File, opened os.FileInfo, observer promotionHashProgress) (sum string, n int64, handled bool, err error) {
+func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string, f *os.File, opened os.FileInfo, observer promotionHashProgress) (sum string, n int64, proof *helperProof, handled bool, err error) {
 	client := e.deps.NASHelper
 	if client == nil {
-		return "", 0, false, nil
+		return "", 0, nil, false, nil
 	}
-	fallback := func(class string, cause error) (string, int64, bool, error) {
+	fallback := func(class string, cause error) (string, int64, *helperProof, bool, error) {
 		log.Printf("promotion: the NAS helper could not hash %s (%s: %v); reading it through the mount", path, class, cause)
 		promotionRecordRead(ctx, path, "smb_fallback", class, false)
-		return "", 0, false, nil
+		return "", 0, nil, false, nil
 	}
 	if _, mapped := client.Remote(resolved); !mapped {
-		return "", 0, false, nil
+		return "", 0, nil, false, nil
 	}
 	if e.helperBreaker.open(time.Now()) {
 		return fallback("helper_down", errors.New("recently unreachable"))
@@ -195,7 +195,7 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 		if observer != nil {
 			if oerr := observer(path, 0, opened.Size()); oerr != nil {
 				cancel()
-				return "", 0, true, oerr
+				return "", 0, nil, true, oerr
 			}
 		}
 		go prog.watch(hashCtx, helperStallAfter)
@@ -205,9 +205,9 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 		observed, stalled, readSoFar := prog.state()
 		switch {
 		case observed != nil:
-			return "", 0, true, observed
+			return "", 0, nil, true, observed
 		case ctx.Err() != nil:
-			return "", 0, true, ctx.Err()
+			return "", 0, nil, true, ctx.Err()
 		case err == nil:
 			// A hash that finished is good even if the watchdog fired in the same
 			// instant.
@@ -222,7 +222,7 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 			var apiErr *nashelper.Error
 			errors.As(err, &apiErr)
 			if apiErr.Code == nashelper.CodeChanged {
-				return "", 0, true, &promotionFileChangedError{path: path, phase: "hashing"}
+				return "", 0, nil, true, &promotionFileChangedError{path: path, phase: "hashing"}
 			}
 			// The mount opened this file a moment ago, so a helper that says it is
 			// not there is looking somewhere else: say so and read it ourselves.
@@ -240,7 +240,7 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 				case <-time.After(time.Duration(busy) * 200 * time.Millisecond):
 					continue
 				case <-ctx.Done():
-					return "", 0, true, ctx.Err()
+					return "", 0, nil, true, ctx.Err()
 				}
 			}
 			return fallback("helper_busy", err)
@@ -251,7 +251,7 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 				}
 				return fallback("helper_unavailable", err)
 			}
-			return "", 0, true, err
+			return "", 0, nil, true, err
 		}
 		break
 	}
@@ -262,40 +262,43 @@ func (e *Engine) promotionHelperHash(ctx context.Context, path, resolved string,
 	mountSample, serr := sampledigest.Digest(ctx, f, opened.Size())
 	if serr != nil {
 		if ctx.Err() != nil {
-			return "", 0, true, ctx.Err()
+			return "", 0, nil, true, ctx.Err()
 		}
-		return "", 0, true, serr
+		return "", 0, nil, true, serr
 	}
 	helperSample, herr := client.Sample(ctx, resolved)
 	if herr != nil {
 		if ctx.Err() != nil {
-			return "", 0, true, ctx.Err()
+			return "", 0, nil, true, ctx.Err()
 		}
 		if nashelper.IsAnswer(herr) {
-			return "", 0, true, &promotionFileChangedError{path: path, phase: "hashing"}
+			return "", 0, nil, true, &promotionFileChangedError{path: path, phase: "hashing"}
 		}
 		return fallback("helper_unavailable", herr)
 	}
 	if helperSample.InstanceID != res.InstanceID || !sameHelperIdentity(helperSample.Identity, res.Identity) {
 		// The file moved between the hash and the sample: the stable loop reads again.
-		return "", 0, true, &promotionFileChangedError{path: path, phase: "hashing"}
+		return "", 0, nil, true, &promotionFileChangedError{path: path, phase: "hashing"}
 	}
 	if res.Bytes != opened.Size() {
 		// The helper's view held steady across the hash and the sample, so a size
 		// that differs from the mount's descriptor is a different file under this
 		// path, not one being written. Re-reading would only repeat it.
-		return "", 0, true, &promotionHelperDisagreeError{path: path, what: "sizes differ"}
+		return "", 0, nil, true, &promotionHelperDisagreeError{path: path, what: "sizes differ"}
 	}
 	if helperSample.Digest != mountSample {
-		return "", 0, true, &promotionHelperDisagreeError{path: path, what: "sampled ranges differ"}
+		return "", 0, nil, true, &promotionHelperDisagreeError{path: path, what: "sampled ranges differ"}
 	}
 	if observer != nil {
 		if oerr := observer(path, res.Bytes, res.Bytes); oerr != nil {
-			return "", 0, true, oerr
+			return "", 0, nil, true, oerr
 		}
 	}
 	promotionRecordRead(ctx, path, "nas_helper", "", res.Identity.Complete)
-	return res.SHA256, res.Bytes, true, nil
+	if res.Identity.Complete {
+		proof = &helperProof{Identity: res.Identity, Sample: helperSample.Digest}
+	}
+	return res.SHA256, res.Bytes, proof, true, nil
 }
 
 func isHelperBusy(err error) bool {

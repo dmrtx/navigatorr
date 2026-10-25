@@ -61,7 +61,7 @@ func promotionKnownFingerprint(ctx context.Context, path, sha string) *promotion
 		return nil
 	}
 	known, ok := v.files[path]
-	if !ok || known.sha != sha {
+	if !ok || known.sha != sha || !known.fpValid {
 		return nil
 	}
 	return known.fp.persisted()
@@ -95,7 +95,11 @@ func (e *Engine) promotionVerifyByIdentity(ctx context.Context, path, sha string
 		}
 		if err == nil && fp == k {
 			if v := promotionVerified(ctx); v != nil {
-				v.files[path] = promotionVerifiedFile{sha: sha, fp: fp}
+				entry := promotionVerifiedFile{sha: sha, fp: fp, fpValid: true}
+				if old, ok := v.files[path]; ok && old.sha == sha {
+					entry.helper = old.helper
+				}
+				v.files[path] = entry
 				v.record(path, promotionCheckIdentity, sha, fp)
 			}
 			return fp.persisted(), nil
@@ -128,7 +132,7 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	if err := promotionBackupPathMatches(p); err != nil {
 		return err
 	}
-	if p.BackupPath == "" || p.OriginalFingerprint == nil {
+	if p.BackupPath == "" || (!p.helperProof() && p.OriginalFingerprint == nil) {
 		return fmt.Errorf("verified original identity is missing; nothing moved")
 	}
 	partial := p.BackupPath + ".partial"
@@ -143,23 +147,40 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	_, originalErr := os.Lstat(p.OriginalPath)
 	_, backupErr := os.Lstat(p.BackupPath)
 	renamed := false
+	// readInFull is set when the moved file was already read in full, which is
+	// a proof by itself and needs no identity comparison.
+	readInFull := false
 	switch {
 	case originalErr != nil && !os.IsNotExist(originalErr):
 		return originalErr
 	case backupErr != nil && !os.IsNotExist(backupErr):
 		return backupErr
 	case originalErr == nil && backupErr != nil:
-		proved, err := e.promotionVerifyByIdentity(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalFingerprint)
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%w: %v", errPromotionOriginalGone, err)
+		if p.helperProof() {
+			// A proof the helper cannot give leaves the original read in full,
+			// and the moved file is read in full too. Only a mount proof
+			// refuses to move a file it has no identity for.
+			proved, err := e.promotionVerifyByHelper(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalHelper, false)
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: %v", errPromotionOriginalGone, err)
+			}
+			if err != nil {
+				return err
+			}
+			p.OriginalHelper = proved
+		} else {
+			proved, err := e.promotionVerifyByIdentity(ctx, p.OriginalPath, p.OriginalSHA, p.OriginalFingerprint)
+			if errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: %v", errPromotionOriginalGone, err)
+			}
+			if err != nil {
+				return err
+			}
+			if proved == nil {
+				return fmt.Errorf("the original has no stable file identity to follow through a rename; nothing moved")
+			}
+			p.OriginalFingerprint = proved
 		}
-		if err != nil {
-			return err
-		}
-		if proved == nil {
-			return fmt.Errorf("the original has no stable file identity to follow through a rename; nothing moved")
-		}
-		p.OriginalFingerprint = proved
 		p.MoveAsideStartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return err
@@ -192,13 +213,27 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	case originalErr != nil && backupErr == nil && p.MoveAsideStartedAt != "":
 		// The rename finished before its checkpoint; only a restart gets
 		// here, so read the moved file in full.
-		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if p.helperProof() {
+			if _, err := e.promotionReadInFull(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+				return err
+			}
+		} else if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return err
 		}
+		readInFull = true
 	case originalErr != nil && backupErr != nil && p.MoveAsideStartedAt == "":
 		return errPromotionOriginalGone
 	default:
 		return fmt.Errorf("original and recovery locations are in an unexpected state (original present: %t, recovery present: %t); nothing moved, recovery retained", originalErr == nil, backupErr == nil)
+	}
+	if p.helperProof() {
+		proof, err := e.promotionConfirmMovedByHelper(ctx, p, readInFull)
+		if err != nil {
+			return err
+		}
+		p.MovedAside, p.BackupVerified, p.BackupHelper, p.BackupFingerprint = true, true, proof, nil
+		p.RecoveryVerifiedBeforeReplacement = true
+		return e.savePromotion(ctx, ec, p)
 	}
 	fp, err := e.promotionCurrentFingerprint(p.BackupPath)
 	if err != nil || !fp.sameFileAfterRead(p.OriginalFingerprint) {
@@ -210,6 +245,37 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	p.MovedAside, p.BackupVerified, p.BackupFingerprint = true, true, fp.persisted()
 	p.RecoveryVerifiedBeforeReplacement = true
 	return e.savePromotion(ctx, ec, p)
+}
+
+// promotionConfirmMovedByHelper proves the file at BackupPath is the original
+// that was moved there. The helper's sample is enough when this process proved
+// the original just before the rename and the same inode now holds the same
+// sampled bytes (ctime is allowed to have moved: the rename did that). Anything
+// else, including a rename that did not keep the inode, reads the file in full
+// and accepts it only if it equals OriginalSHA; a mismatch stops with the
+// recovery retained. readInFull means the caller already did that read.
+func (e *Engine) promotionConfirmMovedByHelper(ctx context.Context, p *promotionState, readInFull bool) (*helperProof, error) {
+	if readInFull {
+		// The caller just read the moved file in full and found OriginalSHA.
+		return promotionKnownHelper(ctx, p.BackupPath, p.OriginalSHA), nil
+	}
+	if k, ok := p.OriginalHelper.fromThisProcess(); ok {
+		cur, err := e.promotionHelperSample(ctx, p.BackupPath)
+		switch {
+		case err == nil && cur.Identity.Complete && sameHelperFile(k.Identity, cur.Identity) && cur.Digest == k.Sample:
+			return helperProof{Identity: cur.Identity, Sample: cur.Digest}.persisted(), nil
+		case err == nil:
+			promotionRecordRead(ctx, p.BackupPath, "nas_helper_identity", "identity_moved:"+helperIdentityDiff(k.Identity, cur.Identity), true)
+			log.Printf("promotion %s: the moved original does not carry the identity it had; reading it in full", p.Service)
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		}
+	}
+	proof, err := e.promotionReadInFull(ctx, p.BackupPath, p.OriginalSHA)
+	if err != nil {
+		return nil, fmt.Errorf("recovery location does not hold the verified original (%v); recovery retained", err)
+	}
+	return proof, nil
 }
 
 func (e *Engine) promotionRenameAside(from, to string) error {
@@ -229,6 +295,9 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 		return err
 	}
 	p.RecoveryMode, p.RecoveryModeReason, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, recoveryReasonRenameRefused, "", err.Error()
+	// A copy-mode promotion proves its files like any other: the helper proof
+	// belonged to the move aside that was refused.
+	p.RecoveryProof, p.OriginalHelper, p.BackupHelper = "", nil, nil
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
@@ -303,7 +372,9 @@ func (e *Engine) promotionMoveBack(ctx context.Context, ec *ExecutionContext, p 
 			_ = d.Close()
 		}
 	}
-	e.promotionCarryRenamed(ctx, p.BackupPath, p.OriginalPath)
+	if !p.helperProof() {
+		e.promotionCarryRenamed(ctx, p.BackupPath, p.OriginalPath)
+	}
 	return e.promotionFinishMoveBack(ctx, ec, p)
 }
 
@@ -343,6 +414,22 @@ func (e *Engine) promotionResumeMoveBack(ctx context.Context, ec *ExecutionConte
 }
 
 func (e *Engine) promotionFinishMoveBack(ctx context.Context, ec *ExecutionContext, p *promotionState) error {
+	if p.helperProof() {
+		known := p.BackupHelper
+		if known == nil {
+			known = p.OriginalHelper
+		}
+		// The second rename moved ctime again, so the renamed-file comparison
+		// applies; any doubt reads the file in full.
+		proof, err := e.promotionVerifyByHelper(ctx, p.OriginalPath, p.OriginalSHA, known, true)
+		if err != nil {
+			return fmt.Errorf("the library path does not hold the moved-back original (%v); nothing else moved", err)
+		}
+		p.OriginalHelper, p.BackupHelper = proof, nil
+		p.MovedAside, p.BackupVerified, p.BackupFingerprint = false, false, nil
+		p.MoveAsideStartedAt, p.MoveBackStartedAt, p.RecoveryVerifiedBeforeReplacement = "", "", false
+		return e.savePromotion(ctx, ec, p)
+	}
 	fp, err := e.promotionCurrentFingerprint(p.OriginalPath)
 	known := p.BackupFingerprint
 	if known == nil {

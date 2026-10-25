@@ -397,7 +397,7 @@ func (h *promotionHarness) checkRecoveryBeforeDelete() {
 		if err != nil || !p.movesAside() {
 			continue
 		}
-		if !p.MovedAside || p.BackupFingerprint == nil {
+		if !p.MovedAside || (!p.helperProof() && p.BackupFingerprint == nil) {
 			h.t.Error("DELETE before the original was moved aside")
 		}
 		if err := testFileSHA(p.BackupPath, p.OriginalSHA); err != nil {

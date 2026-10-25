@@ -318,3 +318,175 @@ the audit trail is `integrity_reads` (last read per path), next to the cache's
 `integrity_checks`. A hash that stalls after it started reading opens the breaker;
 one still queued does not. A file whose size differs from the mount's, while the
 helper's identity held steady, is a disagreement, not a retryable change.
+
+### Stage 5 design: recovery by moving the original aside, proved by the helper
+
+Where the cost is: a promotion keeps the original recoverable by copying it into
+its private recovery directory (`promotionMakeRecoveryCopy`: a kernel copy plus a
+full read-back). On the production NAS that is about 18 s of NAS disk work for
+2.2 GB and a second full file on the volume until the promotion ends. The
+alternative already exists: `move_aside` renames the original into the recovery
+path right before the library file is removed, so no byte is copied. It is never
+chosen on the SMB mount because `promotionProbeMount` fails
+(`rename_changed_identity fs=smb2 changed: mtime,ctime`): the mount does not report
+a stable identity across a rename, so every mount-side proof (`OriginalFingerprint`,
+`BackupFingerprint`, `sameFileAfterRead`) is unreliable there. The helper sees the
+NAS filesystem itself (btrfs fsid, subvolume, generation, inode, size, mtime, ctime),
+which a rename keeps except for ctime.
+
+Change: when the original's last full hash was made by the helper with a complete
+identity, `move_aside` is chosen without the mount probe and proved by helper
+identity. Nothing else about the workflow changes: same steps, same state machine,
+same fallback to a copy.
+
+State (all new fields `omitempty`; a promotion recorded before this has none and
+keeps its mount proof):
+
+- `RecoveryProof`: `"helper"` or empty (the mount proof that exists today).
+- `OriginalHelper`, `BackupHelper`: `{identity, sample, process}`; `identity` is a
+  `nashelper.Identity` (every field, ctime included) and `sample` the sampled-range
+  digest the helper returned with it. `process` is `promotionProcess`, like the mount
+  fingerprints: a proof from an earlier process proves nothing and the file is read
+  in full again.
+
+1. `promotionHelperHash` already holds identity A and the sample digest of the file
+   it hashed. It hands them to `promotionRememberHash`, which stores them in the
+   per-execution entry (`promotionVerifiedFile.helper`), next to the mount
+   fingerprint, which may now be absent. Only an identity with `Complete` is kept.
+2. `promotionChooseRecovery`: after the existing exclusions (forced copy, original not
+   read again, leftovers), if the original has a helper proof and the helper maps the
+   recovery directory, choose `move_aside` with `RecoveryProof = "helper"` and skip
+   the mount probe. With no helper proof the existing logic (fingerprint, probe) runs
+   unchanged. `stepPromotePreserve` stores `OriginalHelper` from the execution's entry
+   (as it does `OriginalFingerprint`), and forces a copy when a helper-proof
+   promotion has none and no move aside began.
+3. Before the rename, `promotionMoveAside` for a helper proof:
+   a. If `OriginalHelper` is from this process, ask the helper to `Sample` the
+      original: identity equal to the recorded one in every field including ctime,
+      and the same digest. ctime moves on every write, chmod, link or rename, so equal
+      ctime since the hash means nothing touched the file. Otherwise read it in full
+      (`verifyPromotionHashStable`, through the helper) and take the proof that read
+      produces. A path the helper cannot hash (it fell back to the mount) leaves no
+      helper proof: return `errPromotionMoveAsideUnsupported` before any intent is
+      saved, and the existing fallback switches the promotion to a recovery copy.
+   b. Save the intent (`MoveAsideStartedAt`, `OriginalHelper`), then the existing
+      no-replace rename.
+4. After the rename the helper `Sample`s `BackupPath`. It is the same file when
+   fsid, subvolume, generation, inode, size and mtime equal the recorded ones (ctime
+   may differ) and the sample digest is equal. Then set `MovedAside`, `BackupVerified`,
+   `RecoveryVerifiedBeforeReplacement` and `BackupHelper` (the new identity). No mount
+   fingerprint is consulted. If the identity differs (the server implemented the
+   rename as a copy), or the helper cannot answer, the file at `BackupPath` is read in
+   full and accepted only if it equals `OriginalSHA`; otherwise the promotion stops
+   with the recovery retained, as today.
+5. Later verification (`promotionVerifyRecovered`, restore, retry): for a helper proof
+   in the same process, the helper `Sample` of `BackupPath` must equal `BackupHelper`
+   entirely (ctime too: the recovery directory is private and nothing should touch it);
+   any difference or an earlier process reads the file in full. Before the move the
+   check is the full read of the original after any wait, as now. The mount
+   `Lstat`s that tell which of the two paths exists stay.
+6. Crash states are the ones the mount proof already has; only the proof differs:
+   - intent saved, rename not done: original present, nothing at `BackupPath`; a restart
+     re-verifies (full read) and renames.
+   - rename done, checkpoint not saved: original absent, file at `BackupPath`,
+     `MoveAsideStartedAt` set; the full read of `BackupPath` equal to `OriginalSHA` is the
+     proof (no identity comparison is needed after a read in full).
+   - moved: as 5.
+7. Move back (`promotionMoveBack`, `RestoreTranscodeBackup`, a failed same-name publish)
+   keeps the no-replace rename and the current guards. `promotionFinishMoveBack` accepts
+   the file at the library path when the helper `Sample` shows `BackupHelper`'s inode,
+   size, mtime and digest, else reads it in full.
+8. Not changed: discard, clean-up and `promotionRecoveryIsOnlyOriginal` (they look at
+   paths and sizes, not identities); the duplicate-copy discard (copy mode only); the
+   copy mode itself, which stays the fallback for a refused rename, a missing helper
+   proof, a leftover recovery and a forced copy.
+9. Audit: the step output gains `recovery_proof` (`helper`/`mount`); the integrity
+   record for `BackupPath` says `helper_identity` when the helper proved it.
+
+Residual risks, stated:
+- Between the helper's pre-rename `Sample` and the rename, someone could rewrite the
+  file in place and restore its mtime. The pre-check and the rename are milliseconds
+  apart, the library does not write files in place, and the post-rename sample digest
+  covers the sampled ranges and the size; a full read is not repeated.
+- The rename is atomic on the NAS, but the library path is empty from the rename until
+  the candidate takes the name. That is how `move_aside` already works.
+- A btrfs ctime has jiffy granularity; the proof relies on the hash having been taken
+  much later than the last modification, so a later write gets a later ctime.
+
+Questions for the review:
+- Is `Sample` (identity plus about 8 MiB) the right pre- and post-rename proof, or
+  should the post-rename check be a full helper hash of the recovery file (one NAS-local
+  read instead of an 18 s copy plus its read-back)?
+- Should a proof from an earlier process also count when the helper identity is equal in
+  every field, ctime included? It would remove the full read after each wait; the mount
+  proofs were never allowed that, because the mount's identity is synthetic. This design
+  does not allow it.
+- Anything that makes the helper proof weaker than the mount probe it replaces.
+
+#### Stage 5 revision after the Opus review
+
+Verdict was "approve with changes"; where this differs from the text above, this wins.
+
+1. One proof, two variants. With `RecoveryProof = "helper"` no mount fingerprint is
+   required or consulted anywhere: `BackupFingerprint` stays nil; `OriginalFingerprint`
+   is not demanded by `stepPromotePreserve`, `promotionMoveAside` or
+   `promotionVerifyRecovered`; `promotionFinishMoveBack` compares helper identities and
+   then stores the fresh identity in `OriginalHelper` (the second rename moved ctime)
+   and clears `BackupHelper`. A full read equal to `OriginalSHA` is a proof by itself
+   wherever an identity comparison is not possible, including the restart that finds the
+   rename done (the old `sameFileAfterRead` check after a full read is not applied to
+   the helper proof). `promotionRememberHash` keeps the helper proof even when the
+   mount fingerprint is unusable; `promotionKnownHelper(ctx, path, sha)` is separate
+   from `promotionKnownFingerprint` and never returns a zero value.
+2. No copy fallback for a missing proof. Whatever cannot be proved by identity is
+   proved by a full read: before the rename the original is read in full (a
+   helper hash, or the mount when the helper is down), and after it the file at
+   `BackupPath` is read in full and must equal `OriginalSHA`. The copy fallback stays
+   for a refused rename only, as today; a mode never changes once the intent is saved.
+3. A helper answer never decides that a file is gone. `not_found` or any error of the
+   pre-rename `Sample` just means "read it in full"; `errPromotionOriginalGone` still
+   comes only from the mount's own not-exist. The helper and the mount must agree on
+   which of the two paths exists; the stage 4 hash already falls back to the mount on
+   `helper_disagrees`.
+4. The mount probe is replaced by a probe the helper observes, in the recovery
+   directory, cached per process and directory (definitive verdicts only): create a
+   file through the mount and read its helper identity (must be `Complete`); rename it
+   no-replace and require the same fsid, subvolume, generation, inode, size and mtime
+   with a changed ctime; a no-replace rename onto an existing file must be refused;
+   rewrite it in place with mtime restored and require the helper's ctime to move. The
+   original's fsid and subvolume must equal the probe file's (else the rename would be
+   `EXDEV`), checked per promotion. A probe the helper cannot run falls through to the
+   existing mount probe, then to a copy.
+5. `duplicateBackupGuard` refuses any promotion that moves aside (`movesAside()`,
+   `MovedAside`, `MoveAsideStartedAt`, `MoveBackStartedAt`).
+6. Audit: `integrity_reads` gets `via: nas_helper_identity` with the changed fields when
+   the identity moved (`identity_moved:ctime`), and `recovery_proof` is also in the
+   step output.
+7. Questions 1-3 answered: `Sample` is enough for the post-rename check (identity is the
+   proof; a full helper hash adds nothing that protects data); a proof from an earlier
+   process does not count in this stage; the helper proof is weaker than the mount
+   probe only by losing its empirical check, which item 4 restores.
+
+#### As built (stage 5)
+
+`action/promote_helper_proof.go` holds the proof (`helperProof`, `promotionKnownHelper`,
+`promotionVerifyByHelper`, the helper-observed probe); `promotionConfirmMovedByHelper`
+is in `promote_move_aside.go`. State: `recovery_proof`, `original_helper`,
+`recovery_helper`. A promotion with no `recovery_proof` keeps the mount proof unchanged.
+
+- `promotionChooseRecovery` takes the helper proof when the original's last full hash
+  came through the helper with a complete identity and `promotionProbeHelper` passes for
+  the recovery directory. A definitive probe failure chooses a copy (reason
+  `mount_probe_failed`, with the probe's step as detail); a probe that could not run falls
+  through to the mount probe.
+- The probe verdict is cached per process and recovery directory; the check that the
+  original lives on the same filesystem and subvolume is made per promotion.
+- Before the rename: the helper's `Sample` of the original must equal the proof of this
+  process in every field (ctime included) and in digest, else the original is read in full.
+  After it: the same inode (ctime may move) and digest, else the moved file is read in full
+  and must equal `OriginalSHA`. A restart that finds the rename done reads the file in
+  full once and accepts that read.
+- Later checks, restore and move back use `promotionVerifyByHelper`; a helper that is down
+  or an earlier process means a full read (through the mount if the helper is gone).
+- `duplicateBackupGuard` refuses any promotion that moves aside.
+- A proof from the same process also counts across waits, as the mount fingerprints do.

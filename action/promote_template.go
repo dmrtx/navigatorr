@@ -89,8 +89,14 @@ type promotionState struct {
 	OriginalFingerprint  *promotionFingerprint `json:"original_fingerprint,omitempty"`
 	BackupFingerprint    *promotionFingerprint `json:"recovery_fingerprint,omitempty"`
 	CandidateFingerprint *promotionFingerprint `json:"candidate_fingerprint,omitempty"`
-	MoveAsideStartedAt   string                `json:"move_aside_started_at,omitempty"`
-	MovedAside           bool                  `json:"moved_aside,omitempty"`
+	// RecoveryProof says what proves a moved-aside original is the same
+	// file: "helper" (the NAS helper's identity, OriginalHelper and
+	// BackupHelper) or empty (the mount's fingerprints above).
+	RecoveryProof      string       `json:"recovery_proof,omitempty"`
+	OriginalHelper     *helperProof `json:"original_helper,omitempty"`
+	BackupHelper       *helperProof `json:"recovery_helper,omitempty"`
+	MoveAsideStartedAt string       `json:"move_aside_started_at,omitempty"`
+	MovedAside         bool         `json:"moved_aside,omitempty"`
 	// MoveAsideRefused keeps why the rename was refused and the promotion
 	// switched to a recovery copy.
 	MoveAsideRefused string `json:"move_aside_refused,omitempty"`
