@@ -3222,8 +3222,9 @@ function whereBlock(where, {heading = true} = {}) {
   } else if (where.backup_removed) line("Original backup", "", "removed after the new file was verified");
   return box;
 }
-// What each file of a batch is doing, as one bar and a legend: finished, failed,
-// running, needing a decision, left alone, stopped, and the rest waiting.
+// What each file of a batch is doing: one bar for how far along it is, and a
+// legend counting finished, failed, running, needing a decision, left alone,
+// stopped, and the rest waiting.
 const segmentKinds = [["completed", "done", "ok"], ["failed", "failed", "err"], ["running", "running", "run"], ["waiting_decision", "need you", "rev"], ["policy", "below minimum savings", "skip"], ["skip", "skipped", "skip"], ["rejected", "rejected", "skip"], ["cancelled", "cancelled", "cancel"]];
 function batchSegments(batch, runningFill) {
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total < 2) return null;
@@ -3237,17 +3238,15 @@ function batchSegments(batch, runningFill) {
   bar.setAttribute("role", "img");
   const legend = parts.map(part => `${part.n} ${part.label}`).join(" \u00b7 ");
   bar.setAttribute("aria-label", `${total} files: ${legend}`);
-  for (const part of parts) {
-    const segment = node("i", "", `segment-${part.kind}`);
-    segment.style.width = `${part.n / total * 100}%`;
-    // Running files are only as full as their measured steps, so a file still
-    // waiting for a worker slot does not read as a finished bar.
-    if (part.kind === "run" && Number.isFinite(runningFill)) {
-      const fill = `${Math.round(Math.max(0, Math.min(1, runningFill)) * 100)}%`;
-      segment.style.background = `linear-gradient(to right, var(--info) ${fill}, var(--info-wash) ${fill})`;
-    }
-    bar.append(segment);
-  }
+  // One fill, not one colour per state: the words under the bar say what each
+  // file is doing. Running files count only as far as their measured steps, so
+  // a file still waiting for a worker slot does not read as a finished bar.
+  const done = ["completed", "failed", "policy", "skip", "rejected"].reduce((sum, key) => sum + count(key), 0);
+  const running = count("running") * (Number.isFinite(runningFill) ? Math.max(0, Math.min(1, runningFill)) : 0);
+  const share = Math.min(1, (done + running) / Math.max(1, total - count("cancelled")));
+  const fill = node("i", "", "segment-ok");
+  fill.style.width = `${share * 100}%`;
+  bar.append(fill);
   return {bar, legend, kinds: parts.length};
 }
 function batchProgress(job, {segments = false} = {}) {
@@ -6185,7 +6184,7 @@ function batchFileActivity(item, job) {
     if (job?.paused) return "Batch paused · Resume the batch to start this file";
     if (job?.status === "waiting_decision") return "Waiting for the batch decision before starting this file";
     if (["failed", "cancelled"].includes(job?.status)) return "Batch stopped · This file has not started";
-    return "Waiting for batch scheduling · Not sent to the worker yet";
+    return "";
   }
   const activity = job?.activities?.find(activity => activity.id === item.child_action_id);
   if (activity?.waiting_condition === "worker_unreachable") return "Worker unreachable · Waiting for connection";
@@ -6231,12 +6230,14 @@ async function retryFileReplacement(item, batchID) {
   const name = item.display_label || (item.file_path || "").split("/").pop();
   await jobControl(item.retry_action_id, "action_retry", {}, {decision: {label: retryReplacementLabel(item, batchID, name).confirm, verb: "Retrying replacement", failure: "Retry failed"}});
 }
-// A file's actions: the main one stays in view, the others sit under a "..."
-// menu so a row is never a wall of buttons.
+// A file's actions sit under a "..." menu so a row is never a wall of buttons.
+// Only a file that needs the person to act, because saving or encoding stopped,
+// keeps one button in view.
+const fileRowRecovery = ["Try again", "Encode again"];
 function foldBatchFileActions(actions, itemKey) {
   const buttons = [...actions.children];
-  if (buttons.length < 2) return;
-  const main = buttons.find(b => /\bprimary\b/.test(b.className)) || buttons[0];
+  if (!buttons.length) return;
+  const main = buttons.find(b => fileRowRecovery.includes(b.textContent));
   const rest = buttons.filter(b => b !== main);
   const more = node("details", "", "more-actions");
   more.dataset.menuFor = itemKey || "";
@@ -6262,12 +6263,14 @@ function foldBatchFileActions(actions, itemKey) {
   more.addEventListener("focusout", e => {
     if (e.relatedTarget && !more.contains(e.relatedTarget)) more.open = false;
   });
-  actions.replaceChildren(main, more);
+  actions.replaceChildren(...(main ? [main] : []), more);
 }
+// The most the server returns at once; a batch of 148 files is two pages.
+const batchItemsPage = 100;
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
-    `batch-items?${new URLSearchParams({ id, offset, limit: 25 })}`,
+    `batch-items?${new URLSearchParams({ id, offset, limit: batchItemsPage })}`,
   );
   if (
     id !== state.detail ||
@@ -6372,7 +6375,7 @@ async function loadBatchItems(id, revision) {
     const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
     if (settled) {
       // Nothing to add.
-    } else if (item.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
+    } else if (item.mode && item.mode !== state.detailJob?.mode) row.append(node("span", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
     else if (item.requested_profile || item.profile) row.append(node("span", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
     if (item.previous_attempts?.length) {
       const history=node("details","","batch-attempt-history");
@@ -6437,10 +6440,10 @@ async function changeBatchPage(delta) {
   }
 }
 $("batch-items-prev").addEventListener("click", () =>
-  safe(() => changeBatchPage(-25)),
+  safe(() => changeBatchPage(-batchItemsPage)),
 );
 $("batch-items-next").addEventListener("click", () =>
-  safe(() => changeBatchPage(25)),
+  safe(() => changeBatchPage(batchItemsPage)),
 );
 // The collapsible rows under the job summary are static markup, so a user's
 // open or closed row survives each refresh. A row opens itself once per job
