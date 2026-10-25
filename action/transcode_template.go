@@ -199,7 +199,17 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 		_, _, hasStat := recordedOriginalStat(ec.State)
 		legacyAction := getString(ec.State, "original_sha256") != "" && !hasStat
-		if !legacyAction && workerLearnsSourceDigest(ctx, e.actionWorker(ec)) {
+		learns := false
+		if !legacyAction {
+			var err error
+			if learns, err = workerLearnsSourceDigest(ctx, e.actionWorker(ec)); err != nil {
+				// Unknown is not absent: wait for the worker rather than
+				// hashing the whole file and dropping the recorded stat.
+				res := workerCapabilityLookupResult(err, "source digest")
+				return &res
+			}
+		}
+		if learns {
 			// A digest pinned for this very file version stays; a file that
 			// changed since the stat was recorded gets a fresh baseline, as the
 			// old hash did on every run.
@@ -208,6 +218,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			} else {
 				delete(ec.State, "original_sha256")
 				delete(ec.Outputs, "original_sha256")
+				// A conflict belongs to the baseline it contradicted.
+				delete(ec.State, originalDigestConflictKey)
+				delete(ec.Outputs, originalDigestConflictKey)
 			}
 			recordOriginalStat(ec.State, fi)
 			if origSHA != "" {

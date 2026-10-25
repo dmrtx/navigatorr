@@ -90,9 +90,6 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	var sourceSize int64
 	if sourceSHA == "" {
 		sourceSize, _, _ = recordedOriginalStat(ec.State)
-		if !getBool(ec.State, "transcode_reconcile") && !workerLearnsSourceDigest(ctx, e.actionWorker(ec)) {
-			return StepResult{Status: StepFailed, Error: "worker does not hash the source while it copies it; upgrade the worker before encoding"}, nil
-		}
 	}
 	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
@@ -200,6 +197,20 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile unexpected status %q (fail closed)", st.Status)}, nil
 			}
+		}
+	}
+
+	// A digest-less request is a new write, whether this is a first submit or a
+	// resubmit after the worker lost the job, so the capability is checked here
+	// and not only on the non-reconcile path: an older worker's decoder rejects
+	// source_size_bytes and would never learn the digest.
+	if sourceSHA == "" {
+		learns, cerr := workerLearnsSourceDigest(ctx, e.actionWorker(ec))
+		if cerr != nil {
+			return workerCapabilityLookupResult(cerr, "source digest"), nil
+		}
+		if !learns {
+			return StepResult{Status: StepFailed, Error: "worker does not hash the source while it copies it; upgrade the worker before encoding"}, nil
 		}
 	}
 

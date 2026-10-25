@@ -165,3 +165,55 @@ func TestVerifyOrLearnHashesInputWhenStagingRecordedNothing(t *testing.T) {
 		t.Fatal("verification of a request digest learned a second one")
 	}
 }
+
+// A crash after the staged copy landed but before the learned digest was saved
+// leaves a complete staged input and no digest. The next run learns it by
+// hashing that local copy; the NAS is not read again.
+func TestRunAfterACrashBetweenStagingAndPersistingLearnsFromTheStagedCopy(t *testing.T) {
+	w, cfg, src, cand, content := learnWorker(t)
+	req := SubmitRequest{ID: "job-learn-crash", SourcePath: src, CandidatePath: cand, SourceSizeBytes: int64(len(content))}
+	if _, err := w.Submit(context.Background(), req, "exe", ""); err != nil {
+		t.Fatal(err)
+	}
+	staged, _ := StagedInputPath(w.localWorkDir(), req.ID, src)
+	if err := os.MkdirAll(filepath.Dir(staged), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(staged, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	hashes := countLocalHashes(t)
+	if err := w.InternalRun(context.Background(), req.ID); err != nil {
+		t.Fatalf("InternalRun: %v", err)
+	}
+	got := pr6b1LoadJob(t, cfg.StateDir, req.ID)
+	if got.Status != "completed" || got.LearnedSourceSHA256 != sha256Hex(content) || got.SourceSHA256 != "" {
+		t.Fatalf("status=%q err=%q learned=%q", got.Status, got.Error, got.LearnedSourceSHA256)
+	}
+	if n := hashes(staged); n != 1 {
+		t.Fatalf("staged copy hashed %d times, want exactly 1", n)
+	}
+	if c := got.PhaseCosts["staging"]; c.NASReadBytes != nil && *c.NASReadBytes != 0 {
+		t.Fatalf("the source was read again: %+v", c)
+	}
+}
+
+// A staged copy left by a crashed run that is not the size the coordinator
+// probed fails closed instead of being learned as the source's digest.
+func TestRunAfterACrashWithAWrongSizedStagedCopyFailsClosed(t *testing.T) {
+	w, cfg, src, cand, content := learnWorker(t)
+	req := SubmitRequest{ID: "job-learn-crash-size", SourcePath: src, CandidatePath: cand, SourceSizeBytes: int64(len(content))}
+	if _, err := w.Submit(context.Background(), req, "exe", ""); err != nil {
+		t.Fatal(err)
+	}
+	staged, _ := StagedInputPath(w.localWorkDir(), req.ID, src)
+	_ = os.MkdirAll(filepath.Dir(staged), 0755)
+	if err := os.WriteFile(staged, append(append([]byte{}, content...), '!'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.InternalRun(context.Background(), req.ID)
+	got := pr6b1LoadJob(t, cfg.StateDir, req.ID)
+	if got.Status != "failed" || got.LearnedSourceSHA256 != "" {
+		t.Fatalf("status=%q learned=%q err=%q", got.Status, got.LearnedSourceSHA256, got.Error)
+	}
+}

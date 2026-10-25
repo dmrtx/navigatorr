@@ -67,9 +67,16 @@ func hasOriginalBaseline(state map[string]any) bool {
 	return ok
 }
 
-func workerLearnsSourceDigest(ctx context.Context, worker transcode.Executor) bool {
+// workerLearnsSourceDigest reports whether the worker hashes the source while it
+// stages it. An error means the capability is unknown, not absent: callers wait
+// or fail instead of falling back to the coordinator hash, which would also
+// discard a recorded stat.
+func workerLearnsSourceDigest(ctx context.Context, worker transcode.Executor) (bool, error) {
 	caps, err := worker.Capabilities(ctx)
-	return err == nil && caps.LearnSourceDigest
+	if err != nil {
+		return false, err
+	}
+	return caps.LearnSourceDigest, nil
 }
 
 // pinOriginalSHA records the digest a worker status reported. The first one is
@@ -89,8 +96,10 @@ func pinOriginalSHA(ec *ExecutionContext, raw string) {
 	if pinned == "" {
 		ec.State["original_sha256"] = sha
 		ec.Outputs["original_sha256"] = sha
-		if orig, ok := ec.State["original"].(map[string]any); ok {
-			orig["sha256"] = sha
+		for _, m := range []map[string]any{ec.State, ec.Outputs} {
+			if orig, ok := m["original"].(map[string]any); ok {
+				orig["sha256"] = sha
+			}
 		}
 		return
 	}

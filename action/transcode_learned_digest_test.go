@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
@@ -437,5 +440,174 @@ func TestLegacyActionKeepsTheFullRehashAtAccept(t *testing.T) {
 	r, err := e.stepTranscodeAccept(context.Background(), ec)
 	if err != nil || r.Status != StepCompleted || r.Outputs["original_integrity_check"] != "sha256" {
 		t.Fatalf("%+v %v", r, err)
+	}
+}
+
+func capsError(err error) *mockTranscodeExecutor {
+	return &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+		return transcode.WorkerCapabilities{}, err
+	}}
+}
+
+// A digest conflict is an integrity failure for the baseline it contradicted;
+// a manual retry starts a new attempt and must not fail on it forever.
+func TestManualRetryClearsADigestConflictAndProceeds(t *testing.T) {
+	sha := strings.Repeat("ab", 32)
+	st := setupTestStore(t)
+	mock := &mockTranscodeExecutor{
+		statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+			// The failed job still reports the digest that disagreed.
+			return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, Error: "worker restarted mid-copy", SourceSHA256: strings.Repeat("cd", 32)}, nil
+		},
+	}
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock})
+	ec := testReconcileEC("")
+	ec.State["resolved_path"] = "/media/source/ep.mkv"
+	ec.State["job_id"] = "job-old"
+	ec.State["original_sha256"] = sha
+	ec.State[originalDigestConflictKey] = "worker reported source sha256 cd, pinned ab"
+	inst := store.ActionInstance{ID: ec.InstanceID, ActionName: "transcode_media", Status: StatusFailed, CurrentStep: 2, StateJSON: toJSON(ec.State)}
+	if err := st.CreateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	tmpl := ActionTemplate{Steps: []StepDefinition{{Name: "preflight"}, {Name: "submit_transcode"}, {Name: "wait"}}}
+	resume, err := e.prepareRemoteRetry(context.Background(), &inst, ec, tmpl, 2)
+	if err != nil || resume != 1 {
+		t.Fatalf("retry refused: resume=%d err=%v", resume, err)
+	}
+	if _, conflict := originalDigestConflict(ec); conflict {
+		t.Fatalf("the conflict survived the retry: %+v", ec.State)
+	}
+	if getString(ec.State, "original_sha256") != sha {
+		t.Fatal("the pinned digest must outlive the retry")
+	}
+	// The new attempt reports the pinned digest and the wait step goes on.
+	next := transcode.JobStatus{ID: "job-new", Status: transcode.StatusRunning, SourceSHA256: sha}
+	e.observeTranscodeStatus(ec, next)
+	if _, conflict := originalDigestConflict(ec); conflict {
+		t.Fatal("a status that matches the pin must not conflict")
+	}
+}
+
+// A fresh baseline (the file changed since the stat) drops the pin, and the
+// conflict recorded against that pin with it.
+func TestPreflightFreshBaselineClearsADigestConflict(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(file, []byte("source bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e, st := setupTranscodeEngine(t, learnsDigestWorker(), writeProbeScript(t, dir, sdrProbeJSON), []string{dir}, []string{dir}, false)
+	defer st.Close()
+	fi, _ := os.Stat(file)
+	state := map[string]any{"original_sha256": strings.Repeat("ab", 32), originalDigestConflictKey: "worker reported something else"}
+	state[originalStatKey] = map[string]any{"size_bytes": fi.Size() + 1, "mod_time": fi.ModTime().UTC().Format(time.RFC3339Nano)}
+	ec := &ExecutionContext{InstanceID: "fresh-baseline", ActionName: "transcode_media", Inputs: map[string]any{"path": file, "mode": "size"}, State: state, Outputs: map[string]any{}}
+	seedActionInstance(t, st, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
+	if res, err := e.stepTranscodePreflight(context.Background(), ec); err != nil || res.Status != StepCompleted {
+		t.Fatalf("preflight %+v %v", res, err)
+	}
+	if _, ok := ec.State[originalDigestConflictKey]; ok {
+		t.Fatal("a conflict outlived the baseline it contradicted")
+	}
+	if _, conflict := originalDigestConflict(ec); conflict {
+		t.Fatal("conflict still reported")
+	}
+}
+
+// Capabilities that could not be read are unknown, not absent: the preflight
+// waits for the worker and keeps what it recorded instead of hashing the file.
+func TestPreflightWaitsWhenWorkerCapabilitiesAreUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "source.mkv")
+	if err := os.WriteFile(file, []byte("source bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fi, _ := os.Stat(file)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantState StepStatus
+	}{
+		{"transient", context.DeadlineExceeded, StepWaitingExternal},
+		{"permanent", errors.New("capabilities: bad config"), StepFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, st := setupTranscodeEngine(t, capsError(tc.err), writeProbeScript(t, dir, sdrProbeJSON), []string{dir}, []string{dir}, false)
+			defer st.Close()
+			state := map[string]any{}
+			recordOriginalStat(state, fi)
+			ec := &ExecutionContext{InstanceID: "caps-" + tc.name, ActionName: "transcode_media", Inputs: map[string]any{"path": file, "mode": "size"}, State: state, Outputs: map[string]any{}}
+			seedActionInstance(t, st, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
+			// A hash would take a slot; none is free, so it would block and
+			// fail at the deadline instead of returning here.
+			for i := 0; i < mediaHashConcurrency; i++ {
+				e.hashSlots <- struct{}{}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			res, err := e.stepTranscodePreflight(ctx, ec)
+			if err != nil || res.Status != tc.wantState {
+				t.Fatalf("%+v %v, want %v", res, err, tc.wantState)
+			}
+			if tc.wantState == StepWaitingExternal && res.WaitingCondition != "worker_unreachable" {
+				t.Fatalf("waiting condition %q", res.WaitingCondition)
+			}
+			if _, ok := ec.State["original_sha256"]; ok {
+				t.Fatal("a digest was computed while the capability was unknown")
+			}
+			if _, _, ok := recordedOriginalStat(ec.State); !ok {
+				t.Fatal("the recorded stat was dropped")
+			}
+		})
+	}
+}
+
+// After the worker lost the job (404), the reconcile path falls through to a
+// new submit. A digest-less one must not reach a worker that cannot learn it.
+func TestReconcileResubmitAfter404ChecksTheLearnCapability(t *testing.T) {
+	notFound := &httpclient.HTTPError{StatusCode: 404, Code: transcode.WorkerErrorNotFound}
+	for _, tc := range []struct {
+		name   string
+		worker func() *mockTranscodeExecutor
+		want   StepStatus
+		submit int
+	}{
+		{"old worker", func() *mockTranscodeExecutor { return &mockTranscodeExecutor{} }, StepFailed, 0},
+		{"unreadable capabilities", func() *mockTranscodeExecutor { return capsError(context.DeadlineExceeded) }, StepWaitingExternal, 0},
+		{"learning worker", learnsDigestWorker, StepCompleted, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			worker := tc.worker()
+			worker.statusFunc = func(context.Context, string) (transcode.JobStatus, error) { return transcode.JobStatus{}, notFound }
+			st := setupTestStore(t)
+			seedActionInstance(t, st, "reconcile-404", "transcode_media", StatusRunning, 3, "", map[string]any{"path": "/Volumes/media/ep.mkv"}, learnedSubmitState(4096))
+			e := NewEngine(EngineDeps{Store: st, Transcode: worker})
+			ec := childECFor("reconcile-404", "", learnedSubmitState(4096))
+			delete(ec.State, "original_sha256")
+			ec.State["transcode_reconcile"] = true
+			res, err := e.stepTranscodeSubmit(context.Background(), ec)
+			if err != nil || res.Status != tc.want || int(worker.submitCalls) != tc.submit {
+				t.Fatalf("%+v %v submits=%d, want %v/%d", res, err, worker.submitCalls, tc.want, tc.submit)
+			}
+			if tc.want == StepFailed && !strings.Contains(res.Error, "upgrade the worker") {
+				t.Fatalf("error %q", res.Error)
+			}
+		})
+	}
+}
+
+func TestPinFillsEveryCopyOfTheOriginalSummary(t *testing.T) {
+	e := NewEngine(EngineDeps{})
+	ec := testReconcileEC("pin-summary")
+	delete(ec.State, "original_sha256")
+	ec.State["original"] = map[string]any{"path": "/Volumes/media/ep.mkv"}
+	ec.Outputs["original"] = map[string]any{"path": "/Volumes/media/ep.mkv"}
+	sha := strings.Repeat("ab", 32)
+	e.observeTranscodeStatus(ec, transcode.JobStatus{ID: "job-1", Status: transcode.StatusRunning, SourceSHA256: sha})
+	for name, m := range map[string]map[string]any{"state": ec.State, "outputs": ec.Outputs} {
+		if orig, _ := m["original"].(map[string]any); orig["sha256"] != sha {
+			t.Fatalf("%s original = %+v", name, orig)
+		}
 	}
 }
