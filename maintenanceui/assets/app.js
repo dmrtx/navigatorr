@@ -6628,8 +6628,29 @@ function showFileReview(job, approval) {
   $("reject-file-review").disabled = !serverReachable || state.approvingFile;
   $("approve-file-review").disabled = !serverReachable || state.approvingFile;
 }
-function showFileReviewPending(text) {
-  $("file-review-data").replaceChildren(node("p", text, "muted"));
+// What the plan is doing while the review waits: it reads the converted file
+// once, never the original. Returns the sentence and, once measured, how much
+// of the file is read.
+function replacementCheck(job) {
+  const work = job?.work || {};
+  const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
+  const note = "Nothing changes until you approve.";
+  if (work.phase === "waiting_for_hash_slot") return {text: `Waiting to check the converted file. ${note}`};
+  if (work.phase === "verifying_candidate" && total) {
+    const read = Math.min(Math.max(0, Number(work.bytes_read) || 0), total);
+    return {text: `Checking the converted file · ${Math.floor(read / total * 100)}% · ${bytes(read)} / ${bytes(total)}. ${note}`, ratio: read / total};
+  }
+  return {text: `Checking the converted file. ${note}`};
+}
+function showFileReviewPending(text, ratio) {
+  const body = [node("p", text, "muted")];
+  if (ratio != null) {
+    const meter = node("progress", "", "replacement-progress");
+    meter.max = 1;
+    meter.value = ratio;
+    body.push(meter);
+  }
+  $("file-review-data").replaceChildren(...body);
   $("file-review-total").textContent = "";
   $("reject-file-review").hidden = true;
   $("approve-file-review").disabled = true;
@@ -6654,7 +6675,8 @@ async function awaitFileReview(approval, auth) {
     if (replacementReady(job)) return showFileReview(job, approval);
     if (!job || ["failed", "cancelled", "completed"].includes(job.status)) return showFileReviewPending(shortJobReason(job?.error) || "This replacement can no longer be approved. Nothing was changed.");
     if (job.status === "waiting_decision") return showFileReviewPending("This replacement is waiting for a decision that is not an approval. Open the job to continue.");
-    showFileReviewPending("Verifying the original and the candidate. Nothing changes until you approve; this can take a few minutes for large files.");
+    const check = replacementCheck(job);
+    showFileReviewPending(check.text, check.ratio);
   }
 }
 async function reviewFilePromotion(id, { wait = false } = {}) {
@@ -6667,7 +6689,8 @@ async function reviewFilePromotion(id, { wait = false } = {}) {
   const approval = state.fileApproval = { id, digest: "", original: "", candidate: "", pending: !ready };
   if (ready) showFileReview(job, approval);
   else {
-    showFileReviewPending("Verifying the original and the candidate. Nothing changes until you approve; this can take a few minutes for large files.");
+    const check = replacementCheck(job);
+    showFileReviewPending(check.text, check.ratio);
     awaitFileReview(approval, auth);
   }
   $("file-review").showModal();

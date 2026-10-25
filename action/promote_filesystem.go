@@ -94,7 +94,7 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 		if p.MovedAside || p.MoveAsideStartedAt != "" {
 			return nil
 		}
-		return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
+		return e.verifyPromotionOriginalStable(ctx, p)
 	}
 	if err := verifyOriginal(); err != nil {
 		return promoteFailed(err)
@@ -189,7 +189,7 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 	}
 	if p.NewPath != p.OriginalPath && !p.movesAside() {
 		if _, err := os.Lstat(p.OriginalPath); err == nil {
-			if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+			if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 				return promoteFailed(err)
 			}
 			p.DeleteSentAt = "filesystem_remove_intent"
@@ -199,7 +199,7 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 			if err := ctx.Err(); err != nil {
 				return promoteFailed(err)
 			}
-			if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+			if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 				return promoteFailed(err)
 			}
 			if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return os.Remove(p.OriginalPath) }); err != nil {

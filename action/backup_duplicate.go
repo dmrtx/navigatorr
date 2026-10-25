@@ -72,7 +72,11 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint); err != nil {
+	if p.originalByMetadata() {
+		if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
+			return nil, err
+		}
+	} else if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint); err != nil {
 		return nil, err
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
@@ -90,7 +94,7 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 			return nil, fmt.Errorf("recovery artifact is not a regular file")
 		}
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+	if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 		return nil, err
 	}
 	backupNow, err := os.Lstat(p.BackupPath)

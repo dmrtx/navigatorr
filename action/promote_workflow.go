@@ -39,7 +39,7 @@ func (e *Engine) stepPromoteImport(ctx context.Context, ec *ExecutionContext) (S
 		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 			return promoteFailed(err)
 		}
-		if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); err != nil {
+		if err := e.verifyPromotionOriginal(ctx, p); err != nil {
 			return promoteFailed(err)
 		}
 		if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
@@ -191,7 +191,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			// NAS metadata can still report the inode after Sonarr has removed
 			// it. A missing original needs only record reconciliation; every
 			// other integrity error must continue to block deletion.
-			if err := e.verifyPromotionHash(ctx, old.Path, p.OriginalSHA); err != nil && !os.IsNotExist(err) {
+			if err := e.verifyPromotionOriginal(ctx, p); err != nil && !os.IsNotExist(err) {
 				return promoteFailed(err)
 			}
 		} else if !os.IsNotExist(err) {
@@ -277,7 +277,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			if _, err := e.promotionPath(p.OriginalPath, true); err != nil {
 				return promoteFailed(err)
 			}
-			if err := e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA); os.IsNotExist(err) {
+			if err := e.verifyPromotionOriginal(ctx, p); os.IsNotExist(err) {
 				// The optional orphan disappeared after discovery. Do not issue
 				// a remove against a pathname that could now contain a new file.
 			} else if err != nil {

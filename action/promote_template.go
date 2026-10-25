@@ -103,6 +103,13 @@ type promotionState struct {
 	// Set for compact candidates only: the re-grab warning and a read-only
 	// snapshot of how Sonarr/Radarr tracks the item.
 	RegrabWarning string `json:"regrab_warning,omitempty"`
+	// OriginalStatMod is the original's modification time when plan found it
+	// unchanged since a transcode whose digest was pinned at staging. Set, the
+	// original is proved by size and this time and never read again.
+	// RecoverySample is the digest over sampled ranges of the original that its
+	// recovery copy must reproduce. See promote_cheap.go.
+	OriginalStatMod string `json:"original_stat_mod_time,omitempty"`
+	RecoverySample  string `json:"recovery_sample_sha256,omitempty"`
 	arrTracking
 }
 

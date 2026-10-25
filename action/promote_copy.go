@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -44,6 +46,9 @@ type promotionCopyResult struct {
 	DurationMs int64  `json:"duration_ms"`
 	CloneError string `json:"clone_error,omitempty"`
 	Streamed   int64  `json:"streamed_bytes,omitempty"`
+	// streamSHA is the SHA-256 of the bytes read from the source when the whole
+	// copy was streamed; empty for any other method. Never persisted.
+	streamSHA string
 }
 
 // promotionCopyData fills the empty dst with src, holding a hash slot. Every
@@ -115,6 +120,17 @@ func (e *Engine) promotionCopyData(ctx context.Context, dst, src *os.File, path 
 		}
 	}
 	result.Method = promotionCopyStream
-	result.Streamed, err = io.Copy(dst, &promotionContextReader{ctx: ctx, r: src, path: path, total: total, read: copied, progress: progress})
+	reader := &promotionContextReader{ctx: ctx, r: src, path: path, total: total, read: copied, progress: progress}
+	if copied > 0 {
+		result.Streamed, err = io.Copy(dst, reader)
+		return result, err
+	}
+	// The source is read once, whole, to be copied: its digest costs nothing
+	// more and proves those bytes against the pinned one.
+	h := sha256.New()
+	result.Streamed, err = io.Copy(dst, io.TeeReader(reader, h))
+	if err == nil {
+		result.streamSHA = hex.EncodeToString(h.Sum(nil))
+	}
 	return result, err
 }
