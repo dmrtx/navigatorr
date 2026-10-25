@@ -45,8 +45,8 @@ func (c NASHelperConfig) Validate() error {
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return fmt.Errorf("nas_helper.url must be a base URL without credentials, path or query")
 	}
-	if strings.TrimSpace(c.TokenFile) == "" {
-		return fmt.Errorf("nas_helper.token_file is required when nas_helper.url is set")
+	if !filepath.IsAbs(c.TokenFile) {
+		return fmt.Errorf("nas_helper.token_file must be an absolute path when nas_helper.url is set")
 	}
 	if len(c.PathMappings) == 0 {
 		return fmt.Errorf("nas_helper.path_mappings needs at least one mapping")

@@ -2,7 +2,7 @@ package tools
 
 import (
 	"context"
-	"errors"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/config"
@@ -62,13 +62,32 @@ func inspectNASHelper(ctx context.Context, cfg config.NASHelperConfig, client *n
 		info["instance_id"] = h.InstanceID
 		info["roots"] = h.Roots
 		info["resolver"] = h.Resolver
-	case errors.Is(err, nashelper.ErrRestarted):
-		// The first call after a restart reports it; the next one is accepted.
-		info["status"] = "restarted"
-		info["error"] = err.Error()
+		// A mapping whose remote side the helper does not serve would make every
+		// file look missing, so say so instead of reporting a healthy helper.
+		var outside []string
+		for _, m := range cfg.PathMappings {
+			if !underAnyRoot(m.Remote, h.Roots) {
+				outside = append(outside, m.Remote)
+			}
+		}
+		if len(outside) > 0 {
+			info["status"] = "misconfigured"
+			info["error"] = "path_mappings remote outside the helper's roots"
+			info["remote_outside_roots"] = outside
+		}
 	default:
 		info["status"] = "unavailable"
 		info["error"] = err.Error()
 	}
 	return info
+}
+
+func underAnyRoot(path string, roots []string) bool {
+	for _, r := range roots {
+		r = strings.TrimSuffix(r, "/")
+		if path == r || strings.HasPrefix(path, r+"/") {
+			return true
+		}
+	}
+	return false
 }

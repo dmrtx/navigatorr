@@ -16,12 +16,16 @@ import (
 
 const diagHelperToken = "0123456789abcdef0123456789abcdef-token"
 
-func diagHelperConfig(t *testing.T, url string, tokenFile string) config.NASHelperConfig {
+func diagHelperConfig(t *testing.T, url string, tokenFile string, remote ...string) config.NASHelperConfig {
 	t.Helper()
+	r := "/data"
+	if len(remote) > 0 {
+		r = remote[0]
+	}
 	return config.NASHelperConfig{
 		URL:          url,
 		TokenFile:    tokenFile,
-		PathMappings: []config.NASHelperPathMapping{{Local: "/data", Remote: "/data"}},
+		PathMappings: []config.NASHelperPathMapping{{Local: "/data", Remote: r}},
 	}
 }
 
@@ -54,7 +58,10 @@ func TestDiagnosticsOmitsNASHelperWhenNotConfigured(t *testing.T) {
 }
 
 func TestDiagnosticsReportsAHealthyNASHelper(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv, err := nashelper.NewServer(nashelper.Config{Roots: []string{root}, Token: diagHelperToken})
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +69,7 @@ func TestDiagnosticsReportsAHealthyNASHelper(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer func() { ts.Close(); srv.Close() }()
 
-	cfg := &config.Config{NASHelper: diagHelperConfig(t, ts.URL, writeHelperToken(t, diagHelperToken))}
+	cfg := &config.Config{NASHelper: diagHelperConfig(t, ts.URL, writeHelperToken(t, diagHelperToken), root+"/library")}
 	out := diagnosticsFor(t, cfg)
 	info, _ := out["nas_helper"].(map[string]any)
 	if info["status"] != "ok" || info["instance_id"] != srv.InstanceID() || info["resolver"] == "" {
@@ -73,6 +80,25 @@ func TestDiagnosticsReportsAHealthyNASHelper(t *testing.T) {
 	}
 	if strings.Contains(mustJSON(t, out), diagHelperToken) {
 		t.Fatal("the token appears in diagnostics")
+	}
+}
+
+func TestDiagnosticsFlagsAMappingTheHelperDoesNotServe(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := nashelper.NewServer(nashelper.Config{Roots: []string{root}, Token: diagHelperToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer func() { ts.Close(); srv.Close() }()
+	cfg := &config.Config{NASHelper: diagHelperConfig(t, ts.URL, writeHelperToken(t, diagHelperToken), "/somewhere/else")}
+	out := diagnosticsFor(t, cfg)
+	info, _ := out["nas_helper"].(map[string]any)
+	if info["status"] != "misconfigured" || out["status"] != "degraded" {
+		t.Fatalf("status %v, nas_helper %v", out["status"], info)
 	}
 }
 

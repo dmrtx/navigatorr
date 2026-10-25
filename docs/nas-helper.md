@@ -222,6 +222,19 @@ bytes on the network.
    require the helper's hash of the replacement to equal the recorded one),
    and the tool descriptions. Not started.
 
+Client contract for stage 4 (from the stage 3 review): `IsAnswer(err)` is true only
+for `not_found`, `not_regular_file` and `changed_while_reading`; every other
+failure (unreachable, the client's own timeout, a path the helper does not serve,
+`permission_denied`, a restart, an unknown code) satisfies `ShouldFallBack(err)`
+and the file is read through the mount, recorded as a degradation. The caller's
+own cancellation is neither. A `not_found` is only as good as the path mapping, so
+absence is confirmed with a `stat` on the mount before any destructive decision.
+`Identity`, `Sample` and `Hash` return the helper's instance id with the result so
+a stored identity is never compared with one from another instance. `Hash` has no
+timeout of its own (the caller passes a deadline), tolerates two failed polls in a
+row, and cancels its job on every exit before a result. `Sample` always needs a
+deadline from the caller.
+
 Required from the second review for the helper's API: no expected value is
 ever sent to it; a job is created for the step that uses it; the sampling
 function is shared so the digests are identical.

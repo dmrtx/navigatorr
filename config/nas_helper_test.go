@@ -34,6 +34,7 @@ func TestNASHelperValidation(t *testing.T) {
 	}
 	cases := map[string]func(*NASHelperConfig){
 		"no token file":     func(c *NASHelperConfig) { c.TokenFile = "" },
+		"relative token":    func(c *NASHelperConfig) { c.TokenFile = "secrets/helper" },
 		"no mappings":       func(c *NASHelperConfig) { c.PathMappings = nil },
 		"bad scheme":        func(c *NASHelperConfig) { c.URL = "ftp://nas:8099" },
 		"no host":           func(c *NASHelperConfig) { c.URL = "http://" },

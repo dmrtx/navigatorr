@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -22,18 +21,24 @@ const (
 	// requestTimeout bounds one request that does not wait on a hash slot. Sample
 	// may queue behind hashes, so its caller's context decides how long it waits.
 	requestTimeout = 30 * time.Second
-	pollMin        = 250 * time.Millisecond
-	pollMax        = 2 * time.Second
+	// sampleTimeout caps a sample that waits for a hash slot; the caller's own
+	// deadline, if shorter, wins.
+	sampleTimeout = 5 * time.Minute
+	pollMin       = 250 * time.Millisecond
+	pollMax       = 2 * time.Second
+	// maxPollFailures is how many polls in a row may fail before the hash is given
+	// up (and cancelled on the helper).
+	maxPollFailures = 3
 )
 
-// ErrUnavailable means the helper could not be reached or answered something that
-// is not its protocol. The caller's answer is to read the file the old way and
-// record that it did.
+// ErrUnavailable means the helper could not give a usable answer: unreachable,
+// timed out, refused, not its protocol, or unable to serve this path. The
+// caller's answer is to read the file the old way and record that it did.
 var ErrUnavailable = errors.New("nas helper unavailable")
 
-// ErrRestarted means the helper restarted since this client first spoke to it, so
-// the job or identity the caller holds belongs to a process that no longer exists.
-var ErrRestarted = errors.New("nas helper restarted")
+// ErrRestarted means the helper restarted while a job was running, so the job
+// belongs to a process that no longer exists. It is an unavailability too.
+var ErrRestarted = fmt.Errorf("%w: the helper restarted", ErrUnavailable)
 
 // PathMapping translates a directory in the coordinator's namespace into the same
 // directory in the helper's.
@@ -57,9 +62,7 @@ type Client struct {
 	token    string
 	mappings []PathMapping
 	http     *http.Client
-
-	mu       sync.Mutex
-	instance string
+	timeout  time.Duration
 }
 
 // ReadToken reads a bearer token from a file, dropping surrounding whitespace.
@@ -78,8 +81,9 @@ func ReadToken(path string) (string, error) {
 // NewClient validates the configuration; it makes no request.
 func NewClient(cfg ClientConfig) (*Client, error) {
 	u, err := url.Parse(strings.TrimSpace(cfg.URL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, errors.New("nas helper url must be an http(s) URL with a host")
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return nil, errors.New("nas helper url must be a base http(s) URL with a host and no credentials, path or query")
 	}
 	if len(cfg.Token) < minTokenLength {
 		return nil, fmt.Errorf("nas helper token must be at least %d characters", minTokenLength)
@@ -88,8 +92,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, errors.New("nas helper needs at least one path mapping")
 	}
 	for _, m := range cfg.Mappings {
-		if !filepath.IsAbs(m.Local) || !filepath.IsAbs(m.Remote) {
-			return nil, fmt.Errorf("nas helper path mapping %q -> %q must be absolute", m.Local, m.Remote)
+		for _, p := range []string{m.Local, m.Remote} {
+			if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
+				return nil, fmt.Errorf("nas helper path mapping %q -> %q must be clean absolute directories other than /", m.Local, m.Remote)
+			}
 		}
 	}
 	hc := cfg.HTTPClient
@@ -109,6 +115,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		token:    cfg.Token,
 		mappings: append([]PathMapping(nil), cfg.Mappings...),
 		http:     &hcCopy,
+		timeout:  requestTimeout,
 	}, nil
 }
 
@@ -138,47 +145,42 @@ func (c *Client) Remote(local string) (string, bool) {
 	return strings.TrimSuffix(m.Remote, "/") + rest, true
 }
 
-// Health asks the helper who it is. It also records the instance, so a later
-// restart is noticed.
+// Health asks the helper who it is.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var h Health
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	if err := c.do(ctx, http.MethodGet, "/v1/health", nil, &h); err != nil {
+	if err := c.do(ctx, c.timeout, http.MethodGet, "/v1/health", nil, &h); err != nil {
 		return Health{}, err
 	}
 	if h.InstanceID == "" {
 		return Health{}, fmt.Errorf("%w: health answered without an instance", ErrUnavailable)
 	}
-	if err := c.checkInstance(h.InstanceID); err != nil {
-		return Health{}, err
-	}
 	return h, nil
 }
 
-// Identity reports what the library's filesystem says about the file.
-func (c *Client) Identity(ctx context.Context, local string) (Identity, error) {
+// Identity reports what the library's filesystem says about the file, with the
+// instance that said it: a caller that keeps the identity to compare later keeps
+// the instance with it.
+func (c *Client) Identity(ctx context.Context, local string) (IdentityResponse, error) {
 	var resp IdentityResponse
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	if err := c.pathCall(ctx, "/v1/identity", local, &resp); err != nil {
-		return Identity{}, err
+	if err := c.pathCall(ctx, c.timeout, "/v1/identity", local, &resp); err != nil {
+		return IdentityResponse{}, err
 	}
-	if err := c.checkInstance(resp.InstanceID); err != nil {
-		return Identity{}, err
+	if resp.InstanceID == "" {
+		return IdentityResponse{}, fmt.Errorf("%w: answer without an instance", ErrUnavailable)
 	}
-	return resp.Identity, nil
+	return resp, nil
 }
 
 // Sample returns the sampled-range digest of the file and the identity it was
-// taken under. It may wait behind running hashes; ctx bounds that wait.
+// taken under. It may wait behind running hashes, so it is bounded by the
+// caller's deadline or sampleTimeout, whichever is shorter.
 func (c *Client) Sample(ctx context.Context, local string) (SampleResponse, error) {
 	var resp SampleResponse
-	if err := c.pathCall(ctx, "/v1/sample", local, &resp); err != nil {
+	if err := c.pathCall(ctx, sampleTimeout, "/v1/sample", local, &resp); err != nil {
 		return SampleResponse{}, err
 	}
-	if err := c.checkInstance(resp.InstanceID); err != nil {
-		return SampleResponse{}, err
+	if resp.InstanceID == "" {
+		return SampleResponse{}, fmt.Errorf("%w: answer without an instance", ErrUnavailable)
 	}
 	return resp, nil
 }
@@ -186,71 +188,87 @@ func (c *Client) Sample(ctx context.Context, local string) (SampleResponse, erro
 // HashProgress receives the bytes read so far and the total, roughly every poll.
 type HashProgress func(read, total int64)
 
+// HashResponse is a finished hash and the instance that took it.
+type HashResponse struct {
+	InstanceID string
+	HashResult
+}
+
 // Hash has the helper read the whole file locally and returns the digest with the
-// identity that held steady while it was read. It returns when the hash is done,
-// fails, or ctx ends; in the last case the job is cancelled on the helper.
-func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) (HashResult, error) {
+// identity that held steady while it was read. It has no time limit of its own: a
+// full read of a large file takes minutes, so the caller's context decides. On
+// every way out before a result, the job is cancelled on the helper.
+func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) (HashResponse, error) {
 	var job Job
-	startCtx, cancel := context.WithTimeout(ctx, requestTimeout)
-	err := c.pathCall(startCtx, "/v1/hash", local, &job)
-	cancel()
-	if err != nil {
-		return HashResult{}, err
+	if err := c.pathCall(ctx, c.timeout, "/v1/hash", local, &job); err != nil {
+		return HashResponse{}, err
 	}
-	if err := c.checkInstance(job.InstanceID); err != nil {
-		return HashResult{}, err
-	}
-	if job.ID == "" {
-		return HashResult{}, fmt.Errorf("%w: hash started without a job id", ErrUnavailable)
+	if job.ID == "" || job.InstanceID == "" {
+		return HashResponse{}, fmt.Errorf("%w: hash started without a job id or instance", ErrUnavailable)
 	}
 	instance := job.InstanceID
+	finished := false
+	defer func() {
+		if !finished {
+			c.cancelJob(job.ID)
+		}
+	}()
 	wait := pollMin
+	failures := 0
 	for {
 		switch job.State {
 		case JobDone:
 			if job.Result == nil {
-				return HashResult{}, fmt.Errorf("%w: a finished hash carried no result", ErrUnavailable)
+				return HashResponse{}, fmt.Errorf("%w: a finished hash carried no result", ErrUnavailable)
 			}
-			return *job.Result, nil
-		case JobFailed, JobCancelled:
+			finished = true
+			return HashResponse{InstanceID: instance, HashResult: *job.Result}, nil
+		case JobFailed:
+			finished = true
 			if job.Error != nil {
-				return HashResult{}, job.Error
+				return HashResponse{}, job.Error
 			}
-			return HashResult{}, &Error{Code: CodeInternal, Message: "the hash " + job.State}
+			return HashResponse{}, &Error{Code: CodeInternal, Message: "the hash failed"}
+		case JobCancelled:
+			// Nobody here asked for that: the helper is shutting down.
+			finished = true
+			return HashResponse{}, fmt.Errorf("%w: the hash was cancelled on the helper", ErrUnavailable)
+		case JobQueued, JobRunning:
+		default:
+			return HashResponse{}, fmt.Errorf("%w: unknown job state %q", ErrUnavailable, job.State)
 		}
 		if progress != nil {
 			progress(job.BytesRead, job.TotalBytes)
 		}
 		select {
 		case <-ctx.Done():
-			c.cancelJob(job.ID)
-			return HashResult{}, ctx.Err()
+			return HashResponse{}, ctx.Err()
 		case <-time.After(wait):
 		}
 		if wait < pollMax {
-			wait *= 2
-			if wait > pollMax {
-				wait = pollMax
-			}
+			wait = min(wait*2, pollMax)
 		}
-		pollCtx, cancel := context.WithTimeout(ctx, requestTimeout)
 		var next Job
-		err := c.do(pollCtx, http.MethodGet, "/v1/jobs/"+url.PathEscape(job.ID), nil, &next)
-		cancel()
+		err := c.do(ctx, c.timeout, http.MethodGet, "/v1/jobs/"+url.PathEscape(job.ID), nil, &next)
 		if err != nil {
 			var apiErr *Error
-			if errors.As(err, &apiErr) && apiErr.Code == CodeNotFound {
+			switch {
+			case ctx.Err() != nil:
+				return HashResponse{}, ctx.Err()
+			case errors.As(err, &apiErr) && apiErr.Code == CodeNotFound:
 				// The helper forgot the job: it restarted, or the job aged out.
-				return HashResult{}, fmt.Errorf("%w: the hash job is gone", ErrRestarted)
+				return HashResponse{}, fmt.Errorf("%w: the hash job is gone", ErrRestarted)
+			case errors.Is(err, ErrUnavailable):
+				if failures++; failures >= maxPollFailures {
+					return HashResponse{}, err
+				}
+				continue
 			}
-			if ctx.Err() != nil {
-				c.cancelJob(job.ID)
-				return HashResult{}, ctx.Err()
-			}
-			return HashResult{}, err
+			return HashResponse{}, err
 		}
+		failures = 0
 		if next.InstanceID != instance {
-			return HashResult{}, ErrRestarted
+			return HashResponse{}, ErrRestarted
 		}
 		job = next
 	}
@@ -261,36 +279,35 @@ func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) 
 func (c *Client) cancelJob(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = c.do(ctx, http.MethodDelete, "/v1/jobs/"+url.PathEscape(id), nil, nil)
+	_ = c.do(ctx, 5*time.Second, http.MethodDelete, "/v1/jobs/"+url.PathEscape(id), nil, nil)
 }
 
-func (c *Client) pathCall(ctx context.Context, route, local string, out any) error {
+// ErrNotMapped means no path mapping covers the path, so the helper cannot be
+// asked about it. It is an unavailability: the file is read the old way.
+var ErrNotMapped = fmt.Errorf("%w: no path mapping covers this path", ErrUnavailable)
+
+func (c *Client) pathCall(ctx context.Context, timeout time.Duration, route, local string, out any) error {
 	remote, ok := c.Remote(local)
 	if !ok {
-		return &Error{Code: CodeOutside, Message: "no helper path mapping covers this path"}
+		return ErrNotMapped
 	}
-	return c.do(ctx, http.MethodPost, route, PathRequest{Path: remote}, out)
+	return c.do(ctx, timeout, http.MethodPost, route, PathRequest{Path: remote}, out)
 }
 
-// checkInstance pins the first instance seen and reports a different one later.
-func (c *Client) checkInstance(id string) error {
-	if id == "" {
-		return fmt.Errorf("%w: answer without an instance", ErrUnavailable)
+// do runs one request bounded by timeout and the caller's context. When the
+// caller's context ends, its error is returned as it is; when only the timeout
+// ran out, the helper is unavailable.
+func (c *Client) do(parent context.Context, timeout time.Duration, method, route string, body, out any) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	fail := func(what string, err error) error {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
+		// A transport error names the URL, never a header, so the token cannot
+		// leak through it.
+		return fmt.Errorf("%w: %s: %v", ErrUnavailable, what, err)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.instance == "" {
-		c.instance = id
-		return nil
-	}
-	if c.instance != id {
-		c.instance = id
-		return ErrRestarted
-	}
-	return nil
-}
-
-func (c *Client) do(ctx context.Context, method, route string, body, out any) error {
 	var rdr io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -309,19 +326,12 @@ func (c *Client) do(ctx context.Context, method, route string, body, out any) er
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		// The URL error text carries no header, so the token cannot leak here.
-		return fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return fail("request", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("%w: reading the answer: %v", ErrUnavailable, err)
+		return fail("reading the answer", err)
 	}
 	if len(raw) > maxResponseBytes {
 		return fmt.Errorf("%w: answer too large", ErrUnavailable)
@@ -344,12 +354,32 @@ func (c *Client) do(ctx context.Context, method, route string, body, out any) er
 	return fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
 }
 
-// IsUnavailable reports that the helper could not give an answer at all, as
-// opposed to answering that the file is missing or changed.
-func IsUnavailable(err error) bool {
-	if errors.Is(err, ErrUnavailable) || errors.Is(err, ErrRestarted) {
+// IsAnswer reports that the helper looked at the file and said something about
+// it: it is missing, not a regular file, or changed while it was read. Every
+// other failure (unreachable, timed out, refused, restarted, a path it does not
+// serve, a code it does not know) means the helper could not help, and the caller
+// reads the file the old way and records that it did. The caller's own context
+// ending is neither.
+//
+// A not_found is only as good as the path mapping behind it: a caller about to
+// act destructively on it confirms the absence on the mount first.
+func IsAnswer(err error) bool {
+	var apiErr *Error
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch apiErr.Code {
+	case CodeNotFound, CodeNotFile, CodeChanged:
 		return true
 	}
-	var apiErr *Error
-	return errors.As(err, &apiErr) && (apiErr.Code == CodeAuth || apiErr.Code == CodeInternal || apiErr.Code == CodeBusy)
+	return false
+}
+
+// ShouldFallBack reports whether the caller should read the file through the
+// mount instead: the helper could not answer, and the caller did not give up.
+func ShouldFallBack(err error) bool {
+	if err == nil || IsAnswer(err) {
+		return false
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }

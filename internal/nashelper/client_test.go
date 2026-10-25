@@ -115,9 +115,10 @@ func TestClientHealthIdentitySampleHash(t *testing.T) {
 		if err != nil || h.InstanceID != f.srv.InstanceID() {
 			t.Fatalf("health: %+v, %v", h, err)
 		}
-		id, err := c.Identity(ctx, path)
-		if err != nil || id.Size != int64(len(data)) || id.Ino == 0 {
-			t.Fatalf("identity: %+v, %v", id, err)
+		idResp, err := c.Identity(ctx, path)
+		id := idResp.Identity
+		if err != nil || id.Size != int64(len(data)) || id.Ino == 0 || idResp.InstanceID != f.srv.InstanceID() {
+			t.Fatalf("identity: %+v, %v", idResp, err)
 		}
 		sample, err := c.Sample(ctx, path)
 		if err != nil {
@@ -136,7 +137,7 @@ func TestClientHealthIdentitySampleHash(t *testing.T) {
 			t.Fatal(err)
 		}
 		sum := sha256.Sum256(data)
-		if res.SHA256 != hex.EncodeToString(sum[:]) || res.Bytes != int64(len(data)) {
+		if res.InstanceID != f.srv.InstanceID() || res.SHA256 != hex.EncodeToString(sum[:]) || res.Bytes != int64(len(data)) {
 			t.Fatalf("hash: %+v", res)
 		}
 		if res.Identity.Ino != id.Ino {
@@ -145,20 +146,53 @@ func TestClientHealthIdentitySampleHash(t *testing.T) {
 	}
 }
 
-func TestClientAPIErrorsAreTypedAndNotUnavailable(t *testing.T) {
+func TestClientAnswersVersusFallbacks(t *testing.T) {
 	f := newFixture(t, 2)
 	c := f.client(t)
 	ctx := context.Background()
-
-	_, err := c.Identity(ctx, filepath.Join(f.root, "missing.bin"))
-	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.Code != CodeNotFound || IsUnavailable(err) {
-		t.Fatalf("missing file: %v", err)
+	dir := filepath.Join(f.root, "d")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	// A path no mapping covers is refused before any request is made.
-	_, err = c.Identity(ctx, "/elsewhere/a.bin")
-	if !errors.As(err, &apiErr) || apiErr.Code != CodeOutside || IsUnavailable(err) {
-		t.Fatalf("unmapped path: %v", err)
+
+	// The helper looked and said something: not a reason to read through the mount.
+	for name, path := range map[string]string{
+		"missing":  filepath.Join(f.root, "missing.bin"),
+		"not file": dir,
+	} {
+		_, err := c.Identity(ctx, path)
+		if !IsAnswer(err) || ShouldFallBack(err) {
+			t.Errorf("%s: want an answer, got %v", name, err)
+		}
+	}
+	// The helper cannot help with these: read through the mount.
+	_, err := c.Identity(ctx, "/elsewhere/a.bin")
+	if !errors.Is(err, ErrNotMapped) || IsAnswer(err) || !ShouldFallBack(err) {
+		t.Errorf("unmapped path: %v", err)
+	}
+	outside, err := NewClient(ClientConfig{URL: f.http.URL, Token: testToken, Mappings: []PathMapping{{Local: "/data", Remote: "/not/served"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = outside.Identity(ctx, "/data/a.bin")
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Code != CodeOutside || IsAnswer(err) || !ShouldFallBack(err) {
+		t.Errorf("path the helper does not serve: %v", err)
+	}
+	// The caller's own cancellation is not a reason to fall back either.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	path, _ := f.write("a.bin", 10)
+	if _, err := c.Identity(cctx, path); !errors.Is(err, context.Canceled) || ShouldFallBack(err) {
+		t.Errorf("caller cancelled: %v", err)
+	}
+	if ShouldFallBack(nil) {
+		t.Error("no error, no fallback")
+	}
+	for _, code := range []string{CodeDenied, CodeBadInput, CodeCancelled, CodeAuth, CodeInternal, CodeBusy, "some_future_code"} {
+		if e := (&Error{Code: code}); IsAnswer(e) || !ShouldFallBack(e) {
+			t.Errorf("%s must fall back", code)
+		}
 	}
 }
 
@@ -174,8 +208,8 @@ func TestClientWrongTokenIsUnavailableAndNeverLeaks(t *testing.T) {
 	}
 	path, _ := f.write("a.bin", 10)
 	_, err = c.Identity(context.Background(), path)
-	if err == nil || !IsUnavailable(err) {
-		t.Fatalf("a refused token must count as unavailable: %v", err)
+	if err == nil || !ShouldFallBack(err) {
+		t.Fatalf("a refused token must fall back: %v", err)
 	}
 	if strings.Contains(err.Error(), strings.Repeat("x", 40)) {
 		t.Fatal("the token leaked into an error")
@@ -193,7 +227,7 @@ func TestClientUnreachableHelperIsUnavailable(t *testing.T) {
 		"sample":   func() error { _, err := c.Sample(context.Background(), path); return err },
 		"hash":     func() error { _, err := c.Hash(context.Background(), path, nil); return err },
 	} {
-		if err := call(); !errors.Is(err, ErrUnavailable) || !IsUnavailable(err) {
+		if err := call(); !errors.Is(err, ErrUnavailable) || !ShouldFallBack(err) {
 			t.Errorf("%s: want ErrUnavailable, got %v", name, err)
 		}
 	}
@@ -274,7 +308,7 @@ func newRestartable(t *testing.T) (*Server, *httptest.Server, string, func() *Se
 	}
 }
 
-func TestClientNoticesARestart(t *testing.T) {
+func TestClientIdentityCarriesTheInstance(t *testing.T) {
 	_, ts, root, restart := newRestartable(t)
 	c, err := NewClient(ClientConfig{URL: ts.URL, Token: testToken, Mappings: []PathMapping{{Local: root, Remote: root}}})
 	if err != nil {
@@ -284,17 +318,17 @@ func TestClientNoticesARestart(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ctx := context.Background()
-	if _, err := c.Identity(ctx, path); err != nil {
+	before, err := c.Identity(context.Background(), path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	restart()
-	if _, err := c.Identity(ctx, path); !errors.Is(err, ErrRestarted) || !IsUnavailable(err) {
-		t.Fatalf("an identity from a new instance must be reported: %v", err)
+	second := restart()
+	after, err := c.Identity(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// After the report the client follows the new instance.
-	if _, err := c.Identity(ctx, path); err != nil {
-		t.Fatalf("the new instance should be accepted once reported: %v", err)
+	if before.InstanceID == after.InstanceID || after.InstanceID != second.InstanceID() {
+		t.Fatalf("a caller must be able to tell the instances apart: %q then %q", before.InstanceID, after.InstanceID)
 	}
 }
 
@@ -319,7 +353,7 @@ func TestClientHashAcrossARestart(t *testing.T) {
 	close(release)
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrRestarted) || !IsUnavailable(err) {
+		if !errors.Is(err, ErrRestarted) || !ShouldFallBack(err) {
 			t.Fatalf("a hash whose helper restarted must say so: %v", err)
 		}
 	case <-time.After(10 * time.Second):
@@ -378,7 +412,175 @@ func TestClientHashReportsAChangedFile(t *testing.T) {
 	}
 	_, err := c.Hash(context.Background(), path, nil)
 	var apiErr *Error
-	if !errors.As(err, &apiErr) || apiErr.Code != CodeChanged || IsUnavailable(err) {
+	if !errors.As(err, &apiErr) || apiErr.Code != CodeChanged || ShouldFallBack(err) {
 		t.Fatalf("a file changed mid-read is an answer, not an outage: %v", err)
+	}
+}
+
+// fakeHelper is a scripted helper for the paths a real one cannot be made to take.
+type fakeHelper struct {
+	t        *testing.T
+	instance func() string
+	polls    atomic.Int64
+	deletes  atomic.Int64
+	// poll answers the nth poll (1-based); return ok=false to drop the connection.
+	poll func(n int64) (job Job, status int)
+	// start answers the hash start.
+	start func() Job
+}
+
+func (f *fakeHelper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/hash":
+		writeJSON(w, http.StatusAccepted, f.start())
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+		n := f.polls.Add(1)
+		job, status := f.poll(n)
+		if status == 0 {
+			hj, _ := w.(http.Hijacker)
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+			return
+		}
+		writeJSON(w, status, job)
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/jobs/"):
+		f.deletes.Add(1)
+		writeJSON(w, http.StatusOK, Job{})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func fakeClient(t *testing.T, f *fakeHelper) *Client {
+	t.Helper()
+	ts := httptest.NewServer(f)
+	t.Cleanup(ts.Close)
+	c, err := NewClient(ClientConfig{URL: ts.URL, Token: testToken, Mappings: []PathMapping{{Local: "/data", Remote: "/data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func waitDeletes(t *testing.T, f *fakeHelper, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.deletes.Load() < want {
+		if time.Now().After(deadline) {
+			t.Fatalf("the job was not cancelled on the helper (deletes=%d)", f.deletes.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClientHashDetectsAnInstanceChangeBetweenPolls(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(int64) (Job, int) { return Job{ID: "j1", InstanceID: "B", State: JobRunning}, http.StatusOK }
+	c := fakeClient(t, f)
+	_, err := c.Hash(context.Background(), "/data/a.bin", nil)
+	if !errors.Is(err, ErrRestarted) || !ShouldFallBack(err) {
+		t.Fatalf("got %v", err)
+	}
+	waitDeletes(t, f, 1)
+}
+
+func TestClientHashSurvivesOneFailedPoll(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(n int64) (Job, int) {
+		switch n {
+		case 1:
+			return Job{}, 0 // connection dropped
+		case 2:
+			return Job{ID: "j1", InstanceID: "A", State: JobRunning}, http.StatusOK
+		}
+		return Job{ID: "j1", InstanceID: "A", State: JobDone, Result: &HashResult{SHA256: "ab", Bytes: 1}}, http.StatusOK
+	}
+	c := fakeClient(t, f)
+	res, err := c.Hash(context.Background(), "/data/a.bin", nil)
+	if err != nil || res.SHA256 != "ab" || res.InstanceID != "A" {
+		t.Fatalf("%+v, %v", res, err)
+	}
+	if f.deletes.Load() != 0 {
+		t.Fatal("a finished job must not be cancelled")
+	}
+}
+
+func TestClientHashGivesUpAfterRepeatedFailedPollsAndCancels(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(int64) (Job, int) { return Job{}, 0 }
+	c := fakeClient(t, f)
+	_, err := c.Hash(context.Background(), "/data/a.bin", nil)
+	if !errors.Is(err, ErrUnavailable) || !ShouldFallBack(err) {
+		t.Fatalf("got %v", err)
+	}
+	// The transport may retry a dropped GET itself, so this is a floor.
+	if got := f.polls.Load(); got < maxPollFailures {
+		t.Fatalf("polled %d times, want at least %d", got, maxPollFailures)
+	}
+	waitDeletes(t, f, 1)
+}
+
+func TestClientHashUnknownStateAndHelperCancelFallBack(t *testing.T) {
+	for name, state := range map[string]string{"unknown": "exploded", "cancelled by helper": JobCancelled} {
+		f := &fakeHelper{t: t}
+		f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: state} }
+		c := fakeClient(t, f)
+		if _, err := c.Hash(context.Background(), "/data/a.bin", nil); !ShouldFallBack(err) {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+}
+
+func TestClientHashCancelsTheJobWhenTheCallerGivesUp(t *testing.T) {
+	f := &fakeHelper{t: t}
+	f.start = func() Job { return Job{ID: "j1", InstanceID: "A", State: JobRunning} }
+	f.poll = func(int64) (Job, int) { return Job{ID: "j1", InstanceID: "A", State: JobRunning}, http.StatusOK }
+	c := fakeClient(t, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	_, err := c.Hash(ctx, "/data/a.bin", nil)
+	if !errors.Is(err, context.DeadlineExceeded) || ShouldFallBack(err) {
+		t.Fatalf("the caller's deadline is the caller's: %v", err)
+	}
+	waitDeletes(t, f, 1)
+}
+
+// A helper that accepts the connection and never answers is unavailable, not a
+// deadline of the caller's: the caller must read through the mount.
+func TestClientOwnTimeoutFallsBack(t *testing.T) {
+	release := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-release }))
+	defer ts.Close()
+	defer close(release)
+	c, err := NewClient(ClientConfig{URL: ts.URL, Token: testToken, Mappings: []PathMapping{{Local: "/data", Remote: "/data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.timeout = 100 * time.Millisecond
+	_, err = c.Identity(context.Background(), "/data/a.bin")
+	if !errors.Is(err, ErrUnavailable) || !ShouldFallBack(err) || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestClientErrorsNeverCarryTheToken(t *testing.T) {
+	// A helper that echoes the Authorization header into its answers.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "echo "+r.Header.Get("Authorization"), http.StatusInternalServerError)
+	}))
+	c, err := NewClient(ClientConfig{URL: ts.URL, Token: testToken, Mappings: []PathMapping{{Local: "/data", Remote: "/data"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, errEcho := c.Identity(context.Background(), "/data/a.bin")
+	ts.Close()
+	_, errDown := c.Identity(context.Background(), "/data/a.bin")
+	for _, err := range []error{errEcho, errDown} {
+		if err == nil || strings.Contains(err.Error(), testToken) {
+			t.Fatalf("token leaked or no error: %v", err)
+		}
 	}
 }
