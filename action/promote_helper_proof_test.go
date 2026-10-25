@@ -64,8 +64,12 @@ func attachProofHelper(t *testing.T, h *promotionHarness, complete bool) *proofH
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, r)
 		out := rec.Body.Bytes()
+		// The test filesystem's own answer depends on the OS (Linux reports a
+		// complete identity on ext4), so pin it either way.
 		if complete {
 			out = bytes.ReplaceAll(out, []byte(`"complete":false`), []byte(`"complete":true`))
+		} else {
+			out = bytes.ReplaceAll(out, []byte(`"complete":true`), []byte(`"complete":false`))
 		}
 		for k, v := range rec.Header() {
 			w.Header()[k] = v
@@ -669,6 +673,18 @@ func TestHelperProbeKeepsTheInodeAndCleansUp(t *testing.T) {
 func TestHelperProbeNeedsACompleteIdentityAndCachesTheVerdict(t *testing.T) {
 	resetHelperProbes()
 	rig := newHelperRig(t, "", nil)
+	rig.on(func(w http.ResponseWriter, r *http.Request) bool {
+		rec := httptest.NewRecorder()
+		rig.real.ServeHTTP(rec, r)
+		out := bytes.ReplaceAll(rec.Body.Bytes(), []byte(`"complete":true`), []byte(`"complete":false`))
+		for k, v := range rec.Header() {
+			w.Header()[k] = v
+		}
+		w.Header().Del("Content-Length")
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(out)
+		return true
+	})
 	dir := filepath.Join(rig.root, "recovery")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
