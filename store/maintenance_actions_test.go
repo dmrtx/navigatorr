@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
 	"github.com/jakenesler/navigatorr/transcode"
 	"path/filepath"
@@ -351,5 +352,116 @@ func TestMaintenanceSnapshotIsNewestFirstThenByID(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "new,a,b,old" {
 		t.Fatalf("order = %v, want newest first, ties by id, other kinds excluded", got)
+	}
+}
+
+func TestMaintenanceSnapshotReadsOnlyActionsWhoseRevisionMoved(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, id := range []string{"quiet", "busy"} {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusRunning, StateJSON: `{"progress":1}`, UpdatedAt: "2026-10-06T12:00:00Z"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.ListMaintenanceActionSnapshot(); err != nil {
+		t.Fatal(err)
+	}
+	// A payload the snapshot has already read is not read again while its
+	// revision stands: change it behind the revision's back, and the snapshot
+	// keeps the projection it has.
+	if _, err := s.db.Exec(`DROP TRIGGER action_instance_revs_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE action_instances SET state_json='{"progress":50}' WHERE id='quiet'`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == "quiet" && row.StateJSON != `{"progress":1}` {
+			t.Fatalf("an unchanged revision was read again: %s", row.StateJSON)
+		}
+	}
+}
+
+func TestActionRevisionMovesOnEveryWrite(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rev := func() (int64, bool) {
+		var n int64
+		err := s.db.QueryRow(`SELECT rev FROM action_instance_revs WHERE id='a'`).Scan(&n)
+		return n, err == nil
+	}
+	inst := ActionInstance{ID: "a", ActionName: "transcode_media", Status: ActionStatusRunning, StateJSON: `{"progress":12.5}`, UpdatedAt: "2026-10-06T12:00:00Z"}
+	if err := s.CreateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	first, ok := rev()
+	if !ok || first < 1 {
+		t.Fatalf("no revision after insert: %d %v", first, ok)
+	}
+	inst.StateJSON = `{"progress":99.5}` // Same size, same timestamp.
+	if err := s.UpdateActionInstance(inst); err != nil {
+		t.Fatal(err)
+	}
+	if second, _ := rev(); second <= first {
+		t.Fatalf("revision did not move on update: %d -> %d", first, second)
+	}
+	if _, err := s.db.Exec(`UPDATE action_instances SET state_json = json_set(state_json, '$.worker', 'm1') WHERE id='a'`); err != nil {
+		t.Fatal(err)
+	}
+	if third, _ := rev(); third <= first+1 {
+		t.Fatalf("revision did not move on a raw update: %d", third)
+	}
+	if _, err := s.db.Exec(`DELETE FROM action_instances WHERE id='a'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := rev(); ok {
+		t.Fatal("revision outlived its action")
+	}
+}
+
+func TestMigrationV17RevisesActionsAlreadyStored(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.version > 16 {
+			continue
+		}
+		for _, stmt := range m.statements {
+			if _, err := db.Exec(stmt); err != nil {
+				t.Fatalf("applying migration %d: %v", m.version, err)
+			}
+		}
+		if _, err := db.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (?, 'now')`, m.version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO action_instances (id, action_name, status, created_at, updated_at) VALUES ('old', 'transcode_batch', 'completed', 'now', '2026-10-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 || rows[0].ID != "old" {
+		t.Fatalf("an action stored before the migration is missing: %v %v", rows, err)
 	}
 }

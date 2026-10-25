@@ -6,22 +6,20 @@ import (
 	"strings"
 )
 
-// Memoize only JSON projections, never status/checkpoints or the ledger itself.
-// Every snapshot rereads authoritative rows and compares the complete source
-// JSON, so same-second and same-size writes also invalidate an entry.
-const maintenanceMemoLimit = 64 * 1024 * 1024
-
+// A snapshot is kept per action and refreshed only for the actions whose
+// revision moved. The revision lives in action_instance_revs and the database
+// itself bumps it on every insert and update (migration 17), so a write from
+// any connection or process, even one that leaves the size and timestamp of a
+// payload alone, is seen by the next snapshot. The payloads themselves, up to
+// tens of megabytes of audit JSON, are read once and then only for the few
+// actions that changed.
 type maintenanceMemo struct {
-	source, projected [3]string
+	rev  int64
+	inst ActionInstance
 }
 
-func (m maintenanceMemo) bytes() int {
-	n := 0
-	for i := range m.source {
-		n += len(m.source[i]) + len(m.projected[i])
-	}
-	return n
-}
+// maintenanceRefreshChunk bounds the ids of one refresh query.
+const maintenanceRefreshChunk = 400
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "media_type", "is_anime"}
 var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "original_integrity_check", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "tracks", "track_report", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message"}
@@ -202,53 +200,89 @@ func maintenanceJSON(raw string, keys []string) string {
 
 // ListMaintenanceActionSnapshot reads the shared workflow ledger consistently.
 // Filtering and accounting precede UI pagination. Full action history remains
-// unchanged, and all metadata is fresh even when a payload projection is reused.
+// unchanged, and every row is as fresh as its revision: the cheap revision
+// table says which actions changed, and only those are read and projected again.
 func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, action_name, status, current_step,
-		inputs_json, outputs_json, state_json, waiting_reason, waiting_condition,
-		waiting_options_json, error_json, idempotency_key, created_at, updated_at
-		FROM action_instances WHERE action_name IN
+	if s.maintenanceMemo == nil {
+		s.maintenanceMemo = map[string]maintenanceMemo{}
+	}
+	rows, err := s.db.Query(`SELECT id, rev FROM action_instance_revs WHERE action_name IN
 		('transcode_media','transcode_batch','benchmark_transcode','promote_transcode_candidate')`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	if s.maintenanceMemo == nil {
-		s.maintenanceMemo = map[string]maintenanceMemo{}
-	}
-	next := make(map[string]maintenanceMemo)
-	nextBytes := 0
-	var actions []ActionInstance
+	current := map[string]int64{}
+	var stale []string
 	for rows.Next() {
-		var inst ActionInstance
-		if err := rows.Scan(&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep,
-			&inst.InputsJSON, &inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason,
-			&inst.WaitingCondition, &inst.WaitingOptionsJSON, &inst.ErrorJSON,
-			&inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt); err != nil {
+		var id string
+		var rev int64
+		if err := rows.Scan(&id, &rev); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		source := [3]string{inst.InputsJSON, inst.OutputsJSON, inst.StateJSON}
-		memo, ok := s.maintenanceMemo[inst.ID]
-		if !ok || memo.source != source {
-			memo = maintenanceMemo{source: source, projected: [3]string{maintenanceJSON(source[0], maintenanceInputKeys), maintenanceJSON(source[1], maintenanceOutputKeys), maintenanceJSON(source[2], maintenanceOutputKeys)}}
+		current[id] = rev
+		if memo, ok := s.maintenanceMemo[id]; !ok || memo.rev != rev {
+			stale = append(stale, id)
 		}
-		if size := memo.bytes(); nextBytes+size <= maintenanceMemoLimit {
-			next[inst.ID] = memo
-			nextBytes += size
-		}
-		inst.InputsJSON, inst.OutputsJSON, inst.StateJSON = memo.projected[0], memo.projected[1], memo.projected[2]
-		actions = append(actions, inst)
 	}
-	if err := rows.Err(); err != nil {
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
 		return nil, err
 	}
-	// Drop removed actions and enforce a bounded memory budget every snapshot.
-	s.maintenanceMemo = next
-	// Newest first. SQLite would sort the wide payload rows through temporary
-	// files, which made every request wait on disk; the rows are few and sort
-	// here by their short keys instead.
+	for start := 0; start < len(stale); start += maintenanceRefreshChunk {
+		ids := stale[start:min(start+maintenanceRefreshChunk, len(stale))]
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+		changed, err := s.db.Query(`SELECT i.id, i.action_name, i.status, i.current_step,
+			i.inputs_json, i.outputs_json, i.state_json, i.waiting_reason, i.waiting_condition,
+			i.waiting_options_json, i.error_json, i.idempotency_key, i.created_at, i.updated_at, r.rev
+			FROM action_instances i JOIN action_instance_revs r ON r.id = i.id
+			WHERE i.id IN (`+marks+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for changed.Next() {
+			var inst ActionInstance
+			var rev int64
+			if err := changed.Scan(&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep,
+				&inst.InputsJSON, &inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason,
+				&inst.WaitingCondition, &inst.WaitingOptionsJSON, &inst.ErrorJSON,
+				&inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt, &rev); err != nil {
+				changed.Close()
+				return nil, err
+			}
+			// The revision read with the row labels it: a write between the two
+			// queries only makes the next snapshot read this action again.
+			inst.InputsJSON = maintenanceJSON(inst.InputsJSON, maintenanceInputKeys)
+			inst.OutputsJSON = maintenanceJSON(inst.OutputsJSON, maintenanceOutputKeys)
+			inst.StateJSON = maintenanceJSON(inst.StateJSON, maintenanceOutputKeys)
+			s.maintenanceMemo[inst.ID] = maintenanceMemo{rev: rev, inst: inst}
+		}
+		err = changed.Err()
+		changed.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	// Forget removed actions.
+	for id := range s.maintenanceMemo {
+		if _, ok := current[id]; !ok {
+			delete(s.maintenanceMemo, id)
+		}
+	}
+	actions := make([]ActionInstance, 0, len(current))
+	for id := range current {
+		if memo, ok := s.maintenanceMemo[id]; ok {
+			actions = append(actions, memo.inst)
+		}
+	}
+	// Newest first, ties by id.
 	sort.Slice(actions, func(i, j int) bool {
 		if actions[i].UpdatedAt != actions[j].UpdatedAt {
 			return actions[i].UpdatedAt > actions[j].UpdatedAt
