@@ -24,6 +24,7 @@ const (
 	hashChunk       = 1 << 20
 	jobRetention    = 15 * time.Minute
 	maxJobs         = 256
+	maxActiveJobs   = 32
 	maxRequestBytes = 64 << 10
 	minTokenLength  = 32
 )
@@ -53,9 +54,10 @@ type Server struct {
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
 
-	mu   sync.Mutex
-	jobs map[string]*job
-	now  func() time.Time
+	mu     sync.Mutex
+	jobs   map[string]*job
+	closed bool
+	now    func() time.Time
 
 	// afterChunk runs after each chunk of a hash, so a test can change the file
 	// mid-read or hold a job.
@@ -102,6 +104,9 @@ func (s *Server) InstanceID() string { return s.instance }
 
 // Close stops every job and releases the roots.
 func (s *Server) Close() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.cancel()
 	s.wg.Wait()
 	s.roots.Close()
@@ -176,13 +181,37 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, statusFor(e.Code), map[string]*Error{"error": e})
 }
 
+func readPathBody(dec *json.Decoder) (PathRequest, bool) {
+	var req PathRequest
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return req, false
+	}
+	seen := false
+	for dec.More() {
+		tok, err := dec.Token()
+		key, isString := tok.(string)
+		if err != nil || !isString || key != "path" || seen {
+			return req, false
+		}
+		seen = true
+		if err := dec.Decode(&req.Path); err != nil {
+			return req, false
+		}
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return req, false
+	}
+	return req, seen
+}
+
 // decodePath reads a request body that is exactly {"path": "..."}.
 func decodePath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	var req PathRequest
-	if err := dec.Decode(&req); err != nil {
+	// The key is read by hand: encoding/json would match "PATH" to path and let
+	// a duplicate key win. The body must be one object with the key "path" once.
+	req, ok := readPathBody(dec)
+	if !ok {
 		writeError(w, &Error{Code: CodeBadInput, Message: "the body must be a JSON object with only a path"})
 		return "", false
 	}
@@ -198,7 +227,7 @@ func decodePath(w http.ResponseWriter, r *http.Request) (string, bool) {
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, Health{Version: Version, InstanceID: s.instance, Roots: s.roots.Paths()})
+	writeJSON(w, http.StatusOK, Health{Version: Version, InstanceID: s.instance, Roots: s.roots.Paths(), Resolver: s.roots.Resolver()})
 }
 
 func (s *Server) identity(w http.ResponseWriter, r *http.Request) {
@@ -227,12 +256,8 @@ func (s *Server) sample(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-r.Context().Done():
-		return
-	}
+	// A sample reads 8 MiB: it does not take a hash slot, or it would wait minutes
+	// behind two whole-file reads and its caller would give up.
 	f, err := s.roots.Open(path)
 	if err != nil {
 		writeError(w, err)
@@ -246,6 +271,9 @@ func (s *Server) sample(w http.ResponseWriter, r *http.Request) {
 	}
 	digest, err := sampledigest.Digest(r.Context(), f, before.Size)
 	if err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			err = errChanged
+		}
 		writeError(w, err)
 		return
 	}
@@ -254,11 +282,24 @@ func (s *Server) sample(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if after != before {
+	if after != before || !s.stillNames(path, before) {
 		writeError(w, errChanged)
 		return
 	}
 	writeJSON(w, http.StatusOK, SampleResponse{InstanceID: s.instance, Digest: digest, Identity: after})
+}
+
+// stillNames reports whether path opens a file with the identity seen on the
+// descriptor that was read. A directory renamed above the file changes what the
+// path names without touching the open file's identity.
+func (s *Server) stillNames(path string, want Identity) bool {
+	again, err := s.roots.Open(path)
+	if err != nil {
+		return false
+	}
+	defer again.Close()
+	named, err := identityOf(again)
+	return err == nil && named == want
 }
 
 type job struct {
@@ -297,10 +338,10 @@ func (s *Server) startHash(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.expireLocked()
-	if len(s.jobs) >= maxJobs {
+	if s.closed || len(s.jobs) >= maxJobs || s.activeLocked() >= maxActiveJobs {
 		s.mu.Unlock()
 		cancel()
-		writeError(w, &Error{Code: CodeBusy, Message: "too many hash jobs are held"})
+		writeError(w, &Error{Code: CodeBusy, Message: "too many hash jobs are waiting or held"})
 		return
 	}
 	s.jobs[j.id] = j
@@ -309,6 +350,19 @@ func (s *Server) startHash(w http.ResponseWriter, r *http.Request) {
 
 	go s.runHash(ctx, j)
 	writeJSON(w, http.StatusAccepted, s.snapshot(j))
+}
+
+// activeLocked counts the jobs still queued or running. s.mu is held.
+func (s *Server) activeLocked() int {
+	n := 0
+	for _, j := range s.jobs {
+		j.mu.Lock()
+		if j.finished.IsZero() {
+			n++
+		}
+		j.mu.Unlock()
+	}
+	return n
 }
 
 // expireLocked forgets finished jobs nobody collected. s.mu is held.
@@ -372,12 +426,6 @@ func (s *Server) finish(j *job, res *HashResult, err error) {
 func (s *Server) runHash(ctx context.Context, j *job) {
 	defer s.wg.Done()
 	defer j.cancel()
-	// This goroutine reads at idle I/O priority. Its thread is never unlocked,
-	// so the runtime ends the thread with the goroutine and the priority does
-	// not leak to other work.
-	runtime.LockOSThread()
-	lowerIOPriority()
-
 	select {
 	case s.sem <- struct{}{}:
 		defer func() { <-s.sem }()
@@ -385,6 +433,12 @@ func (s *Server) runHash(ctx context.Context, j *job) {
 		s.finish(j, nil, ctx.Err())
 		return
 	}
+	// The job reads at idle I/O priority. The thread is taken only once the job
+	// has a slot, so a queue of jobs does not pin a thread each, and it is never
+	// unlocked: the runtime ends the thread with the goroutine and the priority
+	// does not leak to other work.
+	runtime.LockOSThread()
+	lowerIOPriority()
 	j.set(JobRunning)
 	res, err := s.hashFile(ctx, j)
 	s.finish(j, res, err)
@@ -432,13 +486,7 @@ func (s *Server) hashFile(ctx context.Context, j *job) (*HashResult, error) {
 	if after != before || n != before.Size {
 		return nil, errChanged
 	}
-	again, err := s.roots.Open(j.path)
-	if err != nil {
-		return nil, errChanged
-	}
-	defer again.Close()
-	named, err := identityOf(again)
-	if err != nil || named != before {
+	if !s.stillNames(j.path, before) {
 		return nil, errChanged
 	}
 	return &HashResult{SHA256: hex.EncodeToString(h.Sum(nil)), Bytes: n, Identity: before}, nil

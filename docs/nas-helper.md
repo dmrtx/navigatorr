@@ -39,8 +39,8 @@ true on the NAS's own filesystem and does local reads there.
 
 | Operation | Purpose |
 |---|---|
-| `GET /v1/health` | version, instance id (random per start), roots, filesystem UUID |
-| `POST /v1/identity` `{path}` | `{fs_uuid, subvol_id, ino, generation, size, mtime_ns, ctime_ns}` taken from an open descriptor (stat the descriptor, `FS_IOC_GETVERSION` for the generation) |
+| `GET /v1/health` | version, instance id (random per start), roots, resolver (`openat2` or `walk`) |
+| `POST /v1/identity` `{path}` | `{fsid, fs_type, subvol, generation, ino, size, mtime_ns, ctime_ns, complete}` taken from an open descriptor (stat the descriptor, `FS_IOC_GETVERSION` for the generation). `fsid` is `statfs` `f_fsid`, which on btrfs is the UUID folded with the subvolume id, so it is compared as an opaque value; `complete` is false when the generation or the subvolume could not be read |
 | `POST /v1/hash` `{path}` → job; `GET /v1/jobs/{id}` | SHA-256 and byte count of a file read from local disk, with progress; identity is taken from the descriptor before and after the read and the result is refused if it moved. The helper is never given the expected value |
 | `POST /v1/sample` `{path}` | the same sampled-range digest as `promotionSampleDigest` (1 MiB head, tail and 6 interior ranges), for a cross-check against the same digest taken over SMB |
 
@@ -53,7 +53,7 @@ service calls. Those are metadata operations over SMB, already audited.
   move-aside again for a hash-once promotion when the helper is healthy,
   using the helper's identity instead of the mount's. The original is
   identified by the helper before the rename and the renamed file (the
-  recovery file) after it: same `fs_uuid`, `subvol_id`, `ino`, `generation`,
+  recovery file) after it: same `fsid`, `subvol`, `ino`, `generation`,
   `size`, `mtime_ns`. `ctime` is expected to change on rename and is recorded,
   not compared across it. Nothing is copied or read. The pinned SHA-256 from
   staging and the size + mtime check at plan stay the proof of what the
@@ -70,7 +70,7 @@ service calls. Those are metadata operations over SMB, already audited.
 * **Candidate, between waits.** Checks that precede a destructive step but do
   not delete anything (preserve, import, rename) use the helper's identity
   recorded at plan, stored as its own type `helperFingerprint` with its source
-  (instance id, fs UUID, subvolume, generation); it is never compared with a
+  (instance id, fsid, subvolume, generation); it is never compared with a
   `promotionFingerprint` from the mount, and a fingerprint from another
   helper instance proves nothing.
 * **Finalize keeps its full read of the final file before any recovery data
@@ -117,12 +117,19 @@ service calls. Those are metadata operations over SMB, already audited.
   address, token kept in a secret file on the coordinator. Never in the repo.
 * Roots allowlist; each request resolves the path through the descriptor with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`, so there is no
-  validate-then-open race; non-regular files are refused.
+  validate-then-open race; non-regular files are refused. The NAS kernel is
+  4.4.302, which has no `openat2` (5.6+), so the helper probes it at start and
+  otherwise walks the path one component at a time, each opened with
+  `O_NOFOLLOW` relative to the previous directory descriptor and never through
+  `..`. Both refuse symbolic links and cannot leave the root; neither detects a
+  mount nested inside a root, so the bind mount is `ro,nodev,nosuid` and single.
+  `/v1/health` reports which one is in use.
 * Container: unprivileged uid with read access, read-only root filesystem, no
   capabilities, one read-only bind mount of the single shared folder (one
   mount point, so identity is one filesystem), no Docker socket.
-* Load: at most two concurrent hashes, low I/O priority, cancelled requests
-  stop reading. The helper must be a better citizen of the NAS than SMB reads.
+* Load: at most two concurrent hashes and 32 jobs queued or running, low I/O
+  priority (a thread is taken only once a job has its slot), cancelled requests
+  stop reading; a sample does not take a hash slot. The helper must be a better citizen of the NAS than SMB reads.
 
 ## Rollout
 
@@ -175,6 +182,7 @@ what the coordinator's CIFS mount reports with `stat` run inside the NAS:
 * Inode numbers differ between the two views (a Samba mapping), so identities
   from the mount and from the helper are separate types and are never compared.
 * `mtime` differs below 100 ns (SMB truncates to 100 ns units).
+* The NAS kernel is 4.4.302+: no `openat2`, so the component walk is the resolver there.
 * A rename keeps the NAS inode; no-replace rename over SMB works (`EEXIST` on
   an existing destination); reading over SMB does not change `ctime`.
 

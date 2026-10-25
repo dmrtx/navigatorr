@@ -1,6 +1,7 @@
 package nashelper
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -46,18 +47,38 @@ func identityOf(f *os.File) (Identity, error) {
 		CtimeNs: st.Ctim.Nano(),
 	}
 	// The generation tells a file from a later one that reused its inode number.
-	if gen, err := unix.IoctlGetInt(fd, fsIocGetversion); err == nil {
+	// A filesystem without the ioctl answers ENOTTY or similar and the field stays
+	// empty; any other failure is a real error, not a quiet gap.
+	complete := true
+	gen, err := unix.IoctlGetInt(fd, fsIocGetversion)
+	switch {
+	case err == nil:
 		id.Generation = strconv.FormatUint(uint64(gen), 10)
+	case unsupported(err):
+		complete = false
+	default:
+		return Identity{}, fmt.Errorf("read the generation: %w", err)
 	}
 	if int64(sfs.Type) == btrfsSuperMagic {
 		args := btrfsInoLookupArgs{objectid: btrfsFirstFree}
 		_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), btrfsIocInoLookup, uintptr(unsafe.Pointer(&args)))
-		if errno == 0 {
+		switch {
+		case errno == 0:
 			id.Subvol = strconv.FormatUint(args.treeid, 10)
+		case unsupported(errno):
+			complete = false
+		default:
+			return Identity{}, fmt.Errorf("read the subvolume: %w", errno)
 		}
 	}
+	id.Complete = complete
 	runtime.KeepAlive(f)
 	return id, nil
+}
+
+// unsupported reports that the filesystem does not implement an ioctl.
+func unsupported(err error) bool {
+	return errors.Is(err, unix.ENOTTY) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOSYS)
 }
 
 // lowerIOPriority puts the calling thread in the idle I/O class, so a hash never

@@ -7,13 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"syscall"
 )
 
 // Roots on a platform without openat2. It exists so the package builds and its
 // tests run on a development machine; it checks the path before opening it and
 // so is not safe against a concurrent change. The helper serves the library from
 // Linux only.
-type Roots struct{ paths []string }
+type Roots struct {
+	paths  []string
+	closed atomic.Bool
+}
 
 // OpenRoots records the served roots.
 func OpenRoots(paths []string) (*Roots, error) {
@@ -34,8 +39,11 @@ func OpenRoots(paths []string) (*Roots, error) {
 	return r, nil
 }
 
-// Close does nothing here.
-func (r *Roots) Close() {}
+// Resolver names the development fallback.
+func (r *Roots) Resolver() string { return "dev" }
+
+// Close refuses later requests.
+func (r *Roots) Close() { r.closed.Store(true) }
 
 // Paths lists the served roots.
 func (r *Roots) Paths() []string { return append([]string(nil), r.paths...) }
@@ -46,6 +54,9 @@ func (r *Roots) Open(path string) (*os.File, error) {
 	if !filepath.IsAbs(clean) {
 		return nil, errOutside
 	}
+	if r.closed.Load() {
+		return nil, errClosed
+	}
 	for _, root := range r.paths {
 		if clean == root {
 			return nil, errNotFile
@@ -55,7 +66,7 @@ func (r *Roots) Open(path string) (*os.File, error) {
 		}
 		resolved, err := filepath.EvalSymlinks(clean)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
 				return nil, errNotFound
 			}
 			return nil, err
@@ -83,3 +94,8 @@ func (r *Roots) Open(path string) (*os.File, error) {
 	}
 	return nil, errOutside
 }
+
+// forceWalk does nothing on a development machine.
+func (r *Roots) forceWalk() {}
+
+var errClosed = &Error{Code: CodeInternal, Message: "the helper is shutting down"}

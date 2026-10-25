@@ -14,8 +14,11 @@ const Version = "0.1.0"
 
 // Identity is what the library's filesystem reports for an open file. Numbers
 // are strings in JSON because durable state loses precision on large integers.
-// Subvol and Generation are empty where the filesystem has no such notion; a
-// caller that relies on them must check for that.
+// Subvol and Generation are empty where the filesystem has no such notion.
+// Complete says the helper could read everything this filesystem offers: it is
+// false when the generation (or, on btrfs, the subvolume) is unavailable, and a
+// caller that needs them to tell a file from a later one reusing its inode must
+// check it.
 type Identity struct {
 	FSID       string `json:"fsid"`
 	FSType     string `json:"fs_type"`
@@ -25,17 +28,16 @@ type Identity struct {
 	Size       int64  `json:"size,string"`
 	MtimeNs    int64  `json:"mtime_ns,string"`
 	CtimeNs    int64  `json:"ctime_ns,string"`
+	Complete   bool   `json:"complete"`
 }
-
-// Complete reports whether the identity carries the fields that tell a file from
-// a later file reusing its inode number.
-func (i Identity) Complete() bool { return i.Subvol != "" && i.Generation != "" }
 
 // Health is the answer to GET /v1/health.
 type Health struct {
 	Version    string   `json:"version"`
 	InstanceID string   `json:"instance_id"`
 	Roots      []string `json:"roots"`
+	// Resolver is how paths are resolved under a root: "openat2" or "walk".
+	Resolver string `json:"resolver"`
 }
 
 // PathRequest names one file; it is the whole request body of identity, hash

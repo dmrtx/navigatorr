@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,7 +28,11 @@ type fixture struct {
 	http *httptest.Server
 }
 
-func newFixture(t *testing.T, maxHashes int) *fixture {
+func newFixture(t *testing.T, maxHashes int) *fixture { return newFixtureWith(t, maxHashes, false) }
+
+// newFixtureWith can force the component-walk resolver, which is what a kernel
+// without openat2 uses.
+func newFixtureWith(t *testing.T, maxHashes int, walk bool) *fixture {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -36,6 +41,9 @@ func newFixture(t *testing.T, maxHashes int) *fixture {
 	srv, err := NewServer(Config{Roots: []string{root}, Token: testToken, MaxHashes: maxHashes})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if walk {
+		srv.roots.forceWalk()
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(func() { ts.Close(); srv.Close() })
@@ -151,7 +159,14 @@ func TestAShortTokenIsRefused(t *testing.T) {
 }
 
 func TestHashMatchesTheFile(t *testing.T) {
-	f := newFixture(t, 2)
+	for _, walk := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "walk"}[walk], func(t *testing.T) {
+			checkHashMatches(t, newFixtureWith(t, 2, walk))
+		})
+	}
+}
+
+func checkHashMatches(t *testing.T, f *fixture) {
 	path, data := f.write("a.bin", 3*hashChunk+17)
 	j := f.waitJob(f.startHash(path).ID, JobDone, JobFailed)
 	sum := sha256.Sum256(data)
@@ -201,6 +216,9 @@ func TestTheAPIRefusesAnExpectedValue(t *testing.T) {
 			`{"path":"` + path + `","expected":"abc"}`,
 			`{"path":"` + path + `","expect":{"size":"10"}}`,
 			`{"path":"` + path + `"} {"path":"x"}`,
+			`{"path":"` + path + `","PATH":"/etc/passwd"}`,
+			`{"Path":"` + path + `"}`,
+			`{"path":"` + path + `","path":"/etc/passwd"}`,
 			`not json`,
 			`{}`,
 		} {
@@ -213,7 +231,14 @@ func TestTheAPIRefusesAnExpectedValue(t *testing.T) {
 }
 
 func TestPathsOutsideTheRootsAreRefused(t *testing.T) {
-	f := newFixture(t, 2)
+	for _, walk := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "walk"}[walk], func(t *testing.T) {
+			checkPathsOutsideTheRoots(t, newFixtureWith(t, 2, walk))
+		})
+	}
+}
+
+func checkPathsOutsideTheRoots(t *testing.T, f *fixture) {
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "secret.bin")
 	if err := os.WriteFile(secret, []byte("x"), 0o600); err != nil {
@@ -235,11 +260,13 @@ func TestPathsOutsideTheRootsAreRefused(t *testing.T) {
 		"prefix of the root":   f.root + "-other/a.bin",
 		"the root itself":      f.root,
 		"inside but not there": filepath.Join(f.root, "missing.bin"),
+		"through a file":       filepath.Join(inside, "x"),
+		"missing parent":       filepath.Join(f.root, "no-dir", "x.bin"),
 	} {
 		status, raw := f.call("POST", "/v1/identity", testToken, PathRequest{Path: path})
 		code := f.errCode(raw)
 		switch name {
-		case "inside but not there":
+		case "inside but not there", "through a file", "missing parent":
 			if status != http.StatusNotFound || code != CodeNotFound {
 				t.Errorf("%s: %d %s", name, status, raw)
 			}
@@ -368,10 +395,12 @@ func TestUnknownJobsAreNotFound(t *testing.T) {
 
 func TestFinishedJobsAreForgottenAfterTheRetention(t *testing.T) {
 	f := newFixture(t, 2)
+	// The clock is set before any request, so no handler races with the change.
+	var skew atomic.Int64
+	f.srv.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 	path, _ := f.write("a.bin", 100)
 	job := f.waitJob(f.startHash(path).ID, JobDone)
-	now := time.Now().Add(jobRetention + time.Minute)
-	f.srv.now = func() time.Time { return now }
+	skew.Store(int64(jobRetention + time.Minute))
 	// Any new job sweeps the old ones.
 	f.waitJob(f.startHash(path).ID, JobDone)
 	if status, _ := f.call("GET", "/v1/jobs/"+job.ID, testToken, nil); status != http.StatusNotFound {
@@ -414,5 +443,89 @@ func TestEveryOutputKeepsPathsOutOfTheLogs(t *testing.T) {
 		if strings.Contains(line, "very-private-name") {
 			t.Fatalf("a path reached the log: %q", line)
 		}
+	}
+}
+
+// A directory renamed above the file changes what the path names without touching
+// the open file, so only the path check can notice it.
+func TestADirectoryRenamedAboveTheFileFailsTheHash(t *testing.T) {
+	f := newFixture(t, 2)
+	dir := filepath.Join(f.root, "show")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(path, bytes.Repeat([]byte("a"), 3*hashChunk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	f.srv.afterChunk = func(string) {
+		once.Do(func() {
+			if err := os.Rename(dir, filepath.Join(f.root, "show-old")); err != nil {
+				t.Error(err)
+				return
+			}
+			os.Mkdir(dir, 0o700)
+			os.WriteFile(path, bytes.Repeat([]byte("b"), 3*hashChunk), 0o600)
+		})
+	}
+	j := f.waitJob(f.startHash(path).ID, JobDone, JobFailed)
+	if j.State != JobFailed || j.Error == nil || j.Error.Code != CodeChanged {
+		t.Fatalf("the path names another file now: %+v %+v", j, j.Error)
+	}
+}
+
+func TestJobsWaitingOrRunningAreCapped(t *testing.T) {
+	f := newFixture(t, 1)
+	path, _ := f.write("a.bin", 2*hashChunk)
+	hold, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.srv.afterChunk = func(string) { once.Do(func() { close(hold); <-release }) }
+	defer close(release)
+	f.startHash(path)
+	<-hold
+	for i := 1; i < maxActiveJobs; i++ {
+		f.startHash(path)
+	}
+	status, raw := f.call("POST", "/v1/hash", testToken, PathRequest{Path: path})
+	if status != http.StatusTooManyRequests || f.errCode(raw) != CodeBusy {
+		t.Fatalf("job %d beyond the cap: %d %s", maxActiveJobs+1, status, raw)
+	}
+}
+
+func TestIdentityTellsWhetherItIsComplete(t *testing.T) {
+	f := newFixture(t, 2)
+	path, _ := f.write("a.bin", 10)
+	_, raw := f.call("POST", "/v1/identity", testToken, PathRequest{Path: path})
+	if !strings.Contains(string(raw), `"complete":`) {
+		t.Fatalf("the answer must say whether the identity is complete: %s", raw)
+	}
+}
+
+func TestHealthNamesTheResolver(t *testing.T) {
+	for _, walk := range []bool{false, true} {
+		f := newFixtureWith(t, 2, walk)
+		_, raw := f.call("GET", "/v1/health", testToken, nil)
+		var h Health
+		if err := json.Unmarshal(raw, &h); err != nil || h.Resolver == "" {
+			t.Fatalf("health: %s", raw)
+		}
+		if walk && h.Resolver != "walk" && h.Resolver != "dev" {
+			t.Fatalf("a forced walk must report it: %s", raw)
+		}
+	}
+}
+
+func TestRequestsAfterCloseAreRefused(t *testing.T) {
+	f := newFixture(t, 2)
+	path, _ := f.write("a.bin", 10)
+	f.srv.Close()
+	status, raw := f.call("POST", "/v1/identity", testToken, PathRequest{Path: path})
+	if status == http.StatusOK {
+		t.Fatalf("closed server answered: %s", raw)
+	}
+	status, _ = f.call("POST", "/v1/hash", testToken, PathRequest{Path: path})
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("a closed server must not start jobs, got %d", status)
 	}
 }
