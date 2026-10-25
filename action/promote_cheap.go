@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -39,6 +40,9 @@ const promotionSampleRanges = 6
 // modification time rather than by its digest.
 func (p *promotionState) originalByMetadata() bool { return p.OriginalStatMod != "" }
 
+// errPromotionOriginalChanged is a stat that no longer matches the transcode's.
+var errPromotionOriginalChanged = errors.New("integrity violation: the original changed since it was transcoded (size or modification time)")
+
 // promotionOriginalStatMatches reports whether the original is the file the
 // transcode inspected, by the stat plan recorded.
 func (e *Engine) promotionOriginalStatMatches(p *promotionState) error {
@@ -51,7 +55,27 @@ func (e *Engine) promotionOriginalStatMatches(p *promotionState) error {
 		return err
 	}
 	if info.Size() != p.OriginalBytes || !info.ModTime().Equal(want) {
-		return fmt.Errorf("integrity violation: the original changed since it was transcoded (size or modification time)")
+		return errPromotionOriginalChanged
+	}
+	return nil
+}
+
+// promotionOriginalProved is the check of the original for a promotion that
+// does not read it. Until the recovery copy exists the stat must match. After
+// it, a file the library or a restore wrote again has a new modification time
+// and is still the original when its size and sampled ranges reproduce the
+// recovery copy's, which is what recovering from it needs.
+func (e *Engine) promotionOriginalProved(ctx context.Context, p *promotionState) error {
+	err := e.promotionOriginalStatMatches(p)
+	if !errors.Is(err, errPromotionOriginalChanged) || p.RecoverySample == "" {
+		return err
+	}
+	got, sampleErr := e.promotionSampleDigestStable(ctx, p.OriginalPath, p.OriginalBytes)
+	if sampleErr != nil {
+		return sampleErr
+	}
+	if got != p.RecoverySample {
+		return errPromotionOriginalChanged
 	}
 	return nil
 }
@@ -61,14 +85,14 @@ func (e *Engine) promotionOriginalStatMatches(p *promotionState) error {
 // by a full read like verifyPromotionHash and verifyPromotionHashStable.
 func (e *Engine) verifyPromotionOriginal(ctx context.Context, p *promotionState) error {
 	if p.originalByMetadata() {
-		return e.promotionOriginalStatMatches(p)
+		return e.promotionOriginalProved(ctx, p)
 	}
 	return e.verifyPromotionHash(ctx, p.OriginalPath, p.OriginalSHA)
 }
 
 func (e *Engine) verifyPromotionOriginalStable(ctx context.Context, p *promotionState) error {
 	if p.originalByMetadata() {
-		return e.promotionOriginalStatMatches(p)
+		return e.promotionOriginalProved(ctx, p)
 	}
 	return e.verifyPromotionHashStable(ctx, p.OriginalPath, p.OriginalSHA)
 }

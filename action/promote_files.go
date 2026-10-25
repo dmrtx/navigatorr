@@ -323,7 +323,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	// file is read.
 	if size, mod, ok := recordedOriginalStat(source.State); ok && getString(source.State, originalIntegrityCheckKey) == "metadata" {
 		if size != original.Size() || !mod.Equal(original.ModTime()) {
-			return promoteFailed(fmt.Errorf("integrity violation: the original changed since it was transcoded (size or modification time)"))
+			return promoteFailed(errPromotionOriginalChanged)
 		}
 		p.OriginalStatMod = mod.UTC().Format(time.RFC3339Nano)
 	}

@@ -17,7 +17,16 @@ func restoredOriginalFixture(t *testing.T, checkpoint int) (*promotionHarness, s
 
 func restoredOriginalFixtureMode(t *testing.T, checkpoint int, copyMode bool) (*promotionHarness, string) {
 	t.Helper()
+	return restoredOriginalFixtureWith(t, checkpoint, copyMode, nil)
+}
+
+// restoredOriginalFixtureWith prepares the harness before the promotion runs.
+func restoredOriginalFixtureWith(t *testing.T, checkpoint int, copyMode bool, prepare func(*promotionHarness)) (*promotionHarness, string) {
+	t.Helper()
 	h := newPromotionHarness(t)
+	if prepare != nil {
+		prepare(h)
+	}
 	h.engine.promotionAlwaysCopy = copyMode
 	tmpl, _ := h.engine.GetTemplate("promote_transcode_candidate")
 	tmpl.Steps[4].Run = func(context.Context, *ExecutionContext) (StepResult, error) {

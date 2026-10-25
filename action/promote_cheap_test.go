@@ -275,3 +275,40 @@ func TestPromotionPlanReportsTheConvertedFileCheckAndLeavesNothingBehind(t *test
 		t.Fatalf("the finished plan left work looking current: %+v", got)
 	}
 }
+
+func TestPromotionByMetadataRetryAcceptsARestoredOriginalThatMatchesTheRecoveryCopy(t *testing.T) {
+	h, id := restoredOriginalFixtureWith(t, 4, true, func(h *promotionHarness) { markSourceByMetadata(t, h) })
+	inst, _ := h.st.GetActionInstance(id)
+	p, _ := loadPromotion(parseExecutionContext(inst, h.engine))
+	if !p.originalByMetadata() || p.RecoverySample == "" {
+		t.Fatalf("fixture is not a metadata promotion: %+v", p)
+	}
+	// A restore writes the original again: same bytes, a new modification time.
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(h.original, later, later); err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.engine.Retry(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r = h.finish(r); r.Status != StatusCompleted || h.imports != 2 {
+		t.Fatalf("retry of a restored original: %s %s imports=%d", r.Status, r.Error, h.imports)
+	}
+}
+
+func TestPromotionByMetadataRetryRefusesARestoredOriginalThatDiffers(t *testing.T) {
+	h, id := restoredOriginalFixtureWith(t, 4, true, func(h *promotionHarness) { markSourceByMetadata(t, h) })
+	inst, _ := h.st.GetActionInstance(id)
+	p, _ := loadPromotion(parseExecutionContext(inst, h.engine))
+	if err := os.WriteFile(h.original, []byte(strings.Repeat("x", int(p.OriginalBytes))), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.engine.Retry(context.Background(), id)
+	if err == nil && h.finish(r).Status == StatusCompleted {
+		t.Fatal("a different file passed as the restored original")
+	}
+	if h.imports != 1 {
+		t.Fatalf("imports=%d: the candidate was imported again over a different original", h.imports)
+	}
+}
