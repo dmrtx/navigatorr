@@ -82,6 +82,7 @@ func (e *Engine) SetWorkerDrain(ctx context.Context, enabled bool) (transcode.Dr
 	if _, err := e.deps.Store.SetWorkerDrain(enabled); err != nil {
 		return transcode.DrainStatus{}, err
 	}
+	e.syncWorkerHolds(ctx)
 	if !enabled {
 		e.WakeReconciler()
 	}
@@ -137,6 +138,12 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 			continue
 		}
 		name := e.resolveWorker(r.Worker)
+		// A job still in its worker's queue, on a worker that confirmed it is
+		// holding that queue, will not start before Resume: it is held back
+		// like a file the server has not sent, and it does not block a deploy.
+		if state == transcode.DrainJobRunning && r.WorkerQueued && e.workerHolding(name) {
+			state = transcode.DrainJobQueued
+		}
 		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state, Waiting: state == transcode.DrainJobRunning && r.WorkerQueued}
 		if r.Path != "" {
 			job.File, job.Path = filepath.Base(r.Path), r.Path

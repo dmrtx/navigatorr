@@ -148,5 +148,8 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 	}
 	out.CheckedAt = time.Now().UTC()
 	st.obs = out
+	if out.Reachable {
+		e.syncWorkerHold(ctx, w)
+	}
 	return out
 }

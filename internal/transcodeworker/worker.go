@@ -246,6 +246,7 @@ type Worker struct {
 	// count in tests.
 	slotSplit       slotSplitCache
 	slotWrite       sync.Mutex
+	holdWrite       sync.Mutex
 	x265Recheck     sync.Mutex
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache
@@ -1313,6 +1314,10 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 	for {
 		if err := ctx.Err(); err != nil {
 			return started, errors.Join(append(errs, err)...)
+		}
+		// Pause all: queued jobs stay queued; only running ones finish.
+		if w.Held() {
+			return started, errors.Join(errs...)
 		}
 		limits := w.slotLimits()
 		use, err := w.countActiveJobsByKind("")
