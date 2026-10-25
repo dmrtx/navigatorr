@@ -3224,10 +3224,14 @@ function segmentShare(batch, runningFill) {
   const running = count("running") * (Number.isFinite(runningFill) ? Math.max(0, Math.min(1, runningFill)) : 0);
   return {total, share: Math.min(1, (done + running) / Math.max(1, total - count("cancelled")))};
 }
+const replacementActivePhases = new Set(["checking", "backup", "backup_check", "swap", "final_check", "failed"]);
+const replacementRowFiles = 4;
 function renderProgressPart(part) {
   if (part.type === "text") {
     const result = node(part.tag || "span", part.text, part.cls);
+    // A line a row may shorten keeps its full text reachable.
     if (part.title) result.title = part.title;
+    else if (!part.sentence && part.text.length > 24) result.title = part.text;
     return result;
   }
   if (part.type === "meter") {
@@ -3250,12 +3254,20 @@ function renderProgressPart(part) {
     segments.bar.title = part.title;
     return segments.bar;
   }
+  // A row says where the batch is: the files being worked on or stopped keep a
+  // line each (the headline counts the rest), and the job dialog has them all.
   const list = node("ul", "", "replacement-files");
-  for (const member of part.members) {
+  const shown = part.members.filter((member) => replacementActivePhases.has(member.phase));
+  for (const member of shown.slice(0, replacementRowFiles)) {
     const item = node("li", "", `replacement-file ${member.phase}`);
-    item.append(node("span", member.name, "replacement-file-name"), node("span", replacementStepText(member), "replacement-file-step metadata"));
+    const name = node("span", member.name, "replacement-file-name");
+    name.title = member.name;
+    const step = node("span", replacementStepText(member), "replacement-file-step metadata");
+    step.title = step.textContent;
+    item.append(name, step);
     list.append(item);
   }
+  if (shown.length > replacementRowFiles) list.append(node("li", `and ${shown.length - replacementRowFiles} more`, "replacement-file replacement-file-more metadata"));
   return list;
 }
 function renderProgressModel(model) {
@@ -3434,10 +3446,16 @@ function telemetryModel(job, options) {
   }
   const after = postEncodeWork(job);
   if (after) {
-    text([job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.step, after.label].filter(Boolean).join(" · "));
+    // What it is doing and how much sit on the first line, the bar has the
+    // second to itself, and the step it belongs to is the third: the same
+    // three lines at every size, whatever the numbers read.
+    model.className = "job-progress worker-progress";
+    text([job.activity_file ? `Current: ${job.activity_file.split("/").pop()}` : null, after.label].filter(Boolean).join(" \u00b7 "), "metadata single-line");
+    model.parts.at(-1).title = model.parts.at(-1).text;
     if (after.read != null && after.total > 0) {
       model.parts.push({type: "meter", min: 0, max: after.total, value: after.read, label: `${after.measure || "Original checked"} ${(after.read / after.total * 100).toFixed(1)}%`}, {type: "text", text: `${bytes(after.read)} / ${bytes(after.total)}`, cls: "metadata", unit: true});
     }
+    if (after.step) { text(after.step, "metadata progress-observation single-line"); model.parts.at(-1).title = after.step; }
     if (postEncodeWorkerPhases.includes(w?.transcode_phase) && w.last_progress_at)
       text(`Encode finished ${new Date(w.last_progress_at).toLocaleTimeString()}`, "metadata progress-observed-at");
     return model;
@@ -3860,9 +3878,11 @@ async function enqueueReplacement(job, context) {
     });
     $("replacement-choice").close();
     await loadJobs();
-    // One review follows the plan: it opens now and fills in as soon as the
-    // files are verified, so approving needs no second button.
-    await reviewFilePromotion(result.id, { wait: true });
+    // One tap replaces the file: the plan is approved as soon as it is read
+    // back, without a second dialog or a second button.
+    replaceWhenPlanned(result.id).catch((error) => {
+      if (serverReachable) notify(error.message);
+    });
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -3929,6 +3949,8 @@ function statusClass(status) {
 // new tab with the same job open.
 function jobLink(text, id) {
   const link = node("a", text, "job-title");
+  // The title is cut at two lines; the whole name is one long-press away.
+  link.title = text;
   link.href = `?view=queue&job=${encodeURIComponent(id)}`;
   link.addEventListener("click", (e) => {
     if (e?.defaultPrevented || e?.button > 0 || e?.metaKey || e?.ctrlKey || e?.shiftKey || e?.altKey) return;
@@ -6795,10 +6817,9 @@ async function openReplacement(id) {
   else await openJob(id);
 }
 const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Import through Sonarr", radarr: "Import through Radarr"};
-function showFileReview(job, approval) {
+function showFileReview(job, approval, {unprompted = false} = {}) {
   const p = job.promotion;
-  const wasPending = approval.pending;
-  Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256, pending: false });
+  Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256 });
   const facts = job.replacement_facts || {source_bytes: p.original_bytes, candidate_bytes: p.candidate_bytes, size_budget_outcome: job.size_budget_outcome};
   const name = p.original_path.split("/").pop().replace(/\.[^.]+$/, "");
   const data = $("file-review-data");
@@ -6812,80 +6833,49 @@ function showFileReview(job, approval) {
     $("reject-file-review").disabled = !serverReachable || state.approvingFile;
     $("approve-file-review").disabled = !serverReachable || state.approvingFile;
   };
-  if (!wasPending) return settle();
-  // The review just replaced "checking" with the plan, which moves the buttons
-  // under a finger already on its way to the old position: a tap meant for
-  // Replace file landed on Keep original. They wake after the layout settles.
+  if (!unprompted) return settle();
+  // A review that opens by itself, while a finger may already be on its way
+  // to something else, keeps its buttons off until the layout has settled: a
+  // stray tap must not land on Replace file or Keep original.
   $("reject-file-review").disabled = true;
   $("approve-file-review").disabled = true;
   setTimeout(() => { if (state.fileApproval === approval) settle(); }, 800);
 }
-// What the plan is doing while the review waits: it reads the converted file
-// once, never the original. Returns the sentence and, once measured, how much
-// of the file is read.
-function replacementCheck(job) {
-  const work = job?.work || {};
-  const total = Number(work.total_bytes) > 0 ? Number(work.total_bytes) : 0;
-  const note = "Nothing changes until you approve.";
-  if (work.phase === "waiting_for_hash_slot") return {text: `Waiting to check the converted file. ${note}`};
-  if (work.phase === "verifying_candidate" && total) {
-    const read = Math.min(Math.max(0, Number(work.bytes_read) || 0), total);
-    return {text: `Checking the converted file · ${Math.floor(read / total * 100)}% · ${bytes(read)} / ${bytes(total)}. ${note}`, ratio: read / total};
-  }
-  return {text: `Checking the converted file. ${note}`};
-}
-function showFileReviewPending(text, ratio) {
-  const body = [node("p", text, "muted")];
-  if (ratio != null) {
-    const meter = node("progress", "", "replacement-progress");
-    meter.max = 1;
-    meter.value = ratio;
-    body.push(meter);
-  }
-  $("file-review-data").replaceChildren(...body);
-  $("file-review-total").textContent = "";
-  $("reject-file-review").hidden = false;
-  $("reject-file-review").disabled = true;
-  $("approve-file-review").disabled = true;
-}
 function pollDelay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
-// Keeps the open review current until the plan is ready or stops being
-// possible; closing the dialog ends it and leaves the job waiting.
-async function awaitFileReview(approval, auth) {
-  const live = () => state.fileApproval === approval && $("file-review").open && auth === state.authRevision;
-  while (live()) {
+// Tapping Replace file is the decision, so nothing is asked twice: the plan is
+// read back once it is ready and approved with the digest just read. Only what
+// a person has to see first (a Radarr or Sonarr re-grab warning) or a plan that
+// cannot be approved opens the review or the job instead.
+async function replaceWhenPlanned(id) {
+  const auth = state.authRevision;
+  notify("Preparing the replacement. It starts by itself.");
+  for (let attempt = 0; attempt < 200; attempt++) {
     await pollDelay(1500);
-    if (!live()) return;
+    if (auth !== state.authRevision || $("workspace").hidden) return;
     let job;
     try {
-      job = (await api(`operations?id=${encodeURIComponent(approval.id)}`)).jobs?.[0];
+      job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
     } catch {
       continue;
     }
-    if (!live()) return;
-    if (replacementReady(job)) return showFileReview(job, approval);
-    if (!job || ["failed", "cancelled", "completed"].includes(job.status)) return showFileReviewPending(shortJobReason(job?.error) || "This replacement can no longer be approved. Nothing was changed.");
-    if (job.status === "waiting_decision") return showFileReviewPending("This replacement is waiting for a decision that is not an approval. Open the job to continue.");
-    const check = replacementCheck(job);
-    showFileReviewPending(check.text, check.ratio);
+    if (replacementReady(job)) {
+      if (job.promotion.regrab_warning) return reviewFilePromotion(id, {unprompted: true});
+      return jobControl(id, "action_resume", { decision: "approve", plan_digest: job.promotion.plan_digest }, {decision: {label: "Replace file", verb: "Replacing file", failure: "Replacement failed"}});
+    }
+    if (!job || ["failed", "cancelled", "completed"].includes(job.status)) return notify(shortJobReason(job?.error) || "This replacement can no longer be approved. Nothing was changed.");
+    if (job.status === "waiting_decision") return openJob(id);
   }
+  notify("The replacement is still being prepared. Open the job to follow it.");
 }
-async function reviewFilePromotion(id, { wait = false } = {}) {
+async function reviewFilePromotion(id, {unprompted = false} = {}) {
   const auth = state.authRevision;
   const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
   if (auth !== state.authRevision || $("workspace").hidden) return;
-  const ready = replacementReady(job);
-  if (!ready && !(wait && job && ["pending", "running", "waiting_external"].includes(job.status)))
-    throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
-  const approval = state.fileApproval = { id, digest: "", original: "", candidate: "", pending: !ready };
-  if (ready) showFileReview(job, approval);
-  else {
-    const check = replacementCheck(job);
-    showFileReviewPending(check.text, check.ratio);
-    awaitFileReview(approval, auth);
-  }
+  if (!replacementReady(job)) throw new Error("This replacement is no longer waiting for approval. Refresh the queue.");
+  const approval = state.fileApproval = { id, digest: "", original: "", candidate: "" };
+  showFileReview(job, approval, {unprompted});
   $("file-review").showModal();
 }
 $("dismiss-file-review").addEventListener("click", () => $("file-review").close());
@@ -6893,13 +6883,13 @@ $("dismiss-file-review-action").addEventListener("click", () => $("file-review")
 // Keeping the original needs no reviewed digest: it changes no file.
 $("reject-file-review").addEventListener("click", () => safe(async () => {
   const approval = state.fileApproval;
-  if (!approval || approval.pending || state.approvingFile || !serverReachable) return;
+  if (!approval || state.approvingFile || !serverReachable) return;
   await jobControl(approval.id, "action_resume", { decision: "reject" }, {onAccepted: () => $("file-review").close(), decision: {label: "Keep original", verb: "Keeping the original", failure: "Decision failed"}});
 }));
 $("file-review").addEventListener("close", () => { state.fileApproval = null; });
 $("approve-file-review").addEventListener("click", () => safe(async () => {
   const approval = state.fileApproval;
-  if (!approval || approval.pending || !approval.digest || state.approvingFile || !serverReachable) return;
+  if (!approval || !approval.digest || state.approvingFile || !serverReachable) return;
   state.approvingFile = true;
   $("approve-file-review").disabled = true;
   try {

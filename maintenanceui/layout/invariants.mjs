@@ -78,6 +78,9 @@ export function install() {
     // 1. Nothing sticks out sideways. The dialog itself never scrolls sideways
     //    and no box leaves its edges, except inside an intended scroller.
     if (dialog.scrollWidth > dialog.clientWidth + 1) add("overflow-x", `dialog scrolls sideways (${dialog.scrollWidth} > ${dialog.clientWidth})`, dialog);
+    // A modal dialog owns the screen: the page behind it must not scroll, or
+    // its scrollbar moves with nothing visible changing.
+    if (dialog.open && dialog.matches(":modal") && !/(hidden|clip)/.test(getComputedStyle(document.documentElement).overflowY)) add("page-scrolls-behind", "the page behind the open dialog can still scroll", document.documentElement);
     if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1) add("overflow-x", `page scrolls sideways (${document.documentElement.scrollWidth} > ${document.documentElement.clientWidth})`, document.documentElement);
     for (const el of all) {
       if (inScroller(el) || el === dialog || el.closest(".sr-only")) continue;

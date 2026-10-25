@@ -23,6 +23,9 @@ class Element {
   append(...children) {
     this.children.push(...children);
   }
+  prepend(...children) {
+    this.children.unshift(...children);
+  }
   replaceChildren(...children) {
     this.children = children;
     this.value = "";
@@ -94,6 +97,24 @@ function harness({ integrations = [], latest, legacy = null } = {}) {
   };
 }
 
+// Lets the unawaited replaceWhenPlanned loop run to its next stop.
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
+// Records what the replacement flow does instead of doing it: approvals, notices, opened jobs.
+function watch(h, { jobs } = {}) {
+  h.context.resumes = [];
+  h.context.notes = [];
+  h.run("pollDelay=()=>Promise.resolve(); notify=(message)=>notes.push(message); jobControl=async(...args)=>resumes.push(args);");
+  if (jobs) {
+    h.context.answers = [...jobs];
+    h.run('api=async(path)=>({jobs:[String(path).includes("id=planned")?(answers.length>1?answers.shift():answers[0]):latest]})');
+  }
+  return {
+    resumes: () => JSON.parse(JSON.stringify(h.context.resumes)),
+    notes: () => [...h.context.notes],
+  };
+}
+const approveDecision = { decision: { label: "Replace file", verb: "Replacing file", failure: "Replacement failed" } };
+
 test("an agent's durable Sonarr child uses its parent integration without browser storage", async () => {
   const job = {
     id: "agent",
@@ -105,23 +126,22 @@ test("an agent's durable Sonarr child uses its parent integration without browse
     },
   };
   const h = harness({ integrations: [{ name: "sonarr" }], latest: job });
+  const seen = watch(h);
   h.context.job = job;
   await h.run("prepareReplacement(job)");
+  await settle();
   assert.equal(h.calls.length, 1);
   assert.deepEqual(JSON.parse(h.calls[0].args.inputs), {
     transcode_action_id: "agent",
     service: "sonarr",
     series_id: 77,
   });
-  // The plan is ready, so its review opens at once: one approval, no extra click.
+  // The plan is ready, so it is approved as it is read: no second dialog, no second click.
   assert.deepEqual(h.opened, []);
-  assert.equal(h.elements.get("file-review").open, true);
+  assert.equal(h.elements.get("file-review").open, false);
   assert.equal(h.elements.get("replacement-choice").open, false);
   assert.equal(h.calls.some((call) => call.name === "action_resume"), false);
-  h.context.resumes = [];
-  h.run('jobControl=async(...args)=>resumes.push(args)');
-  await h.elements.get("approve-file-review").listeners.get("click")();
-  assert.deepEqual(JSON.parse(JSON.stringify(h.context.resumes)), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, { decision: { label: "Replace file", verb: "Replacing file", failure: "Replacement failed" } }]]);
+  assert.deepEqual(seen.resumes(), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, approveDecision]]);
 });
 
 test("unknown history offers an explicit local or library choice before creating a plan", async () => {
@@ -145,17 +165,18 @@ test("unknown history offers an explicit local or library choice before creating
   h.elements.get("replacement-method").value = "radarr";
   h.elements.get("replacement-method").listeners.get("change")();
   h.elements.get("replacement-library-id").value = "42";
+  const seen = watch(h);
   await h.elements.get("prepare-replacement-choice").listeners.get("click")();
+  await settle();
   assert.deepEqual(JSON.parse(h.calls[0].args.inputs), {
     transcode_action_id: "history",
     service: "radarr",
     movie_id: 42,
   });
-  assert.equal(h.elements.get("file-review").open, true);
-  assert.equal(
-    h.calls.some((call) => call.name === "action_resume"),
-    false,
-  );
+  assert.equal(h.elements.get("file-review").open, false);
+  assert.equal(h.elements.get("replacement-choice").open, false);
+  assert.equal(seen.resumes().length, 1);
+  assert.equal(seen.resumes()[0][2].plan_digest, "sha256:plan");
 });
 
 test("legacy browser hints preselect an import but cannot silently choose its route", async () => {
@@ -188,17 +209,56 @@ test("an existing promotion is opened without changing its route or creating ano
   assert.deepEqual(h.opened, ["prior-review"]);
 });
 
-test("a plan that is still being verified shows a pending review that cannot be approved", async () => {
+test("one tap replaces the file: the plan is approved once it is ready, not before", async () => {
   const job = { id: "file", candidate_ready: true };
   const h = harness({ integrations: [], latest: job });
-  h.run('api=async(path)=>({jobs:[String(path).includes("id=planned")?{id:"planned",status:"running"}:{id:"file",candidate_ready:true}]})');
+  const running = { id: "planned", status: "running" };
+  const seen = watch(h, { jobs: [running, running, h.context.planned] });
   h.context.job = job;
   await h.run('enqueueReplacement(job,{service:"filesystem"})');
+  await settle();
+  // The dialog is gone and the plan was read until it was ready.
+  assert.equal(h.elements.get("replacement-choice").open, false);
+  assert.equal(h.elements.get("file-review").open, false);
+  assert.deepEqual(seen.resumes(), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, approveDecision]]);
+  assert.equal(seen.notes()[0], "Preparing the replacement. It starts by itself.");
+});
+
+test("a replacement whose library may re-download the old file is shown for review, not approved", async () => {
+  const job = { id: "file", candidate_ready: true };
+  const h = harness({ integrations: [{ name: "sonarr" }], latest: job });
+  const warned = { ...h.context.planned, promotion: { ...h.context.planned.promotion, regrab_warning: { service: "sonarr", message: "Sonarr may download this episode again." } } };
+  const seen = watch(h, { jobs: [warned] });
+  await h.run('replaceWhenPlanned("planned")');
+  assert.deepEqual(seen.resumes(), []);
   assert.equal(h.elements.get("file-review").open, true);
-  h.context.resumes = [];
-  h.run("jobControl=async(...args)=>resumes.push(args)");
-  await h.elements.get("approve-file-review").listeners.get("click")();
-  assert.deepEqual(h.context.resumes, []);
+});
+
+test("a plan that fails or is withdrawn is reported and approves nothing", async () => {
+  const h = harness({ integrations: [] });
+  for (const gone of [{ id: "planned", status: "failed", error: "Source file is missing" }, { id: "planned", status: "cancelled" }, { id: "planned", status: "completed" }]) {
+    const seen = watch(h, { jobs: [gone] });
+    await h.run('replaceWhenPlanned("planned")');
+    assert.deepEqual(seen.resumes(), []);
+    assert.equal(seen.notes().length, 2);
+    assert.match(seen.notes()[1], gone.status === "failed" ? /Source file is missing/ : /no longer be approved\. Nothing was changed/);
+  }
+});
+
+test("a plan waiting on something other than approval opens its job", async () => {
+  const h = harness({ integrations: [] });
+  const seen = watch(h, { jobs: [{ id: "planned", status: "waiting_decision", waiting_options: [{ decision: "reject" }] }] });
+  await h.run('replaceWhenPlanned("planned")');
+  assert.deepEqual(seen.resumes(), []);
+  assert.deepEqual(h.opened, ["planned"]);
+});
+
+test("a plan that never finishes preparing stops waiting and says where to look", async () => {
+  const h = harness({ integrations: [] });
+  const seen = watch(h, { jobs: [{ id: "planned", status: "running" }] });
+  await h.run('replaceWhenPlanned("planned")');
+  assert.deepEqual(seen.resumes(), []);
+  assert.equal(seen.notes().at(-1), "The replacement is still being prepared. Open the job to follow it.");
 });
 
 test("a candidate consumed while the selection dialog was open cannot create another plan", async () => {

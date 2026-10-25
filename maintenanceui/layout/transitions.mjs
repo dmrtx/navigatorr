@@ -7,6 +7,7 @@ import { startServer } from "./server.mjs";
 import { scenarios, world } from "./fixtures.mjs";
 import { screens } from "./runner.mjs";
 import { budgets, install } from "./invariants.mjs";
+import { listBudgets, installList } from "./list_invariants.mjs";
 
 export const journeys = [
   ["file-queued", "file-analysing", "file-encoding", "file-validating", "file-candidate", "file-replacing", "file-replaced"],
@@ -17,9 +18,24 @@ export const journeys = [
   ["batch-replacing-mid", "batch-replacing-stopped", "batch-partially-replaced"],
 ];
 
+// A job's row in the Activity list while its numbers change. The row is read
+// on every poll, so its blocks have to stay where they were: the bar keeps its
+// place and width, the row keeps its height, and a counter never grows a line.
+export const listJourneys = [
+  ["file-replacing-hash-wait", "file-replacing-copy", "file-replacing-verify", "file-replacing-verify-done", "file-replacing-copy", "file-replacing-hash-wait"],
+];
+
 // Phones are a full-screen sheet, so the header and bar have one fixed place.
 const phones = ["phone-small", "phone", "phone-large"];
 const said = () => (document.querySelector("#detail-status")?.innerText || "") + "|" + (document.querySelector("#detail-summary")?.innerText || "") + "|" + (document.querySelector("#detail-controls")?.innerText || "");
+const rowShape = id => {
+  const row = document.querySelector(`article.job-row[data-operation-id="${id}"]`);
+  if (!row) return null;
+  const rr = row.getBoundingClientRect();
+  const place = el => { const r = el.getBoundingClientRect(); return { left: Math.round(r.left - rr.left), top: Math.round(r.top - rr.top), width: Math.round(r.width), height: Math.round(r.height) }; };
+  const counters = [...row.querySelectorAll(".metadata")].filter(e => !e.children.length && /\d/.test(e.textContent) && e.textContent.trim().length <= 24).map(e => ({ text: e.textContent.trim(), lines: Math.round(e.getBoundingClientRect().height / (parseFloat(getComputedStyle(e).lineHeight) || parseFloat(getComputedStyle(e).fontSize) * 1.3)) }));
+  return { height: Math.round(rr.height), bars: [...row.querySelectorAll("meter, progress, [role=progressbar]")].map(place), counters, text: row.innerText };
+};
 const edges = () => {
   const box = selector => { const e = document.querySelector(selector); if (!e || e.hidden) return null; const r = e.getBoundingClientRect(); return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height) }; };
   return { dialog: box("#job-detail"), header: box("#job-detail [data-section=header]"), bar: box("#job-detail [data-section=actions]") };
@@ -87,6 +103,43 @@ export async function runTransitions({ browserChannel = process.env.LAYOUT_BROWS
       }
       await page.evaluate(() => document.querySelector("#job-detail")?.close());
       await page.waitForTimeout(100);
+    }
+    const listRules = installList();
+    for (const journey of listJourneys) {
+      let before = null;
+      const id = `list-journey-${listJourneys.indexOf(journey)}`;
+      for (const [index, step] of journey.entries()) {
+        const scenario = byId.get(step);
+        const where = { journey: `list: ${journey.join(" > ")}`, step: `${index + 1}. ${step}`, screen: screenName };
+        if (!scenario) { found.push({ ...where, rule: "journey", message: "unknown scenario" }); continue; }
+        const w = world(scenario, "long", "normal");
+        for (const job of w.jobs) { job.id = id; job.workflow_id = id; }
+        state.jobs = w.jobs;
+        state.items = {};
+        if (index === 0) {
+          await page.evaluate(() => { history.pushState({}, "", "/?view=queue"); dispatchEvent(new PopStateEvent("popstate")); });
+          await page.waitForSelector(`article.job-row[data-operation-id="${id}"]`, { timeout: 5000 }).catch(() => {});
+        } else {
+          const stamp = (await page.evaluate(rowShape, id))?.text;
+          await page.evaluate(() => dispatchEvent(new Event("online")));
+          await page.waitForFunction(([i, old]) => document.querySelector(`article.job-row[data-operation-id="${i}"]`)?.innerText !== old, [id, stamp], { timeout: 3000 }).catch(() => {});
+          await page.waitForTimeout(150);
+        }
+        await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+        const here = await page.evaluate(rowShape, id);
+        if (!here) { found.push({ ...where, rule: "list-row-missing", message: "the job has no row in the list" }); before = null; continue; }
+        const problems = await page.evaluate(`(${listRules.toString()})(${JSON.stringify(`article.job-row[data-operation-id="${id}"]`)}, ${JSON.stringify(listBudgets)})`);
+        for (const v of problems) found.push({ ...where, rule: v.rule, message: v.message });
+        if (before) {
+          if (before.height !== here.height) found.push({ ...where, rule: "list-row-jump", message: `row height changed from ${before.height}px to ${here.height}px` });
+          // A bar appearing once there is something to measure is not a jump.
+          if (before.bars.length === here.bars.length && JSON.stringify(before.bars) !== JSON.stringify(here.bars)) found.push({ ...where, rule: "list-bar-jump", message: `bar moved from ${JSON.stringify(before.bars)} to ${JSON.stringify(here.bars)}` });
+          if (before.text === here.text) found.push({ ...where, rule: "list-stale", message: "the row still says what the previous state said" });
+        }
+        for (const c of here.counters) if (c.lines > 1) found.push({ ...where, rule: "list-counter-wraps", message: `“${c.text}” wraps to ${c.lines} lines` });
+        before = here;
+        if (process.env.LAYOUT_TRACE) console.log("list", screenName, step, JSON.stringify(here.text.slice(0, 90)), here.height);
+      }
     }
     for (const e of errors) found.push({ journey: "", step: "", screen: screenName, rule: "js-error", message: e });
     await context.close();
