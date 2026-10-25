@@ -28,6 +28,9 @@ const (
 	storageKeep = 800 * 24 * time.Hour
 	// storageBudget bounds one measurement of every folder.
 	storageBudget = 45 * time.Minute
+	// storageFolderBudget bounds the helper's walk of one root, so a single slow
+	// folder cannot use up the round.
+	storageFolderBudget = 15 * time.Minute
 	// storageWindowSlack is how much older than a window's start the sample it
 	// is measured from may be.
 	storageWindowSlack = 2 * 24 * time.Hour
@@ -55,8 +58,10 @@ func (s *Server) nasMeter() nasMeter {
 
 // storageState is the measurement in progress, if any, and how the last one went.
 type storageState struct {
-	mu        sync.Mutex
-	ctx       context.Context
+	mu  sync.Mutex
+	ctx context.Context
+	// running is every measurement started, so shutdown can wait for them.
+	running   sync.WaitGroup
 	measuring bool
 	startedAt time.Time
 	lastError string
@@ -65,7 +70,9 @@ type storageState struct {
 }
 
 type volumeReading struct {
-	// Key names the volume by the first served root on it.
+	// Key names the volume by what the helper or the mount calls it (the
+	// filesystem id, or the device), which does not change when roots are added,
+	// removed or fail to read.
 	Key   string
 	Roots []string
 	Total int64
@@ -126,7 +133,7 @@ func readVolumes(ctx context.Context, roots []string, meter nasMeter) ([]*volume
 		}
 		v := byKey[key]
 		if v == nil {
-			v = &volumeReading{Key: root, Total: total, Free: free, Avail: avail, Source: source}
+			v = &volumeReading{Key: key, Total: total, Free: free, Avail: avail, Source: source}
 			byKey[key] = v
 			out = append(out, v)
 		}
@@ -143,21 +150,23 @@ func withinOrEqual(root, path string) bool {
 // readFolder sizes a served root. The NAS helper walks it from inside the NAS;
 // without it, the size comes from the folder cache, and only a complete
 // measurement counts.
-func (s *Server) readFolder(ctx context.Context, root string, meter nasMeter) (int64, string, bool) {
+func (s *Server) readFolder(ctx context.Context, root string, meter nasMeter) (bytes int64, source string, skipped int64, ok bool) {
 	if meter != nil {
 		if _, mapped := meter.Remote(root); mapped {
-			res, err := meter.Usage(ctx, root, nil)
+			helperCtx, cancel := context.WithTimeout(ctx, storageFolderBudget)
+			res, err := meter.Usage(helperCtx, root, nil)
+			cancel()
 			if err == nil {
-				return res.Bytes, "helper", true
+				return res.Bytes, "helper", res.Skipped, true
 			}
 			if !nashelper.ShouldFallBack(err) {
-				return 0, "", false
+				return 0, "", 0, false
 			}
 		}
 	}
 	resolver := s.engine.Deps().Fs
 	if resolver == nil {
-		return 0, "", false
+		return 0, "", 0, false
 	}
 	// Walking a library over the share is slow and often incomplete; a root that
 	// cannot be finished in this time is left out rather than recorded low.
@@ -165,9 +174,9 @@ func (s *Server) readFolder(ctx context.Context, root string, meter nasMeter) (i
 	defer cancel()
 	size := measureFolderSize(walk, root, resolver, 300_000)
 	if size.Status != "ready" || size.Bytes == nil {
-		return 0, "", false
+		return 0, "", 0, false
 	}
-	return *size.Bytes, "mount", true
+	return *size.Bytes, "mount", 0, true
 }
 
 // measureStorage measures the volumes and the served roots and records them.
@@ -194,15 +203,21 @@ func (s *Server) measureStorage(ctx context.Context) (notes []string, err error)
 			UsedBytes: max(0, v.Total-v.Free), TotalBytes: v.Total, FreeBytes: v.Avail, Source: v.Source,
 		})
 	}
-	missed := 0
+	missed, unread := 0, 0
 	for _, root := range roots {
+		// Out of time: keep what was measured instead of throwing the round away,
+		// or the next one would start from nothing.
 		if ctx.Err() != nil {
-			return notes, ctx.Err()
+			missed++
+			continue
 		}
-		bytes, source, ok := s.readFolder(ctx, root, meter)
+		bytes, source, skipped, ok := s.readFolder(ctx, root, meter)
 		if !ok {
 			missed++
 			continue
+		}
+		if skipped > 0 {
+			unread++
 		}
 		samples = append(samples, store.StorageSample{
 			TakenAt: taken, Scope: "folder", Path: root, Volume: volumeOf[root], UsedBytes: bytes, Source: source,
@@ -210,6 +225,12 @@ func (s *Server) measureStorage(ctx context.Context) (notes []string, err error)
 	}
 	if missed > 0 {
 		notes = append(notes, fmt.Sprintf("%d of %d folders could not be sized completely. Folder sizes need the NAS helper for libraries this large.", missed, len(roots)))
+	}
+	if unread > 0 {
+		notes = append(notes, fmt.Sprintf("%d folders had entries the NAS helper could not read, so their sizes may be low.", unread))
+	}
+	if len(samples) == 0 {
+		return notes, errors.New("nothing could be measured")
 	}
 	if err := st.AddStorageSamples(samples); err != nil {
 		return notes, err
@@ -235,7 +256,9 @@ func (s *Server) startStorageMeasurement(force bool) bool {
 	}
 	s.storage.measuring = true
 	s.storage.startedAt = time.Now()
+	s.storage.running.Add(1)
 	go func() {
+		defer s.storage.running.Done()
 		ctx, cancel := context.WithTimeout(parent, storageBudget)
 		defer cancel()
 		notes, err := s.measureStorage(ctx)
@@ -252,12 +275,23 @@ func (s *Server) startStorageMeasurement(force bool) bool {
 	return true
 }
 
-// RunStorageSampler measures storage shortly after start when the last sample is
-// old, then whenever it has aged past storageEvery, until ctx ends.
-func (s *Server) RunStorageSampler(ctx context.Context) {
+// SetStorageContext ties background measurements to ctx, so they stop with the
+// server. It is called before the UI starts serving.
+func (s *Server) SetStorageContext(ctx context.Context) {
 	s.storage.mu.Lock()
 	s.storage.ctx = ctx
 	s.storage.mu.Unlock()
+}
+
+// WaitStorage returns once no measurement is running; call it after the context
+// given to SetStorageContext ends and before the store closes.
+func (s *Server) WaitStorage() { s.storage.running.Wait() }
+
+// RunStorageSampler measures storage shortly after start when the last sample is
+// old, then whenever it has aged past storageEvery, until ctx ends. A round that
+// saved nothing counts as an attempt, so a failing one is retried every
+// storageEvery, not every check.
+func (s *Server) RunStorageSampler(ctx context.Context) {
 	wait := time.Minute
 	for {
 		select {
@@ -275,6 +309,11 @@ func (s *Server) RunStorageSampler(ctx context.Context) {
 			log.Printf("storage statistics: %v", err)
 			continue
 		}
+		s.storage.mu.Lock()
+		if attempt := s.storage.startedAt; attempt.After(last) {
+			last = attempt
+		}
+		s.storage.mu.Unlock()
 		if time.Since(last) >= storageEvery {
 			s.startStorageMeasurement(false)
 		}
@@ -356,6 +395,10 @@ func trendOf(series []store.StorageSample, now time.Time) storageTrend {
 		trend.Points = trend.Points[len(trend.Points)-storageDays:]
 	}
 	latest := series[len(series)-1]
+	// Samples that stopped long ago say nothing about the last week or month.
+	if now.Sub(latest.TakenAt) > storageWindowSlack {
+		return trend
+	}
 	change := func(window time.Duration) *int64 {
 		cutoff := now.Add(-window)
 		var base *store.StorageSample
@@ -416,9 +459,23 @@ func (s *Server) storageView() (storageView, error) {
 			current[r] = true
 		}
 	}
+	// A volume is shown when the newest round measured it. Its key is the
+	// filesystem or device, so a root added, removed or unreadable one time
+	// cannot leave a second, stale card behind.
+	var newestVolume time.Time
+	for _, k := range keys {
+		if k.scope == "volume" {
+			if last := series[k][len(series[k])-1].TakenAt; last.After(newestVolume) {
+				newestVolume = last
+			}
+		}
+	}
 	roots := map[string][]string{}
 	for _, k := range keys {
-		if !current[k.path] {
+		if k.scope == "volume" && !series[k][len(series[k])-1].TakenAt.Equal(newestVolume) {
+			continue
+		}
+		if k.scope == "folder" && !current[k.path] {
 			continue
 		}
 		list := series[k]

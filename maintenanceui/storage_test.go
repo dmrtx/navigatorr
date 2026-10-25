@@ -307,3 +307,76 @@ func TestFileFolderSizesFallBackToTheShareWhenTheHelperIsDown(t *testing.T) {
 		t.Fatalf("the share was not walked: %+v", size)
 	}
 }
+
+func TestStorageTrendsStayEmptyWhenSamplingHasStopped(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	old := func(daysAgo int, used int64) store.StorageSample {
+		return store.StorageSample{TakenAt: now.AddDate(0, 0, -daysAgo), UsedBytes: used}
+	}
+	trend := trendOf([]store.StorageSample{old(40, 900), old(20, 800), old(8, 700)}, now)
+	if trend.Change7d != nil || trend.Change30d != nil || trend.ChangeAll != nil || len(trend.Points) != 3 {
+		t.Fatalf("old samples must not be reported as a recent change: %+v", trend)
+	}
+}
+
+func TestStorageKeepsTheRoundThatRanOutOfTime(t *testing.T) {
+	s, roots := storageRoots(t, "Anime", "Movies")
+	s.nas = &fakeMeter{
+		prefix:  filepath.Dir(roots[0]),
+		volumes: []nashelper.Volume{{Root: "/nas", FSID: "vol1", TotalBytes: 1000, FreeBytes: 400, AvailBytes: 400}},
+		usage:   map[string]int64{roots[0]: 300, roots[1]: 200},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	notes, err := s.measureStorage(ctx)
+	if err != nil {
+		t.Fatalf("the volumes were read and must be kept: %v", err)
+	}
+	if len(notes) == 0 || !strings.Contains(notes[len(notes)-1], "2 of 2") {
+		t.Fatalf("the folders left out were not reported: %v", notes)
+	}
+	view, _ := s.storageView()
+	if len(view.Volumes) != 1 || len(view.Folders) != 0 {
+		t.Fatalf("view %+v", view)
+	}
+}
+
+func TestStorageNothingMeasuredIsAnError(t *testing.T) {
+	s, roots := storageRoots(t, "Anime")
+	s.nas = &fakeMeter{prefix: filepath.Dir(roots[0]), volumesErr: fmt.Errorf("%w: down", nashelper.ErrUnavailable), usageErr: fmt.Errorf("%w: down", nashelper.ErrUnavailable)}
+	if err := os.RemoveAll(roots[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.measureStorage(context.Background()); err == nil {
+		t.Fatal("a round that measured nothing must say so")
+	}
+}
+
+func TestStorageVolumeKeepsItsSeriesWhenRootsChange(t *testing.T) {
+	s, roots := storageRoots(t, "Anime", "Movies")
+	meter := &fakeMeter{
+		prefix:  filepath.Dir(roots[0]),
+		volumes: []nashelper.Volume{{Root: "/nas", FSID: "vol1", TotalBytes: 1000, FreeBytes: 400, AvailBytes: 400}},
+		usage:   map[string]int64{roots[0]: 300, roots[1]: 200},
+	}
+	s.nas = meter
+	if _, err := s.measureStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The volume now reports through a different first root: still one volume.
+	v2, err := fsop.NewResolver([]string{roots[1], roots[0]}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := s.engine.Deps()
+	deps.Fs = v2
+	s.engine = action.NewEngine(deps)
+	time.Sleep(1100 * time.Millisecond)
+	if _, err := s.measureStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := s.storageView()
+	if len(view.Volumes) != 1 || view.Volumes[0].ID != "fsid:vol1" || len(view.Volumes[0].Roots) != 2 {
+		t.Fatalf("volumes %+v", view.Volumes)
+	}
+}

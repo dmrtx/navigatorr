@@ -151,7 +151,7 @@ func withinFolder(root, path string) bool {
 // cheap, so it is simply repeated sooner.
 func helperRemeasure(previous folderSnapshot, otherwise time.Duration) time.Duration {
 	if previous.Source == "helper" {
-		return 2 * time.Minute
+		return 10 * time.Minute
 	}
 	return otherwise
 }
