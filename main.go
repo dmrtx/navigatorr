@@ -138,6 +138,19 @@ func main() {
 	defer mStore.Close()
 	internal.Logf("maintenance database at %s", dbPath)
 
+	// Polls of waiting steps pile up in the step log; tidy them in the
+	// background. Registered after the store's close, so it stops first.
+	retentionCtx, stopRetention := context.WithCancel(context.Background())
+	retentionDone := make(chan struct{})
+	go func() {
+		defer close(retentionDone)
+		mStore.RunRetention(retentionCtx, internal.Logf)
+	}()
+	defer func() {
+		stopRetention()
+		<-retentionDone
+	}()
+
 	// Serve the HTTP ingest endpoint alongside stdio when configured.
 	var qHttpSrv *http.Server
 	if cfg.Queue.Listen != "" {
