@@ -6797,6 +6797,7 @@ async function openReplacement(id) {
 const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Import through Sonarr", radarr: "Import through Radarr"};
 function showFileReview(job, approval) {
   const p = job.promotion;
+  const wasPending = approval.pending;
   Object.assign(approval, { digest: p.plan_digest, original: p.original_sha256, candidate: p.candidate_sha256, pending: false });
   const facts = job.replacement_facts || {source_bytes: p.original_bytes, candidate_bytes: p.candidate_bytes, size_budget_outcome: job.size_budget_outcome};
   const name = p.original_path.split("/").pop().replace(/\.[^.]+$/, "");
@@ -6807,8 +6808,17 @@ function showFileReview(job, approval) {
   const frees = replacementTotalLine([p], () => facts);
   $("file-review-total").textContent = frees && frees.replace(/ across 1 file$/, "");
   $("reject-file-review").hidden = !job.waiting_options?.some(option => option.decision === "reject");
-  $("reject-file-review").disabled = !serverReachable || state.approvingFile;
-  $("approve-file-review").disabled = !serverReachable || state.approvingFile;
+  const settle = () => {
+    $("reject-file-review").disabled = !serverReachable || state.approvingFile;
+    $("approve-file-review").disabled = !serverReachable || state.approvingFile;
+  };
+  if (!wasPending) return settle();
+  // The review just replaced "checking" with the plan, which moves the buttons
+  // under a finger already on its way to the old position: a tap meant for
+  // Replace file landed on Keep original. They wake after the layout settles.
+  $("reject-file-review").disabled = true;
+  $("approve-file-review").disabled = true;
+  setTimeout(() => { if (state.fileApproval === approval) settle(); }, 800);
 }
 // What the plan is doing while the review waits: it reads the converted file
 // once, never the original. Returns the sentence and, once measured, how much
@@ -6834,7 +6844,8 @@ function showFileReviewPending(text, ratio) {
   }
   $("file-review-data").replaceChildren(...body);
   $("file-review-total").textContent = "";
-  $("reject-file-review").hidden = true;
+  $("reject-file-review").hidden = false;
+  $("reject-file-review").disabled = true;
   $("approve-file-review").disabled = true;
 }
 function pollDelay(ms) {

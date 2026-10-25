@@ -1880,6 +1880,13 @@ dialog {
 dialog::backdrop {
   background: var(--backdrop);
 }
+/* A modal that does not need to scroll gives overscroll-behavior nothing to
+   contain, so on iOS a drag on it moved the page behind. */
+html:has(dialog[open]),
+body:has(dialog[open]) {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 #notice.dialog-notice {
   position: sticky;
   bottom: 0;
