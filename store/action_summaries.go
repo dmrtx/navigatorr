@@ -9,7 +9,7 @@ func (s *Store) GetActionStepSummaries(instanceID string, limit int) ([]ActionSt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var total int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM action_steps_log WHERE instance_id=?`, instanceID).Scan(&total); err != nil {
+	if err := s.db.QueryRow(`SELECT COALESCE(SUM(observations), 0) FROM action_steps_log WHERE instance_id=?`, instanceID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	rows, err := s.db.Query(`SELECT step_index, step_name, status, duration_ms, substr(error,1,512), created_at
