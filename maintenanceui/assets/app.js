@@ -4551,7 +4551,7 @@ function jobControls(job, detail = false) {
   if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
     add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
   if (reconfigurable && !(job.mode && onlyUnsupportedSources(job))) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
-  if (job.status === "failed" && !reconfigurable && !job.parent_item_key) {
+  if (job.status === "failed" && !reconfigurable && !job.parent_item_key && !declinedReplacement(job)) {
     if (rejectedCandidate(job)) {
       if (job.parent_action_id) add("Change settings", () => reconfigureBatch(job.parent_action_id, true, {candidate_id:job.id}));
     } else if (job.action_name === "benchmark_transcode")
@@ -4666,6 +4666,7 @@ function shortJobReason(reason) {
     size_budget_estimate_unavailable: "The size budget could not be planned for this file; original kept",
   };
   if (reasons[text]) return reasons[text];
+  if (text.includes("candidate promotion rejected")) return "Replacement declined by you; original and converted file untouched";
   if (isCandidateRejection(text)) return ["Candidate rejected by you; original kept", candidateNoteInText(text)].filter(Boolean).join("; ");
   if (workerBusyFailure(text)) return workerBusyFailureText;
   const growth = text.match(/Candidate file size \(\d+ bytes\) exceeds original \(\d+ bytes\) by ([\d.]+)%, which is greater than max_size_increase_percent \(([\d.]+)%\)/);
@@ -4763,6 +4764,11 @@ function candidateCleanupNote(job) {
 function isCandidateRejection(reason) {
   return String(reason || "").includes("transcode candidate rejected by user decision");
 }
+// Declining the replacement review is a choice, not a failure: nothing was
+// touched and the converted file is still there.
+function declinedReplacement(job) {
+  return job.status === "failed" && String(job.error || "").includes("candidate promotion rejected");
+}
 function rejectedCandidate(job) {
   return job.status === "failed" && isCandidateRejection(job.error);
 }
@@ -4850,9 +4856,9 @@ function queuePresentation(job) {
     (job.replaced && job.status === "completed");
   // Nothing was made, so there are no savings to report.
   const leftNoFile = notConverted(job);
-  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
-    : rejectedCandidate(job) ? "Rejected" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
+    : rejectedCandidate(job) ? "Rejected" : declinedReplacement(job) ? "Kept original" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
         ? "Candidate ready"
         : ["running", "waiting_external"].includes(job.status)
