@@ -22,6 +22,8 @@ import (
 
 // Engine manages declarative, persistent, multi-step actions.
 type Engine struct {
+	// helperBreaker leaves an unreachable NAS helper alone for a few minutes.
+	helperBreaker    helperBreaker
 	podcastCatalogMu sync.Mutex
 	// workerStates caches each worker's observation and video pool.
 	workerStatesMu sync.Mutex

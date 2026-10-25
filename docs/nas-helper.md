@@ -285,3 +285,28 @@ design), the recovery copy's NAS disk work, `validateCandidateDetailed`'s probe.
 Required from the second review for the helper's API: no expected value is
 ever sent to it; a job is created for the step that uses it; the sampling
 function is shared so the digests are identical.
+
+#### As built (after the Opus review)
+
+Only the byte loop of `promotionHash` changed (`action/promote_helper.go`). The
+mount's `Lstat`/open/`SameFile`/size/mtime checks and the verified-file cache are
+untouched.
+
+- Order: mount open + fstat, helper `Hash` (identity A), the mount's sampled ranges
+  read from the same open descriptor, helper `Sample` (instance and identity must
+  equal A, digest must equal the mount's), final mount fstat.
+- Identity or size drift is `promotionFileChangedError` (the stable loop re-reads).
+  A sample digest mismatch is `promotionHelperDisagreeError`: almost always a wrong
+  `path_mappings` entry, never retried and never answered from the mount.
+- Anything the helper cannot answer reads through the mount, and the execution
+  state's `integrity_reads` records `via` (`nas_helper` / `smb_fallback` / `smb`)
+  with the class: `helper_down`, `helper_unavailable`, `helper_disagrees`
+  (helper says not_found for a file the mount just opened), `helper_busy`,
+  `helper_restarted`, `stalled`. The record is kept by flows that force full reads
+  and does not depend on the cache.
+- A helper restart or a job the helper cancelled is asked once more; `busy` is
+  retried briefly; an unreachable helper trips a 2 minute breaker; a hash with no
+  progress for 5 minutes is cancelled and read through the mount.
+- The helper path takes no engine hash slot but yields the reconcile slot before
+  it waits. `promotionReadHook` counts mount bytes only.
+- `Identity.Complete` is recorded now and becomes a requirement in stage 5.
