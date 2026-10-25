@@ -1085,39 +1085,42 @@
       </div>
     </dialog>
     <dialog id="job-detail" aria-labelledby="job-detail-title">
-      <div class="dialog-heading detail-heading">
-        <h2 id="job-detail-title">Job details</h2>
+      <header class="jd-header" data-section="header">
+        <h2 id="job-detail-title" data-single-line>Job details</h2>
         <button id="copy-detail-path" class="icon-button" type="button" aria-label="Copy file path" title="Copy file path" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" />
           </svg>
         </button>
-        <span id="detail-status" class="detail-status"></span>
         <button id="close-detail" class="icon-button" aria-label="Close">
           ×
         </button>
-      </div>
+      </header>
       <p class="dialog-connection muted" role="status" hidden>
         Server unavailable. Retrying automatically.
       </p>
       <p id="detail-command-announcer" class="sr-only" role="status" aria-live="polite"></p>
-      <div id="detail-summary"></div>
-      <div id="detail-controls" class="submit-actions"></div>
-      <div id="detail-related" class="workflow-history"></div>
-      <section id="detail-commands" class="command-history" aria-labelledby="detail-commands-title" hidden>
-        <h3 id="detail-commands-title">What you did to this job</h3>
-        <ol id="detail-command-list"></ol>
+      <section class="jd-status" data-section="status" aria-label="Status">
+        <div id="detail-status" class="detail-status"></div>
+        <div id="detail-summary"></div>
       </section>
-      <section id="batch-items-panel" hidden>
-        <h3>Batch files</h3>
-        <p id="batch-items-note" class="metadata"></p>
-        <div id="batch-items-list"></div>
+      <section id="batch-items-panel" class="jd-files" data-section="files" aria-labelledby="batch-items-title" hidden>
+        <div class="jd-files-head">
+          <h3 id="batch-items-title">Files</h3>
+          <p id="batch-items-note" class="metadata" data-single-line></p>
+        </div>
+        <div id="batch-items-list" role="list"></div>
         <div class="pagination">
           <button id="batch-items-prev">← Previous</button
           ><button id="batch-items-next">Next →</button>
         </div>
       </section>
-      <div id="detail-rows" class="detail-rows">
+      <div id="detail-rows" class="detail-rows" data-section="details">
+        <div id="detail-related" class="workflow-history"></div>
+        <section id="detail-commands" class="command-history" aria-labelledby="detail-commands-title" hidden>
+          <h3 id="detail-commands-title">What you did to this job</h3>
+          <ol id="detail-command-list"></ol>
+        </section>
         <details id="detail-row-plan" class="detail-row" hidden>
           <summary>Plan</summary>
           <div id="detail-plan"></div>
@@ -1136,6 +1139,7 @@
           <pre id="detail-content"></pre>
         </details>
       </div>
+      <div id="detail-controls" class="jd-actions" data-section="actions"></div>
     </dialog>
     <dialog id="file-review" aria-labelledby="file-review-title">
       <div class="dialog-heading">

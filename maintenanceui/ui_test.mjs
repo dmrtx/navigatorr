@@ -2808,10 +2808,13 @@ test("preview item statuses indicate eligibility, while failures and completed i
   h.run('state.detail="p";state.detailRevision=1;state.detailJob={batch:{dry_run:true}};$("job-detail").open=true;api=async()=>({total:2,items:[{status:"queued",display_label:"One",reasons:["explicit profile requested"]},{status:"skip",display_label:"Two",reasons:["Already HEVC; original kept"]}]});');
   await h.run('loadBatchItems("p",1)');
   const rows = h.elements.get("batch-items-list").children;
-  assert.equal(rows[0].children[1].children[1].textContent, "Eligible");
-  assert.equal(rows[0].children.length, 2);
-  assert.equal(rows[1].children[1].children[1].textContent, "Skipped");
-  assert.equal(rows[1].children.length, 3);
+  // A row is its toggle (name, state) and a body that stays hidden until opened.
+  const stateOf = row => row.children[0].children[1].children[0].children[1].textContent;
+  assert.equal(stateOf(rows[0]), "Eligible");
+  assert.equal(rows[0].children[1].children.length, 0);
+  assert.equal(stateOf(rows[1]), "Skipped");
+  assert.equal(rows[1].children[1].children.length, 1);
+  assert.equal(rows[1].children[1].hidden, true);
   assert.equal(h.run('statusClass("completed")'), "completed");
   assert.equal(h.run('statusClass("failed")'), "failed");
   assert.equal(h.run('statusClass("waiting_decision")'), "waiting_decision");
@@ -3488,16 +3491,18 @@ test("batch outcome buttons reveal current decisions, readable skips and ready r
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
   assert.match(text(rows[0]),/Candidate ready.*Replace file/);
   assert.match(text(rows[1]),/quality target; original kept/);
-  assert.match(text(rows[2]),/Needs attention.*Change goal.*Search reached its limit/);
+  assert.match(text(rows[2]),/Needs attention.*Search reached its limit.*Change goal/);
   assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
-  // Candidate ready opens the same file as the name does, so its badge is not a second button.
-  assert.equal(rows[0].children.some(el=>el.className.includes("status-action")),false);
-  for (const [index,label] of [[1,"Skipped"],[2,"Needs attention"]]) {
-    const badge=rows[index].children.find(el=>el.className.includes("status-action"));
-    assert.ok(badge,`${label} is actionable`);
-    await badge.listeners.get("click")();
+  // A row is closed until it is opened; all of a file's actions wait inside it.
+  for (const row of rows) {
+    assert.equal(row.dataset.open, "false");
+    assert.equal(row.children[1].hidden, true);
+    assert.equal(row.children[0].children.some(el=>el.className.includes("status-action")), false, "the state is a label, not a second button");
   }
-  await all(rows[0]).find(el=>el.textContent==="Replace file").listeners.get("click")();
+  const click = (row,label)=>all(row).find(el=>el.textContent===label).listeners.get("click")();
+  await click(rows[1],"Change goal");
+  await click(rows[2],"Open job");
+  await click(rows[0],"Replace file");
   assert.deepEqual(calls,[["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
 });
 
@@ -5497,20 +5502,22 @@ test("job details lead with a one-line title, a status chip and fact chips", asy
 
 test("job details have one progress line with the worker's heartbeat", async () => {
   const h = await openDetail(detailJob());
-  const [line] = nodesWithClass(h.elements.get("detail-summary"), "detail-progress");
-  assert.ok(line, "no progress line");
-  assert.match(nodesWithClass(line, "detail-progress-text")[0].textContent, /^42\.5% · 1\.35×/);
-  const [dot] = nodesWithClass(line, "live-dot");
-  assert.equal(dot.textContent, "Worker live");
-  assert.match(dot.title, /^Last heartbeat /);
+  const [hero] = nodesWithClass(h.elements.get("detail-summary"), "jd-hero");
+  assert.ok(hero, "no progress");
+  assert.match(nodesWithClass(hero, "jd-headline")[0].textContent, /^42\.5% · 1\.35×/);
+  assert.equal(nodesWithClass(hero, "bar").length, 1, "one bar");
+  const [live] = nodesWithClass(hero, "jd-live");
+  // The dot is the first child, the words the second.
+  assert.equal(live.children[1].textContent, "Worker live");
+  assert.match(live.title, /^Last heartbeat /);
   // Without a heartbeat the dot is left out; the rest stays.
   const quiet = await openDetail(detailJob({ worker: { transcode_phase: "encoding", progress: 10, speed: 1, progress_is_stale: false } }));
-  const quietLine = nodesWithClass(quiet.elements.get("detail-summary"), "detail-progress")[0];
-  assert.equal(nodesWithClass(quietLine, "live-dot").length, 0);
-  assert.doesNotMatch(allTextOf(quietLine), /undefined|NaN/);
+  const quietHero = nodesWithClass(quiet.elements.get("detail-summary"), "jd-hero")[0];
+  assert.equal(nodesWithClass(quietHero, "jd-live").length, 0);
+  assert.doesNotMatch(allTextOf(quietHero), /undefined|NaN/);
   // A silent worker is named as such rather than live.
   const silent = await openDetail(detailJob({ worker: { transcode_phase: "encoding", progress: 10, speed: 1, progress_is_stale: false, worker_heartbeat_at: new Date(Date.now() - 600000).toISOString() } }));
-  const silentDots = nodesWithClass(silent.elements.get("detail-summary"), "live-dot");
+  const silentDots = nodesWithClass(silent.elements.get("detail-summary"), "jd-live");
   assert.ok(silentDots.length === 0 || silentDots[0].textContent === "Worker silent");
 });
 
@@ -5523,21 +5530,19 @@ test("job details without a worker still say why the job waits or what it checks
   const checking = await openDetail(detailJob({ worker: undefined, work: { phase: "verifying_original", bytes_read: 100, total_bytes: 1000 } }));
   assert.match(text(checking.elements.get("detail-summary")), /100 B \/ 1(\.0)? KB/);
   const plain = await openDetail(detailJob({ worker: undefined }));
-  assert.equal(nodesWithClass(plain.elements.get("detail-summary"), "detail-progress").length + nodesWithClass(plain.elements.get("detail-summary"), "workflow-progress").length, 0);
+  assert.equal(nodesWithClass(plain.elements.get("detail-summary"), "jd-hero").length + nodesWithClass(plain.elements.get("detail-summary"), "workflow-progress").length, 0);
 });
 
-test("job details show the pipeline as a stepper and name the current step", async () => {
+test("job details name the current step in one line, not a stepper", async () => {
   const h = await openDetail(detailJob());
-  const [stepper] = nodesWithClass(h.elements.get("detail-summary"), "job-steps");
-  assert.equal(stepper.children.length, 7);
-  assert.deepEqual(stepper.children.map((n) => n.className.split(" ")[1]), ["done", "done", "done", "done", "done", "current", "pending"]);
-  assert.equal(nodesWithClass(h.elements.get("detail-summary"), "job-steps-current")[0].textContent, "Step 6 of 7 · Convert file");
+  const stepOf = (view) => nodesWithClass(view.elements.get("detail-summary"), "jd-step").map((n) => n.textContent);
+  assert.deepEqual(stepOf(h), ["Step 6 of 7 · Convert file"]);
+  assert.equal(nodesWithClass(h.elements.get("detail-summary"), "job-steps").length, 0);
   const failed = await openDetail(detailJob({ status: "failed", error: "ffmpeg exited with status 1", worker: undefined, stages: stagesAt(5, "failed") }));
-  const [failedStepper] = nodesWithClass(failed.elements.get("detail-summary"), "job-steps");
-  assert.equal(failedStepper.children[5].className, "job-step failed");
-  assert.equal(nodesWithClass(failed.elements.get("detail-summary"), "job-steps-current")[0].textContent, "Failed at step 6 of 7 · Convert file");
+  assert.deepEqual(stepOf(failed), ["Failed at step 6 of 7 · Convert file"]);
   const done = await openDetail(detailJob({ status: "completed", worker: undefined, stages: detailStageNames.map((name) => ({ name, status: "completed" })) }));
-  assert.equal(nodesWithClass(done.elements.get("detail-summary"), "job-steps-current")[0].textContent, "All 7 steps done");
+  // A finished job already says "Completed" in its chip; a step line would repeat it.
+  assert.deepEqual(stepOf(done), []);
 });
 
 test("job details print the plan once, in its own row, and not under the summary", async () => {
@@ -5607,9 +5612,11 @@ test("a failure no step explains opens the worker log", async () => {
   assert.equal(el("detail-row-steps").open, false);
 });
 
-test("cancel keeps its handler and confirmation, right under the progress", async () => {
-  assert.ok(markup.indexOf('id="detail-summary"') < markup.indexOf('id="detail-controls"'));
-  assert.ok(markup.indexOf('id="detail-controls"') < markup.indexOf('id="detail-rows"'));
+test("cancel keeps its handler and confirmation, in the action bar that closes the dialog", async () => {
+  // Header, status, files, details, then the pinned actions.
+  const order = ["jd-header", 'id="detail-summary"', 'id="batch-items-panel"', 'id="detail-rows"', 'id="detail-controls"'].map((marker) => markup.indexOf(marker));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+  assert.ok(order.every((index) => index > 0));
   const h = await openDetail(detailJob());
   const calls = [];
   h.context.record = (name, id, args) => calls.push([name, id, args]);
@@ -6802,7 +6809,7 @@ test("a batch's file rows carry the sentence about the tracks they kept", async 
     ] });`);
   await h.run('loadBatchItems("batch", 1)');
   const rows = h.elements.get("batch-items-list").children;
-  const tracks = (row) => row.children.filter((cell) => String(cell.className).includes("batch-file-tracks")).map((cell) => cell.textContent);
+  const tracks = (row) => row.children[1].children.filter((cell) => String(cell.className).includes("batch-file-tracks")).map((cell) => cell.textContent);
   assert.deepEqual(tracks(rows[0]), ["Kept 2 of 3 audio tracks (eng, und)"]);
   assert.deepEqual(tracks(rows[1]), []);
 });
@@ -7109,7 +7116,7 @@ test("every job card and open job offers its file or folder in Files", () => {
   assert.ok(h.run('navigationLabels').includes("Show in Files"));
 });
 
-test("a batch file is one line: a name that opens the file, its saving, one action and a menu for the rest", async () => {
+test("a batch file is one collapsed line: its name, its state and saving; the actions are inside", async () => {
   const items = [
     { item_key: "k-c", display_label: "Ready.mkv", status: "completed", candidate_ready: true, saved_bytes: 1.9e9, child_action_id: "t-c", file_path: "/media/tv/Ready.mkv", can_reconfigure: true, mode: "size" },
     { item_key: "k-x", display_label: "Cancelled.mkv", status: "cancelled", child_action_id: "t-x", file_path: "/media/tv/X.mkv", can_reconfigure: true, mode: "size" },
@@ -7122,30 +7129,34 @@ test("a batch file is one line: a name that opens the file, its saving, one acti
   await h.run('loadBatchItems("batch-a",2)');
   const rows = itemRows(h);
   const flat = (row) => flatten(row);
-  // The name is the link to the file's job; there is no View file button.
-  const link = flat(rows[0]).find((e) => e.dataset.nameLink);
-  assert.equal(link.textContent, "Ready.mkv");
-  assert.equal(link.dataset.batchItemKey, "k-c");
-  assert.ok(!rows.some((row) => buttonLabels(row).includes("View file")));
-  // A file with no job has plain text for a name.
-  assert.ok(!flat(rows[2]).some((e) => e.dataset.nameLink));
+  const classed = (row, name) => flat(row).find((e) => String(e.className || "").split(" ").includes(name));
+  // A row is a head and a body; the head is one button that opens the body.
+  for (const row of rows) {
+    assert.equal(row.children.length, 2);
+    assert.equal(row.children[0].type, "button");
+    assert.equal(row.children[0].dataset.fileToggle, row.dataset.itemKey);
+    assert.equal(row.dataset.open, "false");
+    assert.equal(row.children[1].hidden, true);
+  }
+  assert.equal(classed(rows[0], "jd-file-name").textContent, "Ready.mkv");
+  // The name is no longer a second link or button: the head is the only control until it opens.
+  assert.ok(!rows.some((row) => flat(row.children[0]).some((e) => e !== row.children[0] && e.type === "button")));
   // The saving is shown only where the server gave one.
-  const saved = (row) => flat(row).find((e) => /batch-file-saved/.test(e.className || ""));
-  assert.match(saved(rows[0]).textContent, /1\.90 GB/);
-  assert.ok(rows[0].className.includes("has-saved"));
-  assert.equal(saved(rows[1]), undefined);
-  // A file that needs nothing from the person shows only the menu; Replace file is in it, controls intact.
-  const actions = flat(rows[0]).find((e) => /batch-file-actions/.test(e.className || ""));
-  assert.equal(actions.children.length, 1);
-  const more = actions.children[0];
-  assert.equal(more.dataset.menuFor, "k-c");
-  const menu = flat(more).filter((e) => e.textContent && e.textContent !== "\u22ef" && e.dataset?.jobControl);
-  assert.deepEqual(menu.map((e) => e.textContent), ["Replace file", "Show in Files"]);
-  assert.ok(menu.every((e) => e.dataset.batchItemKey === "k-c"));
+  assert.match(classed(rows[0], "jd-file-saved").textContent, /1\.90 GB/);
+  assert.equal(classed(rows[1], "jd-file-saved"), undefined);
+  // Inside: Replace file is the one primary action; the rest are plain secondary buttons.
+  const labels = (row) => flat(row.children[1]).filter((e) => e.dataset?.jobControl).map((e) => e.textContent);
+  assert.deepEqual(labels(rows[0]), ["Replace file", "Show in Files", "Open job"]);
+  assert.deepEqual(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl && String(e.className).includes("jd-primary")).map((e) => e.textContent), ["Replace file"]);
+  assert.ok(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl).every((e) => e.dataset.batchItemKey === "k-c"));
   // The primary action of a cancelled file is Encode again.
-  const cancelled = flat(rows[1]).find((e) => /batch-file-actions/.test(e.className || ""));
-  assert.equal(cancelled.children[0].textContent, "Encode again");
-  assert.equal(cancelled.children.length, 2);
+  assert.deepEqual(flat(rows[1].children[1]).filter((e) => e.dataset?.jobControl && String(e.className).includes("jd-primary")).map((e) => e.textContent), ["Encode again"]);
+  // A file that has not started has nothing to do.
+  assert.deepEqual(labels(rows[2]), []);
+  // Opening a row is remembered across the list being rebuilt.
+  rows[0].children[0].listeners.get("click")();
+  assert.equal(rows[0].dataset.open, "true");
+  assert.equal(rows[0].children[1].hidden, false);
 });
 
 test("every batch row offers Show in Files when its file is inside the media folders", async () => {

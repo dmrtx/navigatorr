@@ -47,6 +47,48 @@ jobs:
         env:
           CGO_ENABLED: "0"
 
+  # The job detail is laid out in a real browser at every phone, tablet and
+  # desktop size, in both themes, at 150% zoom and with long, unbroken and CJK
+  # names (maintenanceui/layout). Linux fonts measure a little differently from
+  # the macOS ones the rules were tuned on, so a failure here does not block a
+  # merge until this has run green once; the report is uploaded either way.
+  layout:
+    name: layout (browser)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: maintenanceui/layout/package-lock.json
+
+      - name: Install
+        working-directory: maintenanceui/layout
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Verify the job detail layout
+        working-directory: maintenanceui/layout
+        run: npm run verify
+
+      - name: Keep the layout report
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: layout-report
+          path: |
+            maintenanceui/layout/out/report.md
+            maintenanceui/layout/out/report.json
+            maintenanceui/layout/out/*.png
+          retention-days: 7
+
   # The worker ships on Apple Silicon and has darwin-only files (storage
   # commit, promote rename) that the Linux job never compiles.
   worker:

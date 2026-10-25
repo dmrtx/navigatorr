@@ -80,6 +80,20 @@ Backend regressions cover durable admission/restart/cancel/retry receipts, authe
 
 Mobile browser checks cover 320, 360, 390 and 430-pixel widths, tablet (768), landscape (844×390), desktop (1280), file/profile selection, batch preview/details, inline retry, replacement-plan review, advanced controls and actual server-stop/offline reload/automatic recovery. PWA regressions cover public routes/icon dimensions, cache isolation, network-first fallback, mutation blocking and preservation of prepared inputs on reconnect. Installation and keyboard behavior on physical iOS/Android devices remain device acceptance checks.
 
+### Layout verification
+
+`maintenanceui/layout` opens the job detail in a real browser (Playwright) for every scenario in `fixtures.mjs` (each job kind and state: queued, analysing, encoding, verifying, saving, waiting for a decision, failed, cancelled, candidate ready/larger, batches that are running, mixed, replacing, replaced or failed) and checks the rules in `invariants.mjs` against computed boxes, not pixels: no control overlaps or leaves its container, nothing scrolls sideways, every tap target is at least 44 px, single-line text stays on one line, a bar and a spinner look the same everywhere, nothing is said twice, no font is under 12 px, the section order is fixed, and the header and action bar stay small and in view. Each scenario runs on seven screens (320 to 1280 wide, landscape included), in light and dark, at 150% zoom, and with short, long, unbroken and CJK names and tiny and huge sizes.
+
+```bash
+cd maintenanceui/layout && npm ci && npx playwright install chromium   # once
+npm run verify                  # quick matrix, about a minute
+npm run verify:full             # the whole product, several minutes
+LAYOUT_ONLY=batch-replacing npm run verify
+node inspect.mjs <scenario> [screen] [shot.png]   # one cell, with a picture
+```
+
+`out/report.md` lists each distinct finding with an example cell and `out/index.html` shows the pictures; `LAYOUT_BROWSER=chrome` uses the installed Chrome. The fixtures are synthetic and `out/` is not committed. A new job state or button gets a scenario in `fixtures.mjs` before it ships.
+
 The [adversarial review](maintenance-ui/ADVERSARIAL_REVIEW.md) records the latest fixes, validation and remaining external acceptance checks. Deployment is cancelled.
 
 ## Design reference
@@ -131,4 +145,4 @@ Settings submission uses only fields accepted by the batch-settings API; the obs
 
 Workflow filters use Finished for all terminal outcomes; Failed includes failed batch items even when their coordinator completed, and excludes deliberate candidate rejection. Batch savings exclude children explicitly recorded as previous attempts, including legacy child keys. Profile review identifies optimization-enabled profiles from the removed sample search; new jobs refuse them.
 
-- **Job details polish.** Each file of a batch is one line: the name (a link that opens the file), how much smaller its candidate is (*−1.9 GB*), its state, then one action (the next step, such as *Replace file* or *Encode again*, outlined in green) and a *⋯* menu for the rest (*Change goal*, *Show in Files*). On a phone the line wraps: name and state, then the saving, then the actions. Under the line go only the things that differ per file: what it is doing, why it stopped or was skipped, the tracks kept, and the goal of a file that still needs a look. A batch row that has finished with a single outcome shows no bar. *Where the time went* (the per-phase costs) is only shown for a single file, because a batch keeps nothing but its own bookkeeping there. The *Path* section names the worker that ran the job.
+- **Job details.** The detail is one dialog with one anatomy, whatever the job and state: a sticky *header* (title, copy path, close), a *status* block (one chip, one progress headline with its bar, one step line, the counts and facts, each said once), the *files* of a batch, the collapsed *details* (plan, steps, costs, path, log) and a sticky *action bar* with at most two buttons and a *More* menu. At 640 px and below it is a full-screen sheet. A batch file is a single collapsed line: name, state and saving; opening it shows what it is doing, why it stopped, the tracks kept and its actions, with one primary action outlined in green. A state change redraws the same blocks in place; it never swaps one kind of detail for another, and an approved replacement closes its review and the job keeps showing its progress. *Where the time went* is only shown for a single file. The *Path* section names the worker that ran the job.

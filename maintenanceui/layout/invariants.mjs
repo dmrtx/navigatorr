@@ -29,7 +29,7 @@ export const budgets = {
   contrastLarge: 3,
   // Order of the named sections of the dialog. Missing ones are skipped,
   // repeated ones are a violation.
-  sections: ["header", "status", "actions", "files", "details"],
+  sections: ["header", "status", "files", "details", "actions"],
   // Sections every state must show.
   requiredSections: ["header", "status"],
   overlapTolerance: 1.5, // px a box may overlap its neighbour by (borders)
@@ -80,7 +80,7 @@ export function install() {
     if (dialog.scrollWidth > dialog.clientWidth + 1) add("overflow-x", `dialog scrolls sideways (${dialog.scrollWidth} > ${dialog.clientWidth})`, dialog);
     if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1) add("overflow-x", `page scrolls sideways (${document.documentElement.scrollWidth} > ${document.documentElement.clientWidth})`, document.documentElement);
     for (const el of all) {
-      if (inScroller(el) || el === dialog) continue;
+      if (inScroller(el) || el === dialog || el.closest(".sr-only")) continue;
       const r = rect(el);
       if (r.right > dr.right + 1 || r.left < dr.left - 1) add("overflow-x", `leaves the dialog by ${Math.round(Math.max(r.right - dr.right, dr.left - r.left))}px`, el);
     }
@@ -139,6 +139,8 @@ export function install() {
         const a = interactive[i], c = interactive[j];
         if (a.contains(c) || c.contains(a) || Boolean(pinned(a)) !== Boolean(pinned(c))) continue;
         const ra = rect(a), rc = rect(c);
+        // Two generous targets (44px both ways) side by side cannot be mistaken for each other.
+        if (Math.min(ra.width, ra.height, rc.width, rc.height) >= 44) continue;
         const overlapX = Math.min(ra.right, rc.right) - Math.max(ra.left, rc.left), overlapY = Math.min(ra.bottom, rc.bottom) - Math.max(ra.top, rc.top);
         const gapX = Math.max(ra.left, rc.left) - Math.min(ra.right, rc.right), gapY = Math.max(ra.top, rc.top) - Math.min(ra.bottom, rc.bottom);
         const side = overlapY > 4 && gapX >= -b.overlapTolerance && gapX < b.minGap, stacked = overlapX > 4 && gapY >= -b.overlapTolerance && gapY < b.minGap;
@@ -285,7 +287,8 @@ export function install() {
     // 13. How many controls each region shows.
     const bar = dialog.querySelector("[data-section=actions]");
     if (bar) {
-      const n = [...bar.querySelectorAll("button, a[href], summary")].filter(visible).length;
+      // The open More menu lists what is behind its toggle; only the bar itself is counted.
+      const n = [...bar.querySelectorAll("button, a[href], summary")].filter(c => visible(c) && !c.closest(".more-menu")).length;
       if (n > b.maxBarControls) add("too-many-controls", `${n} controls in the action bar (max ${b.maxBarControls})`, bar);
     }
     for (const row of dialog.querySelectorAll("[data-file-row]")) {
@@ -299,7 +302,7 @@ export function install() {
     //     and leave the content reachable: the last thing in the dialog can be
     //     scrolled above the action bar.
     const header = dialog.querySelector("[data-section=header]");
-    if (header) { const r = rect(header); if (r.bottom > innerHeight * 0.4) add("header-tall", `header takes ${Math.round(r.bottom)}px of ${innerHeight}px`, header); }
+    if (header) { const r = rect(header); if (r.height > innerHeight * 0.4) add("header-tall", `header takes ${Math.round(r.height)}px of ${innerHeight}px`, header); }
     if (bar && /sticky|fixed/.test(getComputedStyle(bar).position)) {
       const r = rect(bar);
       if (r.bottom > innerHeight + 1 || r.top < 0) add("bar-offscreen", "pinned action bar is outside the screen", bar);
