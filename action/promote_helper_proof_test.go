@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/jakenesler/navigatorr/internal/nashelper"
 )
+
+var timeFields = regexp.MustCompile(`"(mtime|ctime)_ns":"[0-9]*"`)
 
 var digestField = regexp.MustCompile(`"digest":"[^"]*"`)
 
@@ -40,6 +43,9 @@ type proofHelper struct {
 	// hashedBodies keeps the request body of every hash.
 	hashedMu     sync.Mutex
 	hashedBodies []string
+	// delayed makes that many identity answers about a probe file report times
+	// that differ from the last, as Samba's delayed write times do.
+	delayed atomic.Int64
 	// digest, when set, replaces the digest every sample answers with.
 	digest atomic.Pointer[string]
 }
@@ -91,6 +97,11 @@ func attachProofHelper(t *testing.T, h *promotionHarness, complete bool) *proofH
 		out := rec.Body.Bytes()
 		// The test filesystem's own answer depends on the OS (Linux reports a
 		// complete identity on ext4), so pin it either way.
+		if r.URL.Path == "/v1/identity" && strings.Contains(string(body), ".helper-probe-") {
+			if n := ph.delayed.Add(-1); n >= 0 {
+				out = timeFields.ReplaceAll(out, []byte(`"${1}_ns":"9`+strconv.FormatInt(n, 10)+`"`))
+			}
+		}
 		if d := ph.digest.Load(); d != nil && r.URL.Path == "/v1/sample" {
 			out = digestField.ReplaceAll(out, []byte(`"digest":"`+*d+`"`))
 		}
@@ -127,6 +138,7 @@ func failMountProbe(h *promotionHarness) {
 }
 
 func resetHelperProbes() {
+	helperProbeQuiet, helperProbePoll = 40*time.Millisecond, 5*time.Millisecond
 	promotionHelperProbesMu.Lock()
 	promotionHelperProbes = map[string]helperProbeVerdict{}
 	promotionHelperProbesMu.Unlock()

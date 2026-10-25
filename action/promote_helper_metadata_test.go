@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 )
 
 // metadataPlanned is a promotion by metadata that plan has accepted and that
@@ -313,5 +315,55 @@ func TestMetadataPromotionReadsATouchedOriginalInFull(t *testing.T) {
 	}
 	if _, err := h.engine.promotionVerifyOriginalByHelper(context.Background(), p); err != nil || ph.hashed(filepath.Base(p.OriginalPath)) == 0 {
 		t.Fatalf("touched original: err %v", err)
+	}
+}
+
+// Samba applies a written file's times late. A probe that read the file
+// before they settled used to see the rename "change" them and condemned the
+// directory for the rest of the process.
+func TestHelperProbeWaitsForTheProbeFileTimesToSettle(t *testing.T) {
+	resetHelperProbes()
+	h := newPromotionHarness(t)
+	ph := attachProofHelper(t, h, true)
+	ph.delayed.Store(4)
+	dir := filepath.Join(h.root, "recovery")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original, err := h.engine.helperIdentity(context.Background(), h.original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Complete = true
+	// helperIdentity of the real original is not shifted (not a probe file).
+	if err := h.engine.promotionProbeHelper(context.Background(), dir, original); err != nil {
+		t.Fatalf("probe condemned a directory over delayed times: %v", err)
+	}
+}
+
+// Times that never settle are not evidence about the filesystem: the probe
+// says nothing, and is asked again next time.
+func TestHelperProbeThatNeverSettlesIsNotCached(t *testing.T) {
+	resetHelperProbes()
+	helperProbeQuiet = time.Hour
+	t.Cleanup(func() { helperProbeQuiet = 40 * time.Millisecond })
+	h := newPromotionHarness(t)
+	attachProofHelper(t, h, true)
+	dir := filepath.Join(h.root, "recovery")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := h.engine.promotionProbeHelper(ctx, dir, nashelper.Identity{Complete: true})
+	var failure *promotionProbeFailure
+	if err == nil || (errors.As(err, &failure) && failure.Definitive) {
+		t.Fatalf("probe: %v", err)
+	}
+	promotionHelperProbesMu.Lock()
+	cached := len(promotionHelperProbes)
+	promotionHelperProbesMu.Unlock()
+	if cached != 0 {
+		t.Fatal("an unsettled probe was cached")
 	}
 }

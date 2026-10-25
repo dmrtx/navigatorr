@@ -213,6 +213,45 @@ func (e *Engine) helperIdentity(ctx context.Context, path string) (nashelper.Ide
 	return res.Identity, nil
 }
 
+// helperProbeQuiet is how long a probe file's identity must stay unchanged before
+// it counts as settled; helperProbePoll is how often it is read.
+var (
+	helperProbeQuiet = 3 * time.Second
+	helperProbePoll  = 200 * time.Millisecond
+)
+
+const helperProbeSettleLimit = 15 * time.Second
+
+// helperIdentityQuiet is helperIdentity once the file's identity has stopped
+// changing for helperProbeQuiet. A file whose times keep moving is not settled
+// and says nothing yet about the filesystem.
+func (e *Engine) helperIdentityQuiet(ctx context.Context, path string) (nashelper.Identity, error) {
+	cur, err := e.helperIdentity(ctx, path)
+	if err != nil {
+		return nashelper.Identity{}, err
+	}
+	start := time.Now()
+	stableSince := start
+	for time.Since(stableSince) < helperProbeQuiet {
+		if time.Since(start) > helperProbeSettleLimit {
+			return nashelper.Identity{}, errors.New("the probe file's times kept changing after it was written")
+		}
+		select {
+		case <-ctx.Done():
+			return nashelper.Identity{}, ctx.Err()
+		case <-time.After(helperProbePoll):
+		}
+		next, err := e.helperIdentity(ctx, path)
+		if err != nil {
+			return nashelper.Identity{}, err
+		}
+		if next != cur {
+			cur, stableSince = next, time.Now()
+		}
+	}
+	return cur, nil
+}
+
 func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelper.Identity, error) {
 	fs := promotionFilesystemName(dir)
 	fail := func(step, detail string, err error, definitive bool) error {
@@ -237,7 +276,10 @@ func (e *Engine) probePromotionHelper(ctx context.Context, dir string) (nashelpe
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepCreate, "", err, false)
 	}
-	created, err := e.helperIdentity(ctx, from)
+	// The file was just written over the mount. Samba applies a write's
+	// timestamps up to a couple of seconds after the handle closes, which is not
+	// a rename changing anything: wait until they stop moving.
+	created, err := e.helperIdentityQuiet(ctx, from)
 	if err != nil {
 		return nashelper.Identity{}, fail(probeStepStat, "", err, false)
 	}
