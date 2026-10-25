@@ -6279,6 +6279,25 @@ test("the single-file review uses the same card, the total it frees and a Keep o
   assert.equal(h.elements.get("reject-file-review").hidden, false);
 });
 
+test("the review's buttons stay off while the plan replaces the checking text, so a tap aimed at Replace file cannot land on Keep original", async () => {
+  const h = harness();
+  h.context.current = { id: "replace", status: "waiting_decision", waiting_options: [{ decision: "approve" }, { decision: "reject" }], replacement_facts: sampleFacts(4e9, 2.4e9), promotion: { original_path: "/media/Sample Show S01E01.mkv", candidate_path: "/media/.candidates/Sample Show S01E01.mkv", original_sha256: "o", candidate_sha256: "c", plan_digest: "sha256:plan" } };
+  h.run("api = async () => ({jobs:[current]});");
+  h.run('state.fileApproval = {id:"replace", digest:"", original:"", candidate:"", pending:true}; showFileReviewPending("Checking the converted file.");');
+  const reject = h.elements.get("reject-file-review");
+  const approve = h.elements.get("approve-file-review");
+  assert.equal(reject.hidden, false, "Keep original keeps its place while the plan is checked");
+  assert.equal(reject.disabled && approve.disabled, true);
+  const timers = [];
+  h.context.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return 1; };
+  h.run("serverReachable = true; showFileReview(current, state.fileApproval)");
+  assert.equal(reject.disabled && approve.disabled, true, "both stay off right after the plan appears");
+  assert.equal(timers.length, 1);
+  assert.ok(timers[0].ms >= 500);
+  timers[0].fn();
+  assert.ok(!reject.disabled && !approve.disabled, "and wake once the layout has settled");
+});
+
 // Languages to keep: the Settings editor, the goal form's track picker, and the
 // track report in the job details.
 const plain = (value) => JSON.parse(JSON.stringify(value ?? null));
