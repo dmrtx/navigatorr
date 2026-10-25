@@ -45,12 +45,24 @@ var errPromotionOriginalChanged = errors.New("integrity violation: the original 
 
 // promotionOriginalStatMatches reports whether the original is the file the
 // transcode inspected, by the stat plan recorded.
-func (e *Engine) promotionOriginalStatMatches(p *promotionState) error {
+func (e *Engine) promotionOriginalStatMatches(ctx context.Context, p *promotionState) error {
 	want, err := time.Parse(time.RFC3339Nano, p.OriginalStatMod)
 	if err != nil {
 		return fmt.Errorf("promotion original stat is unreadable: %w", err)
 	}
-	info, err := e.promotionStatIdentity(p.OriginalPath)
+	var info os.FileInfo
+	for attempt := 0; attempt < promotionStableHashAttempts; attempt++ {
+		if info, err = e.promotionStatIdentity(p.OriginalPath); !errors.Is(err, os.ErrInvalid) {
+			break
+		}
+		// A file whose identity moved as it was opened, which a network mount
+		// reports transiently, as promotionHashStable retries.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 20 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -66,7 +78,7 @@ func (e *Engine) promotionOriginalStatMatches(p *promotionState) error {
 // and is still the original when its size and sampled ranges reproduce the
 // recovery copy's, which is what recovering from it needs.
 func (e *Engine) promotionOriginalProved(ctx context.Context, p *promotionState) error {
-	err := e.promotionOriginalStatMatches(p)
+	err := e.promotionOriginalStatMatches(ctx, p)
 	if !errors.Is(err, errPromotionOriginalChanged) || p.RecoverySample == "" {
 		return err
 	}
@@ -187,6 +199,26 @@ func (e *Engine) promotionSampleDigestStable(ctx context.Context, path string, s
 	return "", lastErr
 }
 
+// verifyPromotionReusedRecovery is verifyPromotionRecovery for a file an
+// earlier attempt left. Until a copy of this promotion was proved against the
+// original (RecoverySample), nothing says its bytes were ever complete, so it
+// is read in full against the pinned digest, once, and then sampled. Nothing
+// reads the original.
+func (e *Engine) verifyPromotionReusedRecovery(ctx context.Context, p *promotionState, path string) error {
+	if p.originalByMetadata() && p.RecoverySample == "" {
+		if err := e.verifyPromotionHashStable(ctx, path, p.OriginalSHA); err != nil {
+			return err
+		}
+		sum, err := e.promotionSampleDigestStable(ctx, path, p.OriginalBytes)
+		if err != nil {
+			return err
+		}
+		p.RecoverySample = sum
+		return nil
+	}
+	return e.verifyPromotionRecovery(ctx, p, path)
+}
+
 // verifyPromotionRecovery proves path holds the original's bytes: a full read
 // against the original's digest, or, for a promotion that does not re-read the
 // original, its size and sampled ranges against the digest of the same ranges
@@ -199,7 +231,7 @@ func (e *Engine) verifyPromotionRecovery(ctx context.Context, p *promotionState,
 	}
 	want := p.RecoverySample
 	if want == "" {
-		if err := e.promotionOriginalStatMatches(p); err != nil {
+		if err := e.promotionOriginalStatMatches(ctx, p); err != nil {
 			return err
 		}
 		var err error

@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
@@ -310,5 +312,95 @@ func TestPromotionByMetadataRetryRefusesARestoredOriginalThatDiffers(t *testing.
 	}
 	if h.imports != 1 {
 		t.Fatalf("imports=%d: the candidate was imported again over a different original", h.imports)
+	}
+}
+
+func TestPromotionByMetadataStreamedCopyIsProvedAgainstThePinnedDigest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pinned  string
+		wantErr bool
+	}{{"matches", "", false}, {"differs", strings.Repeat("ab", 32), true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newPromotionHarness(t)
+			markSourceByMetadata(t, h)
+			if tc.pinned != "" {
+				inst, _ := h.st.GetActionInstance("source-transcode")
+				state := map[string]any{}
+				if err := json.Unmarshal([]byte(inst.StateJSON), &state); err != nil {
+					t.Fatal(err)
+				}
+				state["original_sha256"] = tc.pinned
+				updated := *inst
+				updated.StateJSON = toJSON(state)
+				if err := h.st.UpdateActionInstance(updated); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.engine.promotionCloneHook = func(*os.File, *os.File) error { return errPromotionCopyUnsupported }
+			h.engine.promotionCopyRangeHook = func(*os.File, *os.File, int) (int, error) { return 0, errPromotionCopyUnsupported }
+			reads := countReads(h.engine)
+			ec := approvedPreserve(t, h)
+			step, err := h.engine.stepPromotePreserve(context.Background(), ec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, _ := loadPromotion(ec)
+			if tc.wantErr {
+				if step.Status != StepFailed || !strings.Contains(step.Error, "pinned when it was transcoded") {
+					t.Fatalf("a streamed original that is not the pinned one was accepted: %+v", step)
+				}
+				return
+			}
+			if step.Status != StepCompleted || p.RecoveryCopy == nil || p.RecoveryCopy.Method != promotionCopyStream {
+				t.Fatalf("preserve: %+v copy=%+v", step, p.RecoveryCopy)
+			}
+			// The one read of the original is the copy itself.
+			if n := reads.of(h.original); n != p.OriginalBytes {
+				t.Fatalf("original read %d bytes, want exactly the copy's %d", n, p.OriginalBytes)
+			}
+		})
+	}
+}
+
+func TestPromotionByMetadataReadsALeftoverRecoveryFileInFull(t *testing.T) {
+	e, path, _ := fingerprintEngine(t)
+	size := int64(promotionSampleChunk * 12)
+	content := make([]byte, size)
+	for i := range content {
+		content[i] = byte(i * 31)
+	}
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &promotionState{OriginalPath: path, OriginalBytes: size, OriginalSHA: hex.EncodeToString(sum[:]), OriginalStatMod: fi.ModTime().UTC().Format(time.RFC3339Nano)}
+	// Zeroed between the sampled ranges, as an unsynced copy can be left.
+	damaged := append([]byte(nil), content...)
+	offsets := promotionSampleOffsets(size)
+	for i := offsets[1] + promotionSampleChunk; i < offsets[2]; i++ {
+		damaged[i] = 0
+	}
+	leftover := path + ".leftover"
+	if err := os.WriteFile(leftover, damaged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := e.verifyPromotionReusedRecovery(ctx, p, leftover); err == nil || !strings.Contains(err.Error(), "integrity violation") {
+		t.Fatalf("a leftover damaged between the samples was reused: %v", err)
+	}
+	if p.RecoverySample != "" {
+		t.Fatal("a rejected leftover recorded a sample")
+	}
+	// The same bytes complete are accepted, and then only sampled.
+	if err := os.WriteFile(leftover, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.verifyPromotionReusedRecovery(ctx, p, leftover); err != nil || p.RecoverySample == "" {
+		t.Fatalf("a complete leftover was refused: %v", err)
 	}
 }

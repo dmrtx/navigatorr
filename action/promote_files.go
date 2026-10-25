@@ -651,7 +651,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 		return err
 	}
 	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
+		if err := e.verifyPromotionReusedRecovery(ctx, p, p.BackupPath); err != nil {
 			return err
 		}
 		if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
@@ -675,7 +675,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 			if info.Size() == p.OriginalBytes && p.OriginalBytes > 0 {
 				var reusable bool
 				if p.originalByMetadata() {
-					reusable = e.verifyPromotionRecovery(ctx, p, partial) == nil
+					reusable = e.verifyPromotionReusedRecovery(ctx, p, partial) == nil
 				} else {
 					hash, n, hashErr := e.promotionHashStable(ctx, partial)
 					reusable = hashErr == nil && hash == p.OriginalSHA && n == p.OriginalBytes
@@ -701,6 +701,9 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 			return err
 		}
 		copied.DurationMs = time.Since(started).Milliseconds()
+		if p.originalByMetadata() && copied.streamSHA != "" && copied.streamSHA != p.OriginalSHA {
+			return fmt.Errorf("integrity violation: the original's bytes do not match the digest pinned when it was transcoded")
+		}
 		p.RecoveryCopy = &copied
 		log.Printf("promotion %s: recovery copy made by %s in %dms (clone: %s)", ec.InstanceID, copied.Method, copied.DurationMs, promotionOr(copied.CloneError, "used"))
 		// promotionCopyToPartial returns only after the destination writer is
