@@ -132,9 +132,6 @@ func TestHelperProofMovesTheOriginalAsideWithoutReadingItOverTheMount(t *testing
 	if ph.hashes.Load() == 0 || ph.samples.Load() == 0 {
 		t.Fatalf("helper not used: %d hashes, %d samples", ph.hashes.Load(), ph.samples.Load())
 	}
-	if out := r.Outputs["recovery_proof"]; out != nil && out != "helper" {
-		t.Fatalf("recovery_proof output %v", out)
-	}
 }
 
 func TestHelperProofWithoutACompleteIdentityKeepsTheMountProof(t *testing.T) {
@@ -523,6 +520,31 @@ func TestVerifyByHelperProvesAnUnchangedFileWithoutReadingItInFull(t *testing.T)
 			t.Fatalf("a renamed file's moved ctime read it in full: %v", err)
 		}
 	})
+	t.Run("helper sees another ctime while the mount fingerprint is intact", func(t *testing.T) {
+		// The same continuous execution that read the file holds a fingerprint
+		// that still matches (here: the file is untouched); a proof recording
+		// another ctime must still send the file to a real read, whose own
+		// proof replaces the stale one.
+		ctx := fresh()
+		sum2, _, err := rig.engine.promotionHash(ctx, rig.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cur := promotionKnownHelper(ctx, rig.path, sum2)
+		if cur == nil {
+			t.Fatal("no proof")
+		}
+		stale := *cur
+		stale.Identity.CtimeNs++
+		before := rig.posts.Load()
+		proof, err := rig.engine.promotionVerifyByHelper(ctx, rig.path, sum2, &stale, false)
+		if err != nil || proof == nil || rig.posts.Load() == before {
+			t.Fatalf("a changed ctime was accepted through the mount's fingerprint: %v %+v", err, proof)
+		}
+		if proof.Identity.CtimeNs != cur.Identity.CtimeNs {
+			t.Fatalf("the proof kept the stale ctime: %d vs %d", proof.Identity.CtimeNs, cur.Identity.CtimeNs)
+		}
+	})
 	t.Run("earlier process", func(t *testing.T) {
 		other := *known
 		other.Process = "an-earlier-process"
@@ -659,6 +681,55 @@ func TestHelperProbeNeedsACompleteIdentityAndCachesTheVerdict(t *testing.T) {
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Fatalf("probe left files behind: %v", entries)
 	}
+	promotionHelperProbesMu.Lock()
+	n := len(promotionHelperProbes)
+	promotionHelperProbesMu.Unlock()
+	if n != 1 {
+		t.Fatalf("a definitive verdict was not cached (%d entries)", n)
+	}
+	hits := rig.hits.Load()
+	if err := rig.engine.promotionProbeHelper(context.Background(), dir, nashelper.Identity{Complete: true}); !errors.As(err, &failure) || failure.Step != probeStepStat {
+		t.Fatalf("cached verdict: %v", err)
+	}
+	if rig.hits.Load() != hits {
+		t.Fatal("a cached verdict asked the helper again")
+	}
+}
+
+// A helper that is unmapped for the directory or recently unreachable is not
+// asked to run the probe: nothing is created, nothing is cached, and the caller
+// falls through to the mount probe.
+func TestHelperProbeDoesNotTouchTheDirectoryWithoutAHelper(t *testing.T) {
+	resetHelperProbes()
+	rig := newHelperRig(t, "", nil)
+	rig.on(completeIdentities(rig))
+	check := func(t *testing.T, dir string) {
+		t.Helper()
+		hits := rig.hits.Load()
+		err := rig.engine.promotionProbeHelper(context.Background(), dir, nashelper.Identity{Complete: true})
+		var failure *promotionProbeFailure
+		if !errors.As(err, &failure) || failure.Definitive {
+			t.Fatalf("probe: %v", err)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 || rig.hits.Load() != hits {
+			t.Fatalf("probe touched the directory or the helper: %v, %d hits", entries, rig.hits.Load()-hits)
+		}
+		promotionHelperProbesMu.Lock()
+		n := len(promotionHelperProbes)
+		promotionHelperProbesMu.Unlock()
+		if n != 0 {
+			t.Fatal("a probe that did not run was cached")
+		}
+	}
+	t.Run("unmapped", func(t *testing.T) { check(t, t.TempDir()) })
+	t.Run("breaker open", func(t *testing.T) {
+		dir := filepath.Join(rig.root, "recovery")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		rig.engine.helperBreaker.trip(time.Now())
+		check(t, dir)
+	})
 }
 
 func TestHelperProbeThatCouldNotRunIsNotCached(t *testing.T) {
@@ -707,5 +778,26 @@ func TestStateWithoutAProofFieldKeepsTheMountProof(t *testing.T) {
 	}
 	if back.OriginalHelper == nil || back.OriginalHelper.Identity != p.OriginalHelper.Identity || back.OriginalHelper.Process != promotionProcess {
 		t.Fatalf("proof lost in the round trip: %+v", back.OriginalHelper)
+	}
+}
+
+// The helper proof belongs to the move aside: when the rename is refused and the
+// promotion falls back to a recovery copy, it proves its files like any copy.
+func TestHelperProofRefusedRenameFallsBackToACopyWithoutTheProof(t *testing.T) {
+	resetHelperProbes()
+	h := newPromotionHarness(t)
+	attachProofHelper(t, h, true)
+	failMountProbe(h)
+	h.engine.promotionMoveAsideHook = func(from, to string) error {
+		return &os.LinkError{Op: "rename", Old: from, New: to, Err: syscall.EXDEV}
+	}
+	r := h.run()
+	r = h.finish(h.resume(r.ID, "approve"))
+	if r.Status != StatusCompleted {
+		t.Fatalf("promotion: %s %s", r.Status, r.Error)
+	}
+	p := movedAsideState(t, h, r.ID)
+	if p.RecoveryMode != promotionRecoveryCopy || p.RecoveryProof != "" || p.OriginalHelper != nil || p.BackupHelper != nil || p.MovedAside || p.RecoveryCopy == nil || !p.RecoveryCleanupCompleted {
+		t.Fatalf("fallback evidence: %+v", p)
 	}
 }

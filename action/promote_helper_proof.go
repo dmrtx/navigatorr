@@ -105,22 +105,38 @@ func (e *Engine) promotionVerifyByHelper(ctx context.Context, path, sha string, 
 	if k, ok := known.fromThisProcess(); ok {
 		cur, err := e.promotionHelperSample(ctx, path)
 		switch {
-		case err == nil && cur.Digest == k.Sample && cur.Identity.Complete && sameHelperFile(cur.Identity, k.Identity) && (renamed || cur.Identity.CtimeNs == k.Identity.CtimeNs):
+		case err == nil && cur.Identity.Complete && sameHelperFile(cur.Identity, k.Identity) && cur.Digest == k.Sample && (renamed || cur.Identity.CtimeNs == k.Identity.CtimeNs):
 			proof := helperProof{Identity: cur.Identity, Sample: cur.Digest}.persisted()
 			promotionRecordRead(ctx, path, "nas_helper_identity", "", true)
 			return proof, nil
-		case err == nil && cur.Identity.Complete && sameHelperFile(cur.Identity, k.Identity):
-			// Same inode, but the change time moved without the file being renamed:
-			// something touched it. Read it to know whether the bytes changed.
-			promotionRecordRead(ctx, path, "nas_helper_identity", "identity_moved:ctime", true)
+		case err == nil && cur.Identity.Complete && sameHelperFile(cur.Identity, k.Identity) && cur.Digest != k.Sample:
+			promotionRecordRead(ctx, path, "nas_helper_identity", "sample_changed", true)
 		case err == nil:
-			promotionRecordRead(ctx, path, "nas_helper_identity", "identity_moved", true)
+			// The change time moved without a rename, or the inode is another:
+			// something touched the file. Read it to know whether the bytes changed.
+			promotionRecordRead(ctx, path, "nas_helper_identity", "identity_moved:"+helperIdentityDiff(k.Identity, cur.Identity), true)
 		case ctx.Err() != nil:
 			return nil, ctx.Err()
 		}
 	}
-	if err := e.verifyPromotionHashStable(ctx, path, sha); err != nil {
+	return e.promotionReadInFull(ctx, path, sha)
+}
+
+// promotionReadInFull reads path in full and returns the helper proof of that
+// read (nil when it did not go through the helper). Unlike
+// verifyPromotionHashStable it never trusts this execution's cached fingerprint:
+// the helper just said the file moved, and a mount whose attribute cache still
+// shows the old fingerprint must not turn that into an unread acceptance.
+func (e *Engine) promotionReadInFull(ctx context.Context, path, sha string) (*helperProof, error) {
+	if v := promotionVerified(ctx); v != nil {
+		delete(v.files, path)
+	}
+	actual, _, err := e.promotionHashStable(ctx, path)
+	if err != nil {
 		return nil, err
+	}
+	if actual != sha {
+		return nil, fmt.Errorf("integrity violation: SHA-256 changed for %s", path)
 	}
 	return promotionKnownHelper(ctx, path, sha), nil
 }
@@ -157,6 +173,12 @@ func (e *Engine) promotionProbeHelper(ctx context.Context, dir string, original 
 	verdict, ok := promotionHelperProbes[key]
 	promotionHelperProbesMu.Unlock()
 	if !ok {
+		if _, mapped := e.deps.NASHelper.Remote(dir); !mapped {
+			return &promotionProbeFailure{Step: probeStepCreate, Detail: "the NAS helper does not map the recovery directory"}
+		}
+		if e.helperBreaker.open(time.Now()) {
+			return &promotionProbeFailure{Step: probeStepCreate, Detail: "the NAS helper was recently unreachable"}
+		}
 		fs, err := e.probePromotionHelper(ctx, dir)
 		verdict = helperProbeVerdict{err: err, fs: fs}
 		var failure *promotionProbeFailure

@@ -95,7 +95,11 @@ func (e *Engine) promotionVerifyByIdentity(ctx context.Context, path, sha string
 		}
 		if err == nil && fp == k {
 			if v := promotionVerified(ctx); v != nil {
-				v.files[path] = promotionVerifiedFile{sha: sha, fp: fp, fpValid: true, helper: v.files[path].helper}
+				entry := promotionVerifiedFile{sha: sha, fp: fp, fpValid: true}
+				if old, ok := v.files[path]; ok && old.sha == sha {
+					entry.helper = old.helper
+				}
+				v.files[path] = entry
 				v.record(path, promotionCheckIdentity, sha, fp)
 			}
 			return fp.persisted(), nil
@@ -209,7 +213,11 @@ func (e *Engine) promotionMoveAside(ctx context.Context, ec *ExecutionContext, p
 	case originalErr != nil && backupErr == nil && p.MoveAsideStartedAt != "":
 		// The rename finished before its checkpoint; only a restart gets
 		// here, so read the moved file in full.
-		if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+		if p.helperProof() {
+			if _, err := e.promotionReadInFull(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+				return err
+			}
+		} else if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
 			return err
 		}
 		readInFull = true
@@ -263,10 +271,11 @@ func (e *Engine) promotionConfirmMovedByHelper(ctx context.Context, p *promotion
 			return nil, ctx.Err()
 		}
 	}
-	if err := e.verifyPromotionHashStable(ctx, p.BackupPath, p.OriginalSHA); err != nil {
+	proof, err := e.promotionReadInFull(ctx, p.BackupPath, p.OriginalSHA)
+	if err != nil {
 		return nil, fmt.Errorf("recovery location does not hold the verified original (%v); recovery retained", err)
 	}
-	return promotionKnownHelper(ctx, p.BackupPath, p.OriginalSHA), nil
+	return proof, nil
 }
 
 func (e *Engine) promotionRenameAside(from, to string) error {
@@ -286,6 +295,9 @@ func (e *Engine) promotionPreserveForRemoval(ctx context.Context, ec *ExecutionC
 		return err
 	}
 	p.RecoveryMode, p.RecoveryModeReason, p.MoveAsideStartedAt, p.MoveAsideRefused = promotionRecoveryCopy, recoveryReasonRenameRefused, "", err.Error()
+	// A copy-mode promotion proves its files like any other: the helper proof
+	// belonged to the move aside that was refused.
+	p.RecoveryProof, p.OriginalHelper, p.BackupHelper = "", nil, nil
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
