@@ -870,3 +870,39 @@ func TestHTTPExecutor_SlotsOnAnOlderWorker(t *testing.T) {
 		t.Fatalf("a 500 is an outage, not an old worker: %v", err)
 	}
 }
+
+func TestSetHoldAndOldWorker(t *testing.T) {
+	var held bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/hold" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodPut {
+			var in struct{ Hold bool }
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			held = in.Hold
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"hold": held, "active": 2})
+	}))
+	defer srv.Close()
+	e, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, Token: "tok", RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.SetHold(context.Background(), true); err != nil || !got.Hold || !got.ActiveKnown || got.Active != 2 {
+		t.Fatalf("set: %v %v", got, err)
+	}
+	if got, err := e.Hold(context.Background()); err != nil || !got.Hold {
+		t.Fatalf("get: %v %v", got, err)
+	}
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	oldExec, err := NewHTTPExecutor(HTTPConfig{BaseURL: old.URL, Token: "tok", RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldExec.SetHold(context.Background(), true); !errors.Is(err, ErrHoldUnsupported) {
+		t.Fatalf("an old worker must read as unsupported: %v", err)
+	}
+}

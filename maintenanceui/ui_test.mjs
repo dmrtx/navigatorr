@@ -7211,6 +7211,25 @@ test("a draining worker shows its progress, lists open jobs and offers Resume", 
   assert.deepEqual(buttonLabels(rows[1]), ["Try again", "View file", "Show in Files"]);
 });
 
+test("the pause banner tells files encoding from files waiting for a turn on a worker", () => {
+  const h = harness();
+  h.context.info = drainInfo({
+    running: 4, waiting: 2, queued: 5,
+    workers: [{ name: "alpha", reachable: true, running: 4, waiting: 2, ready_for_deploy: false, reason: "4 running" }],
+    jobs: [
+      { action_id: "t-1", worker: "alpha", file: "Encoding.mkv", state: "running" },
+      { action_id: "t-2", worker: "alpha", file: "Lined.mkv", state: "running", waiting: true },
+    ],
+  });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 2 files still encoding, 2 waiting for a turn on a worker");
+  const labels = h.elements.get("worker-drain-jobs").children.map((row) => flatten(row).filter((e) => e.className === "badge").map((e) => e.textContent).join());
+  assert.deepEqual(labels, ["Encoding · alpha", "Waiting for a turn · alpha"]);
+  h.context.info = drainInfo({ running: 3, waiting: 3 });
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(h.elements.get("worker-drain-status").textContent, "Pausing — 3 waiting for a turn on a worker");
+});
+
 test("worker drain reports ready for deploy only when the server says so", () => {
   const h = harness();
   h.context.info = drainInfo({ ready_for_deploy: true });
@@ -7357,6 +7376,15 @@ test("a batch shows one segmented bar with a legend of what each file is doing",
   assert.equal(h.run("batchSegments(batch)"), null);
   h.context.batch = { total: 4, completed: 4, dry_run: true };
   assert.equal(h.run("batchSegments(batch)"), null);
+});
+
+test("running files fill their segment only as far as their measured steps", () => {
+  const h = harness();
+  h.context.batch = { total: 2, running: 2 };
+  const run = h.run("batchSegments(batch, 0.57)").bar.children[0];
+  assert.match(run.style.background, /var\(--info\) 57%, var\(--info-wash\) 57%/);
+  // Without a measurement the segment stays a plain running colour.
+  assert.equal(h.run("batchSegments(batch)").bar.children[0].style.background, undefined);
 });
 
 test("a job title is a real link to the job that still opens in place on a plain click", () => {

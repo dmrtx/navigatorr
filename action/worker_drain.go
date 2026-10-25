@@ -82,6 +82,7 @@ func (e *Engine) SetWorkerDrain(ctx context.Context, enabled bool) (transcode.Dr
 	if _, err := e.deps.Store.SetWorkerDrain(enabled); err != nil {
 		return transcode.DrainStatus{}, err
 	}
+	e.syncWorkerHolds(ctx)
 	if !enabled {
 		e.WakeReconciler()
 	}
@@ -131,13 +132,32 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 		}
 		byWorker[w.Name] = &transcode.DrainWorker{Name: w.Name, Reachable: reachable}
 	}
+	// Jobs the database says are encoding, per worker: a worker that holds its
+	// queue may keep no more running jobs than these.
+	encoding := map[string]int{}
+	for _, r := range rows {
+		if classifyDrainRow(r) == transcode.DrainJobRunning && !r.WorkerQueued {
+			encoding[e.resolveWorker(r.Worker)]++
+		}
+	}
 	for _, r := range rows {
 		state := classifyDrainRow(r)
 		if state == "" {
 			continue
 		}
 		name := e.resolveWorker(r.Worker)
-		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state}
+		// A job still in its worker's queue, on a worker that confirmed it is
+		// holding that queue, will not start before Resume: it is held back
+		// like a file the server has not sent, and it does not block a deploy.
+		// The stored status can lag the worker, so the worker's own count of
+		// running jobs must not exceed the encodes the database knows of;
+		// otherwise a queued job may already have started.
+		if state == transcode.DrainJobRunning && r.WorkerQueued {
+			if active, ok := e.workerHolding(name); ok && active <= encoding[name] {
+				state = transcode.DrainJobQueued
+			}
+		}
+		job := transcode.DrainJob{ActionID: r.ID, ParentID: r.ParentID, Worker: name, State: state, Waiting: state == transcode.DrainJobRunning && r.WorkerQueued}
 		if r.Path != "" {
 			job.File, job.Path = filepath.Base(r.Path), r.Path
 		}
@@ -146,8 +166,14 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 		switch state {
 		case transcode.DrainJobRunning:
 			out.Running++
+			if job.Waiting {
+				out.Waiting++
+			}
 			if w != nil {
 				w.Running++
+				if job.Waiting {
+					w.Waiting++
+				}
 				w.InFlight = append(w.InFlight, job)
 			} else {
 				unmatched++

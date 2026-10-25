@@ -181,6 +181,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/benchmarks/", s.handleRemovedBenchmarks)
 	mux.HandleFunc("/v1/activity", s.handleActivity)
 	mux.HandleFunc("/v1/slots", s.handleSlots)
+	mux.HandleFunc("/v1/hold", s.handleHold)
 	// Auth applies first so the documented invariant holds: when a token is
 	// configured it protects ALL /v1/* including malformed/traversal paths
 	// (unauthenticated traversal -> 401). rejectTraversal still runs before
@@ -827,4 +828,46 @@ func (s *Server) handleSlots(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeHTTPJSON(w, http.StatusOK, map[string]any{"slots": s.worker.slotsStatus()})
+}
+
+// maxHTTPHoldBodyBytes bounds a hold request: one boolean.
+const maxHTTPHoldBodyBytes = 1 << 8
+
+// handleHold serves GET /v1/hold and PUT /v1/hold {"hold": bool}: while held,
+// the worker starts no queued job (see hold.go). Running jobs are untouched.
+func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusServiceUnavailable, "worker unavailable")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPHoldBodyBytes)
+		var body struct {
+			Hold *bool `json:"hold"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil || body.Hold == nil {
+			writeHTTPError(w, http.StatusBadRequest, `invalid hold: send {"hold": true|false}`)
+			return
+		}
+		if err := s.worker.SetHold(*body.Hold); err != nil {
+			log.Printf("hold not stored: %v", err)
+			writeHTTPError(w, http.StatusInternalServerError, "the worker could not store the hold")
+			return
+		}
+	default:
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET or PUT")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	reply := map[string]any{"hold": s.worker.Held()}
+	// Jobs the worker is running right now, so the server can tell a queued
+	// job that already started from one still waiting.
+	if active, err := s.worker.countActiveJobs(""); err == nil {
+		reply["active"] = active
+	}
+	writeHTTPJSON(w, http.StatusOK, reply)
 }

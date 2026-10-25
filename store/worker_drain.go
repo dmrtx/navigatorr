@@ -86,6 +86,7 @@ type DrainActionRow struct {
 	Rejected         bool // transcode_submit_rejected
 	Done             bool // transcode_done: the worker job ended
 	RecoveryRequired bool // the encode finished and only saving it failed
+	WorkerQueued     bool // transcode_status is queued: accepted by the worker, not encoding yet
 }
 
 // ListDrainActions returns the unfinished actions that run worker jobs.
@@ -101,7 +102,8 @@ func (s *Store) ListDrainActions() ([]DrainActionRow, error) {
 		COALESCE(json_extract(state_json, '$.job_id'), ''),
 		COALESCE(json_extract(state_json, '$.external_reference'), ''),
 		COALESCE(json_extract(state_json, '$.resolved_path'), json_extract(inputs_json, '$.path'), ''),
-		` + flag("transcode_submitted") + `, ` + flag("transcode_reconcile") + `, ` + flag("transcode_submit_rejected") + `, ` + flag("transcode_done") + `, ` + flag("recovery_required") + `
+		` + flag("transcode_submitted") + `, ` + flag("transcode_reconcile") + `, ` + flag("transcode_submit_rejected") + `, ` + flag("transcode_done") + `, ` + flag("recovery_required") + `,
+		COALESCE(json_extract(state_json, '$.transcode_status'), '') = 'queued'
 		FROM action_instances
 		WHERE status IN ('pending', 'running', 'waiting_external', 'waiting_decision')
 		AND action_name IN ('transcode_media', 'clean_podcast_ads')
@@ -115,7 +117,7 @@ func (s *Store) ListDrainActions() ([]DrainActionRow, error) {
 	for rows.Next() {
 		var r DrainActionRow
 		if err := rows.Scan(&r.ID, &r.ActionName, &r.Status, &r.WaitingCondition, &r.ParentID, &r.Worker, &r.JobID, &r.ExternalRef, &r.Path,
-			&r.Submitted, &r.Reconcile, &r.Rejected, &r.Done, &r.RecoveryRequired); err != nil {
+			&r.Submitted, &r.Reconcile, &r.Rejected, &r.Done, &r.RecoveryRequired, &r.WorkerQueued); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

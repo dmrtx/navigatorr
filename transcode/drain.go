@@ -13,6 +13,9 @@ type DrainStatus struct {
 	// Running counts the admitted worker jobs that are queued on a worker or
 	// encoding; a job queued on a worker still starts there when a slot frees.
 	Running int `json:"running"`
+	// Waiting is how many of Running are queued on a worker and not encoding
+	// yet.
+	Waiting int `json:"waiting,omitempty"`
 	// PublicationPending counts finished encodes whose output could not be
 	// saved. The worker keeps them as open jobs, so they block a deploy until
 	// they are saved (Try again) or cancelled.
@@ -37,6 +40,7 @@ type DrainWorker struct {
 	Name               string `json:"name"`
 	Reachable          bool   `json:"reachable"`
 	Running            int    `json:"running"`
+	Waiting            int    `json:"waiting,omitempty"`
 	PublicationPending int    `json:"publication_pending"`
 	ReadyForDeploy     bool   `json:"ready_for_deploy"`
 	Reason             string `json:"reason,omitempty"`
@@ -55,6 +59,8 @@ type DrainJob struct {
 	Path string `json:"path,omitempty"`
 	// State is "running", "publication_pending" or "queued".
 	State string `json:"state"`
+	// Waiting marks a running job that is only queued on its worker.
+	Waiting bool `json:"waiting,omitempty"`
 }
 
 // Drain job states.

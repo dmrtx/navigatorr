@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -211,6 +212,10 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 	running := submitted()
 	running["worker"] = transcode.DefaultWorkerName
 	seedActionInstance(t, st, "running", "transcode_media", StatusWaitingExternal, 4, "", map[string]any{"path": "/Volumes/media/one.mkv"}, running)
+	// Accepted by the worker but still in its queue: open, yet not encoding.
+	lined := submitted()
+	lined["worker"], lined["transcode_status"] = transcode.DefaultWorkerName, "queued"
+	seedActionInstance(t, st, "lined", "transcode_media", StatusWaitingExternal, 4, "", map[string]any{"path": "/Volumes/media/seven.mkv"}, lined)
 	pending := submitted()
 	pending["recovery_required"] = true
 	seedActionInstance(t, st, "unsaved", "transcode_media", StatusWaitingDecision, 4, "", map[string]any{"path": "/Volumes/media/two.mkv"}, pending)
@@ -238,17 +243,17 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 
 	setDrain(t, e, true)
 	got := e.WorkerDrainStatus(ctx)
-	if got.Running != 1 || got.PublicationPending != 1 || got.Queued != 1 || got.ReadyForDeploy {
+	if got.Running != 2 || got.Waiting != 1 || got.PublicationPending != 1 || got.Queued != 1 || got.ReadyForDeploy {
 		t.Fatalf("counts: %+v", got)
 	}
 	states := drainJobStates(got)
-	if states["running"] != "running" || states["unsaved"] != "publication_pending" || states["held"] != "queued" || len(states) != 3 {
+	if states["running"] != "running" || states["lined"] != "running" || states["unsaved"] != "publication_pending" || states["held"] != "queued" || len(states) != 4 {
 		t.Fatalf("jobs: %+v", got.Jobs)
 	}
 	if got.Jobs[0].ActionID != "unsaved" || got.Jobs[0].File != "ep.mkv" {
 		t.Fatalf("publication-pending jobs go first with the file name only: %+v", got.Jobs)
 	}
-	if len(got.Workers) != 1 || got.Workers[0].ReadyForDeploy || got.Workers[0].Running != 1 || got.Workers[0].PublicationPending != 1 {
+	if len(got.Workers) != 1 || got.Workers[0].ReadyForDeploy || got.Workers[0].Running != 2 || got.Workers[0].Waiting != 1 || got.Workers[0].PublicationPending != 1 {
 		t.Fatalf("workers: %+v", got.Workers)
 	}
 
@@ -260,6 +265,7 @@ func TestDrainStatusCountsJobsAndReportsReady(t *testing.T) {
 		}
 	}
 	finish("running")
+	finish("lined")
 	if got = e.WorkerDrainStatus(ctx); got.ReadyForDeploy || got.PublicationPending != 1 {
 		t.Fatalf("an unsaved encode still blocks a deploy: %+v", got)
 	}
@@ -420,5 +426,146 @@ func TestDrainReleasesAFileWaitingForAHashSlot(t *testing.T) {
 	}
 	if len(e.hashSlots) != mediaHashConcurrency {
 		t.Fatalf("the held file must not take or free a slot it never held: %d", len(e.hashSlots))
+	}
+}
+
+// holdingExecutor is a worker that can hold its own queue.
+type holdingExecutor struct {
+	*mockTranscodeExecutor
+	hold   bool
+	active int // jobs the worker says it is running
+	calls  []bool
+	err    error
+}
+
+func (h *holdingExecutor) status() httpclient.HoldStatus {
+	return httpclient.HoldStatus{Hold: h.hold, Active: h.active, ActiveKnown: true}
+}
+
+func (h *holdingExecutor) Hold(ctx context.Context) (httpclient.HoldStatus, error) {
+	if h.err != nil {
+		return httpclient.HoldStatus{}, h.err
+	}
+	return h.status(), nil
+}
+
+func (h *holdingExecutor) SetHold(ctx context.Context, hold bool) (httpclient.HoldStatus, error) {
+	h.calls = append(h.calls, hold)
+	if h.err != nil {
+		return httpclient.HoldStatus{}, h.err
+	}
+	h.hold = hold
+	return h.status(), nil
+}
+
+func seedLinedJob(t *testing.T, st *store.Store) {
+	t.Helper()
+	lined := submitStepState()
+	lined["job_id"], lined["transcode_submitted"] = "job-lined", true
+	lined["worker"], lined["transcode_status"] = transcode.DefaultWorkerName, "queued"
+	seedActionInstance(t, st, "lined", "transcode_media", StatusWaitingExternal, 4, "", map[string]any{"path": "/Volumes/media/seven.mkv"}, lined)
+}
+
+// Pause all reaches the worker's own queue: while drain is on and the worker
+// confirms its hold, a job waiting in that queue is held back like any other
+// file and no longer blocks a deploy. Resume lifts the hold.
+func TestDrainHoldsTheWorkerQueue(t *testing.T) {
+	drainSettle = 0
+	t.Cleanup(func() { drainSettle = 15 * time.Second })
+	st := setupTestStore(t)
+	w := &holdingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}}
+	e := NewEngine(EngineDeps{Store: st, Transcode: w})
+	ctx := context.Background()
+	seedLinedJob(t, st)
+
+	setDrain(t, e, true)
+	if !w.hold {
+		t.Fatalf("pausing must hold the worker's queue: calls=%v", w.calls)
+	}
+	got := e.WorkerDrainStatus(ctx)
+	if got.Running != 0 || got.Waiting != 0 || got.Queued != 1 || !got.ReadyForDeploy {
+		t.Fatalf("a job in a held worker queue is held back, not in flight: %+v", got)
+	}
+	n := len(w.calls)
+	e.syncWorkerHolds(ctx)
+	if len(w.calls) != n {
+		t.Fatalf("a hold the worker already has is not re-sent: %v", w.calls)
+	}
+
+	setDrain(t, e, false)
+	if w.hold {
+		t.Fatalf("resume must lift the hold: calls=%v", w.calls)
+	}
+}
+
+// A worker that lost its hold (restart, state directory replaced) is asked
+// again on the next check, and until it confirms its queued jobs stay in
+// flight.
+func TestDrainReSendsAHoldTheWorkerLost(t *testing.T) {
+	drainSettle = 0
+	t.Cleanup(func() { drainSettle = 15 * time.Second })
+	st := setupTestStore(t)
+	w := &holdingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}}
+	e := NewEngine(EngineDeps{Store: st, Transcode: w})
+	ctx := context.Background()
+	seedLinedJob(t, st)
+	setDrain(t, e, true)
+
+	w.hold = false // the worker restarted and forgot the hold
+	e.syncWorkerHolds(ctx)
+	if !w.hold {
+		t.Fatalf("the hold must be pushed again to a worker that lost it: calls=%v", w.calls)
+	}
+}
+
+// Resume while the worker was unreachable must still lift the hold later.
+func TestDrainLiftsAHoldKeptAfterResume(t *testing.T) {
+	st := setupTestStore(t)
+	w := &holdingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}}
+	e := NewEngine(EngineDeps{Store: st, Transcode: w})
+	setDrain(t, e, true)
+	w.err = errors.New("worker down")
+	setDrain(t, e, false)
+	if !w.hold {
+		t.Fatal("the worker could not be told")
+	}
+	w.err = nil
+	e.syncWorkerHolds(context.Background())
+	if w.hold {
+		t.Fatalf("the next check must lift the hold: calls=%v", w.calls)
+	}
+}
+
+// A queued job that the stored status still calls queued may already have
+// started on the worker: the worker running more jobs than the database knows
+// are encoding keeps the deploy blocked.
+func TestDrainQueuedJobThatAlreadyStartedBlocksADeploy(t *testing.T) {
+	drainSettle = 0
+	t.Cleanup(func() { drainSettle = 15 * time.Second })
+	st := setupTestStore(t)
+	w := &holdingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}, active: 1}
+	e := NewEngine(EngineDeps{Store: st, Transcode: w})
+	seedLinedJob(t, st)
+	setDrain(t, e, true)
+	got := e.WorkerDrainStatus(context.Background())
+	if got.Running != 1 || got.ReadyForDeploy {
+		t.Fatalf("the worker runs a job the database still shows as queued: %+v", got)
+	}
+}
+
+// A worker that predates the hold keeps its queue running, so its queued jobs
+// still count as in flight and block a deploy.
+func TestDrainWorkerWithoutHoldKeepsQueuedJobsInFlight(t *testing.T) {
+	drainSettle = 0
+	t.Cleanup(func() { drainSettle = 15 * time.Second })
+	st := setupTestStore(t)
+	w := &holdingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}, err: httpclient.ErrHoldUnsupported}
+	e := NewEngine(EngineDeps{Store: st, Transcode: w})
+	seedLinedJob(t, st)
+
+	setDrain(t, e, true)
+	got := e.WorkerDrainStatus(context.Background())
+	if got.Running != 1 || got.Waiting != 1 || got.ReadyForDeploy {
+		t.Fatalf("an unconfirmed hold leaves the queued job in flight: %+v", got)
 	}
 }

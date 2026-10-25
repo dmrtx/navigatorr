@@ -868,14 +868,17 @@ function drainSummary(drain) {
   if (!drain?.enabled) return null;
   if (drain.ready_for_deploy) return {state: "ready", label: "Paused", text: "Paused — ready to deploy"};
   const parts = [];
-  if (drain.running) parts.push(`${filesWord(drain.running)} still encoding`);
+  const waiting = Math.min(drain.waiting || 0, drain.running || 0);
+  const encoding = (drain.running || 0) - waiting;
+  if (encoding) parts.push(`${filesWord(encoding)} still encoding`);
+  if (waiting) parts.push(`${waiting} waiting for a turn on a worker`);
   if (drain.publication_pending) parts.push(`${filesWord(drain.publication_pending)} encoded but not saved yet`);
   return {state: "pausing", label: "Pausing", text: `Pausing — ${parts.join(", ") || "checking the workers"}`};
 }
-const drainJobLabels = {running: "Encoding", publication_pending: "Not saved yet"};
+const drainJobLabels = {running: "Encoding", waiting: "Waiting for a turn", publication_pending: "Not saved yet"};
 function drainJobRow(job) {
   const row = node("div", "", "worker-drain-job");
-  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
+  row.append(node("strong", job.file || job.action_id), node("span", `${drainJobLabels[job.waiting ? "waiting" : job.state]}${job.worker ? ` · ${job.worker}` : ""}`, "badge"));
   const actions = node("div", "", "batch-file-actions");
   if (job.state === "publication_pending") {
     const retry = button("Try again", () => jobControl(job.action_id, "action_resume", {decision: "recheck"}, {decision: {label: "Try again", verb: "Trying to save the file again", failure: "Try again failed"}}).then(() => refreshWorkers()), "primary");
@@ -3222,7 +3225,7 @@ function whereBlock(where, {heading = true} = {}) {
 // What each file of a batch is doing, as one bar and a legend: finished, failed,
 // running, needing a decision, left alone, stopped, and the rest waiting.
 const segmentKinds = [["completed", "done", "ok"], ["failed", "failed", "err"], ["running", "running", "run"], ["waiting_decision", "need you", "rev"], ["policy", "below minimum savings", "skip"], ["skip", "skipped", "skip"], ["rejected", "rejected", "skip"], ["cancelled", "cancelled", "cancel"]];
-function batchSegments(batch) {
+function batchSegments(batch, runningFill) {
   if (!batch || batch.dry_run || !Number.isInteger(batch.total) || batch.total < 2) return null;
   const count = key => Number.isInteger(batch[key]) && batch[key] > 0 ? batch[key] : 0;
   const parts = segmentKinds.map(([key, label, kind]) => ({kind, label, n: key === "waiting_decision" ? count("waiting_decision") || count("review") : count(key)})).filter(part => part.n > 0);
@@ -3237,6 +3240,12 @@ function batchSegments(batch) {
   for (const part of parts) {
     const segment = node("i", "", `segment-${part.kind}`);
     segment.style.width = `${part.n / total * 100}%`;
+    // Running files are only as full as their measured steps, so a file still
+    // waiting for a worker slot does not read as a finished bar.
+    if (part.kind === "run" && Number.isFinite(runningFill)) {
+      const fill = `${Math.round(Math.max(0, Math.min(1, runningFill)) * 100)}%`;
+      segment.style.background = `linear-gradient(to right, var(--info) ${fill}, var(--info-wash) ${fill})`;
+    }
     bar.append(segment);
   }
   return {bar, legend, kinds: parts.length};
@@ -3297,7 +3306,7 @@ function batchProgress(job, {segments = false} = {}) {
   counts.title = "Processed includes completed, failed, skipped and rejected files. Cancelled files and files waiting for a decision are not counted as processed.";
   const value = node("strong", `${active ? "~" : ""}${active ? Math.min(99,Math.round(percent)) : Math.round(percent)}%`, "batch-progress-percent");
   value.title = active ? "Estimated overall workflow progress: finished files plus active workflow steps and measured worker work. Steps have equal weight; requested replacements reserve 15% of work. This is not a time estimate." : "Files processed";
-  const parts = segments ? batchSegments(batch) : null;
+  const parts = segments ? batchSegments(batch, count("running") ? partial / Math.min(count("running"), Math.max(1, byFile.size)) : undefined) : null;
   if (parts) {
     // The bar shows each file's state; the percent keeps the estimate.
     parts.bar.title = value.title;
