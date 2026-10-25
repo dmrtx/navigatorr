@@ -36,3 +36,7 @@ Thumbs.db
 *.swp
 *.swo
 navigatorrr
+
+# Layout checks
+maintenanceui/layout/node_modules/
+maintenanceui/layout/out/
