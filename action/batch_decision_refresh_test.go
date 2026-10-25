@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -14,19 +15,26 @@ import (
 // oversizedCandidateExecutor produces a candidate larger than its source, which
 // parks the child on a decision and the batch on the child's behalf.
 func oversizedCandidateExecutor() *mockTranscodeExecutor {
-	var candidate string
+	var (
+		mu        sync.Mutex
+		candidate string
+	)
 	return &mockTranscodeExecutor{
 		submitFunc: func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+			mu.Lock()
 			candidate = req.CandidatePath
-			if candidate != "" {
-				_ = os.MkdirAll(filepath.Dir(candidate), 0755)
-				f, _ := os.Create(candidate)
+			mu.Unlock()
+			if req.CandidatePath != "" {
+				_ = os.MkdirAll(filepath.Dir(req.CandidatePath), 0755)
+				f, _ := os.Create(req.CandidatePath)
 				_ = f.Truncate(2000000000)
 				_ = f.Close()
 			}
 			return transcode.Job{ID: req.ID}, nil
 		},
 		statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+			mu.Lock()
+			defer mu.Unlock()
 			return transcode.JobStatus{ID: jobID, Status: transcode.StatusCompleted, CandidatePath: candidate}, nil
 		},
 	}

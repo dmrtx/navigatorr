@@ -36,6 +36,11 @@ const (
 // caller's answer is to read the file the old way and record that it did.
 var ErrUnavailable = errors.New("nas helper unavailable")
 
+// ErrHelperCancelled means the helper itself ended a job nobody here cancelled:
+// it is shutting down, or it judged the job abandoned (the caller's machine
+// slept past its patience). Asking again is reasonable.
+var ErrHelperCancelled = fmt.Errorf("%w: the hash was cancelled on the helper", ErrUnavailable)
+
 // ErrRestarted means the helper restarted while a job was running, so the job
 // belongs to a process that no longer exists. It is an unavailability too.
 var ErrRestarted = fmt.Errorf("%w: the helper restarted", ErrUnavailable)
@@ -236,7 +241,7 @@ func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) 
 		case JobCancelled:
 			// Nobody here asked for that: the helper is shutting down.
 			finished = true
-			return HashResponse{}, fmt.Errorf("%w: the hash was cancelled on the helper", ErrUnavailable)
+			return HashResponse{}, ErrHelperCancelled
 		case JobQueued, JobRunning:
 		default:
 			return HashResponse{}, fmt.Errorf("%w: unknown job state %q", ErrUnavailable, job.State)

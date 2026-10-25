@@ -7,6 +7,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -152,6 +153,9 @@ type EngineDeps struct {
 	Qbit     *qbit.Client
 	Fs       *fsop.Resolver
 	Ffprobe  string
+	// NASHelper, when set, hashes promotion files where they live instead of
+	// reading them through the mount; nil keeps every read on the mount.
+	NASHelper *nashelper.Client
 	// DrainSettle overrides how long a new drain is reported not ready (zero
 	// keeps the default; negative means no wait). Tests use it.
 	DrainSettle time.Duration

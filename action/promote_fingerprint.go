@@ -76,6 +76,7 @@ type promotionVerifiedFile struct {
 }
 
 func withPromotionVerifiedFiles(ctx context.Context, ec *ExecutionContext) context.Context {
+	ctx = context.WithValue(ctx, promotionExecKey{}, ec)
 	return context.WithValue(ctx, promotionVerifiedKey{}, &promotionVerifiedFiles{ec: ec, files: map[string]promotionVerifiedFile{}})
 }
 

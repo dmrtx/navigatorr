@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log"
 	"os"
@@ -113,19 +114,34 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if !os.SameFile(before, opened) {
 		return "", 0, &promotionFileChangedError{path: path, phase: "opening"}
 	}
-	h := sha256.New()
 	observer, _ := ctx.Value(promotionHashProgressKey{}).(promotionHashProgress)
-	if observer != nil {
-		if err := observer(path, 0, opened.Size()); err != nil {
-			return "", 0, err
-		}
-	}
-	n, err := e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
-	if hook := e.promotionReadHook; hook != nil {
-		hook(path, n)
-	}
+	var h hash.Hash
+	var n int64
+	helperSum, helperN, handled, err := e.promotionHelperHash(ctx, path, resolved, f, opened, observer)
 	if err != nil {
 		return "", 0, err
+	}
+	if handled {
+		n = helperN
+	} else {
+		h = sha256.New()
+		if observer != nil {
+			if err := observer(path, 0, opened.Size()); err != nil {
+				return "", 0, err
+			}
+		}
+		n, err = e.hashMedia(ctx, h, &promotionContextReader{ctx: ctx, r: f, path: path, total: opened.Size(), progress: observer})
+		if hook := e.promotionReadHook; hook != nil {
+			hook(path, n)
+		}
+		if err != nil {
+			return "", 0, err
+		}
+		if e.deps.NASHelper != nil {
+			if _, mapped := e.deps.NASHelper.Remote(resolved); !mapped {
+				promotionRecordRead(ctx, path, "smb", "unmapped", false)
+			}
+		}
 	}
 	after, err := e.promotionLstat(resolved)
 	if err != nil {
@@ -141,7 +157,10 @@ func (e *Engine) promotionHash(ctx context.Context, path string) (string, int64,
 	if !os.SameFile(opened, after) || !os.SameFile(opened, finished) || opened.Size() != n || finished.Size() != n || !opened.ModTime().Equal(finished.ModTime()) {
 		return "", 0, &promotionFileChangedError{path: path, phase: "hashing"}
 	}
-	sum := hex.EncodeToString(h.Sum(nil))
+	sum := helperSum
+	if !handled {
+		sum = hex.EncodeToString(h.Sum(nil))
+	}
 	promotionRememberHash(ctx, path, sum, opened, finished)
 	return sum, n, nil
 }

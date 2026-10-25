@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"log"
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -72,6 +73,13 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		workers = transcodeWorkers[0]
 	}
 
+	// A helper that is configured but unusable must not stop the server: the
+	// diagnostics report it, and every promotion read goes through the mount.
+	helper, helperErr := NewNASHelperClient(cfg.NASHelper)
+	if helperErr != nil {
+		log.Printf("nas helper disabled for promotion reads: %v", helperErr)
+		helper = nil
+	}
 	actEngine := action.NewEngine(action.EngineDeps{
 		Store:     mStore,
 		Config:    cfg,
@@ -79,6 +87,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 		Qbit:      qbClient,
 		Fs:        resolver,
 		Ffprobe:   ffprobe,
+		NASHelper: helper,
 		Workers:   workers,
 		StartTime: time.Now(),
 	})
