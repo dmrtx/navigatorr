@@ -274,3 +274,29 @@ func TestQueueKeepsOneOrderAndDecisionsStayReachable(t *testing.T) {
 		t.Fatalf("resolving a decision moved rows:\nbefore %v\nafter  %v", ids(all), after)
 	}
 }
+
+// A batch paused on request only waits for Resume: nothing in it is waiting for
+// a decision about a file, so it is neither counted nor flagged as one.
+func TestPausedBatchIsNotADecision(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "paused-batch", "transcode_batch", "waiting_decision", map[string]any{"paths": []string{"/media/one.mkv"}}, nil, map[string]any{"paused": true})
+	seedOperation(t, st, "asking-batch", "transcode_batch", "waiting_decision", map[string]any{"paths": []string{"/media/two.mkv"}}, nil, nil)
+	w := request(h, "GET", "/api/maintenance/operations?group=workflow&limit=10", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if page.DecisionCount != 1 {
+		t.Fatalf("decision count %d, want 1 (only the batch that asks)", page.DecisionCount)
+	}
+	for _, job := range page.Jobs {
+		id := fmt.Sprint(job["id"])
+		if want := id == "asking-batch"; job["needs_decision"] != want {
+			t.Fatalf("%s needs_decision = %v, want %v", id, job["needs_decision"], want)
+		}
+		if id == "paused-batch" && job["paused"] != true {
+			t.Fatalf("paused batch not reported as paused: %v", job["paused"])
+		}
+	}
+}

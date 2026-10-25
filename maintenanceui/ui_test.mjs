@@ -7766,3 +7766,12 @@ test("returning to Activity restores how far down the list was; other tabs and r
   assert.deepEqual(scrolls2, [900]);
   assert.equal(h2.run("state.jobsRestore"), null);
 });
+
+test("a batch paused on request reads Paused, not Needs decision", () => {
+  const h = metricProgressHarness();
+  h.run('progressJob.status="waiting_decision";progressJob.paused=true;progressJob.waiting_options=[{decision:"resume"}];');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Paused");
+  assert.equal(h.run('statusClass("Paused")'), "neutral");
+  h.run('progressJob.paused=false;');
+  assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
+});
