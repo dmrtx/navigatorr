@@ -4093,6 +4093,7 @@ function batchCounts(batch, compact = false) {
     const counts = [
       [batch.queued, batch.dry_run ? "eligible" : "queued"],
       [batch.running, "active"],
+      [batch.queued_on_worker, "waiting for a worker"],
       [batch.waiting_for_slot, "waiting for slot"],
       [batch.completed, "completed"],
       [batch.failed, "failed"],
@@ -4986,7 +4987,9 @@ function visibleBatch(job) {
   const rejected = Math.min(job.batch.failed || 0, job.batch_files?.rejected_count ?? (job.batch_files?.reasons || []).filter(reason=>isCandidateRejection(reason.reason)).reduce((count,reason)=>count+reason.count,0));
   const policy = Math.min(Math.max(0,(job.batch.failed || 0)-rejected),job.batch_files?.policy_count || 0);
   const failed = (job.batch.failed || 0)-rejected-policy;
-  return {...job.batch,failed,rejected,policy,outcome:rejected > 0 && rejected===job.batch.total && job.status === "completed" ? "rejected" : policy > 0 && policy===job.batch.total ? "minimum_savings" : policy > 0 && failed === 0 && job.batch.outcome === "failed" ? "no_changes" : job.batch.outcome};
+  // Files in a worker's line are counted by the server as running; only the ones encoding are.
+  const queuedOnWorker = Math.min(job.batch.queued_on_worker || 0, job.batch.running || 0);
+  return {...job.batch,running:(job.batch.running || 0)-queuedOnWorker,failed,rejected,policy,outcome:rejected > 0 && rejected===job.batch.total && job.status === "completed" ? "rejected" : policy > 0 && policy===job.batch.total ? "minimum_savings" : policy > 0 && failed === 0 && job.batch.outcome === "failed" ? "no_changes" : job.batch.outcome};
 }
 function queuePresentation(job) {
   if (job.podcast) { const p=job.podcast; return {kind:"Podcast",title:job.source_path?.split("/").pop() || p.podcast_id || "Podcast",status:job.waiting_condition === "podcast_classification" ? "Awaiting LLM" : job.waiting_condition === "podcast_review" ? "Review cuts" : names[job.status] || job.status,summary:job.status === "failed" ? shortJobReason(job.error) : `${p.classified_blocks || 0}/${p.total_blocks || 0} blocks · ${((p.removed_ms || 0)/1000).toFixed(1)} seconds removed · Original kept`,showTelemetry:false}; }
@@ -5024,7 +5027,9 @@ function queuePresentation(job) {
     cancelling: "Cancelling",
   };
   const phase = job.worker?.transcode_phase || job.worker?.phase;
-  const multipleActive = job.activities?.length > 1;
+  // Every file handed to a worker is still in its line: nothing is encoding yet.
+  const allQueued = job.activities?.length > 0 && job.activities.every(activity => (activity.worker?.transcode_phase || activity.worker?.phase) === "queued");
+  const multipleActive = job.activities?.length > 1 && !allQueued;
   const offline = multipleActive
     ? job.activities.every(activity => activity.waiting_condition === "worker_unreachable")
     : workerUnavailable(job);

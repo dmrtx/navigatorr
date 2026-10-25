@@ -62,6 +62,10 @@ func fileStateOf(row store.FileStatusRow) string {
 		}
 	case "running", store.ActionStatusWaitingExternal:
 		if !ended {
+			// In the worker's line is still waiting for its turn.
+			if row.ChildQueuedOnWorker {
+				return fileQueued
+			}
 			return fileWorking
 		}
 	case "waiting_decision", "review":

@@ -14,6 +14,9 @@ type FileStatusRow struct {
 	// ChildStatus is empty until the item has an attempt.
 	ChildStatus  string
 	ChildSkipped bool
+	// ChildQueuedOnWorker is true while the worker holds the attempt in its line
+	// without encoding it yet.
+	ChildQueuedOnWorker bool
 	// ReplacementStatus is empty until the candidate has a replacement action.
 	ReplacementStatus string
 	Replaced          bool
@@ -28,6 +31,9 @@ func (s *Store) ListFileStatusRows() ([]FileStatusRow, error) {
 		b.status,
 		COALESCE(c.status, ''),
 		CASE WHEN json_valid(c.outputs_json) AND (COALESCE(json_extract(c.outputs_json, '$.skip_transcode'), 0) IN (1, 'true') OR COALESCE(json_extract(c.outputs_json, '$.skipped'), 0) IN (1, 'true')) THEN 1 ELSE 0 END,
+		CASE WHEN c.status NOT IN ('completed', 'failed', 'cancelled') AND COALESCE(
+			CASE WHEN json_valid(c.outputs_json) THEN json_extract(c.outputs_json, '$.transcode_phase') END,
+			CASE WHEN json_valid(c.state_json) THEN json_extract(c.state_json, '$.transcode_phase') END, '') = 'queued' THEN 1 ELSE 0 END,
 		COALESCE(r.status, ''),
 		CASE WHEN json_valid(r.outputs_json) AND COALESCE(json_extract(r.outputs_json, '$.promoted'), 0) IN (1, 'true') THEN 1 ELSE 0 END
 		FROM transcode_batch_items i
@@ -44,11 +50,11 @@ func (s *Store) ListFileStatusRows() ([]FileStatusRow, error) {
 	var out []FileStatusRow
 	for rows.Next() {
 		var r FileStatusRow
-		var skipped, replaced int
-		if err := rows.Scan(&r.ItemID, &r.FilePath, &r.ItemStatus, &r.Decision, &r.CandidatePath, &r.Error, &r.BatchStatus, &r.ChildStatus, &skipped, &r.ReplacementStatus, &replaced); err != nil {
+		var skipped, queued, replaced int
+		if err := rows.Scan(&r.ItemID, &r.FilePath, &r.ItemStatus, &r.Decision, &r.CandidatePath, &r.Error, &r.BatchStatus, &r.ChildStatus, &skipped, &queued, &r.ReplacementStatus, &replaced); err != nil {
 			return nil, err
 		}
-		r.ChildSkipped, r.Replaced = skipped == 1, replaced == 1
+		r.ChildSkipped, r.ChildQueuedOnWorker, r.Replaced = skipped == 1, queued == 1, replaced == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()
