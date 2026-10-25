@@ -852,6 +852,8 @@ main {
   padding: 3px 0;
   border-bottom: 1px solid var(--line);
 }
+/* The row Show in Files arrived at. */
+.media-row.located { background: var(--forest-wash-strong); box-shadow: -3px 0 0 var(--forest); }
 .media-row > button,
 .media-row .open-media {
   flex: 1;

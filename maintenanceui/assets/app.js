@@ -677,7 +677,7 @@ function navigationRoute(search = "") {
     sort:["name","name_desc","size_asc","size_desc"].includes(q.get("sort")) ? q.get("sort") : "name",
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
-    copies:q.get("copies") === "1", configure:q.get("configure") === "1",
+    copies:q.get("copies") === "1", configure:q.get("configure") === "1", locate:q.get("locate") === "1",
     mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "size", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
   };
 }
@@ -704,6 +704,27 @@ function writeNavigation(replace = false) {
   const url = `${window.location.pathname}?${navigationQuery()}`;
   if (url === window.location.pathname + window.location.search) return;
   window.history[replace ? "replaceState" : "pushState"]({navigatorr:true},"",url);
+}
+// locateFileRow ticks a file's row in the folder list and scrolls to it, loading
+// further pages of the folder until the row is there. The encoding form is not
+// opened: step 2 is the person's to ask for.
+async function locateFileRow(path, current = () => true) {
+  const row = () => fileChecks().find(input => input.dataset.selection === path);
+  for (let pages = 0; !row() && state.libraryHasMore && pages < 40; pages++) {
+    await loadLibrary(true);
+    if (!current()) return;
+  }
+  const check = row();
+  if (!check) {
+    if (current()) notify("That file is not in the list shown. Its folder is open.");
+    return;
+  }
+  selectOneFile(path);
+  fileSelectionChanged();
+  const line = check.closest(".media-row");
+  document.querySelectorAll?.(".media-row.located").forEach(n => n.classList.remove("located"));
+  line?.classList.add("located");
+  line?.scrollIntoView?.({block: "center"});
 }
 async function applyNavigation(route) {
   if (route.tab === "recipes" && route.profile !== state.recipe?.name && recipeIsDirty() && !await confirmRecipeDiscard()) { writeNavigation(true); return; }
@@ -766,7 +787,11 @@ async function applyNavigation(route) {
         const page = await api(`${folder ? "folder" : "library"}?${query}`);
         if (!current()) return;
         const file = page.items?.find(f=>(f.path || "")===route.file && !f.is_dir);
-        if (file) {
+        if (file && route.locate && !route.configure && folder) {
+          // Only where the file is: ticked in its folder and scrolled to, with its
+          // encoding form left for the person to open.
+          await locateFileRow(file.path, current);
+        } else if (file) {
           state.file = file; state.fileMedia = state.media; state.fileService = folder ? null : $("service").value;
           $("path").value = file.path; $("scope").value = "file"; setFileStep("configure"); controls();
         } else notify("The selected file is unavailable. Showing its folder or title.");
@@ -788,8 +813,20 @@ async function applyNavigation(route) {
 if (typeof window !== "undefined") window.addEventListener("popstate", () => {
   if (state.routeReady && !$("workspace").hidden) safe(() => applyNavigation(navigationRoute(window.location.search)));
 });
+// rememberJobsScroll follows the Activity list while it is on screen, so the
+// place it was left at is known even when the browser has already moved the
+// page by the time the tab changes (the Back button).
+function rememberJobsScroll() {
+  if (state.tab !== "jobs" || state.jobsRestore != null || typeof window === "undefined") return;
+  state.jobsScroll = window.scrollY || 0;
+  state.jobsScrollFilter = $("job-filter").value;
+}
+if (typeof window !== "undefined") window.addEventListener("scroll", rememberJobsScroll, {passive: true});
 function selectTab(tab, fromRoute = false) {
   if (!fromRoute && state.applyingNavigation) { state.routeRevision++; state.applyingNavigation=false; }
+  // Leaving Activity remembers how far down it was, so coming back (the Back
+  // button, or its tab) lands on the same job instead of the top.
+  const cameFrom = state.tab;
   state.tab = tab;
   document
     .querySelectorAll(".tab-content")
@@ -800,7 +837,8 @@ function selectTab(tab, fromRoute = false) {
       n.setAttribute("aria-current", n.dataset.tab === tab ? "page" : "false"),
     );
 
-  if (typeof window !== "undefined") window.scrollTo({ top: 0 });
+  state.jobsRestore = tab === "jobs" && cameFrom !== "jobs" && state.jobsScroll > 0 && state.jobsScrollFilter === $("job-filter").value ? state.jobsScroll : null;
+  if (typeof window !== "undefined") window.scrollTo({ top: state.jobsRestore || 0 });
   writeNavigation();
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
   if (tab !== "stats") clearTimeout(state.storageTimer);
@@ -4586,7 +4624,7 @@ function openGoalForm(path, options = {}) {
   if (options.pickTracks) $("keep-tracks").open = true;
 }
 // The Files location of a file Navigatorr was asked to convert: its media
-// folder, its own folder and the file itself, so the goal form opens on it.
+// folder, its own folder and the file itself, ticked and in view.
 // null when the file is outside every folder the Files tab can browse.
 function filesRouteFor(path, {folder: isFolder = false} = {}) {
   if (typeof path !== "string" || !path.startsWith("/")) return null;
@@ -4597,7 +4635,8 @@ function filesRouteFor(path, {folder: isFolder = false} = {}) {
   // A folder opens as it is; a file opens its own folder, on the file.
   if (isFolder) return new URLSearchParams({view: "files", source: `folder:${root}`, folder: path}).toString();
   const folder = path.slice(0, path.lastIndexOf("/")) || root;
-  return new URLSearchParams({view: "files", source: `folder:${root}`, folder, file: path}).toString();
+  // locate: show the file where it lives; its encoding form stays closed.
+  return new URLSearchParams({view: "files", source: `folder:${root}`, folder, file: path, locate: "1"}).toString();
 }
 // The file a job or batch row is about, when it is one file.
 function jobFilePath(job) {
@@ -5713,6 +5752,11 @@ async function loadJobs(more = false) {
     restoreCommandFocus(commandFocused);
     restoreActionMenu($("jobs-list"), menu);
     restoreControl($("jobs-list"), focus);
+    // The list is rebuilt on return, so the place it was left at is restored
+    // once it is as long as it was.
+    if (state.jobsRestore != null && state.tab === "jobs" && typeof window !== "undefined") {
+      window.scrollTo({ top: state.jobsRestore });
+    }
 
     $("jobs-more").hidden = !data.has_more;
     $("jobs-page").textContent =
@@ -5726,6 +5770,8 @@ async function loadJobs(more = false) {
     if (revision === state.jobsRevision) {
       state.jobsLoading = false;
       $("jobs-more").disabled = false;
+      // One attempt only: a failed load must not scroll the list later.
+      state.jobsRestore = null;
     }
   }
 }
