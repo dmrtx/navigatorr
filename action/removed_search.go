@@ -92,7 +92,7 @@ func (e *Engine) stepPlanEncode(ctx context.Context, ec *ExecutionContext) (Step
 	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
-	if getString(ec.State, "original_sha256") == "" {
+	if !hasOriginalBaseline(ec.State) {
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
 	cleanPath := getString(ec.State, "resolved_path")

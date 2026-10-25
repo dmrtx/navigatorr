@@ -27,13 +27,13 @@ func (e *Engine) registerTranscodeTemplate() {
 		Description:    "Set mode=size|quality|x265_preserve|compact for immutable quality and final size policies without profile/priority/tuning; quality is the UI default. Every goal encodes the whole file at a short ladder of fixed settings and the worker's final quality check judges each result: the first rung that passes is kept, a rung that fails on quality is followed by one that compresses less, and a rung refused for its size ends the ladder. x265_preserve requires libx265, skips existing HEVC and permits 0% minimum savings; size requires 15%, converts lossless audio (TrueHD, MLP, FLAC, ALAC, PCM, DTS-HD MA) to AAC with the same layout, lossless Atmos and DTS:X included (their object/height channels are lost), while copying lossy tracks (E-AC-3 Atmos included), and may encode 8-bit sources as 10-bit HEVC on a worker that proves native 10-bit quality; quality and x265_preserve reject growth. Size also takes allow_hardware (default true; false keeps x265 only): with it, a worker that has Apple VideoToolbox encodes the whole file with VideoToolbox first, and a hardware result is reported with its encoder. Size also takes allow_slow_preset (default false): true lets the x265 ladder use the slow preset, whose full encode of a long 1080p source can take hours. Size also takes one optional size budget (a budget also fixes an audio level for the file, see below), size_budget_percent (5-85, a percent of the source file), size_budget_bytes (a whole number of bytes, at least 50000000) or size_budget_source=siblings (the median total bitrate of the other video files in the same season folder, else the series folder, needing at least 3 of the same resolution class, times size_budget_sibling_multiplier 1.0-4.0, default 1.5), exactly one of them. With allow_hardware on (the default) and a worker that has VideoToolbox, a budget encodes the whole file with VideoToolbox at quality 65, then 58, then 50, then at the average bitrate that lands on the budget; the worker refuses any result over the budget before scoring it, and the first one within it is validated on the final windows against a fixed quality floor (VMAF mean 70, p5 60, worst 5 s window 65; banding limits unchanged). A result below that floor is not offered, and the result says to try again with allow_hardware=false. With allow_hardware=false (or a worker without VideoToolbox) the file is encoded once with two-pass x265 at the bitrate that lands on the budget, held to the same floor. A size budget plans its audio as well: the least aggressive of two levels that leaves the video at least about 0.04 bits per pixel per frame (about 2 Mbps for 1080p at 24 fps), else the more compressed one if the budget allows a video at all. A track is converted only when its bitrate is at least 1.25 times the level's target for its layout. Level 1 converts such tracks, lossless included, to AAC-LC at the target (stereo 192, mono 128, 5.1 384, 7.1 512 kbps); level 2 converts such stereo, quad and 5.1 tracks to HE-AAC (stereo 64, quad and 5.1 160 kbps) and every other layout as level 1. Lossless audio that states no bitrate is converted. Any other track, E-AC-3 Atmos, and a lossy track whose bitrate is unknown are copied at both levels; track order, languages, titles, layout, subtitles and attachments of the tracks kept never change. A result within the budget is reported as below the quality target unless it meets it; it still needs the usual approval before it replaces the original. compact makes HDR10, HLG, Dolby Vision 7/8 (base layer) and over-1080p SDR sources much smaller: deterministic tone map to SDR BT.709, downscale to max_height (720, 1080 default, 1440 or 2160), HEVC, lossless/DTS/PCM audio to AAC with the tracks of the languages to keep, 30% minimum savings; HDR, Dolby Vision and Atmos are dropped and Dolby Vision profile 5 is rejected. Size and compact keep only the audio and subtitle tracks in the languages to keep: the global setting (default spa, eng, jpn; GET or PUT /api/maintenance/keep-languages) or this job's keep_languages (ISO 639-2 codes, where ger and deu, fre and fra and the other bibliographic and terminology pairs are one language; [] keeps every track). The original-language audio track (disposition original, else the first audio track), any other audio in its language and any untagged or und track are always kept, and when no audio track matches the list every audio track is kept; a subtitle is kept when it is in a language to keep, in the original track's language, or untagged; video, attachments and chapters are never dropped; when the default audio track is dropped the first kept one becomes the default. keep_audio_streams and keep_subtitle_streams (source stream indexes, for one file only) pick tracks by hand, for tracks with a missing or wrong language tag. The list is frozen with the job, so changing it later never affects a job already planned; a job that drops tracks needs a worker that follows the selection, and the result lists the tracks kept and dropped and the bytes saved. Unsupported sources or unavailable quality capabilities preserve the original. Omit mode for a fixed profile. Coordinates safe candidate-only media transcoding using an immutable recipe-resolved plan, bounded transient retries, worker revalidation, post-transcode stream validation, and original SHA-256 verification.",
 		RequiredInputs: []string{"path"}, OptionalInputs: []string{"mode", "keep_languages", "keep_audio_streams", "keep_subtitle_streams", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "profile", "profile_config", "preserve_source_bit_depth", "replace_original", "expected_video_codec", "max_size_increase_percent", "media_type", "is_anime", "min_savings_percent", "surface_worker_busy", "parent_action_id", "batch_item_key", "library_context"}, Destructive: false,
 		Steps: []StepDefinition{
-			{Name: "preflight", Description: "Inspect source, hash original once it needs worker work, resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
+			{Name: "preflight", Description: "Inspect source, record its size and modification time (hashing it only for a worker that cannot hash while it copies), resolve profile/recipe and per-stream compatibility plan", Run: e.measureCoordinatorPhase("coordinator_preflight", e.stepTranscodePreflight)},
 			{Name: "submit_benchmark", Description: "Plan the goal's first encode: a quality ladder rung or the size budget's encode", Run: e.stepPlanEncode},
 			{Name: "wait_benchmark", Description: "Unused since the sample search was removed; kept so the stored step positions of earlier actions still line up", Run: stepRetired},
 			{Name: "submit_transcode", Description: "Submit the immutable structured plan to the remote worker with bounded transient retries", Run: e.stepTranscodeSubmit},
 			{Name: "wait_transcode", Description: "Monitor transcode progress and classify transient transport failures", Run: e.stepTranscodeWait},
 			{Name: "validate_result", Description: "Validate duration, codecs, streams, dispositions, attachments, chapters and candidate integrity", Run: e.stepTranscodeValidate},
-			{Name: "accept_result", Description: "Finalize candidate report and verify original SHA-256 is unchanged (not applicable when nothing ran against the original)", Run: e.stepTranscodeAccept},
+			{Name: "accept_result", Description: "Finalize candidate report and verify the original is unchanged: size and modification time against the preflight stat, or a full SHA-256 re-read for an action preflighted with a coordinator hash (not applicable when nothing ran against the original)", Run: e.stepTranscodeAccept},
 		},
 	})
 }
@@ -182,13 +182,51 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	origMap["subtitle_languages"] = subLangs
 
-	// The full source hash is the baseline accept_result re-verifies before a
-	// candidate may be kept. It is taken only once the source is known to need
-	// worker work: probe-only exits below end without it, since a source that
-	// is never encoded or promoted needs no integrity baseline.
+	// The source's identity is the baseline accept_result relies on before a
+	// candidate may be kept. It is settled only once the source is known to need
+	// worker work: probe-only exits below end without it, since a source that is
+	// never encoded or promoted needs no integrity baseline.
+	//
+	// A worker that advertises LearnSourceDigest hashes the original while it
+	// copies it, so the preflight records the stat it already has and reads
+	// nothing (see transcode_source_identity.go). Any other worker gets the old
+	// whole-file hash here, as does an action admitted with one before this flow.
 	origSHA := ""
+	baselineSet := false
 	hashSource := func() *StepResult {
-		if origSHA != "" {
+		if baselineSet {
+			return nil
+		}
+		_, _, hasStat := recordedOriginalStat(ec.State)
+		legacyAction := getString(ec.State, "original_sha256") != "" && !hasStat
+		learns := false
+		if !legacyAction {
+			var err error
+			if learns, err = workerLearnsSourceDigest(ctx, e.actionWorker(ec)); err != nil {
+				// Unknown is not absent: wait for the worker rather than
+				// hashing the whole file and dropping the recorded stat.
+				res := workerCapabilityLookupResult(err, "source digest")
+				return &res
+			}
+		}
+		if learns {
+			// A digest pinned for this very file version stays; a file that
+			// changed since the stat was recorded gets a fresh baseline, as the
+			// old hash did on every run.
+			if size, mod, ok := recordedOriginalStat(ec.State); ok && size == fi.Size() && mod.Equal(fi.ModTime()) {
+				origSHA = getString(ec.State, "original_sha256")
+			} else {
+				delete(ec.State, "original_sha256")
+				delete(ec.Outputs, "original_sha256")
+				// A conflict belongs to the baseline it contradicted.
+				delete(ec.State, originalDigestConflictKey)
+				delete(ec.Outputs, originalDigestConflictKey)
+			}
+			recordOriginalStat(ec.State, fi)
+			if origSHA != "" {
+				origMap["sha256"] = origSHA
+			}
+			baselineSet = true
 			return nil
 		}
 		// Drain: a file that has not begun hashing has not begun its encode
@@ -204,6 +242,8 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 		origSHA = sha
 		origMap["sha256"] = sha
+		delete(ec.State, originalStatKey)
+		baselineSet = true
 		return nil
 	}
 
@@ -383,7 +423,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return *res, nil
 	}
 	ec.State["resolved_path"] = cleanPath
-	ec.State["original_sha256"] = origSHA
+	if origSHA != "" {
+		ec.State["original_sha256"] = origSHA
+	}
 	ec.State["original_size"] = fi.Size()
 	ec.State["original"] = origMap
 	ec.State["source_report"] = rep
@@ -406,7 +448,6 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	ec.State["retry_count"] = 0
 	outputs := map[string]any{
 		"original":                  origMap,
-		"original_sha256":           origSHA,
 		"resolved_path":             cleanPath,
 		"profile":                   profile,
 		"plan":                      plan,
@@ -416,6 +457,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		"plan_digest":               plan.PlanDigest,
 		"preserve_source_bit_depth": preserveBitDepth,
 		"applied_fallbacks":         plan.AppliedFallbacks,
+	}
+	if origSHA != "" {
+		outputs["original_sha256"] = origSHA
 	}
 	if hasProfileConfig {
 		outputs["ephemeral_profile"] = recipeProfile

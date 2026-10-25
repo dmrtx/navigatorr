@@ -26,6 +26,9 @@ func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobSt
 	if st.CandidateSHA256 != "" {
 		ec.State["candidate_sha256"] = st.CandidateSHA256
 	}
+	// The digest a worker verified the original against, learned while it
+	// copied the file when the request had none. The first one is pinned.
+	pinOriginalSHA(ec, st.SourceSHA256)
 	if st.StorageBackend != "" {
 		ec.State["storage_backend"] = st.StorageBackend
 	}

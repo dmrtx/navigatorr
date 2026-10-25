@@ -152,7 +152,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// the staged local bytes even when caching is disabled or staging resumed.
 	hashStart := time.Now()
 	readsBefore := digestMemoFrom(ctx).fullReads()
-	hashErr := verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+	hashErr := w.verifyOrLearnSourceDigest(ctx, jobDir, jobFile, job, r.effectiveInput)
 	hashCost := transcode.PhaseCost{}
 	_, inputOnNAS := externalRootFor(r.effectiveInput, w.cfg.ExternalRoots)
 	if inputOnNAS && digestMemoFrom(ctx).fullReads() > readsBefore {
@@ -282,11 +282,11 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	}
 	audioOnly := transcode.IsSizeAudioOnlyPlan(job.Plan)
 	if verr == nil && job.Plan != nil && (job.Plan.QualityValidation != nil || audioOnly) {
-		if job.SourceSHA256 == "" {
+		if job.effectiveSourceSHA() == "" {
 			verr = fmt.Errorf("quality_final_source_identity_missing: immutable source digest required before final validation")
 		}
 		if verr == nil {
-			verr = verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+			verr = verifyLocalDigest(ctx, r.effectiveInput, job.effectiveSourceSHA())
 		}
 		if verr == nil {
 			if cancelled, progressErr := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) { l.Phase = "validating_quality" }); progressErr != nil {
@@ -302,7 +302,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			}
 			job.QualityEvidence = qualityEvidence
 			if verr == nil {
-				verr = verifyLocalDigest(ctx, r.effectiveInput, job.SourceSHA256)
+				verr = verifyLocalDigest(ctx, r.effectiveInput, job.effectiveSourceSHA())
 			}
 			if verr == nil {
 				var currentSHA string
@@ -421,9 +421,20 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 			return false, err
 		}
 		stagedFromCache := false
-		if w.sourceCacheEnabled() {
+		// Without a digest there is nothing to address a cache entry by, and a
+		// digest-less entry proves nothing about the bytes: the source is read
+		// once from the NAS, and the digest learned there fills the cache.
+		learning := job.effectiveSourceSHA() == ""
+		if learning && job.ExpectedSourceSizeBytes > 0 {
+			// Cheap stat before the long read: a source that changed since the
+			// coordinator probed it is not worth copying.
+			if fi, serr := w.statMedia(ctx, job.Source); serr == nil && fi.Size() != job.ExpectedSourceSizeBytes {
+				return false, sourceChangedSinceProbe(job.Source, job.ExpectedSourceSizeBytes, fi.Size())
+			}
+		}
+		if w.sourceCacheEnabled() && !learning {
 			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
-				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256); ok {
+				if hit, ok := lookupSourceCache(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.effectiveSourceSHA()); ok {
 					// Job-local immutable hard link (fallback: safe local copy).
 					// The job never reads the evictable shared filename, so a
 					// concurrent sweep can unlink it without breaking this job.
@@ -445,13 +456,21 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 			if err = w.stageSourceVerified(ctx, job, r.stagedInput, &stageCost); err != nil {
 				return false, err
 			}
+			if learning {
+				// The bytes were hashed while they streamed in, so this is the
+				// digest of exactly the staged copy. Size is the one identity
+				// the request carries to check the copy against.
+				if serr := w.learnStagedDigest(ctx, jobDir, jobFile, job, r.stagedInput); serr != nil {
+					return false, serr
+				}
+			}
 			// Best-effort: share this fresh NAS read with future jobs for the
 			// same immutable source. The entry is a hard link to the staged
 			// bytes whose digest was proved while they streamed; failures
 			// never fail the current job.
 			if w.sourceCacheEnabled() {
 				if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
-					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput, job.SourceSHA256)
+					_, _ = populateSourceCacheFromLocal(ctx, w.sourceCacheDir(), filepath.Clean(job.Source), fi, r.stagedInput, job.effectiveSourceSHA())
 				}
 			}
 		}
@@ -459,7 +478,7 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 			// Keep the entry this job staged from out of the sweep until the
 			// job completes, so a retry of the same source still hits it.
 			if fi, serr := w.statSourceForCache(ctx, job.Source); serr == nil {
-				pinSourceCacheEntry(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.SourceSHA256, job.ID)
+				pinSourceCacheEntry(w.sourceCacheDir(), filepath.Clean(job.Source), fi, job.effectiveSourceSHA(), job.ID)
 			}
 			// The sweep used to run after each sample test fetched a source;
 			// without those, staging is the only thing that grows the cache.
@@ -486,7 +505,7 @@ func (w *Worker) ensureStaged(ctx context.Context, jobDir, jobFile string, job *
 // otherwise the retry is recorded in the phase cost.
 func (w *Worker) stageSourceVerified(ctx context.Context, job *JobRecord, stagedInput string, cost *transcode.PhaseCost) error {
 	if w.mediaStore != nil && w.mediaStore.Maps(job.Source) {
-		expected, _ := normalizeExpectedSourceSHA(job.SourceSHA256)
+		expected, _ := normalizeExpectedSourceSHA(job.effectiveSourceSHA())
 		if verified, ok := w.mediaStore.(verifiedDownloader); ok {
 			tr, err := verified.DownloadAtomicVerified(ctx, job.Source, stagedInput, expected)
 			cost.NASReadBytes = knownCount(tr.ReadBytes)
@@ -1451,4 +1470,51 @@ func validateEncodedCandidate(path string) error {
 		return candidateInvalid(fmt.Errorf("%w: encoder output %s is empty", ErrSourceInvalid, path))
 	}
 	return nil
+}
+
+// sourceChangedSinceProbe is the fail-closed error for a source whose size is
+// not the one the coordinator probed: the plan was built from other media.
+func sourceChangedSinceProbe(source string, want, got int64) error {
+	return sourceChanged(fmt.Errorf("%w: %s is %d bytes, the coordinator probed %d (fail closed)", ErrSizeMismatch, source, got, want))
+}
+
+// learnStagedDigest records the digest of a freshly staged source on the job
+// when the request had none. The staged bytes were hashed as they streamed in
+// (see stageSourceVerified), so the job's digest memo answers without another
+// read; only a staging this run did not perform reads the local copy. The
+// staged size is checked against the size the coordinator probed.
+func (w *Worker) learnStagedDigest(ctx context.Context, jobDir, jobFile string, job *JobRecord, staged string) error {
+	if job.effectiveSourceSHA() != "" {
+		return nil
+	}
+	info, err := os.Lstat(staged)
+	if err != nil {
+		return fmt.Errorf("%w: statting staged input %s: %v", ErrStorageIO, staged, err)
+	}
+	if job.ExpectedSourceSizeBytes > 0 && info.Size() != job.ExpectedSourceSizeBytes {
+		return sourceChangedSinceProbe(job.Source, job.ExpectedSourceSizeBytes, info.Size())
+	}
+	sha, err := verifiedLocalSHA256(ctx, staged)
+	if err != nil {
+		return sourceDigestFailure(err)
+	}
+	if _, perr := w.persistOperationalProgress(jobDir, jobFile, job, func(l *JobRecord) {
+		if l.SourceSHA256 == "" && l.LearnedSourceSHA256 == "" {
+			l.LearnedSourceSHA256 = sha
+		}
+	}); perr != nil {
+		return perr
+	}
+	return nil
+}
+
+// verifyOrLearnSourceDigest checks the operational input against the job's
+// digest, or, for a digest-less request whose digest staging did not record
+// (an unstaged source, or a staged copy left by an interrupted run), learns it
+// from the input. Either way the input is hashed at most once per run.
+func (w *Worker) verifyOrLearnSourceDigest(ctx context.Context, jobDir, jobFile string, job *JobRecord, input string) error {
+	if job.effectiveSourceSHA() != "" {
+		return verifyLocalDigest(ctx, input, job.effectiveSourceSHA())
+	}
+	return w.learnStagedDigest(ctx, jobDir, jobFile, job, input)
 }

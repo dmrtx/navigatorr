@@ -272,6 +272,11 @@ type Request struct {
 	// shared source cache identity and the worker verifies local bytes against
 	// it before publishing a cache entry.
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// SourceSizeBytes is the size the coordinator saw when it probed the source.
+	// It is sent only with an empty SourceSHA256 (a worker that advertises
+	// LearnSourceDigest): the worker hashes the file while it copies it, and the
+	// size is the only identity it can check the copy against.
+	SourceSizeBytes int64 `json:"source_size_bytes,omitempty"`
 }
 type Job struct {
 	ID string `json:"id"`
@@ -389,6 +394,10 @@ type JobStatus struct {
 	// full NAS read or media inspection.
 	CandidateSizeBytes int64  `json:"candidate_size_bytes,omitempty"`
 	CandidateSHA256    string `json:"candidate_sha256,omitempty"`
+	// SourceSHA256 is the digest of the original the worker verified while it
+	// copied the file: the request's digest, or the one it learned when the
+	// request had none. Response only; servers that predate it ignore it.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 }
 
 type PathMapping struct {

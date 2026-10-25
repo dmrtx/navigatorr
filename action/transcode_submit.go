@@ -79,10 +79,17 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if plan == nil {
 		return StepResult{Status: StepFailed, Error: "resolved transcode plan is missing (fail closed)"}, nil
 	}
-	// The worker treats an empty source hash as a legacy request and skips its
-	// content check, so work is never submitted without the preflight baseline.
-	if getString(ec.State, "original_sha256") == "" {
+	// Work is never submitted without a baseline: the coordinator's digest, or
+	// the stat of an action whose digest the worker learns while it copies the
+	// file (see transcode_source_identity.go). The pinned digest is sent once
+	// one is known, so every later rung is verified against it.
+	if !hasOriginalBaseline(ec.State) {
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
+	}
+	sourceSHA := getString(ec.State, "original_sha256")
+	var sourceSize int64
+	if sourceSHA == "" {
+		sourceSize, _, _ = recordedOriginalStat(ec.State)
 	}
 	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
@@ -147,7 +154,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support compact SDR conversion; upgrade the worker before encoding"}, nil
 		}
 	}
-	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: getString(ec.State, "original_sha256")}
+	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
 	// status query and deliberately does not take the parent admission lease.
@@ -190,6 +197,20 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile unexpected status %q (fail closed)", st.Status)}, nil
 			}
+		}
+	}
+
+	// A digest-less request is a new write, whether this is a first submit or a
+	// resubmit after the worker lost the job, so the capability is checked here
+	// and not only on the non-reconcile path: an older worker's decoder rejects
+	// source_size_bytes and would never learn the digest.
+	if sourceSHA == "" {
+		learns, cerr := workerLearnsSourceDigest(ctx, e.actionWorker(ec))
+		if cerr != nil {
+			return workerCapabilityLookupResult(cerr, "source digest"), nil
+		}
+		if !learns {
+			return StepResult{Status: StepFailed, Error: "worker does not hash the source while it copies it; upgrade the worker before encoding"}, nil
 		}
 	}
 
@@ -631,6 +652,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode status failed (fail closed): %v", err), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 	}
 	e.observeTranscodeStatus(ec, st)
+	if res, conflict := originalDigestConflict(ec); conflict {
+		return res, nil
+	}
 	switch st.Status {
 	case transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
 		e.noteWorkerSlotFreed()

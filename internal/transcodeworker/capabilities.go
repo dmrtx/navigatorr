@@ -231,6 +231,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Track selection maps explicit streams and validates the output against
 	// them; it needs no encoder of its own.
 	caps.TrackSelection = true
+	// A submit without a source digest is hashed while the worker stages the
+	// file, and the digest comes back in the job status.
+	caps.LearnSourceDigest = true
 	// Search-only flags, kept for fingerprint stability; they go when the
 	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.

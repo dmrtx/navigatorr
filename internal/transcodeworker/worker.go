@@ -523,6 +523,11 @@ type SubmitRequest struct {
 	// bytes. Optional for legacy callers; carried into the shared source cache
 	// identity so unchanged-content reuse is provable.
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// SourceSizeBytes is the size the coordinator probed. It accompanies a
+	// request without SourceSHA256: the worker learns the digest while it
+	// copies the file, and the staged copy must have this size. Ignored when a
+	// digest is present.
+	SourceSizeBytes int64 `json:"source_size_bytes,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
@@ -689,6 +694,13 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
 	}
 	req.SourceSHA256 = sourceSHA
+	if req.SourceSizeBytes < 0 {
+		return SubmitResponse{ID: trimmedID, Error: "source_size_bytes cannot be negative (fail closed)"}, errors.New("source_size_bytes cannot be negative")
+	}
+	var expectedSourceSize int64
+	if sourceSHA == "" {
+		expectedSourceSize = req.SourceSizeBytes
+	}
 
 	cleanSource := filepath.Clean(req.SourcePath)
 	cleanCandidate := filepath.Clean(req.CandidatePath)
@@ -1074,18 +1086,19 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	}
 
 	job := &JobRecord{
-		ID:                  trimmedID,
-		Status:              "queued",
-		Source:              cleanSource,
-		Candidate:           cleanCandidate,
-		Profile:             profile,
-		Plan:                plan,
-		IdempotencyKey:      effKey,
-		ExecutionSpecDigest: canonicalDigest,
-		SourceSHA256:        sourceSHA,
-		CreatedAt:           time.Now().UTC(),
-		Attempt:             1,
-		RetryCount:          0,
+		ID:                      trimmedID,
+		Status:                  "queued",
+		Source:                  cleanSource,
+		Candidate:               cleanCandidate,
+		Profile:                 profile,
+		Plan:                    plan,
+		IdempotencyKey:          effKey,
+		ExecutionSpecDigest:     canonicalDigest,
+		SourceSHA256:            sourceSHA,
+		ExpectedSourceSizeBytes: expectedSourceSize,
+		CreatedAt:               time.Now().UTC(),
+		Attempt:                 1,
+		RetryCount:              0,
 
 		StagingPolicy:       string(meta.StagingPolicy),
 		StagingState:        string(meta.StagingState),
@@ -1886,6 +1899,9 @@ type JobStatusResponse struct {
 	CandidateSizeBytes int64                           `json:"candidate_size_bytes,omitempty"`
 	CandidateSHA256    string                          `json:"candidate_sha256,omitempty"`
 	QualityEvidence    *transcode.FinalQualityEvidence `json:"quality_evidence,omitempty"`
+	// SourceSHA256 is the digest the worker verified the original against: the
+	// request's, or the one it learned while staging. Response only.
+	SourceSHA256 string `json:"source_sha256,omitempty"`
 
 	// Operational storage observability (Phase 6B1). Additive: never changes
 	// the meaning of existing fields/statuses.
@@ -1978,6 +1994,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		Conversions:           job.Conversions,
 		CandidateSizeBytes:    job.CandidateSizeBytes,
 		CandidateSHA256:       job.CandidateSHA256,
+		SourceSHA256:          job.effectiveSourceSHA(),
 
 		StagingPolicy:       job.StagingPolicy,
 		StagingState:        job.StagingState,

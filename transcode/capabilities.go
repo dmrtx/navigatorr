@@ -99,6 +99,13 @@ type WorkerCapabilities struct {
 	// before it, it is not part of the pinned capability fingerprint (the
 	// fingerprint of an unchanged machine must not move).
 	TrackSelection bool `json:"track_selection,omitempty"`
+	// LearnSourceDigest reports a worker that takes a submit without a source
+	// digest (with the size the coordinator probed), hashes the original while
+	// it copies it, and reports the digest in the job status. The coordinator
+	// then reads a source over the network once instead of hashing it before the
+	// worker starts. Older workers get the coordinator's own hash. Like
+	// TrackSelection, it is not part of the pinned capability fingerprint.
+	LearnSourceDigest bool `json:"learn_source_digest,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
