@@ -182,7 +182,7 @@ var transcodeAttemptKeys = []string{
 	"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status",
 	"transcode_phase", "candidate_path", "output_path", "candidate_sha256", "candidate_size_bytes", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms",
 	"next_poll_at", "retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, transcodeRejectedKey,
-	"validation", "result", "original_intact", "original_integrity", "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at",
+	"validation", "result", "original_intact", "original_integrity", "original_integrity_check", "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at",
 	"failure_classification", "error_class", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms",
 	"worker_wall_duration_ms", "quality_evidence", "conversions", "applied_fallbacks", "phase", "progress_is_stale",
 }

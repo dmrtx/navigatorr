@@ -259,6 +259,17 @@ esac
 	if !caps.CoverArt {
 		t.Error("worker must advertise cover_art so the server admits sources with cover art")
 	}
+	if !caps.LearnSourceDigest {
+		t.Error("worker must advertise learn_source_digest so the server skips its own source hash")
+	}
+	// Like track_selection, the flag is outside the pinned fingerprint.
+	off := caps
+	off.LearnSourceDigest = false
+	if a, errA := transcode.ComputeCapabilityFingerprint(caps); errA != nil {
+		t.Fatal(errA)
+	} else if b, errB := transcode.ComputeCapabilityFingerprint(off); errB != nil || a != b {
+		t.Errorf("learn_source_digest moved the capability fingerprint: %v %v", errB, a == b)
+	}
 	if !caps.HardwareSearch {
 		t.Error("worker must advertise hardware_search so the server may add media engine candidates")
 	}

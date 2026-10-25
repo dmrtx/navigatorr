@@ -33,8 +33,10 @@ This is separate from retrying an encode that the worker has definitively
 reported as failed. User decision waits are never approved by the reconciler.
 
 The workflow's terminal output carries the final worker status. Original
-integrity is marked verified only after comparing the SHA-256 with the original
-baseline; the resolved `original_sha256_pending` field is removed.
+integrity is marked verified only after comparing the original with its baseline:
+the SHA-256 for actions that were hashed by the coordinator, or the recorded
+size and mtime (`original_integrity_check: metadata`) for actions whose digest
+the worker learned while staging; the resolved `original_sha256_pending` field is removed.
 
 ### Batch parent/child coordination
 
@@ -204,7 +206,9 @@ whatever the message says:
 - the source was modified during a benchmark (`verifySourceUnchanged`);
 - the resolved plan no longer matches the source's streams (subtitle index,
   codec or a missing stream);
-- the accept step that compares hashes.
+- the accept step that compares hashes or, for learned-digest actions, the
+  original's size and mtime, or a status whose `source_sha256` differs from the
+  pinned digest.
 
 An unchanged manual retry after any of these is refused, because it would copy
 and hash the same source again. The generic file hasher is role-neutral: it

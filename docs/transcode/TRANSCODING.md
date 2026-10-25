@@ -215,7 +215,7 @@ The built-in profiles use:
 
 ## Safety and validation
 
-`transcode_media` is candidate-only. `replace_original: true` is rejected. The original is SHA-256 hashed before work begins and re-hashed at acceptance.
+`transcode_media` is candidate-only. `replace_original: true` is rejected. The original is read once for hashing, by the worker, while it copies the file to local staging. The coordinator preflight records the original's size and mtime (`original_stat`) and does not read the file. The digest the worker learns is reported in the job status (`source_sha256`) and the coordinator pins the first one it sees as `original_sha256`; a different digest later is a `SourceChanged` integrity failure. Acceptance checks the original's size and mtime against `original_stat` (`original_integrity_check: metadata`) instead of reading the file again, so a same-size, same-mtime content change is no longer caught there; the worker's staged-size check and the digest comparison on later rungs still apply. Actions started before this behaviour (digest recorded, no `original_stat`) and workers that do not advertise `learn_source_digest` keep the coordinator hash at preflight and the full re-hash at acceptance (`original_integrity_check: sha256`).
 
 All structural/media/policy validation (duration, video codec, expected bit depth and pixel format, audio stream count/codecs/languages/channels, subtitle count and expected copy/conversion codecs, subtitle languages and `forced`/`default` dispositions, attachments, and chapters) runs worker-local on the candidate BEFORE it is published. A bad candidate fails the job closed and is never published; the original is never deleted or overwritten. Promotion of an already-published candidate intentionally performs a full re-inspection.
 
@@ -264,8 +264,11 @@ Source cache identity and cleanup:
 
 - Key: `sha256(clean_source_path | size | mtime_nanos | mode | expected_sha256)`
   with a JSON sidecar (`source`, `size`, `mod_time_unix_nano`, `sha256`). The
-  coordinator preflight SHA-256 of the source is forwarded to the
-  transcode. A size, mtime, or **content** change is a
+  source SHA-256 is forwarded to the transcode: the coordinator preflight
+  hash for a worker without `learn_source_digest`, or the digest the worker
+  learned while staging and the coordinator pinned for later rungs. The first
+  rung of a learning worker is digest-less, so it cannot hit the cache and
+  populates it with the learned digest. A size, mtime, or **content** change is a
   miss, so a same path/size/mtime source with changed content can never be
   reused. Before an entry is published the worker hashes only the LOCAL
   copied/downloaded bytes and compares them to the expected digest; a mismatch
@@ -308,6 +311,13 @@ plan is a deterministic idempotency conflict rather than a silent reuse.
 > deferring the failure. There is no compatibility fallback and `source_sha256`
 > is never silently omitted. Upgrade the Navigatorr server and every transcode
 > worker in the same rollout.
+>
+> Learn-at-staging is additive on top of v2: the `learn_source_digest`
+> capability (not part of the capability fingerprint), an optional
+> `source_size_bytes` request field sent only with an empty `source_sha256` and
+> only to a worker that advertises the capability, and a response-only
+> `source_sha256` in the job status. Roll workers out first, then the server;
+> a server never sends a digest-less submit to a worker without the capability.
 
 Worker config (`~/.config/navigatorr-transcode/config.yaml`):
 

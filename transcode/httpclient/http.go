@@ -764,6 +764,7 @@ type httpSubmitPayload struct {
 	IdempotencyKey      string          `json:"idempotency_key,omitempty"`
 	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
 	SourceSHA256        string          `json:"source_sha256,omitempty"`
+	SourceSizeBytes     int64           `json:"source_size_bytes,omitempty"`
 }
 
 type httpSubmitResult struct {
@@ -816,7 +817,7 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (trans
 			specDigest = d
 		}
 	}
-	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256}
+	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256, SourceSizeBytes: req.SourceSizeBytes}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return transcode.Job{}, fmt.Errorf("serializing submit payload: %w", err)

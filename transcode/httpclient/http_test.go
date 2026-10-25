@@ -906,3 +906,54 @@ func TestSetHoldAndOldWorker(t *testing.T) {
 		t.Fatalf("an old worker must read as unsupported: %v", err)
 	}
 }
+
+// A digest-less submit carries the probed size; a status that reports the
+// digest the worker learned decodes it. Both fields are optional: a request
+// with a digest sends no size, and a status without the field leaves it empty.
+func TestHTTPExecutor_DigestlessSubmitCarriesSizeAndStatusReportsLearnedDigest(t *testing.T) {
+	const learned = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	var submits []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/jobs":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			submits = append(submits, body)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprintf(w, `{"id": %q, "status": "queued"}`, body["id"])
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job-1":
+			fmt.Fprintln(w, `{"id": "job-1", "status": "running", "candidate_path": "/Volumes/media/out.mkv", "source_sha256": "`+learned+`"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/job-2":
+			fmt.Fprintln(w, `{"id": "job-2", "status": "running", "candidate_path": "/Volumes/media/out.mkv"}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	exec := newTestHTTPExecutor(t, srv)
+	ctx := context.Background()
+
+	if _, err := exec.Submit(ctx, transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", SourceSizeBytes: 4096}); err != nil {
+		t.Fatalf("digest-less Submit: %v", err)
+	}
+	if _, err := exec.Submit(ctx, transcode.Request{ID: "job-2", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/c.mkv", Profile: "hevc-vt", SourceSHA256: learned}); err != nil {
+		t.Fatalf("pinned Submit: %v", err)
+	}
+	if len(submits) != 2 {
+		t.Fatalf("submits: %v", submits)
+	}
+	if _, hasSHA := submits[0]["source_sha256"]; hasSHA || submits[0]["source_size_bytes"] != float64(4096) {
+		t.Errorf("digest-less submit payload = %v", submits[0])
+	}
+	if _, hasSize := submits[1]["source_size_bytes"]; hasSize || submits[1]["source_sha256"] != learned {
+		t.Errorf("pinned submit payload = %v", submits[1])
+	}
+
+	if st, err := exec.Status(ctx, "job-1"); err != nil || st.SourceSHA256 != learned {
+		t.Errorf("status digest = %q err=%v", st.SourceSHA256, err)
+	}
+	if st, err := exec.Status(ctx, "job-2"); err != nil || st.SourceSHA256 != "" {
+		t.Errorf("status without the field = %q err=%v", st.SourceSHA256, err)
+	}
+}

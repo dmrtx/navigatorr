@@ -25,6 +25,12 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 	if origPath != "" && skippedWithoutWork(ec) {
 		return acceptUntouchedSkip(ec, origPath, origSHA), nil
 	}
+	if res, conflict := originalDigestConflict(ec); conflict {
+		return res, nil
+	}
+	if _, _, byMetadata := recordedOriginalStat(ec.State); byMetadata {
+		return e.acceptByMetadata(ec, origPath, origSHA, candidate), nil
+	}
 	if origPath == "" || origSHA == "" {
 		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}, nil
 	}
@@ -72,28 +78,68 @@ func (e *Engine) stepTranscodeAccept(ctx context.Context, ec *ExecutionContext) 
 		ec.State["failure_classification"] = string(resilience.SourceChanged)
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("integrity violation: original file %s was modified (expected sha256 %s, got %s)", origPath, origSHA, current)}, nil
 	}
-	validation, _ := ec.State["validation"].(map[string]any)
-	if validation == nil {
-		validation = make(map[string]any)
-	}
-	delete(validation, "original_sha256_pending")
-	validation["original_sha256"] = "ok"
-	validation["original_integrity"] = "verified"
-	ec.State["validation"] = validation
-	ec.Outputs["validation"] = validation
-	ec.State["original_integrity"] = "verified"
-	ec.Outputs["original_integrity"] = "verified"
+	validation := markOriginalVerified(ec, "ok", "sha256")
 	if getBool(ec.State, "skip_transcode") {
 		return StepResult{Status: StepCompleted, Outputs: skipOutputs(ec, origPath, origSHA, "verified", validation)}, nil
 	}
-	out := map[string]any{"original_integrity": "verified", "validation": validation, "candidate_path": candidate, "output_path": candidate, "original_path": origPath, "original_intact": true, "original_sha256": origSHA, "replace_original": false, "profile": getString(ec.State, "profile"), "recipe_version": getString(ec.State, "recipe_version"), "recipe_digest": getString(ec.State, "recipe_digest"), "plan_digest": getString(ec.State, "plan_digest"), "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": ec.State["applied_fallbacks"], "message": "Transcode completed and verified. Candidate output ready. Original file physically preserved and SHA-256 unchanged."}
+	return StepResult{Status: StepCompleted, Outputs: e.acceptOutputs(ec, origPath, origSHA, candidate, validation, "sha256", "Transcode completed and verified. Candidate output ready. Original file physically preserved and SHA-256 unchanged.")}, nil
+}
+
+// acceptOutputs is the result of an accepted candidate; check says how the
+// original was verified and message says it in words.
+func (e *Engine) acceptOutputs(ec *ExecutionContext, origPath, origSHA, candidate string, validation map[string]any, check, message string) map[string]any {
+	out := map[string]any{"original_integrity": "verified", "original_integrity_check": check, "validation": validation, "candidate_path": candidate, "output_path": candidate, "original_path": origPath, "original_intact": true, "original_sha256": origSHA, "replace_original": false, "profile": getString(ec.State, "profile"), "recipe_version": getString(ec.State, "recipe_version"), "recipe_digest": getString(ec.State, "recipe_digest"), "plan_digest": getString(ec.State, "plan_digest"), "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count"), "fallback_count": getInt(ec.State, "fallback_count"), "applied_fallbacks": ec.State["applied_fallbacks"], "message": message}
 	if c := ec.State["conversions"]; c != nil {
 		out["conversions"] = c
 	}
 	if h := ec.State["failure_history"]; h != nil {
 		out["failure_history"] = h
 	}
-	return StepResult{Status: StepCompleted, Outputs: out}, nil
+	return out
+}
+
+// markOriginalVerified records a passed original integrity check in the
+// validation report and the action's state, and says how it was established.
+func markOriginalVerified(ec *ExecutionContext, shaStatus, check string) map[string]any {
+	validation, _ := ec.State["validation"].(map[string]any)
+	if validation == nil {
+		validation = make(map[string]any)
+	}
+	delete(validation, "original_sha256_pending")
+	validation["original_sha256"] = shaStatus
+	validation["original_integrity"] = "verified"
+	validation[originalIntegrityCheckKey] = check
+	ec.State["validation"] = validation
+	ec.Outputs["validation"] = validation
+	ec.State["original_integrity"] = "verified"
+	ec.Outputs["original_integrity"] = "verified"
+	ec.State[originalIntegrityCheckKey] = check
+	ec.Outputs[originalIntegrityCheckKey] = check
+	return validation
+}
+
+// acceptByMetadata finishes an action preflighted without a coordinator hash.
+// The original's content digest was taken once, by the worker, while it copied
+// the file; the original's size and modification time are checked against the
+// stat recorded at preflight, and no media is read. The result says so: the
+// integrity is "verified" by metadata, not by a second hash.
+func (e *Engine) acceptByMetadata(ec *ExecutionContext, origPath, origSHA, candidate string) StepResult {
+	if origPath == "" {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing (fail closed)"}
+	}
+	// A skip that ran no worker job needs no digest; every other finish does,
+	// because promotion verifies the original against it.
+	if origSHA == "" && !getBool(ec.State, "skip_transcode") {
+		return StepResult{Status: StepFailed, Error: "original integrity baseline missing: the worker never reported the source digest (fail closed)"}
+	}
+	if res := verifyOriginalMetadata(ec, origPath); res != nil {
+		return *res
+	}
+	validation := markOriginalVerified(ec, "pinned_at_staging", "metadata")
+	if getBool(ec.State, "skip_transcode") {
+		return StepResult{Status: StepCompleted, Outputs: skipOutputs(ec, origPath, origSHA, "verified", validation)}
+	}
+	return StepResult{Status: StepCompleted, Outputs: e.acceptOutputs(ec, origPath, origSHA, candidate, validation, "metadata", "Transcode completed and verified. Candidate output ready. Original file preserved: its SHA-256 was taken once while the worker copied it, and its size and modification time are unchanged since it was inspected.")}
 }
 
 // workStateKeys are the state entries a worker job or its candidate leave

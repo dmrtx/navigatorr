@@ -36,16 +36,25 @@ type JobRecord struct {
 	// SourceSHA256 is the coordinator preflight digest of the original source
 	// bytes, used as the content-identity component of the shared source cache
 	// key. Optional; empty on legacy records.
-	SourceSHA256     string                       `json:"source_sha256,omitempty"`
-	Conversions      []transcode.ConversionRecord `json:"conversions,omitempty"`
-	PID              int                          `json:"pid"`
-	ProcessStartTime string                       `json:"process_start_time,omitempty"`
-	CreatedAt        time.Time                    `json:"created_at"`
-	StartedAt        time.Time                    `json:"started_at,omitempty"`
-	FinishedAt       time.Time                    `json:"finished_at,omitempty"`
-	ExitCode         int                          `json:"exit_code,omitempty"`
-	Error            string                       `json:"error,omitempty"`
-	DurationSec      float64                      `json:"duration_sec,omitempty"`
+	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// LearnedSourceSHA256 is the digest of the original the worker computed
+	// while it staged the file, for a request that carried no SourceSHA256. It
+	// never replaces SourceSHA256: the execution-spec digest that idempotent
+	// resubmits compare is built from the request's value, so a learned digest
+	// must not change what an identical resubmit hashes to.
+	LearnedSourceSHA256 string `json:"learned_source_sha256,omitempty"`
+	// ExpectedSourceSizeBytes is the size the coordinator probed, sent with a
+	// digest-less request. The staged copy must have exactly this size.
+	ExpectedSourceSizeBytes int64                        `json:"expected_source_size_bytes,omitempty"`
+	Conversions             []transcode.ConversionRecord `json:"conversions,omitempty"`
+	PID                     int                          `json:"pid"`
+	ProcessStartTime        string                       `json:"process_start_time,omitempty"`
+	CreatedAt               time.Time                    `json:"created_at"`
+	StartedAt               time.Time                    `json:"started_at,omitempty"`
+	FinishedAt              time.Time                    `json:"finished_at,omitempty"`
+	ExitCode                int                          `json:"exit_code,omitempty"`
+	Error                   string                       `json:"error,omitempty"`
+	DurationSec             float64                      `json:"duration_sec,omitempty"`
 	// CandidateSizeBytes/CandidateSHA256 attest the accepted worker-local
 	// candidate computed during pre-publish validation. They are the cheap
 	// identity metadata exposed to the coordinator for post-publish checks.
@@ -428,4 +437,17 @@ func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
 		Valid:     valid,
 		UpdatedAt: info.ModTime().UTC(),
 	}
+}
+
+// effectiveSourceSHA is the digest every check of the original's bytes uses:
+// the request's, or the one the worker learned while staging when the request
+// had none. It is empty until a digest-less job has staged its source.
+func (j *JobRecord) effectiveSourceSHA() string {
+	if j == nil {
+		return ""
+	}
+	if j.SourceSHA256 != "" {
+		return j.SourceSHA256
+	}
+	return j.LearnedSourceSHA256
 }
