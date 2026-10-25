@@ -85,7 +85,40 @@ type Job struct {
 	BytesRead  int64       `json:"bytes_read,string"`
 	TotalBytes int64       `json:"total_bytes,string"`
 	Result     *HashResult `json:"result,omitempty"`
-	Error      *Error      `json:"error,omitempty"`
+	// Usage is the result of a usage job; BytesRead counts bytes so far.
+	Usage *UsageResult `json:"usage,omitempty"`
+	Error *Error       `json:"error,omitempty"`
+}
+
+// Volume is what the filesystem under a served root reports about its space.
+// It is the whole volume, whatever the root holds, so it is the number to set
+// the folders against.
+type Volume struct {
+	Root       string `json:"root"`
+	FSID       string `json:"fsid"`
+	FSType     string `json:"fs_type"`
+	TotalBytes int64  `json:"total_bytes,string"`
+	// FreeBytes includes space reserved for privileged use; AvailBytes is what
+	// an ordinary writer can still use.
+	FreeBytes  int64 `json:"free_bytes,string"`
+	AvailBytes int64 `json:"avail_bytes,string"`
+}
+
+// VolumeResponse is the answer to GET /v1/volumes.
+type VolumeResponse struct {
+	InstanceID string   `json:"instance_id"`
+	Volumes    []Volume `json:"volumes"`
+}
+
+// UsageResult is the size of a directory tree: the apparent size of its regular
+// files, as ls and the coordinator's own folder scan count it. Links are not
+// followed, a directory on another filesystem is not entered, and Skipped counts
+// what could not be read or was left out for either reason.
+type UsageResult struct {
+	Bytes   int64 `json:"bytes,string"`
+	Files   int64 `json:"files,string"`
+	Dirs    int64 `json:"dirs,string"`
+	Skipped int64 `json:"skipped,string"`
 }
 
 // Error codes.
@@ -93,6 +126,7 @@ const (
 	CodeNotFound  = "not_found"
 	CodeOutside   = "outside_roots"
 	CodeNotFile   = "not_regular_file"
+	CodeNotDir    = "not_directory"
 	CodeChanged   = "changed_while_reading"
 	CodeDenied    = "permission_denied"
 	CodeBusy      = "busy"
@@ -114,6 +148,7 @@ var (
 	errNotFound = &Error{Code: CodeNotFound, Message: "no such file"}
 	errOutside  = &Error{Code: CodeOutside, Message: "path is outside the served roots or crosses a symbolic link"}
 	errNotFile  = &Error{Code: CodeNotFile, Message: "path is not a regular file"}
+	errNotDir   = &Error{Code: CodeNotDir, Message: "path is not a directory"}
 	errDenied   = &Error{Code: CodeDenied, Message: "permission denied"}
 	errChanged  = &Error{Code: CodeChanged, Message: "the file changed while it was read"}
 )

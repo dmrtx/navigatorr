@@ -287,6 +287,97 @@ func (c *Client) Hash(ctx context.Context, local string, progress HashProgress) 
 	}
 }
 
+// Volumes reports the space of the volume under each served root, with the
+// instance that said it.
+func (c *Client) Volumes(ctx context.Context) (VolumeResponse, error) {
+	var resp VolumeResponse
+	if err := c.do(ctx, c.timeout, http.MethodGet, "/v1/volumes", nil, &resp); err != nil {
+		return VolumeResponse{}, err
+	}
+	if resp.InstanceID == "" {
+		return VolumeResponse{}, fmt.Errorf("%w: answer without an instance", ErrUnavailable)
+	}
+	return resp, nil
+}
+
+// UsageProgress receives the bytes counted so far, roughly every poll.
+type UsageProgress func(bytes int64)
+
+// Usage has the helper walk the directory locally and sum its regular files.
+// Like Hash it has no time limit of its own: the caller's context decides, and
+// on every way out before a result the job is cancelled on the helper.
+func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress) (UsageResult, error) {
+	var job Job
+	if err := c.pathCall(ctx, c.timeout, "/v1/usage", local, &job); err != nil {
+		return UsageResult{}, err
+	}
+	if job.ID == "" || job.InstanceID == "" {
+		return UsageResult{}, fmt.Errorf("%w: usage started without a job id", ErrUnavailable)
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			c.cancelJob(job.ID)
+		}
+	}()
+	instance := job.InstanceID
+	wait := pollMin
+	failures := 0
+	for {
+		switch job.State {
+		case JobDone:
+			if job.Usage == nil {
+				return UsageResult{}, fmt.Errorf("%w: a finished walk carried no result", ErrUnavailable)
+			}
+			finished = true
+			return *job.Usage, nil
+		case JobFailed:
+			finished = true
+			if job.Error != nil {
+				return UsageResult{}, job.Error
+			}
+			return UsageResult{}, &Error{Code: CodeInternal, Message: "the walk failed"}
+		case JobCancelled:
+			finished = true
+			return UsageResult{}, ErrHelperCancelled
+		case JobQueued, JobRunning:
+		default:
+			return UsageResult{}, fmt.Errorf("%w: unknown job state %q", ErrUnavailable, job.State)
+		}
+		if progress != nil {
+			progress(job.BytesRead)
+		}
+		select {
+		case <-ctx.Done():
+			return UsageResult{}, ctx.Err()
+		case <-time.After(wait):
+		}
+		if wait < pollMax {
+			wait = min(wait*2, pollMax)
+		}
+		var next Job
+		if err := c.do(ctx, c.timeout, http.MethodGet, "/v1/jobs/"+url.PathEscape(job.ID), nil, &next); err != nil {
+			var apiErr *Error
+			switch {
+			case ctx.Err() != nil:
+				return UsageResult{}, ctx.Err()
+			case errors.As(err, &apiErr) && apiErr.Code == CodeNotFound:
+				return UsageResult{}, fmt.Errorf("%w: the walk job is gone", ErrRestarted)
+			default:
+				if failures++; failures >= maxPollFailures {
+					return UsageResult{}, err
+				}
+				continue
+			}
+		}
+		failures = 0
+		if next.InstanceID != instance {
+			return UsageResult{}, ErrRestarted
+		}
+		job = next
+	}
+}
+
 // cancelJob is best effort: it uses its own short context because the caller's
 // has usually ended.
 func (c *Client) cancelJob(id string) {

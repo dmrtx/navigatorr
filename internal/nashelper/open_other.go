@@ -49,7 +49,12 @@ func (r *Roots) Close() { r.closed.Store(true) }
 func (r *Roots) Paths() []string { return append([]string(nil), r.paths...) }
 
 // Open opens a regular file under a root for reading.
-func (r *Roots) Open(path string) (*os.File, error) {
+func (r *Roots) Open(path string) (*os.File, error) { return r.open(path, false) }
+
+// OpenDir opens a directory under a root, or a root itself, for listing.
+func (r *Roots) OpenDir(path string) (*os.File, error) { return r.open(path, true) }
+
+func (r *Roots) open(path string, wantDir bool) (*os.File, error) {
 	clean := filepath.Clean(path)
 	if !filepath.IsAbs(clean) {
 		return nil, errOutside
@@ -58,10 +63,10 @@ func (r *Roots) Open(path string) (*os.File, error) {
 		return nil, errClosed
 	}
 	for _, root := range r.paths {
-		if clean == root {
+		if clean == root && !wantDir {
 			return nil, errNotFile
 		}
-		if !strings.HasPrefix(clean, strings.TrimSuffix(root, "/")+"/") {
+		if clean != root && !strings.HasPrefix(clean, strings.TrimSuffix(root, "/")+"/") {
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(clean)
@@ -86,7 +91,11 @@ func (r *Roots) Open(path string) (*os.File, error) {
 			f.Close()
 			return nil, err
 		}
-		if !info.Mode().IsRegular() {
+		switch {
+		case wantDir && !info.IsDir():
+			f.Close()
+			return nil, errNotDir
+		case !wantDir && !info.Mode().IsRegular():
 			f.Close()
 			return nil, errNotFile
 		}
