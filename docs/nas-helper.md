@@ -238,6 +238,50 @@ its own gets its own deadline back, not a fallback. The helper stops a hash job
 nobody has asked about for two minutes (a caller that died, or never received the
 id), so an abandoned job cannot keep reading or hold a slot.
 
+### Stage 4 design: full hashes by the helper
+
+Where the cost is: `promotionHash` (action/promote_files.go) is the one place that
+reads a whole media file through the mount; the plan, preserve, promote and final
+verification steps all go through it (`verifyPromotionHash*`), and the
+per-execution cache (`promotionVerifiedFiles`) is dropped at every wait, so a
+promotion that waits for approval reads the converted file again. Each read is the
+file's size over SMB.
+
+Change: `promotionHash` asks the helper to do the full read when a helper is
+configured and the path is mapped, and keeps every other check as it is.
+
+1. The mount-side metadata checks stay exactly as they are (Lstat, open, SameFile,
+   size, mtime before and after), so the verified-file cache, the stable-retry
+   loop and the change detection behave as before. Only the byte loop is replaced.
+2. The helper hashes the file (`Client.Hash`, idle I/O priority on the NAS, no data
+   on the network). Its answer must agree with the mount: the byte count equals the
+   size the mount reports, and the helper's identity is complete and unchanged
+   between the hash and a sample taken right after it.
+3. Cross-check against the mount: the sampled-range digest of the file read over
+   the mount (about 8 MiB, the function recovery already uses) must equal the
+   helper's sample digest. A mismatch means the helper and the mount are not
+   looking at the same bytes (a wrong mapping, a stale mount cache); it is an
+   integrity failure, never a fallback.
+4. Any helper failure for which `ShouldFallBack` is true (unreachable, timeout,
+   restart, a path it does not serve, refusal) falls back to the full read through
+   the mount, and the integrity record says so. An answer (`not_found`,
+   `not_regular_file`, `changed_while_reading`) maps to the error the mount read
+   would have produced (not-exist, not a regular file, file changed, which the
+   stable loop retries).
+5. The plan step still compares the digest with the worker's attested
+   `candidate_sha256` and size, so the helper's hash is checked against a value it
+   never saw; and the candidate that was probed is the one hashed, as before.
+6. The integrity record (`integrity_checks`) gets `via`: `nas_helper` or
+   `smb_fallback` (with the helper error class), so a promotion that read over the
+   network says why.
+7. The same substitution serves every path that goes through `promotionHash`: the
+   candidate, the recovery copy being verified, the final file, and a
+   not-hash-once original. It does not change which steps run or in what order, so
+   a recovery stays what it is today (stage 5).
+
+Out of scope here: identity comparison across waits (needs the stage 5 recovery
+design), the recovery copy's NAS disk work, `validateCandidateDetailed`'s probe.
+
 Required from the second review for the helper's API: no expected value is
 ever sent to it; a job is created for the step that uses it; the sampling
 function is shared so the digests are identical.
