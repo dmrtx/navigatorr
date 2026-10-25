@@ -186,6 +186,22 @@ what the coordinator's CIFS mount reports with `stat` run inside the NAS:
 * A rename keeps the NAS inode; no-replace rename over SMB works (`EEXIST` on
   an existing destination); reading over SMB does not change `ctime`.
 
+## Deployment and measurements on the NAS (2026-10-25)
+
+Deployed by Ansible (`playbooks/navigatorr/nas-helper.yml` in the private
+repository): uid of the SMB account, read-only root, `cap_drop ALL`, library
+mounted read-only, bound to the LAN address. Health reports `resolver: walk`
+(kernel 4.4); a request without the token gets 401; the helper's hash of a real
+file equals the hash read over SMB; the idle I/O class (3) is applied inside the
+container (Docker's default seccomp allows `ioprio_set`); cancelling a job stops
+the read.
+
+Throughput: the Go standard library hashes at ~98 MB/s on the NAS's Celeron
+J4125, which has SHA extensions but no AVX2 (Go needs both). `sha256-simd`
+reaches 555 MB/s on the same machine, so the helper uses it; end to end, a
+470 MB file hashes at 100-140 MB/s with the disk read at idle priority and no
+bytes on the network.
+
 ## Staging
 
 1. Shared sampled-range digest package (no behaviour change).
