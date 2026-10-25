@@ -2962,7 +2962,8 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
-.jd-actions > .jd-primary, .jd-actions > .jd-secondary { flex: 1 1 0; min-width: 0; }
+.jd-actions > .jd-primary { flex: 3 1 0; min-width: 0; }
+.jd-actions > .jd-secondary { flex: 2 1 0; min-width: 0; }
 .jd-actions .more-actions { position: relative; flex: 0 0 44px; }
 .jd-actions .more-actions > summary { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--control-line); border-radius: 6px; font-size: 20px; line-height: 1; list-style: none; cursor: pointer; }
 .jd-actions .more-actions > summary::-webkit-details-marker { display: none; }
@@ -2975,6 +2976,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 /* A pending button shows one real spinner in place of its icon. */
 .spinner { display: none; }
 #job-detail .button-pending::before { content: none; }
+#job-detail .button-pending { padding-inline: 6px; gap: 4px; }
 #job-detail .spinner { display: inline-block; box-sizing: border-box; flex: 0 0 14px; width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: pending-spin .8s linear infinite; }
 @media (prefers-reduced-motion: reduce) { #job-detail .spinner { animation: none; } }
 

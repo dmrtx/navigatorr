@@ -108,6 +108,24 @@ export function install() {
       if (top && top !== el && !el.contains(top) && !top.contains(el) && !(pinned(top) && !pinned(el))) add("covered", `covered by ${describe(top)}`, el);
     }
 
+    // 2b. A word in a control is never cut in half: each word fits the line it is on.
+    const measure = document.createElement("canvas").getContext("2d");
+    for (const el of interactive) {
+      if (!visible(el) || !el.textContent.trim()) continue;
+      const cs = getComputedStyle(el);
+      if (cs.whiteSpace === "nowrap") continue;
+      // Only plain labels: a control that holds a truncated name or a count is checked by single-line.
+      if ([...el.children].some(c => !c.matches(".spinner, .action-label, svg"))) continue;
+      measure.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      const label = [...el.querySelectorAll(".action-label")][0] || el;
+      const box = label.getBoundingClientRect();
+      const room = box.width - (label === el ? parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) : 0)
+        - (label === el ? [...el.children].filter(c => c.matches?.(".spinner, .jd-chevron") && getComputedStyle(c).display !== "none").reduce((sum, c) => sum + c.getBoundingClientRect().width + parseFloat(cs.columnGap || 0), 0) : 0);
+      for (const word of el.textContent.trim().split(/\s+/)) {
+        if (word.length > 3 && measure.measureText(word).width > room + 1 && !/^[\u3000-\u9fff]/.test(word)) { add("word-broken", `“${word}” does not fit the ${Math.round(room)}px its control leaves for it`, el); break; }
+      }
+    }
+
     // 3. Controls do not overlap each other.
     for (let i = 0; i < interactive.length; i++) {
       for (let j = i + 1; j < interactive.length; j++) {
