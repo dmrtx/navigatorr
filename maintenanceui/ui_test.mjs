@@ -7737,9 +7737,10 @@ test("locating a file loads further pages of its folder until the row is there",
   assert.equal(h.run("scrolled"), true);
   // A row that never turns up ends when the folder has no more pages.
   h.context.loads = 0;
-  h.run('state.libraryHasMore = false; fileChecks = () => [];');
+  h.run('state.libraryHasMore = false; fileChecks = () => []; var told = []; notify = text => told.push(text);');
   await h.run('locateFileRow("/media/missing.mkv")');
   assert.equal(h.context.loads, 0);
+  assert.equal(h.run("told.length"), 1);
 });
 
 test("returning to Activity restores how far down the list was; other tabs and re-clicks start at the top", async () => {
@@ -7747,12 +7748,22 @@ test("returning to Activity restores how far down the list was; other tabs and r
   const scrolls = [];
   h.context.window = { scrollY: 1400, scrollTo: ({ top }) => scrolls.push(top), history: { pushState() {}, replaceState() {} }, location: { pathname: "/", search: "" } };
   h.run('controls = () => {}; loadJobs = async () => {}; loadLibrary = async () => {}; state.tab = "jobs";');
-  h.run('selectTab("library")');
-  assert.equal(h.run("state.jobsScroll"), 1400);
+  // The list is followed while it is on screen, so the Back button (which can
+  // move the page before the tab changes) does not lose the place.
+  h.run("rememberJobsScroll()");
   h.context.window.scrollY = 0;
+  h.run('selectTab("library")');
+  h.run("rememberJobsScroll()");
+  assert.equal(h.run("state.jobsScroll"), 1400);
   h.run('selectTab("jobs")');
   assert.deepEqual(scrolls, [0, 1400]);
   assert.equal(h.run("state.jobsRestore"), 1400);
+  // A different filter is a different list: it starts at the top.
+  h.run('selectTab("library"); $("job-filter").value = "failed"; selectTab("jobs")');
+  assert.equal(scrolls.at(-1), 0);
+  assert.equal(h.run("state.jobsRestore"), null);
+  h.run('$("job-filter").value = ""; selectTab("library"); selectTab("jobs")');
+  assert.equal(scrolls.at(-1), 1400);
   // Tapping Activity while on it goes to the top, not back to an old position.
   h.run('selectTab("jobs")');
   assert.equal(scrolls.at(-1), 0);
@@ -7765,6 +7776,13 @@ test("returning to Activity restores how far down the list was; other tabs and r
   await h2.run("loadJobs()");
   assert.deepEqual(scrolls2, [900]);
   assert.equal(h2.run("state.jobsRestore"), null);
+  // A load that fails does not leave the position waiting for a later refresh.
+  const h3 = harness();
+  const scrolls3 = [];
+  h3.context.window = { scrollY: 0, scrollTo: ({ top }) => scrolls3.push(top), history: { pushState() {}, replaceState() {} }, location: { pathname: "/", search: "" } };
+  h3.run('api = async () => { throw new Error("down"); }; state.tab = "jobs"; state.jobsRestore = 900;');
+  await h3.run("loadJobs().catch(() => {})");
+  assert.equal(h3.run("state.jobsRestore"), null);
 });
 
 test("a batch paused on request reads Paused, not Needs decision", () => {

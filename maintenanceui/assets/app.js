@@ -715,7 +715,10 @@ async function locateFileRow(path, current = () => true) {
     if (!current()) return;
   }
   const check = row();
-  if (!check) return;
+  if (!check) {
+    if (current()) notify("That file is not in the list shown. Its folder is open.");
+    return;
+  }
   selectOneFile(path);
   fileSelectionChanged();
   const line = check.closest(".media-row");
@@ -810,12 +813,20 @@ async function applyNavigation(route) {
 if (typeof window !== "undefined") window.addEventListener("popstate", () => {
   if (state.routeReady && !$("workspace").hidden) safe(() => applyNavigation(navigationRoute(window.location.search)));
 });
+// rememberJobsScroll follows the Activity list while it is on screen, so the
+// place it was left at is known even when the browser has already moved the
+// page by the time the tab changes (the Back button).
+function rememberJobsScroll() {
+  if (state.tab !== "jobs" || state.jobsRestore != null || typeof window === "undefined") return;
+  state.jobsScroll = window.scrollY || 0;
+  state.jobsScrollFilter = $("job-filter").value;
+}
+if (typeof window !== "undefined") window.addEventListener("scroll", rememberJobsScroll, {passive: true});
 function selectTab(tab, fromRoute = false) {
   if (!fromRoute && state.applyingNavigation) { state.routeRevision++; state.applyingNavigation=false; }
   // Leaving Activity remembers how far down it was, so coming back (the Back
   // button, or its tab) lands on the same job instead of the top.
   const cameFrom = state.tab;
-  if (typeof window !== "undefined" && cameFrom === "jobs" && tab !== "jobs") state.jobsScroll = window.scrollY || 0;
   state.tab = tab;
   document
     .querySelectorAll(".tab-content")
@@ -826,7 +837,7 @@ function selectTab(tab, fromRoute = false) {
       n.setAttribute("aria-current", n.dataset.tab === tab ? "page" : "false"),
     );
 
-  state.jobsRestore = tab === "jobs" && cameFrom !== "jobs" && state.jobsScroll > 0 ? state.jobsScroll : null;
+  state.jobsRestore = tab === "jobs" && cameFrom !== "jobs" && state.jobsScroll > 0 && state.jobsScrollFilter === $("job-filter").value ? state.jobsScroll : null;
   if (typeof window !== "undefined") window.scrollTo({ top: state.jobsRestore || 0 });
   writeNavigation();
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
@@ -5745,7 +5756,6 @@ async function loadJobs(more = false) {
     // once it is as long as it was.
     if (state.jobsRestore != null && state.tab === "jobs" && typeof window !== "undefined") {
       window.scrollTo({ top: state.jobsRestore });
-      state.jobsRestore = null;
     }
 
     $("jobs-more").hidden = !data.has_more;
@@ -5760,6 +5770,8 @@ async function loadJobs(more = false) {
     if (revision === state.jobsRevision) {
       state.jobsLoading = false;
       $("jobs-more").disabled = false;
+      // One attempt only: a failed load must not scroll the list later.
+      state.jobsRestore = null;
     }
   }
 }
