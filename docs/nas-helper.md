@@ -490,3 +490,61 @@ is in `promote_move_aside.go`. State: `recovery_proof`, `original_helper`,
   or an earlier process means a full read (through the mount if the helper is gone).
 - `duplicateBackupGuard` refuses any promotion that moves aside.
 - A proof from the same process also counts across waits, as the mount fingerprints do.
+
+### Stage 5b design: move aside for promotions that never read the original
+
+Found on the first real Replace file after stage 5 was deployed (Monogatari S02E02,
+1.78 GB, filesystem service, 2026-10-25): `recovery_mode: copy`,
+`recovery_mode_reason: original_not_read_again`, a 6 s `copy_file_range` copy on the NAS.
+Stage 5 never engaged. Every promotion admitted by the hash-once flow
+(`originalByMetadata`, `OriginalStatMod != ""`) returns early in `promotionChooseRecovery`
+because no full read of the original happens in the promotion, so no helper proof
+(`promotionKnownHelper`) and no mount fingerprint exist. That is the common case, so the
+design goal (no recovery copy, no read of the original) is not met until it is covered.
+
+**Trust model today.** The transcode pinned `OriginalSHA` once, while the worker copied the
+original, and accepted it by size + mtime. Promotion keeps to that: the original is the
+file whose size and mtime equal the transcode's (`promotionOriginalStatMatches`).
+
+**Proposal.** For a metadata-mode promotion the helper's `Sample` of the original, taken in
+`stepPromotePreserve`, becomes the proof:
+
+1. Preconditions, all required, else the current copy path (reason unchanged):
+   `Sample.Identity.Complete`, `Identity.Size == OriginalBytes`,
+   `Identity.MtimeNs == OriginalStatMod` (nanoseconds). This is the same trust as the
+   mount stat check, from the NAS filesystem instead of the SMB cache, plus an inode,
+   generation, ctime and a digest of 8 MiB of the file.
+2. `OriginalHelper = {Identity, Sample, Process}` from that `Sample`;
+   `RecoverySample` is set to the same digest when empty (both use `internal/sampledigest`,
+   which is what the existing metadata-mode checks of a recovery file compare against).
+3. The helper-observed probe of the recovery directory and `RecoveryProof = "helper"`
+   as in stage 5. Mode is chosen once (`RecoveryMode` empty), exactly as now.
+4. Everything stage 5 does for the move itself is unchanged: before the rename the helper
+   `Sample` must equal the proof in every field including ctime, else a full read of the
+   original compared with `OriginalSHA` (rare: something touched the file; it is also the
+   truthful check, since `OriginalSHA` is the real digest); after the rename the same
+   inode (all fields but ctime) and the same digest, else a full read accepted only if
+   it equals `OriginalSHA`.
+5. After the move, metadata-mode checks of the recovery file keep their cheap form: a
+   sampled-range comparison of `BackupPath` with `RecoverySample` over the mount (about
+   8 MiB), never a full read.
+
+**What must not change.** No path may fall to a full read of the original in the normal case;
+no helper answer ever decides "the original is gone"; the mode never changes after the
+intent is durable; restore/move-back/discard keep stage 5 semantics.
+
+**Questions for review.**
+1. Is the helper `Sample` (identity + 8 MiB digest + mtime/size equal to the transcode's)
+   at least as strong as the mount's size + mtime for deciding "this is the file that
+   was transcoded"? Where could it be weaker (mtime restored after a rewrite, a rewrite
+   outside the sampled ranges)? Is it acceptable that, as today, bytes outside the
+   sampled ranges are never compared in this mode?
+2. Does every metadata-mode check that runs after the move (restore, move back, discard,
+   duplicate guard, `promotionOriginalProved`, `verifyPromotionRecovery`) handle a
+   promotion with `RecoveryProof="helper"` and `OriginalSHA` never read? Which one still
+   assumes a copy or a mount fingerprint?
+3. The preserve step is re-run after a restart. What happens if the process changed
+   between the proof and the rename (proof from an earlier process counts for nothing)?
+   Is a full read of 1-2 GB acceptable there?
+4. Should a Sonarr/Radarr (non-filesystem) metadata-mode promotion get the same
+   treatment, or only `service == filesystem` first?
