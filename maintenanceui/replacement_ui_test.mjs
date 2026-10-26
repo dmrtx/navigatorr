@@ -215,13 +215,29 @@ test("one tap replaces the file: the plan is approved once it is ready, not befo
   const running = { id: "planned", status: "running" };
   const seen = watch(h, { jobs: [running, running, h.context.planned] });
   h.context.job = job;
+  h.context.refreshed = 0;
+  h.run('$("job-detail").open = true; state.detail = "file"; refreshDetail = async () => { refreshed++; };');
   await h.run('enqueueReplacement(job,{service:"filesystem"})');
   await settle();
+  // The open batch is read again at once, so the file shows as replacing.
+  assert.equal(h.context.refreshed, 1);
   // The dialog is gone and the plan was read until it was ready.
   assert.equal(h.elements.get("replacement-choice").open, false);
   assert.equal(h.elements.get("file-review").open, false);
   assert.deepEqual(seen.resumes(), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, approveDecision]]);
   assert.equal(seen.notes()[0], "Preparing the replacement. It starts by itself.");
+});
+
+test("starting a replacement leaves a dialog that shows some other job alone", async () => {
+  const job = { id: "file", candidate_ready: true };
+  const h = harness({ integrations: [], latest: job });
+  watch(h, { jobs: [h.context.planned] });
+  h.context.job = job;
+  h.context.refreshed = 0;
+  h.run('$("job-detail").open = true; state.detail = "unrelated"; refreshDetail = async () => { refreshed++; };');
+  await h.run('enqueueReplacement(job,{service:"filesystem"})');
+  await settle();
+  assert.equal(h.context.refreshed, 0);
 });
 
 test("a replacement whose library may re-download the old file is shown for review, not approved", async () => {
