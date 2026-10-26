@@ -5260,15 +5260,20 @@ function compactQueueActions(actions) {
     overflow = icons.filter((b) => !kept.has(b));
   }
   const shown = icons.filter((b) => !overflow.includes(b));
-  // Each kind of button keeps its own column down the list: pause or resume
-  // first, then what ends the job (cancel, stop, archive), then Files or More.
-  const column = (b) => ["Pause batch", "Resume batch"].includes(labelOf(b)) ? 1 : ["Cancel", "Stop batch · keep originals", "Archive"].includes(labelOf(b)) ? 2 : 3;
-  shown.sort((x, y) => column(x) - column(y));
+  // Each kind of button keeps its own place down the list: pause or resume
+  // first, then what stops the job, then Files or More, and Archive always last,
+  // at the right edge.
   const more = overflow.length ? moreActionsMenu(overflow, buttons[0]?.dataset.jobControl, {toggleClass: "action-icon more-toggle", icon: actionIcon("More actions")}) : null;
-  const slotted = [...shown, ...(more ? [more] : [])];
+  const place = (b) => {
+    const label = b === more ? "" : labelOf(b);
+    if (["Pause batch", "Resume batch"].includes(label)) return 1;
+    if (["Cancel", "Stop batch · keep originals"].includes(label)) return 2;
+    return label === "Archive" ? 4 : 3;
+  };
+  const slotted = [...shown, ...(more ? [more] : [])].sort((x, y) => place(x) - place(y));
   let slot = 0;
   slotted.forEach((b, i) => {
-    slot = Math.min(Math.max(b === more ? 3 : column(b), slot + 1), 3 - (slotted.length - 1 - i));
+    slot = Math.min(Math.max(Math.min(place(b), 3), slot + 1), 3 - (slotted.length - 1 - i));
     b.dataset.slot = String(slot);
   });
   actions.replaceChildren(...[main, ...slotted].filter(Boolean));

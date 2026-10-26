@@ -3720,7 +3720,7 @@ test("a queue card labels at most one main action, the most important, first", (
   assert.equal(rail.children.some((b) => b.className === "more-actions"), false);
   const none = queueRail(["Archive", "Compare frames"]).rail;
   assert.equal(none.children.some((b) => /\baction-main\b/.test(b.className)), false);
-  assert.deepEqual(none.children.map((b) => b.attrs["aria-label"]), ["Archive", "Compare frames"]);
+  assert.deepEqual(none.children.map((b) => b.attrs["aria-label"]), ["Compare frames", "Archive"]);
 });
 
 test("the usual actions stay in view as icons with their full name in aria-label and title", () => {
@@ -3735,9 +3735,17 @@ test("each kind of corner button keeps its own column from row to row", () => {
   const slots = (labels) => queueRail(labels).rail.children.map((b) => [b.attrs["aria-label"] || "More", b.dataset.slot]);
   assert.deepEqual(slots(["Pause batch", "Cancel", "Show in Files"]), [["Pause batch", "1"], ["Cancel", "2"], ["Show in Files", "3"]]);
   assert.deepEqual(slots(["Show in Files", "Cancel"]), [["Cancel", "2"], ["Show in Files", "3"]]);
-  assert.deepEqual(slots(["Show in Files", "Archive"]), [["Archive", "2"], ["Show in Files", "3"]]);
+  assert.deepEqual(slots(["Show in Files", "Archive"]), [["Show in Files", "2"], ["Archive", "3"]]);
+  assert.deepEqual(slots(["Archive", "Show in Files"]), [["Show in Files", "2"], ["Archive", "3"]]);
+  assert.deepEqual(slots(["Archive"]), [["Archive", "3"]]);
   assert.match(css, /\.job-row > \.job-actions \{\s*display: grid;\s*grid-template-columns: repeat\(3, var\(--action-height\)\);/);
   assert.match(css, /\[data-slot="3"\] \{ grid-column: 3; \}/);
+});
+
+test("the corner buttons share a centre line with the title and its status badge", () => {
+  const block = css.match(/\.job-row > \.job-actions \{\s*position: absolute;[^}]*\}/)[0];
+  assert.match(block, /top: calc\(6px \+ \(24px - var\(--action-height\)\) \/ 2\);/);
+  assert.doesNotMatch(css, /@media \(min-width: 901px\) \{\s*\.job-row > \.job-actions \{ top/);
 });
 
 test("a single other action is an icon in view, not a menu", () => {
@@ -3750,10 +3758,13 @@ test("a single other action is an icon in view, not a menu", () => {
 test("with more than three icons the common ones stay and the rest go to More, which closes after a choice", () => {
   const { rail } = queueRail(["Review candidate", "Run one more test", "Keep original", "Change goal", "Archive", "View batch"]);
   // Review is the main action; Archive stays in view with the first of the rest by rank, and the others are in the menu.
-  const more = rail.children.at(-1);
-  assert.equal(more.className, "more-actions");
+  const more = rail.children.find((b) => b.className === "more-actions");
+  assert.ok(more);
   assert.equal(rail.children.length, 1 + 2 + 1);
-  const shown = rail.children.slice(1, -1).map((b) => b.attrs["aria-label"]);
+  // Archive keeps the right edge, after the menu.
+  assert.equal(rail.children.at(-1).attrs["aria-label"], "Archive");
+  assert.equal(rail.children.at(-1).dataset.slot, "3");
+  const shown = rail.children.slice(1).filter((b) => b !== more).map((b) => b.attrs["aria-label"]);
   assert.ok(shown.includes("Archive"));
   assert.equal(more.dataset.menuFor, "job-1");
   const [toggle, menu] = more.children;
@@ -3773,7 +3784,7 @@ test("a Stop batch stays in view while Resume and other less common actions fold
   const { rail } = queueRail(["Resume batch", "Stop batch · keep originals", "Change settings", "View batch", "Archive"]);
   const labels = rail.children.filter((b) => b.className !== "more-actions").map((b) => b.attrs["aria-label"]);
   assert.ok(labels.includes("Resume batch") || rail.children[0].attrs["aria-label"] === "Resume batch");
-  const menu = rail.children.at(-1).children[1].children.map((b) => b.attrs["aria-label"]);
+  const menu = rail.children.find((b) => b.className === "more-actions").children[1].children.map((b) => b.attrs["aria-label"]);
   assert.ok(!menu.includes("Resume batch"));
   assert.ok(menu.length >= 2);
 });
