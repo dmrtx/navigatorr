@@ -1215,7 +1215,18 @@ main {
   display: flex;
   margin: 0;
 }
-.job-row > .job-actions { align-items: center; gap: var(--action-gap); }
+/* The corner buttons sit in three fixed columns, so a kind of button lines up
+   from one row to the next whatever else the row offers. */
+.job-row > .job-actions {
+  display: grid;
+  grid-template-columns: repeat(3, var(--action-height));
+  align-items: center;
+  justify-content: end;
+  gap: var(--action-gap);
+}
+.job-row > .job-actions > [data-slot="1"] { grid-column: 1; }
+.job-row > .job-actions > [data-slot="2"] { grid-column: 2; }
+.job-row > .job-actions > [data-slot="3"] { grid-column: 3; }
 /* The title line leaves room for however many buttons the corner holds. */
 /* Every row reserves room for three buttons, so the status badges end at the
    same place whether a row has one, two or three of them. */

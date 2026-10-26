@@ -5259,9 +5259,19 @@ function compactQueueActions(actions) {
     const kept = new Set([...icons].sort((a, b) => rank(a) - rank(b)).slice(0, visibleQueueIcons - 1));
     overflow = icons.filter((b) => !kept.has(b));
   }
-  const rail = [main, ...icons.filter((b) => !overflow.includes(b))].filter(Boolean);
-  if (overflow.length) rail.push(moreActionsMenu(overflow, buttons[0]?.dataset.jobControl, {toggleClass: "action-icon more-toggle", icon: actionIcon("More actions")}));
-  actions.replaceChildren(...rail);
+  const shown = icons.filter((b) => !overflow.includes(b));
+  // Each kind of button keeps its own column down the list: pause or resume
+  // first, then what ends the job (cancel, stop, archive), then Files or More.
+  const column = (b) => ["Pause batch", "Resume batch"].includes(labelOf(b)) ? 1 : ["Cancel", "Stop batch · keep originals", "Archive"].includes(labelOf(b)) ? 2 : 3;
+  shown.sort((x, y) => column(x) - column(y));
+  const more = overflow.length ? moreActionsMenu(overflow, buttons[0]?.dataset.jobControl, {toggleClass: "action-icon more-toggle", icon: actionIcon("More actions")}) : null;
+  const slotted = [...shown, ...(more ? [more] : [])];
+  let slot = 0;
+  slotted.forEach((b, i) => {
+    slot = Math.min(Math.max(b === more ? 3 : column(b), slot + 1), 3 - (slotted.length - 1 - i));
+    b.dataset.slot = String(slot);
+  });
+  actions.replaceChildren(...[main, ...slotted].filter(Boolean));
 }
 // More actions menus close on Escape and on a press anywhere outside them.
 function closeActionMenus(except) {
