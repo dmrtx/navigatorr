@@ -66,7 +66,7 @@ func (c *Client) login(ctx context.Context) error {
 	}
 	// An empty 204 proves nothing by itself (a proxy can answer it): the
 	// server must also have handed out the session cookie.
-	if base, err := url.Parse(c.url); err == nil && len(c.http.Jar.Cookies(base)) == 0 {
+	if base, err := url.Parse(c.url); resp.StatusCode == http.StatusNoContent && err == nil && len(c.http.Jar.Cookies(base)) == 0 {
 		return fmt.Errorf("login failed (HTTP %d): no session cookie", resp.StatusCode)
 	}
 
