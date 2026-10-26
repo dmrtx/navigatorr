@@ -2459,18 +2459,20 @@ pre {
   justify-self: end;
   max-width: 220px;
 }
-/* Phones: there is no room beside the badge, so the chip gets its own row
-   under the title. The title stays in row 1 so the chip never covers it. */
-@media (max-width: 600px) {
-  .job-heading:has(> .command-chip) {
-    grid-template-columns: 34px minmax(0, 1fr) 88px;
-  }
-  .job-heading:has(> .command-chip) > .badge:not(.decision-badge) { grid-column: 3; }
-  .job-heading > .command-chip {
-    grid-column: 2 / -1;
+/* The chip is the same size as the status badge it sits beside. */
+.job-heading > .command-chip { font-size: 9px; }
+/* Phones: the title keeps the whole line beside the number and the status
+   badge sits under it (see "Phones" further down), so the chip goes on that
+   row right after the badge, not at the far edge with a gap between them. */
+@media (max-width: 700px) {
+  .job-row > .job-heading:has(> .command-chip) { grid-template-columns: 34px auto minmax(0, 1fr); }
+  .job-row > .job-heading:has(> .command-chip) > .job-title { grid-column: 2 / -1; }
+  .job-row > .job-heading > .command-chip {
+    grid-column: 3;
     grid-row: 2;
-    /* The status badge keeps a 5px right margin; line up with its edge. */
-    margin: 4px 5px 0 0;
+    justify-self: start;
+    /* The badge's own vertical margin, so the two share a baseline. */
+    margin: 2px 0;
   }
 }
 .backup-heading > .command-chip { flex: 0 0 auto; }
