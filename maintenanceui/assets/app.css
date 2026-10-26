@@ -3031,6 +3031,12 @@ html { scrollbar-gutter: stable; }
 .jd-file-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 8px 0 12px; }
 .jd-file-body > * { margin: 0; min-width: 0; }
 .jd-file-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* A file's own buttons repeat on every row, so with a mouse they are compact;
+   a touch screen keeps the full 44px target. */
+@media (hover: hover) and (pointer: fine) {
+  .jd-file-actions { gap: 6px; }
+  .jd-file-actions > .jd-primary, .jd-file-actions > .jd-secondary { min-height: 30px; padding: 2px 10px; font-size: 13px; border-radius: 5px; }
+}
 .jd-files .pagination { display: flex; gap: 8px; padding: 10px 0; }
 .jd-files .pagination button { flex: 1 1 0; min-height: 44px; }
 

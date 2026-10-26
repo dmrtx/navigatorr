@@ -7895,5 +7895,6 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
 });
 
 test("a disabled action-bar button is flat grey at full opacity, not faded on top of grey", () => {
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-file-actions \{ gap: 6px; \}\s*\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ min-height: 30px;/);
   assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);
 });
