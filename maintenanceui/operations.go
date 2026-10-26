@@ -722,8 +722,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateSavedBytes != nil && !seenCandidates[key] {
 				page.Savings.CandidateBytes += *r.savings.CandidateSavedBytes
 				seenCandidates[key] = true
-				page.Savings.CandidateCount++
 				if r.savings.SourceBytes != nil && r.savings.CandidateBytes != nil {
+					page.Savings.CandidateCount++
 					ready = append(ready, savingsCandidate{ActionID: r.inst.ID, SourcePath: operationString(r.inputs["path"]), SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.CandidateSavedBytes})
 				}
 			}
