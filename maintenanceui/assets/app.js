@@ -4093,14 +4093,14 @@ async function enqueueReplacement(job, context) {
     });
     $("replacement-choice").close();
     await loadJobs();
-    // The open batch lists this file as replacing right away, not on the next
-    // refresh, so Replace is not offered a second time.
-    if ($("job-detail").open) await refreshDetail();
     // One tap replaces the file: the plan is approved as soon as it is read
     // back, without a second dialog or a second button.
     replaceWhenPlanned(result.id).catch((error) => {
       if (serverReachable) notify(error.message);
     });
+    // The open details (this file's, or its batch's) list the file as replacing
+    // right away, not on the next refresh, so Replace is not offered again.
+    if ($("job-detail").open && [job.id, latest.parent_action_id].includes(state.detail)) await refreshDetail();
   } finally {
     state.busyJobs.delete(job.id);
   }
