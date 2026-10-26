@@ -7959,20 +7959,20 @@ test("the masthead and the tab bar stay pinned while the page scrolls, except on
 });
 
 test("a disabled action-bar button is flat grey at full opacity, not faded on top of grey", () => {
-  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-file-actions \{ gap: 6px; \}\s*\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ min-height: 30px;/);
+  assert.match(css, /\.jd-file-actions \{ gap: 6px; \}\n\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ padding-inline: 10px; \}/);
   assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);
 });
 
 test("the dialog's primary button keeps a readable hover and its bar is as compact as the other buttons", () => {
   assert.match(css, /\.jd-primary:not\(:disabled\):hover \{ border-color: var\(--primary-hover\); background: var\(--primary-hover\); \}/);
-  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-actions \{ justify-content: flex-end; \}\s*\.jd-actions > \.jd-primary, \.jd-actions > \.jd-secondary \{ flex: 0 1 auto; min-height: 30px;/);
+  assert.match(css, /\.jd-actions \{ justify-content: flex-end; \}\n\.jd-actions > \.jd-primary, \.jd-actions > \.jd-secondary \{ flex: 0 1 auto; padding-inline: 14px; \}/);
 });
 
-test("every button takes the compact size with a mouse, whatever component it belongs to", () => {
-  const block = css.slice(css.lastIndexOf("@media (hover: hover) and (pointer: fine) {"));
-  assert.match(block, /:root \{ --control-size: 30px; \}/);
-  assert.match(block, /^\s*button, \.jd-primary, \.jd-secondary, \.jd-menu-item,/m);
+test("every button takes the compact size, with a mouse or a finger", () => {
+  const block = css.slice(css.lastIndexOf("/* One button size everywhere"));
+  assert.match(block, /^:root \{ --control-size: 30px; \}/m);
+  assert.match(block, /^button, \.jd-primary, \.jd-secondary, \.jd-menu-item,/m);
   assert.match(block, /min-height: var\(--control-size\);\s*padding-block: 2px;\s*font-size: 13px;\s*border-radius: 5px;/);
-  // The dialog's own sizes no longer exceed it: the touch sizes live outside this block.
-  assert.ok(css.lastIndexOf("min-height: 44px", css.length) < css.lastIndexOf("@media (hover: hover) and (pointer: fine) {"));
+  // Nothing below it is conditional on the pointer, so a touch screen is not left out.
+  assert.doesNotMatch(block, /@media/);
 });
