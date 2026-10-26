@@ -7896,6 +7896,13 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
 });
 
+test("queue rows reserve the same room for their buttons so the badges line up", async () => {
+  const app = await readFile(new URL("./assets/app.js", import.meta.url), "utf8");
+  assert.match(css, /\.job-row\.has-menu \{ --rail: 3; \}/);
+  assert.doesNotMatch(css, /\.job-row\.rail-[23]/);
+  assert.doesNotMatch(app, /rail-\$\{/);
+});
+
 test("Stats charts what was freed per day and links the recent and waiting files to their jobs", () => {
   const h = commandDom([]);
   const doc = h.document;
