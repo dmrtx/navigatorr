@@ -7895,3 +7895,39 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
   h.run('progressJob.paused=false;');
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
 });
+
+test("Stats charts what was freed per day and links the recent and waiting files to their jobs", () => {
+  const h = commandDom([]);
+  const doc = h.document;
+  for (const id of ["freed-chart", "freed-summary", "candidate-count", "recent-replaced", "ready-list", "saved-total", "saved-count", "candidate-total", "estimated-total"]) {
+    const el = new FakeNode(doc, id.endsWith("list") || id === "recent-replaced" ? "ul" : "div");
+    el.id = id;
+    doc.body.append(el);
+    h.elements.set(id, el);
+  }
+  const day = (date, saved, count) => ({date, saved_bytes: saved, count, cumulative_bytes: saved});
+  const days = Array.from({length: 30}, (_, i) => day(`2026-10-${String(i + 1).padStart(2, "0")}`, 0, 0));
+  days[28] = day("2026-10-29", 2 * 1024 ** 3, 2);
+  days[29] = day("2026-10-30", 1024 ** 3, 1);
+  h.context.data = {
+    savings: {realized_bytes: 3 * 1024 ** 3, completed_replacements: 3, candidate_saved_bytes: 5 * 1024 ** 3, candidate_count: 9},
+    daily: days,
+    history: [{action_id: "old", source_path: "/m/Old.mkv", saved_bytes: 1024 ** 3, completed_at: "2020-01-01T00:00:00Z"}, {action_id: "new", source_path: "/m/New.mkv", saved_bytes: 2 * 1024 ** 3, completed_at: new Date().toISOString()}],
+    ready: [{action_id: "cand", source_path: "/m/Next.mkv", source_bytes: 4 * 1024 ** 3, candidate_bytes: 3 * 1024 ** 3, saved_bytes: 1024 ** 3}],
+  };
+  h.run("renderSavings(data)");
+  const bars = h.elements.get("freed-chart").querySelectorAll("i");
+  assert.equal(bars.length, 30);
+  assert.equal(bars.filter((b) => "empty" in b.dataset).length, 28);
+  assert.ok("today" in bars[29].dataset);
+  assert.match(h.elements.get("freed-summary").textContent, /^Today 1\.07 GB · 7 days 3\.22 GB · 30 days 3\.22 GB$/);
+  assert.equal(h.elements.get("candidate-count").textContent, "9 files · Potential savings");
+  const recent = h.elements.get("recent-replaced").querySelectorAll("a");
+  assert.deepEqual(recent.map((a) => a.textContent), ["New.mkv", "Old.mkv"], "newest replacement first");
+  assert.equal(recent[0].href, "?view=queue&job=new");
+  assert.equal(h.elements.get("ready-list").querySelectorAll("a")[0].href, "?view=queue&job=cand");
+  assert.match(h.elements.get("ready-list").children.at(-1).textContent, /^8 more waiting/);
+  h.run("renderSavings({savings:{}, daily:[], history:[], ready:[]})");
+  assert.match(h.elements.get("freed-chart").children[0].textContent, /Nothing freed/);
+  assert.match(h.elements.get("recent-replaced").children[0].textContent, /Nothing has been replaced yet/);
+});
