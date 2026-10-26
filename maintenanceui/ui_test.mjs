@@ -1662,6 +1662,11 @@ test("opening another job moves focus off the cleared rows and clears the old an
   h.run('$("detail-command-announcer").textContent = "Retry started"; $("detail-summary").dataset.operationId = "old"; state.detail = "old"; $("job-detail").open = true;');
   await h.run('openJob("next")');
   assert.equal(focused, "title");
+  // A dialog that was closed keeps showModal's own initial focus.
+  focused = null;
+  h.run('$("job-detail").open = false; state.detail = null;');
+  await h.run('openJob("another")');
+  assert.equal(focused, null);
   assert.equal(h.run('$("detail-command-announcer").textContent'), "");
   assert.notEqual(h.run('$("detail-summary").dataset.operationId'), "old");
 });

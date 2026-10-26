@@ -3117,3 +3117,6 @@ html { scrollbar-gutter: stable; }
   .jd-actions > :first-child { flex-basis: 100%; }
   .jd-actions { padding-top: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
 }
+
+/* Focus lands here only from code (a job opened from a cleared row); the heading is not a control. */
+#job-detail-title:focus { outline: none; }

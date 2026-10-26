@@ -6535,6 +6535,10 @@ function syncDetailSections() {
 async function openJob(id) {
   // The same job opened again (Back, a link to itself) keeps what it shows.
   const reopened = state.detail === id && $("job-detail").open;
+  // Read before any row is cleared: removing the focused control sends focus
+  // to the page. Only an already open dialog counts, so showModal keeps its
+  // own initial focus.
+  const hadFocus = $("job-detail").open && $("job-detail").contains?.(document.activeElement) && document.activeElement !== $("job-detail-title");
   state.detail = id;
   state.chunk = 0;
   state.stepOffset = 0;
@@ -6560,9 +6564,6 @@ async function openJob(id) {
   // Nothing of the job that was open before may show while this one loads: its
   // files, its command history, its details.
   if (!reopened) {
-    // The control that opened this job may be one of the rows cleared below:
-    // focus goes to the title instead of falling to the page.
-    if ($("job-detail").contains?.(document.activeElement) && document.activeElement !== $("job-detail-title")) $("job-detail-title").focus?.();
     $("detail-command-announcer").textContent = "";
     delete $("detail-summary").dataset.operationId;
     state.detailJob = null;
@@ -6574,6 +6575,9 @@ async function openJob(id) {
   }
   resetDetailRows();
   syncDetailSections();
+  // The control that opened this job was cleared above: focus goes to the
+  // title instead of falling to the page.
+  if (hadFocus) $("job-detail-title").focus?.();
   // The list already holds this job: show it at once and let the server's
   // answer correct it, instead of a blank "Loading job…".
   const known = [...(state.operationJobs?.values() || [])].find(job => job.id === id);
