@@ -1210,7 +1210,9 @@ main {
 .job-sentence .action-main:disabled { color: var(--muted); cursor: default; }
 .job-row > .job-actions {
   position: absolute;
-  top: 6px;
+  /* The row's padding plus half of what the 24px title line has over a button,
+     so the buttons share a centre line with the title and the status badge. */
+  top: calc(6px + (24px - var(--action-height)) / 2);
   right: 0;
   display: flex;
   margin: 0;
@@ -1273,7 +1275,6 @@ main {
 .job-row .batch-progress:has(.batch-progress-phase) .batch-progress-count,
 .job-row .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: 1.4; }
 @media (min-width: 901px) {
-  .job-row > .job-actions { top: 10px; }
   .job-sentence, .job-row .job-summary { font-size: 13px; }
 }
 /* Job actions: one compact height for every button, in the queue rows and the
