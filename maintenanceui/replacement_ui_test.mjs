@@ -215,8 +215,12 @@ test("one tap replaces the file: the plan is approved once it is ready, not befo
   const running = { id: "planned", status: "running" };
   const seen = watch(h, { jobs: [running, running, h.context.planned] });
   h.context.job = job;
+  h.context.refreshed = 0;
+  h.run('$("job-detail").open = true; refreshDetail = async () => { refreshed++; };');
   await h.run('enqueueReplacement(job,{service:"filesystem"})');
   await settle();
+  // The open batch is read again at once, so the file shows as replacing.
+  assert.equal(h.context.refreshed, 1);
   // The dialog is gone and the plan was read until it was ready.
   assert.equal(h.elements.get("replacement-choice").open, false);
   assert.equal(h.elements.get("file-review").open, false);

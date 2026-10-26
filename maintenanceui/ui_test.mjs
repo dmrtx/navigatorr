@@ -3604,6 +3604,10 @@ test("replacement from a batch row rechecks the exact candidate and ignores stal
   await assert.rejects(h.run('replaceBatchFile("batch","child")'),/candidate changed/);
   h.run('api=async()=>({jobs:[{id:"child",parent_action_id:"batch",candidate_ready:false}]});');
   await assert.rejects(h.run('replaceBatchFile("batch","child")'),/candidate changed/);
+  // A second tap on a file whose replacement already started goes to that replacement.
+  prepared=null;
+  h.run('api=async()=>({jobs:[{id:"child",parent_action_id:"batch",candidate_ready:false,replacement_action_id:"rep"}]});');
+  await h.run('replaceBatchFile("batch","child")');assert.equal(prepared.replacement_action_id,"rep");
 });
 
 

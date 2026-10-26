@@ -4093,6 +4093,9 @@ async function enqueueReplacement(job, context) {
     });
     $("replacement-choice").close();
     await loadJobs();
+    // The open batch lists this file as replacing right away, not on the next
+    // refresh, so Replace is not offered a second time.
+    if ($("job-detail").open) await refreshDetail();
     // One tap replaces the file: the plan is approved as soon as it is read
     // back, without a second dialog or a second button.
     replaceWhenPlanned(result.id).catch((error) => {
@@ -6687,7 +6690,7 @@ async function replaceBatchFile(batchID, childID) {
   const auth = state.authRevision;
   const job = (await api(`operations?id=${encodeURIComponent(childID)}`)).jobs?.[0];
   if (auth !== state.authRevision || $("workspace").hidden) return;
-  if (!job || job.parent_action_id !== batchID || !job.candidate_ready || job.replacement_action_id) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
+  if (!job || job.parent_action_id !== batchID || (!job.candidate_ready && !job.replacement_action_id)) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
   await prepareReplacement(job);
 }
 // What a replacement Retry does. Retrying through the batch re-runs every failed
