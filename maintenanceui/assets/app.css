@@ -723,6 +723,9 @@ main {
 .slots-table th { padding:4px 12px 4px 0; text-align:left; font-size:11px; font-weight:500; color:var(--muted); }
 .slots-table td { padding:8px 12px 8px 0; border-top:1px solid var(--line); vertical-align:top; }
 .slots-table .slot-file { max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.slots-table .slot-file-link { all:unset; box-sizing:border-box; display:block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; color:inherit; }
+.slots-table .slot-file-link:hover { text-decoration:underline; text-underline-offset:3px; }
+.slots-table .slot-file-link:focus-visible { outline:2px solid var(--forest); outline-offset:2px; border-radius:3px; }
 .slots-table .slot-phase { max-width:240px; }
 .slots-table .slot-phase-name { display:block; white-space:nowrap; color:var(--forest); }
 .slots-table .slot-phase .slot-facts { display:block; margin-top:2px; font-size:11px; color:var(--muted); }
