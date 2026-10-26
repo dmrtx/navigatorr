@@ -1635,6 +1635,41 @@ test("a job the list already holds is shown at once, before the server answers",
   assert.equal(h.run("state.detailJob.status"), "completed", "the server's answer corrects it");
 });
 
+test("opening a job shows nothing of the one open before: its files and command history are cleared", async () => {
+  const h = harness(), answer = deferred();
+  h.run('api = async () => ({jobs:[await answerPromise]}); tool = async () => ({data:{}});');
+  h.context.answerPromise = answer.promise;
+  h.run('$("batch-items-list").replaceChildren({textContent:"old file"}); $("batch-items-note").textContent = "3 of 3 files"; $("detail-command-list").replaceChildren({textContent:"old command"}); $("detail-commands").hidden = false;');
+  h.run('state.detailJob = {id:"old", batch:{total:3}};');
+  const opening = h.run('openJob("next")');
+  assert.equal(h.elements.get("batch-items-list").children.length, 0);
+  assert.equal(h.elements.get("batch-items-note").textContent, "Loading files…");
+  assert.equal(h.elements.get("detail-command-list").children.length, 0);
+  assert.equal(h.elements.get("detail-commands").hidden, true);
+  assert.equal(h.run("state.detailJob"), null);
+  answer.resolve({id: "next", status: "completed", action_name: "transcode_media", source_path: "/media/a.mkv"});
+  await opening;
+});
+
+test("an action on a file refreshes the open batch details at once, whichever job it targets", async () => {
+  const h = harness();
+  h.context.refreshed = 0;
+  h.run('tool = async () => ({}); loadJobs = async () => {}; refreshDetail = async () => { refreshed++; }; $("job-detail").open = true; state.detail = "batch";');
+  await h.run('jobControl("child-file", "action_resume", {decision: "recheck"})');
+  assert.equal(h.context.refreshed, 1);
+  // Nothing open, nothing to refresh.
+  h.run('$("job-detail").open = false;');
+  await h.run('jobControl("child-file", "action_resume", {decision: "recheck"})');
+  assert.equal(h.context.refreshed, 1);
+});
+
+test("opening the job that is already open keeps its files and command history", async () => {
+  const h = harness();
+  h.run('api = async () => ({jobs:[{id:"same", status:"completed", action_name:"transcode_media"}]}); tool = async () => ({data:{}}); $("job-detail").open = true; state.detail = "same"; $("batch-items-list").replaceChildren({textContent:"kept"});');
+  await h.run('openJob("same")');
+  assert.equal(h.run('$("batch-items-list").children.length'), 1);
+});
+
 test("an archived job is announced before the list reloads", async () => {
   const h = harness(), reload = deferred(), order = [];
   h.context.record = (what) => order.push(what);
