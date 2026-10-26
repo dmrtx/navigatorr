@@ -4842,8 +4842,10 @@ function jobControls(job, detail = false) {
   // Every job offers it, whatever its state, so the source is one click away.
   // A file's job opened on its own (from a worker slot, a link) leads back to
   // the batch it belongs to.
-  if (detail && job.parent_action_id && job.parent_action_id !== job.id)
-    add("View batch", () => openJob(job.parent_action_id));
+  // parent_batch_id is only set for a batch the server found, and a job that
+  // already offers its preview does not offer the same batch twice.
+  if (detail && job.parent_batch_id && job.parent_batch_id !== job.id && job.parent_batch_id !== job.preview_action_id && job.parent_batch_id !== job.preview_execution_action_id)
+    add("View batch", () => openJob(job.parent_batch_id));
   const filePath = jobFilePath(job), folderPath = filePath ? "" : jobFolderPath(job);
   if (filePath && filesRouteFor(filePath))
     add("Show in Files", () => showInFiles(filePath));
@@ -6622,7 +6624,7 @@ async function refreshDetail() {
 }
 // The action bar: at most one filled main action, one quiet second action and
 // a More menu for the rest, so a state never shows a wall of buttons.
-const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "Change settings", "Change goal", "Show in Files", "View replacement", "View batch"];
+const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "Change settings", "Change goal", "View batch", "Show in Files", "View replacement"];
 const destructiveActions = ["Cancel", "Stop batch · keep originals"];
 function detailActionBar(job) {
   const buttons = [...jobControls(job, true).children];

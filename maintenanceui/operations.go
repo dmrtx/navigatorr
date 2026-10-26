@@ -887,7 +887,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				job["candidate_cleanup"] = cleanup
 			}
 			if parent, found := recordsByID[operationString(r.inputs["parent_action_id"])]; found && parent.inst.ActionName == "transcode_batch" {
-				job["parent_action_id"] = parent.inst.ID
+				job["parent_batch_id"] = parent.inst.ID
 			}
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
