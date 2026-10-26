@@ -2195,6 +2195,25 @@ test("the slot table names the encoder of a full conversion", () => {
   assert.match(rows[1].children[2].textContent,/Full conversion · VideoToolbox/);
 });
 
+test("a slot's file opens that job's details when the job is known, and is plain text when it is not", () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  const job=(id,file,extra)=>({id,file,kind:"transcode",phase:"encoding",heartbeat_at:new Date().toISOString(),progress:10,...extra});
+  h.context.opened=[];
+  h.run('openJob = id => opened.push(id);');
+  h.context.activity={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:2,jobs:[job("job-a","one.mkv",{action_id:"a"}),job("job-b","two.mkv")],
+    slots:{ceiling:2,split:false,video:{total:2,used:2},podcast:{total:2,used:0}}}}]};
+  h.run('renderWorkerActivity(activity)');
+  const rows=h.elements.get("worker-slots").children[1].children[0].children[1].children;
+  const link=rows[0].children[1].children[0];
+  assert.equal(link.className,"slot-file-link");
+  assert.equal(link.textContent,"one.mkv");
+  link.listeners.get("click")();
+  assert.deepEqual(h.context.opened,["a"]);
+  assert.equal(rows[1].children[1].children.length,0);
+  assert.equal(rows[1].children[1].textContent,"two.mkv");
+});
+
 test("worker activity gives each node a row that opens onto its slots, and a table of what runs for wide screens", () => {
   const h=harness();
   h.elements.get("settings-node-pick").options=[];

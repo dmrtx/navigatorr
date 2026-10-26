@@ -16,6 +16,8 @@ type WorkerActivityJob struct {
 	// Navigatorr fills these in from the job's action; a worker does not send
 	// them. Encoding names the encode being run ("x265 CRF 22"), Speed is the
 	// encoder's running speed against real time.
+	// ActionID is the job to open for this slot, when its action is known.
+	ActionID string   `json:"action_id,omitempty"`
 	Encoding string   `json:"encoding,omitempty"`
 	Speed    *float64 `json:"speed,omitempty"`
 	FPS      *float64 `json:"fps,omitempty"`

@@ -6259,8 +6259,15 @@ function slotTable(groups) {
         row.append(note);
       } else {
         const job = e.job, stale = !heartbeatAlive(workerHeartbeatState(job.heartbeat_at)), facts = slotFacts(job, stale);
-        const file = node("td", job.file, "slot-file"), [phase, bar] = slotProgressCells(job, !stale);
+        const file = node("td", "", "slot-file"), [phase, bar] = slotProgressCells(job, !stale);
         file.title = job.file;
+        // A file whose job is known opens that job's details.
+        if (job.action_id) {
+          const open = node("button", job.file, "slot-file-link");
+          open.type = "button";
+          open.addEventListener("click", () => safe(() => openJob(job.action_id)));
+          file.append(open);
+        } else file.textContent = job.file;
         // What the worker is doing sits under the phase's name: encoder and speed while encoding, a short note otherwise.
         const factsLine = node("span", facts.text, stale ? "slot-facts warn" : "slot-facts");
         factsLine.title = facts.title;

@@ -43,6 +43,7 @@ func (s *Server) describeActivityJobs(activity *transcode.WorkerActivity) {
 		if err != nil || inst == nil {
 			continue
 		}
+		job.ActionID = id
 		var state map[string]any
 		if json.Unmarshal([]byte(inst.StateJSON), &state) != nil {
 			continue

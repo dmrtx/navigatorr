@@ -46,6 +46,9 @@ func TestActivityJobsNameTheirEncodeAndSpeed(t *testing.T) {
 	if jobs[0].Encoding != "x265 CRF 19" || jobs[0].Speed == nil || *jobs[0].Speed != 4.94 || jobs[0].FPS == nil || *jobs[0].FPS != 118.36 {
 		t.Fatalf("a running encode lost its facts: %+v", jobs[0])
 	}
+	if jobs[0].ActionID != "act-running" || jobs[1].ActionID != "act-quiet" || jobs[2].ActionID != "" || jobs[3].ActionID != "" {
+		t.Fatalf("slots did not name the job to open: %+v", jobs)
+	}
 	if jobs[1].Speed != nil || jobs[1].FPS != nil || jobs[1].Encoding != "" {
 		t.Fatalf("a worker that went quiet still reports a speed: %+v", jobs[1])
 	}
