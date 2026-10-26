@@ -7896,6 +7896,16 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
 });
 
+test("the masthead and the tab bar stay pinned while the page scrolls, except on phones", () => {
+  const wide = /@media \(min-width: 601px\) \{([\s\S]*?)\n\}\n/.exec(css.slice(css.indexOf(".tabs {")))[1];
+  assert.match(wide, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;\s*height: var\(--masthead-h\);\s*background: var\(--paper\);/);
+  assert.match(wide, /\.tabs \{\s*position: sticky;\s*top: var\(--masthead-h\);/);
+  assert.match(css, /#worker-status \{ max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  // On phones the tab bar is the fixed bottom bar and the masthead scrolls away.
+  assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
+  assert.doesNotMatch(css.slice(css.indexOf("@media (max-width: 600px) {")), /\.masthead \{[^}]*position: sticky/);
+});
+
 test("a disabled action-bar button is flat grey at full opacity, not faded on top of grey", () => {
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-file-actions \{ gap: 6px; \}\s*\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ min-height: 30px;/);
   assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);

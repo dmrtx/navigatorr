@@ -510,6 +510,13 @@ p {
   color: var(--muted);
   font-size: 12px;
 }
+/* The masthead has a fixed height, so a long worker status is cut short
+   rather than wrapping into the tab bar. Phones let it grow instead. */
+@media (min-width: 601px) {
+  .brand { white-space: nowrap; }
+  .masthead-right { min-width: 0; }
+  #worker-status { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 main {
   max-width: 1580px;
   margin: 0 auto;
@@ -521,6 +528,29 @@ main {
   gap: 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 14px;
+}
+/* The masthead and the tab bar stay on screen while the page scrolls, above
+   the menus (z-index 20) and below the notice and dialogs. The masthead has a
+   fixed height so the tab bar knows where to stick under it. Phones already
+   keep their tabs at the bottom and need the height for content. */
+@media (min-width: 601px) {
+  :root { --masthead-h: 58px; }
+  html { scroll-padding-top: calc(var(--masthead-h) + 52px); }
+  .masthead {
+    position: sticky;
+    top: 0;
+    z-index: 26;
+    height: var(--masthead-h);
+    background: var(--paper);
+  }
+  .tabs {
+    position: sticky;
+    top: var(--masthead-h);
+    z-index: 25;
+    background: var(--paper);
+    /* Covers the gap under the bar so content does not scroll through it. */
+    box-shadow: 0 14px 0 var(--paper);
+  }
 }
 .tabs button {
   display: flex;
