@@ -4601,6 +4601,8 @@ test("the decision flag is a small icon on the title line, not a second badge ro
   assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ padding-right: 26px; \}/);
   // With a command chip the status badge owns column 4; the flag must not take its cell.
   assert.match(css, /\.job-heading:has\(> \.command-chip\) > \.badge:not\(\.decision-badge\) \{ grid-column: 4; grid-row: 1; \}/);
+  // On a phone the chip shares the status badge's row; the decision icon keeps the title's right edge.
+  assert.match(css, /\.job-row > \.job-heading:has\(> \.command-chip\) > \.status-badge\.decision-badge \{ grid-column: 2 \/ -1; \}/);
   assert.doesNotMatch(css, /\.decision-badge \{[^}]*grid-row: [23]/);
   // Explicitly placing the flag would otherwise push the title and status badge out of their cells.
   assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ grid-column: 2; grid-row: 1; \}/);
@@ -7902,4 +7904,9 @@ test("the masthead and the tab bar stay pinned while the page scrolls, except on
   // On phones the tab bar is the fixed bottom bar and the masthead scrolls away.
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
   assert.doesNotMatch(css.slice(css.indexOf("@media (max-width: 600px) {")), /\.masthead \{[^}]*position: sticky/);
+});
+
+test("a disabled action-bar button is flat grey at full opacity, not faded on top of grey", () => {
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-file-actions \{ gap: 6px; \}\s*\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ min-height: 30px;/);
+  assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);
 });
