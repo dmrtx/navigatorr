@@ -482,14 +482,15 @@ p {
 }
 
 /* App shell and navigation. */
-/* The masthead and the tab bar stay on screen while the page scrolls. The
-   masthead has a fixed height so the tab bar knows where to stick under it. */
+/* The masthead and the tab bar stay on screen while the page scrolls, above
+   the menus (z-index 20) and below the notice and dialogs. The masthead has a
+   fixed height so the tab bar knows where to stick under it. */
 :root { --masthead-h: 58px; }
 html { scroll-padding-top: calc(var(--masthead-h) + 52px); }
 .masthead {
   position: sticky;
   top: 0;
-  z-index: 15;
+  z-index: 26;
   height: var(--masthead-h);
   background: var(--paper);
   display: flex;
@@ -519,6 +520,13 @@ html { scroll-padding-top: calc(var(--masthead-h) + 52px); }
   color: var(--muted);
   font-size: 12px;
 }
+/* The masthead has a fixed height, so a long worker status is cut short
+   rather than wrapping into the tab bar. Phones let it grow instead. */
+@media (min-width: 601px) {
+  .brand { white-space: nowrap; }
+  .masthead-right { min-width: 0; }
+  #worker-status { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
 main {
   max-width: 1580px;
   margin: 0 auto;
@@ -528,7 +536,7 @@ main {
 .tabs {
   position: sticky;
   top: var(--masthead-h);
-  z-index: 14;
+  z-index: 25;
   display: flex;
   gap: 8px;
   border-bottom: 1px solid var(--line);
@@ -2126,7 +2134,7 @@ pre {
 /* Phones: five navigation icons, a single content column, compact spacing. */
 @media (max-width: 600px) {
   :root { --masthead-h: 44px; }
-  html { scroll-padding-top: calc(var(--masthead-h) + 8px); }
+  html { scroll-padding-top: calc(env(safe-area-inset-top) + var(--masthead-h) + 8px); }
   .masthead {
     height: auto;
     min-height: 44px;
