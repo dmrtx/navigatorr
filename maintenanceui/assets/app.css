@@ -3068,7 +3068,8 @@ html { scrollbar-gutter: stable; }
 }
 .jd-primary { border-color: var(--forest); background: var(--forest); color: var(--on-forest); }
 .jd-danger { color: var(--danger); border-color: var(--danger); }
-.jd-primary:disabled, .jd-secondary:disabled { border-color: var(--disabled-line); background: var(--disabled); color: var(--on-disabled); }
+/* Already flat and grey: the generic button:disabled fade on top of it left the label unreadable. */
+.jd-primary:disabled, .jd-secondary:disabled { border-color: var(--disabled-line); background: var(--disabled); color: var(--on-disabled); opacity: 1; }
 .jd-primary:focus-visible, .jd-secondary:focus-visible, .jd-menu-item:focus-visible, .more-actions > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* The action bar: pinned to the bottom, at most three controls. */

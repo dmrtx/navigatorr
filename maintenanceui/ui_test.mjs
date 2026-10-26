@@ -7893,3 +7893,7 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
   h.run('progressJob.paused=false;');
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
 });
+
+test("a disabled action-bar button is flat grey at full opacity, not faded on top of grey", () => {
+  assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);
+});
