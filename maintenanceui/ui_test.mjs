@@ -7967,3 +7967,12 @@ test("the dialog's primary button keeps a readable hover and its bar is as compa
   assert.match(css, /\.jd-primary:not\(:disabled\):hover \{ border-color: var\(--primary-hover\); background: var\(--primary-hover\); \}/);
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-actions \{ justify-content: flex-end; \}\s*\.jd-actions > \.jd-primary, \.jd-actions > \.jd-secondary \{ flex: 0 1 auto; min-height: 30px;/);
 });
+
+test("every button takes the compact size with a mouse, whatever component it belongs to", () => {
+  const block = css.slice(css.lastIndexOf("@media (hover: hover) and (pointer: fine) {"));
+  assert.match(block, /:root \{ --control-size: 30px; \}/);
+  assert.match(block, /^\s*button, \.jd-primary, \.jd-secondary, \.jd-menu-item,/m);
+  assert.match(block, /min-height: var\(--control-size\);\s*padding-block: 2px;\s*font-size: 13px;\s*border-radius: 5px;/);
+  // The dialog's own sizes no longer exceed it: the touch sizes live outside this block.
+  assert.ok(css.lastIndexOf("min-height: 44px", css.length) < css.lastIndexOf("@media (hover: hover) and (pointer: fine) {"));
+});

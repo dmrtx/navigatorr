@@ -3187,3 +3187,23 @@ html { scrollbar-gutter: stable; }
 
 /* Focus lands here only from code (a job opened from a cleared row); the heading is not a control. */
 #job-detail-title:focus { outline: none; }
+
+/* One button size wherever a mouse is in use: every button, the dialog's and
+   the rest, takes the same compact height, type and corner. A touch screen keeps
+   the generous targets set above. Last in the file so it wins over the sizes
+   each component gave its own buttons. */
+@media (hover: hover) and (pointer: fine) {
+  :root { --control-size: 30px; }
+  button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
+    min-height: var(--control-size);
+    padding-block: 2px;
+    font-size: 13px;
+    border-radius: 5px;
+  }
+  .jd-primary, .jd-secondary, .jd-menu-item { padding-inline: 12px; }
+  .advanced-profiles > summary, .keep-tracks > summary, .track-label, .detail-row > summary, .phase-costs.detail-row > summary, #job-detail .technical-reason > summary { min-height: var(--control-size); }
+  .jd-header .icon-button { flex-basis: var(--control-size); width: var(--control-size); height: var(--control-size); }
+  .tabs button { padding-block: 2px; }
+  .library-columns .column-sort, .range-bar button { min-height: var(--control-size); }
+  .queue-tool { min-width: var(--control-size); height: var(--control-size); min-height: var(--control-size); }
+}
