@@ -300,3 +300,25 @@ func TestPausedBatchIsNotADecision(t *testing.T) {
 		}
 	}
 }
+
+// A file's job names the batch it belongs to, so its details can lead back.
+func TestChildJobNamesItsBatch(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "waiting_external", nil, map[string]any{"counts": map[string]any{"total": 1, "transcode": 1}}, nil)
+	seedOperation(t, st, "child", "transcode_media", "waiting_external", map[string]any{"path": "/media/a.mkv", "parent_action_id": "batch"}, nil, nil)
+	seedOperation(t, st, "alone", "transcode_media", "waiting_external", map[string]any{"path": "/media/b.mkv"}, nil, nil)
+	seedOperation(t, st, "orphan", "transcode_media", "waiting_external", map[string]any{"path": "/media/c.mkv", "parent_action_id": "gone"}, nil, nil)
+	seedOperation(t, st, "not-batch", "transcode_media", "waiting_external", map[string]any{"path": "/media/d.mkv", "parent_action_id": "alone"}, nil, nil)
+	for id, want := range map[string]string{"child": "batch", "alone": "", "orphan": "", "not-batch": ""} {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(id, w.Code, w.Body.String())
+		}
+		got, _ := page.Jobs[0]["parent_batch_id"].(string)
+		if got != want {
+			t.Fatalf("%s: parent_batch_id = %q, want %q", id, got, want)
+		}
+	}
+}
