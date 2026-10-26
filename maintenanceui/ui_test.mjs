@@ -3725,10 +3725,19 @@ test("a queue card labels at most one main action, the most important, first", (
 
 test("the usual actions stay in view as icons with their full name in aria-label and title", () => {
   const { rail } = queueRail(["Change settings", "Pause batch", "Cancel"]);
-  assert.deepEqual(rail.children.map((b) => b.attrs["aria-label"]), ["Change settings", "Pause batch", "Cancel"]);
-  assert.deepEqual(rail.children.map((b) => b.title), ["Change settings", "Pause batch", "Cancel"]);
-  assert.match(rail.children[2].className, /\bdanger\b/);
+  assert.deepEqual(rail.children.map((b) => b.attrs["aria-label"]), ["Pause batch", "Cancel", "Change settings"]);
+  assert.deepEqual(rail.children.map((b) => b.title), ["Pause batch", "Cancel", "Change settings"]);
+  assert.match(rail.children[1].className, /\bdanger\b/);
   assert.ok(rail.children.every((b) => /\baction-icon\b/.test(b.className) && b.children.at(-1).className === "action-label"));
+});
+
+test("each kind of corner button keeps its own column from row to row", () => {
+  const slots = (labels) => queueRail(labels).rail.children.map((b) => [b.attrs["aria-label"] || "More", b.dataset.slot]);
+  assert.deepEqual(slots(["Pause batch", "Cancel", "Show in Files"]), [["Pause batch", "1"], ["Cancel", "2"], ["Show in Files", "3"]]);
+  assert.deepEqual(slots(["Show in Files", "Cancel"]), [["Cancel", "2"], ["Show in Files", "3"]]);
+  assert.deepEqual(slots(["Show in Files", "Archive"]), [["Archive", "2"], ["Show in Files", "3"]]);
+  assert.match(css, /\.job-row > \.job-actions \{\s*display: grid;\s*grid-template-columns: repeat\(3, var\(--action-height\)\);/);
+  assert.match(css, /\[data-slot="3"\] \{ grid-column: 3; \}/);
 });
 
 test("a single other action is an icon in view, not a menu", () => {
