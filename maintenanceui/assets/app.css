@@ -1187,9 +1187,9 @@ main {
 }
 .job-row > .job-actions { align-items: center; gap: var(--action-gap); }
 /* The title line leaves room for however many buttons the corner holds. */
-.job-row.has-menu { --rail: 1; }
-.job-row.rail-2 { --rail: 2; }
-.job-row.rail-3 { --rail: 3; }
+/* Every row reserves room for three buttons, so the status badges end at the
+   same place whether a row has one, two or three of them. */
+.job-row.has-menu { --rail: 3; }
 .job-row.has-menu > .job-heading { padding-right: calc(var(--rail) * var(--action-height) + (var(--rail) - 1) * var(--action-gap) + 10px); }
 .job-row .job-summary { margin-top: 2px; -webkit-line-clamp: 2; }
 .job-row > .job-footer { min-height: 0; margin-top: 4px; }

@@ -5756,7 +5756,7 @@ async function loadJobs(more = false) {
       }
       if (menu.length) {
         actions.replaceChildren(...menu);
-        row.className += ` has-menu rail-${Math.min(3, menu.length)}`;
+        row.className += " has-menu";
         row.append(actions);
       }
       $("jobs-list").append(row);
