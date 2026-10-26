@@ -482,17 +482,7 @@ p {
 }
 
 /* App shell and navigation. */
-/* The masthead and the tab bar stay on screen while the page scrolls, above
-   the menus (z-index 20) and below the notice and dialogs. The masthead has a
-   fixed height so the tab bar knows where to stick under it. */
-:root { --masthead-h: 58px; }
-html { scroll-padding-top: calc(var(--masthead-h) + 52px); }
 .masthead {
-  position: sticky;
-  top: 0;
-  z-index: 26;
-  height: var(--masthead-h);
-  background: var(--paper);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -534,16 +524,33 @@ main {
     calc(40px + env(safe-area-inset-bottom)) max(3vw, env(safe-area-inset-left));
 }
 .tabs {
-  position: sticky;
-  top: var(--masthead-h);
-  z-index: 25;
   display: flex;
   gap: 8px;
   border-bottom: 1px solid var(--line);
   margin-bottom: 14px;
-  background: var(--paper);
-  /* Covers the gap under the bar so content does not scroll through it. */
-  box-shadow: 0 14px 0 var(--paper);
+}
+/* The masthead and the tab bar stay on screen while the page scrolls, above
+   the menus (z-index 20) and below the notice and dialogs. The masthead has a
+   fixed height so the tab bar knows where to stick under it. Phones already
+   keep their tabs at the bottom and need the height for content. */
+@media (min-width: 601px) {
+  :root { --masthead-h: 58px; }
+  html { scroll-padding-top: calc(var(--masthead-h) + 52px); }
+  .masthead {
+    position: sticky;
+    top: 0;
+    z-index: 26;
+    height: var(--masthead-h);
+    background: var(--paper);
+  }
+  .tabs {
+    position: sticky;
+    top: var(--masthead-h);
+    z-index: 25;
+    background: var(--paper);
+    /* Covers the gap under the bar so content does not scroll through it. */
+    box-shadow: 0 14px 0 var(--paper);
+  }
 }
 .tabs button {
   display: flex;
@@ -2133,15 +2140,7 @@ pre {
 
 /* Phones: five navigation icons, a single content column, compact spacing. */
 @media (max-width: 600px) {
-  :root { --masthead-h: 44px; }
-  /* Both bars cover the page, so scrolling something to the middle of the
-     screen has to leave room under each of them. */
-  html {
-    scroll-padding-top: calc(env(safe-area-inset-top) + var(--masthead-h) + 8px);
-    scroll-padding-bottom: calc(env(safe-area-inset-bottom) + 64px);
-  }
   .masthead {
-    height: auto;
     min-height: 44px;
     padding: max(2px, env(safe-area-inset-top))
       max(10px, env(safe-area-inset-right)) 2px
@@ -2173,7 +2172,6 @@ pre {
   .tabs {
     position: fixed;
     z-index: 20;
-    box-shadow: none;
     inset: auto 0 0;
     display: grid;
     grid-template-columns: repeat(5, minmax(0, 1fr));
