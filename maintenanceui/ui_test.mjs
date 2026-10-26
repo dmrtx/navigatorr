@@ -7962,3 +7962,8 @@ test("a disabled action-bar button is flat grey at full opacity, not faded on to
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-file-actions \{ gap: 6px; \}\s*\.jd-file-actions > \.jd-primary, \.jd-file-actions > \.jd-secondary \{ min-height: 30px;/);
   assert.match(css, /\.jd-primary:disabled, \.jd-secondary:disabled \{[^}]*color: var\(--on-disabled\);[^}]*opacity: 1;/);
 });
+
+test("the dialog's primary button keeps a readable hover and its bar is as compact as the other buttons", () => {
+  assert.match(css, /\.jd-primary:not\(:disabled\):hover \{ border-color: var\(--primary-hover\); background: var\(--primary-hover\); \}/);
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.jd-actions \{ justify-content: flex-end; \}\s*\.jd-actions > \.jd-primary, \.jd-actions > \.jd-secondary \{ flex: 0 1 auto; min-height: 30px;/);
+});
