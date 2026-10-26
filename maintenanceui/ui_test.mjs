@@ -1651,6 +1651,33 @@ test("opening a job shows nothing of the one open before: its files and command 
   await opening;
 });
 
+test("opening another job moves focus off the cleared rows and clears the old announcement", async () => {
+  const h = harness();
+  h.run('api = async () => ({jobs:[{id:"next", status:"completed", action_name:"transcode_media"}]}); tool = async () => ({data:{}});');
+  const button = {id: "row-button"};
+  let focused = null;
+  h.run('$("job-detail-title")').focus = () => { focused = "title"; };
+  h.run('$("job-detail")').contains = el => el === button;
+  h.document.activeElement = button;
+  h.run('$("detail-command-announcer").textContent = "Retry started"; $("detail-summary").dataset.operationId = "old"; state.detail = "old"; $("job-detail").open = true;');
+  await h.run('openJob("next")');
+  assert.equal(focused, "title");
+  // A dialog that was closed keeps showModal's own initial focus.
+  focused = null;
+  h.run('$("job-detail").open = false; state.detail = null;');
+  await h.run('openJob("another")');
+  assert.equal(focused, null);
+  assert.equal(h.run('$("detail-command-announcer").textContent'), "");
+  assert.notEqual(h.run('$("detail-summary").dataset.operationId'), "old");
+});
+
+test("the action bar of a file job shows View batch first", () => {
+  const h = harness();
+  const child = JSON.stringify({id: "c", status: "failed", action_name: "transcode_media", parent_action_id: "b", parent_batch_id: "b", parent_item_key: "k", mode: "x"});
+  const labels = h.run(`detailActionBar(${child})`).map(c => c.textContent.trim());
+  assert.equal(labels[0], "View batch");
+});
+
 test("an action on a file refreshes the open batch details at once, whichever job it targets", async () => {
   const h = harness();
   h.context.refreshed = 0;

@@ -6535,6 +6535,10 @@ function syncDetailSections() {
 async function openJob(id) {
   // The same job opened again (Back, a link to itself) keeps what it shows.
   const reopened = state.detail === id && $("job-detail").open;
+  // Read before any row is cleared: removing the focused control sends focus
+  // to the page. Only an already open dialog counts, so showModal keeps its
+  // own initial focus.
+  const hadFocus = $("job-detail").open && $("job-detail").contains?.(document.activeElement) && document.activeElement !== $("job-detail-title");
   state.detail = id;
   state.chunk = 0;
   state.stepOffset = 0;
@@ -6560,6 +6564,8 @@ async function openJob(id) {
   // Nothing of the job that was open before may show while this one loads: its
   // files, its command history, its details.
   if (!reopened) {
+    $("detail-command-announcer").textContent = "";
+    delete $("detail-summary").dataset.operationId;
     state.detailJob = null;
     $("batch-items-list").replaceChildren();
     $("batch-items-note").textContent = "Loading files…";
@@ -6569,6 +6575,9 @@ async function openJob(id) {
   }
   resetDetailRows();
   syncDetailSections();
+  // The control that opened this job was cleared above: focus goes to the
+  // title instead of falling to the page.
+  if (hadFocus) $("job-detail-title").focus?.();
   // The list already holds this job: show it at once and let the server's
   // answer correct it, instead of a blank "Loading job…".
   const known = [...(state.operationJobs?.values() || [])].find(job => job.id === id);
@@ -6645,7 +6654,7 @@ async function refreshDetail() {
 }
 // The action bar: at most one filled main action, one quiet second action and
 // a More menu for the rest, so a state never shows a wall of buttons.
-const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "Change settings", "Change goal", "View batch", "Show in Files", "View replacement"];
+const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "View batch", "Change settings", "Change goal", "Show in Files", "View replacement"];
 const destructiveActions = ["Cancel", "Stop batch · keep originals"];
 function detailActionBar(job) {
   const buttons = [...jobControls(job, true).children];
