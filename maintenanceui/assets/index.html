@@ -638,7 +638,7 @@
             <div>
               <span class="metadata">Ready to replace</span
               ><strong id="candidate-total">—</strong
-              ><span class="metadata">Potential savings</span>
+              ><span id="candidate-count" class="metadata">Potential savings</span>
             </div>
             <div>
               <span class="metadata">Estimated savings</span
@@ -646,11 +646,23 @@
               ><span class="metadata">From profiles and plans</span>
             </div>
           </div>
-          <h3>Space freed over time</h3>
-          <p class="muted">
-            Verified replacements with recovery copies removed.
-          </p>
-          <div id="savings-history"></div>
+          <section class="freed-days" aria-labelledby="freed-title">
+            <div class="freed-head">
+              <h3 id="freed-title">Freed per day</h3>
+              <p id="freed-summary" class="metadata"></p>
+            </div>
+            <div id="freed-chart"></div>
+          </section>
+          <div class="stat-lists">
+            <section aria-labelledby="recent-title">
+              <h3 id="recent-title">Recently replaced</h3>
+              <ul id="recent-replaced" class="stat-list"></ul>
+            </section>
+            <section aria-labelledby="ready-title">
+              <h3 id="ready-title">Ready to replace</h3>
+              <ul id="ready-list" class="stat-list"></ul>
+            </section>
+          </div>
         </section>
         <section id="recipes" class="panel tab-content" hidden>
           <div class="queue-toolbar">

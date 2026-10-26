@@ -3642,6 +3642,58 @@ function stageLabel(name) {
   };
   return labels[name] || String(name || "Processing").replaceAll("_", " ");
 }
+const statDay = (date) => new Date(`${date}T12:00:00`).toLocaleDateString("en", { month: "short", day: "numeric" });
+// "5 min ago", "3 h ago", then the date: enough to tell fresh work from old.
+function agoText(iso, now = Date.now()) {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.round((now - at) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} h ago`;
+  return new Date(at).toLocaleDateString("en", { month: "short", day: "numeric" });
+}
+// The chart: one bar per local day, the last one being today.
+function renderFreedPerDay(days) {
+  const chart = $("freed-chart");
+  chart.replaceChildren();
+  const total = (n) => days.slice(-n).reduce((sum, d) => sum + (d.saved_bytes || 0), 0);
+  const files = days.reduce((sum, d) => sum + (d.count || 0), 0);
+  if (!files) {
+    $("freed-summary").textContent = "";
+    chart.append(node("p", `Nothing freed in the last ${days.length || 30} days.`, "muted"));
+    return;
+  }
+  $("freed-summary").textContent = `Today ${bytes(total(1))} · 7 days ${bytes(total(7))} · ${days.length} days ${bytes(total(days.length))}`;
+  const peak = Math.max(...days.map((d) => d.saved_bytes || 0), 1);
+  const bars = node("div", "", "freed-bars");
+  bars.setAttribute("role", "img");
+  bars.setAttribute("aria-label", `Space freed per day over ${days.length} days: ${$("freed-summary").textContent}`);
+  days.forEach((d, i) => {
+    const bar = node("i", "");
+    const share = (d.saved_bytes || 0) / peak;
+    bar.style.height = d.saved_bytes ? `${Math.max(4, share * 100).toFixed(1)}%` : "";
+    if (!d.saved_bytes) bar.dataset.empty = "";
+    if (i === days.length - 1) bar.dataset.today = "";
+    bar.title = `${i === days.length - 1 ? "Today" : statDay(d.date)} · ${d.saved_bytes ? `${bytes(d.saved_bytes)} from ${d.count} replacement${d.count === 1 ? "" : "s"}` : "nothing freed"}`;
+    bars.append(bar);
+  });
+  chart.append(bars);
+  const axis = node("div", "", "freed-axis metadata");
+  axis.append(node("span", statDay(days[0].date)), node("span", `Busiest ${bytes(peak)}`), node("span", "Today"));
+  chart.append(axis);
+}
+function statRow(item, detail, extra) {
+  const name = item.source_path?.split("/").pop() || "File";
+  const row = node("li", "", "stat-row");
+  const link = jobLink(name, item.action_id);
+  link.className = "stat-link";
+  const facts = node("span", "", "stat-facts metadata");
+  facts.append(node("strong", `−${bytes(item.saved_bytes)}`), detail ? node("span", detail) : "");
+  row.append(link, facts);
+  if (extra) row.append(extra);
+  return row;
+}
 function renderSavings(data) {
   const savings = data.savings || {};
   $("saved-total").textContent = bytes(savings.realized_bytes ?? 0);
@@ -3650,30 +3702,21 @@ function renderSavings(data) {
   $("candidate-total").textContent = bytes(
     savings.candidate_saved_bytes ?? savings.candidate_bytes ?? 0,
   );
+  const waiting = savings.candidate_count || 0;
+  $("candidate-count").textContent = waiting ? `${waiting} file${waiting === 1 ? "" : "s"} · Potential savings` : "Potential savings";
   $("estimated-total").textContent = bytes(
     savings.estimated_saved_bytes ?? savings.estimated_bytes ?? 0,
   );
-  $("savings-history").replaceChildren();
-  for (const item of data.history || []) {
-    const row = node("div", "", "savings-history-row");
-    row.append(
-      node(
-        "span",
-        `${item.source_path?.split("/").pop() || "Replacement"} · ${new Date(item.completed_at).toLocaleDateString("en")}`,
-        "metadata",
-      ),
-      node(
-        "strong",
-        `${bytes(item.saved_bytes)} · total ${bytes(item.cumulative_bytes)}`,
-        "metadata",
-      ),
-    );
-    $("savings-history").append(row);
-  }
-  if (!$("savings-history").children.length)
-    $("savings-history").append(
-      node("p", "No verified replacements yet.", "muted"),
-    );
+  renderFreedPerDay(data.daily || []);
+  const recent = $("recent-replaced");
+  recent.replaceChildren();
+  for (const item of (data.history || []).slice(-8).reverse()) recent.append(statRow(item, agoText(item.completed_at)));
+  if (!recent.children.length) recent.append(node("li", "Nothing has been replaced yet.", "muted"));
+  const ready = $("ready-list");
+  ready.replaceChildren();
+  for (const item of data.ready || []) ready.append(statRow(item, `${bytes(item.source_bytes)} → ${bytes(item.candidate_bytes)}`));
+  if (!ready.children.length) ready.append(node("li", "No finished encodes are waiting.", "muted"));
+  else if (waiting > (data.ready || []).length) ready.append(node("li", `${waiting - data.ready.length} more waiting, smaller than these.`, "muted"));
 }
 // Stats: how full the NAS is, what each served folder holds, and how that has
 // moved. The numbers come from the server's periodic measurement.
@@ -5649,7 +5692,7 @@ async function loadJobs(more = false) {
     // The server bounds each page to 100. Refresh the complete visible window.
     while (page.length < target) {
       data = await api(
-        `operations?${new URLSearchParams({ group: "workflow", status, limit: Math.min(100, target - page.length), offset: offset + page.length })}`,
+        `operations?${new URLSearchParams({ group: "workflow", status, limit: Math.min(100, target - page.length), offset: offset + page.length, tz_offset: String(-new Date().getTimezoneOffset()) })}`,
       );
       if (revision !== state.jobsRevision || $("workspace").hidden) return;
       if (!Array.isArray(data.jobs))

@@ -57,12 +57,17 @@ type operationsPage struct {
 		CompletedReplacements int    `json:"completed_replacements"`
 		CandidateBytes        int64  `json:"candidate_bytes"`
 		CandidateSavedBytes   int64  `json:"candidate_saved_bytes"`
+		CandidateCount        int    `json:"candidate_count"`
 		EstimatedBytes        int64  `json:"estimated_bytes"`
 		EstimatedSavedBytes   int64  `json:"estimated_saved_bytes"`
 		Measurement           string `json:"measurement"`
 	} `json:"savings"`
-	History    []savingsReplacement `json:"history"`
-	ObservedAt string               `json:"observed_at"`
+	History []savingsReplacement `json:"history"`
+	// Daily is the space freed per local day over the last month; Ready lists
+	// the largest finished encodes still waiting to replace their originals.
+	Daily      []savingsDay       `json:"daily"`
+	Ready      []savingsCandidate `json:"ready"`
+	ObservedAt string             `json:"observed_at"`
 }
 
 type operationRecord struct {
@@ -617,7 +622,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, ObservedAt: now.Format(time.RFC3339Nano)}
+	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ObservedAt: now.Format(time.RFC3339Nano)}
 	page.Savings.Measurement = "verified_content_bytes_after_replacement_cleanup; not filesystem free space"
 	records := make([]operationRecord, 0, len(instances))
 	for _, inst := range instances {
@@ -707,6 +712,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		page.Savings.CompletedReplacements++
 		page.History = append(page.History, savingsReplacement{ActionID: r.inst.ID, SourcePath: path, CompletedAt: r.inst.UpdatedAt, SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.RealizedSavedBytes, CumulativeBytes: page.Savings.RealizedBytes})
 	}
+	page.Daily = dailySavings(page.History, now, clientZone(req))
+	ready := []savingsCandidate{}
 	seenCandidates, seenEstimates := map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
 	for _, r := range records {
@@ -715,6 +722,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateSavedBytes != nil && !seenCandidates[key] {
 				page.Savings.CandidateBytes += *r.savings.CandidateSavedBytes
 				seenCandidates[key] = true
+				if r.savings.SourceBytes != nil && r.savings.CandidateBytes != nil {
+					page.Savings.CandidateCount++
+					ready = append(ready, savingsCandidate{ActionID: r.inst.ID, SourcePath: operationString(r.inputs["path"]), SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.CandidateSavedBytes})
+				}
 			}
 			if operationActive(r.inst.Status) && r.savings.EstimatedSavedBytes != nil && !seenEstimates[key] {
 				page.Savings.EstimatedBytes += *r.savings.EstimatedSavedBytes
@@ -1020,6 +1031,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			page.Jobs = append(page.Jobs, job)
 		}
 	}
+	page.Ready = largestCandidates(ready)
 	if len(page.History) > 25 {
 		page.History = page.History[len(page.History)-25:]
 	}
