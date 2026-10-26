@@ -6560,6 +6560,11 @@ async function openJob(id) {
   // Nothing of the job that was open before may show while this one loads: its
   // files, its command history, its details.
   if (!reopened) {
+    // The control that opened this job may be one of the rows cleared below:
+    // focus goes to the title instead of falling to the page.
+    if ($("job-detail").contains?.(document.activeElement) && document.activeElement !== $("job-detail-title")) $("job-detail-title").focus?.();
+    $("detail-command-announcer").textContent = "";
+    delete $("detail-summary").dataset.operationId;
     state.detailJob = null;
     $("batch-items-list").replaceChildren();
     $("batch-items-note").textContent = "Loading files…";
@@ -6645,7 +6650,7 @@ async function refreshDetail() {
 }
 // The action bar: at most one filled main action, one quiet second action and
 // a More menu for the rest, so a state never shows a wall of buttons.
-const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "Change settings", "Change goal", "View batch", "Show in Files", "View replacement"];
+const detailSecondaryActions = ["Keep originals", "Keep original", "Pause batch", "Cancel", "Stop batch · keep originals", "View batch", "Change settings", "Change goal", "Show in Files", "View replacement"];
 const destructiveActions = ["Cancel", "Stop batch · keep originals"];
 function detailActionBar(job) {
   const buttons = [...jobControls(job, true).children];
