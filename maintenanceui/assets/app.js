@@ -3848,6 +3848,12 @@ async function measureStorage() {
   clearTimeout(state.storageTimer);
   if (data.measuring) state.storageTimer = setTimeout(() => void safe(loadStorage), 3000);
 }
+// An action on a file or replacement changes what the open details show (the
+// batch lists that file), whichever job the details are of: read them again at
+// once instead of leaving the old button until the next timed refresh.
+async function refreshOpenDetail() {
+  if ($("job-detail").open && state.detail) await refreshDetail();
+}
 async function jobControl(id, name, args = {}, {onAccepted, decision} = {}) {
   if (jobIsBusy(id)) return;
   state.busyJobs.add(id);
@@ -3856,7 +3862,7 @@ async function jobControl(id, name, args = {}, {onAccepted, decision} = {}) {
   });
   try {
     await tool(name, { id, ...args }, onAccepted, decision);
-    await Promise.all([state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve(), loadJobs()]);
+    await Promise.all([refreshOpenDetail(), loadJobs()]);
   } finally {
     state.busyJobs.delete(id);
     document.querySelectorAll("[data-job-control]").forEach((b) => {
@@ -3960,7 +3966,7 @@ async function reviewJobDecision(id, decision) {
     const replaceAfter = replaceNext && chosen === true;
     if (candidatePlan) {
       await commandRequest("candidate-decision",{id,candidate_id:candidatePlan.candidate_id,decision_version:candidatePlan.decision_version,decision:selected,background:true});
-      await Promise.all([loadJobs(),state.detail === id && $("job-detail").open ? refreshDetail() : Promise.resolve()]);
+      await Promise.all([loadJobs(), refreshOpenDetail()]);
       notify(selected === "reject" ? "Candidate rejected. Original preserved; its candidate file is removed when nothing else uses it. Other batch files continue." : replaceAfter ? "Candidate accepted. Preparing the replacement review…" : "Candidate accepted. Replacement requires separate approval.");
       if (replaceAfter) safe(() => continueToReplacement(candidatePlan.candidate_id, id));
     } else {
@@ -4100,7 +4106,7 @@ async function enqueueReplacement(job, context) {
     });
     // The open details (this file's, or its batch's) list the file as replacing
     // right away, not on the next refresh, so Replace is not offered again.
-    if ($("job-detail").open && [job.id, latest.parent_action_id].includes(state.detail)) await refreshDetail();
+    if ([job.id, latest.parent_action_id].includes(state.detail)) await refreshOpenDetail();
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -4309,7 +4315,7 @@ async function encodeFileAgain(id, itemKey) {
     if (plan.requires_explicit_profile) { state.busyJobs.delete(id); await reconfigureBatch(id, false, {item_key:itemKey}); return; }
     await commandRequest("batch-settings", sameSettingsRequest(plan));
     if (auth !== state.authRevision) return;
-    await loadJobs();
+    await Promise.all([loadJobs(), refreshOpenDetail()]);
     notify("Encoding this file again with the same settings.");
   } finally {
     state.busyJobs.delete(id);
@@ -4448,7 +4454,7 @@ async function submitReconfiguredBatch() {
       if (current()) $("reconfigure-batch").close();
     });
     if (auth !== state.authRevision) return;
-    await loadJobs();
+    await Promise.all([loadJobs(), refreshOpenDetail()]);
     notify("Settings updated in this batch. Active files finish first; replaced candidates are removed and their attempts stay in file history.");
   } finally {
     state.busyJobs.delete(plan.id);
@@ -4511,7 +4517,7 @@ async function archiveJob(job, archived) {
     }
     await api("archive", {id:job.id,archived});
     if (auth !== state.authRevision || $("workspace").hidden) return;
-    if (state.detailJob?.id === job.id) $("job-detail").close();
+    if (state.detail === job.id) $("job-detail").close();
     notify(archived ? "Job archived. Find it under Archived to restore it." : "Job restored to the queue.");
     await loadJobs();
   } finally {
@@ -6527,6 +6533,8 @@ function syncDetailSections() {
   $("detail-rows").hidden = !rows.some(key => !$(key).hidden && $(key).children.length > 0);
 }
 async function openJob(id) {
+  // The same job opened again (Back, a link to itself) keeps what it shows.
+  const reopened = state.detail === id && $("job-detail").open;
   state.detail = id;
   state.chunk = 0;
   state.stepOffset = 0;
@@ -6551,12 +6559,14 @@ async function openJob(id) {
   $("detail-related").replaceChildren();
   // Nothing of the job that was open before may show while this one loads: its
   // files, its command history, its details.
-  state.detailJob = null;
-  $("batch-items-list").replaceChildren();
-  $("batch-items-note").textContent = "";
-  $("batch-items-prev").hidden = $("batch-items-next").hidden = true;
-  $("detail-command-list").replaceChildren();
-  $("detail-commands").hidden = true;
+  if (!reopened) {
+    state.detailJob = null;
+    $("batch-items-list").replaceChildren();
+    $("batch-items-note").textContent = "Loading files…";
+    $("batch-items-prev").hidden = $("batch-items-next").hidden = true;
+    $("detail-command-list").replaceChildren();
+    $("detail-commands").hidden = true;
+  }
   resetDetailRows();
   syncDetailSections();
   // The list already holds this job: show it at once and let the server's
