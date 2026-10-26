@@ -58,7 +58,9 @@ func (c *Client) login(ctx context.Context) error {
 
 	body, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode != 200 || strings.TrimSpace(string(body)) != "Ok." {
+	// Older servers answer 200 "Ok." (and 200 "Fails." for a wrong password);
+	// newer ones answer 204 with no body and 401 for a wrong password.
+	if !(resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "Ok.") {
 		return fmt.Errorf("login failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
@@ -109,7 +111,8 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 			return nil, fmt.Errorf("reading response: %w", err)
 		}
 
-		if resp.StatusCode != 200 {
+		// Commands with nothing to return answer 204 on newer servers.
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 		}
 
