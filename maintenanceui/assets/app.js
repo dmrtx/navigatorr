@@ -4840,6 +4840,10 @@ function jobControls(job, detail = false) {
   // A job that ended without a result leaves its file where it was. Files
   // shows it there, with its status and the goal form, to try again from.
   // Every job offers it, whatever its state, so the source is one click away.
+  // A file's job opened on its own (from a worker slot, a link) leads back to
+  // the batch it belongs to.
+  if (detail && job.parent_action_id && job.parent_action_id !== job.id)
+    add("View batch", () => openJob(job.parent_action_id));
   const filePath = jobFilePath(job), folderPath = filePath ? "" : jobFolderPath(job);
   if (filePath && filesRouteFor(filePath))
     add("Show in Files", () => showInFiles(filePath));

@@ -2800,6 +2800,14 @@ test("a completed preview offers review and start, while active work retains can
   assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
+  // A file's job opened on its own leads back to its batch in the details, not in the list.
+  h.context.opened=[];
+  h.run('openJob = id => opened.push(id);');
+  const child='{id:"c",action_name:"transcode_media",status:"waiting_external",parent_action_id:"b"}';
+  assert.ok(h.run(`jobControls(${child}, true)`).children.some(c=>c.textContent==="View batch"));
+  h.run(`jobControls(${child}, true)`).children.find(c=>c.textContent==="View batch").listeners.get("click")();
+  assert.deepEqual(h.context.opened,["b"]);
+  assert.ok(!h.run(`jobControls(${child}, false)`).children.some(c=>c.textContent==="View batch"));
   assert.ok(h.run('jobControls({id:"p",status:"running",batch:{dry_run:true}})').children.some(c=>c.textContent === "Cancel"));
   h.run('state.workerInfo={ready:false};');
   const offline = h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8}})');
