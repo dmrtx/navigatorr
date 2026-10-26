@@ -7893,3 +7893,10 @@ test("a batch paused on request reads Paused, not Needs decision", () => {
   h.run('progressJob.paused=false;');
   assert.equal(h.run('queuePresentation(progressJob).status'), "Needs decision");
 });
+
+test("the masthead and the tab bar stay pinned while the page scrolls", () => {
+  assert.match(css, /\.masthead \{\s*position: sticky;\s*top: 0;[^}]*height: var\(--masthead-h\);[^}]*background: var\(--paper\);/);
+  assert.match(css, /\.tabs \{\s*position: sticky;\s*top: var\(--masthead-h\);/);
+  // On phones the tab bar is the fixed bottom bar, not a second sticky bar.
+  assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
+});
