@@ -1858,17 +1858,23 @@ main {
   font: 600 24px/1.2 var(--heading);
   overflow-wrap: anywhere;
 }
-.savings-history-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--line);
-}
-.savings-history-row > * {
-  min-width: 0;
-}
+/* Stats: what was freed each day, and the files that moved it or are next. */
+.freed-days { margin: 4px 0 16px; }
+.freed-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.freed-head h3, .stat-lists h3 { margin: 0 0 6px; }
+.freed-bars { display: flex; align-items: flex-end; gap: 3px; height: 84px; padding-bottom: 1px; border-bottom: 1px solid var(--line); }
+.freed-bars > i { flex: 1 1 0; min-width: 2px; border-radius: 2px 2px 0 0; background: var(--forest); opacity: 0.75; }
+.freed-bars > i[data-empty] { height: 2px; background: var(--line); opacity: 1; }
+.freed-bars > i[data-today] { opacity: 1; }
+.freed-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.stat-lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; }
+.stat-lists > section { min-width: 0; }
+.stat-list { margin: 0; padding: 0; list-style: none; }
+.stat-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 2px 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+.stat-link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); text-decoration: none; }
+.stat-link:hover { text-decoration: underline; }
+.stat-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 8px; white-space: nowrap; }
+.stat-facts strong { color: var(--forest); font-weight: 600; }
 
 /* Profiles: ordinary compact controls, with advanced options in a dialog. */
 .recipe-layout {
@@ -2269,10 +2275,9 @@ pre {
   .savings-dashboard strong {
     font-size: 22px;
   }
-  .savings-history-row {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 2px;
-  }
+  .stat-lists { grid-template-columns: minmax(0, 1fr); }
+  .stat-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .stat-facts { justify-content: flex-start; }
   .recipe-layout {
     display: block;
   }
