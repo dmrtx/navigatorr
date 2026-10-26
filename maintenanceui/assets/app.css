@@ -3126,6 +3126,8 @@ html { scrollbar-gutter: stable; }
 .jd-danger { color: var(--danger); border-color: var(--danger); }
 /* Already flat and grey: the generic button:disabled fade on top of it left the label unreadable. */
 .jd-primary:disabled, .jd-secondary:disabled { border-color: var(--disabled-line); background: var(--disabled); color: var(--on-disabled); opacity: 1; }
+/* The generic button:hover paints the dark hover wash, which left the primary's dark label unreadable on it. */
+.jd-primary:not(:disabled):hover { border-color: var(--primary-hover); background: var(--primary-hover); }
 .jd-primary:focus-visible, .jd-secondary:focus-visible, .jd-menu-item:focus-visible, .more-actions > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* The action bar: pinned to the bottom, at most three controls. */
@@ -3151,6 +3153,14 @@ html { scrollbar-gutter: stable; }
 .jd-menu-item { justify-content: flex-start; border-color: transparent; text-align: left; white-space: nowrap; }
 .jd-actions svg { display: none; }
 .jd-actions .action-label { display: inline; }
+/* With a mouse the pinned bar's buttons are the same compact size as every other
+   dialog button and keep their own width; a touch screen keeps the full-width 44px targets. */
+@media (hover: hover) and (pointer: fine) {
+  .jd-actions { justify-content: flex-end; }
+  .jd-actions > .jd-primary, .jd-actions > .jd-secondary { flex: 0 1 auto; min-height: 30px; padding: 2px 14px; font-size: 13px; border-radius: 5px; }
+  .jd-actions .more-actions { flex-basis: 30px; }
+  .jd-actions .more-actions > summary { width: 30px; height: 30px; border-radius: 5px; font-size: 18px; }
+}
 
 /* A pending button shows one real spinner in place of its icon. */
 .spinner { display: none; }
