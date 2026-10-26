@@ -62,6 +62,9 @@
      target. The gap between icon buttons keeps their targets from overlapping. */
   --action-height: 28px;
   --action-min-width: 88px;
+  /* The tallest a row's progress block gets (a label, its bar and a counter), so
+     a row keeps its height as the job moves between states; not a button size. */
+  --footer-height: 38px;
   --action-gap: max(6px, calc(var(--control-size) - var(--action-height)));
 }
 /* Dark palette: once for the system preference, once for an explicit choice. */
@@ -1137,7 +1140,7 @@ main {
 .job-footer > .job-progress, .job-footer > .job-outcome {
   min-width: 0;
   flex: 1 1 240px;
-  max-height: var(--control-size);
+  max-height: var(--footer-height);
   overflow: hidden;
 }
 .job-footer > .job-outcome {
@@ -1632,7 +1635,7 @@ main {
   flex-wrap: wrap;
 }
 .batch-progress-phase { order: 3; flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; color: var(--muted); line-height: 1.45; }
-.job-row .job-footer:has(.batch-progress-phase) { height: auto; min-height: var(--control-size); align-items: flex-start; }
+.job-row .job-footer:has(.batch-progress-phase) { height: auto; min-height: var(--footer-height); align-items: flex-start; }
 .job-footer > .batch-progress:has(.batch-progress-phase) { max-height: none; overflow: visible; row-gap: 0; }
 .batch-progress:has(.batch-progress-phase) .batch-progress-count,
 .batch-progress:has(.batch-progress-phase) .batch-progress-percent { line-height: var(--control-size); }
@@ -1762,7 +1765,7 @@ main {
 .job-row .job-footer:has(.progress-observation),
 .job-row .job-footer:has(.stalled-progress) {
   height: auto;
-  min-height: var(--control-size);
+  min-height: var(--footer-height);
 }
 .job-footer > .worker-progress:has(.progress-observation),
 .job-footer > .stalled-progress {
