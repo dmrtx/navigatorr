@@ -2134,7 +2134,12 @@ pre {
 /* Phones: five navigation icons, a single content column, compact spacing. */
 @media (max-width: 600px) {
   :root { --masthead-h: 44px; }
-  html { scroll-padding-top: calc(env(safe-area-inset-top) + var(--masthead-h) + 8px); }
+  /* Both bars cover the page, so scrolling something to the middle of the
+     screen has to leave room under each of them. */
+  html {
+    scroll-padding-top: calc(env(safe-area-inset-top) + var(--masthead-h) + 8px);
+    scroll-padding-bottom: calc(env(safe-area-inset-bottom) + 64px);
+  }
   .masthead {
     height: auto;
     min-height: 44px;

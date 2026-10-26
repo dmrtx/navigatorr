@@ -7899,6 +7899,7 @@ test("the masthead and the tab bar stay pinned while the page scrolls", () => {
   assert.match(css, /\.tabs \{\s*position: sticky;\s*top: var\(--masthead-h\);/);
   assert.match(css, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;/);
   assert.match(css, /#worker-status \{ max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  assert.match(css, /scroll-padding-bottom: calc\(env\(safe-area-inset-bottom\) \+ 64px\);/);
   // On phones the tab bar is the fixed bottom bar, not a second sticky bar.
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
 });
