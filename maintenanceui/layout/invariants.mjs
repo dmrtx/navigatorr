@@ -12,7 +12,7 @@
 export const budgets = {
   // A control is never smaller than a thumb or larger than a toolbar button.
   minTarget: 28,        // CSS px, the visible box with a mouse
-  minTargetTouch: 36,   // with a finger
+  minTargetTouch: 28,   // with a finger
   minGap: 6,            // between neighbouring controls
   maxButtonHeight: 56,
   // One status block, one action bar: how many controls each may show.
