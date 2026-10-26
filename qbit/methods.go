@@ -60,8 +60,7 @@ func (c *Client) PauseTorrents(ctx context.Context, hashes []string) error {
 	form := url.Values{
 		"hashes": {strings.Join(hashes, "|")},
 	}
-	_, err := c.do(ctx, "POST", "/api/v2/torrents/pause", form)
-	return err
+	return c.doRenamed(ctx, form, "stop", "pause")
 }
 
 // ResumeTorrents resumes torrents by hash.
@@ -69,7 +68,16 @@ func (c *Client) ResumeTorrents(ctx context.Context, hashes []string) error {
 	form := url.Values{
 		"hashes": {strings.Join(hashes, "|")},
 	}
-	_, err := c.do(ctx, "POST", "/api/v2/torrents/resume", form)
+	return c.doRenamed(ctx, form, "start", "resume")
+}
+
+// doRenamed calls a torrents command under the name qBittorrent 5 gave it
+// and, when the server does not know it (404), under the older name.
+func (c *Client) doRenamed(ctx context.Context, form url.Values, current, legacy string) error {
+	_, err := c.do(ctx, "POST", "/api/v2/torrents/"+current, form)
+	if err != nil && strings.HasPrefix(err.Error(), "HTTP 404") {
+		_, err = c.do(ctx, "POST", "/api/v2/torrents/"+legacy, form)
+	}
 	return err
 }
 

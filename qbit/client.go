@@ -60,8 +60,14 @@ func (c *Client) login(ctx context.Context) error {
 
 	// Older servers answer 200 "Ok." (and 200 "Fails." for a wrong password);
 	// newer ones answer 204 with no body and 401 for a wrong password.
-	if !(resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "Ok.") {
+	accepted := resp.StatusCode == http.StatusNoContent || (resp.StatusCode == http.StatusOK && strings.TrimSpace(string(body)) == "Ok.")
+	if !accepted {
 		return fmt.Errorf("login failed (HTTP %d): %s", resp.StatusCode, string(body))
+	}
+	// An empty 204 proves nothing by itself (a proxy can answer it): the
+	// server must also have handed out the session cookie.
+	if base, err := url.Parse(c.url); err == nil && len(c.http.Jar.Cookies(base)) == 0 {
+		return fmt.Errorf("login failed (HTTP %d): no session cookie", resp.StatusCode)
 	}
 
 	c.loggedIn = true

@@ -15,12 +15,16 @@ func fakeServer(t *testing.T, loginStatus int, loginBody, resumeStatus string) *
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
-			if loginStatus == http.StatusOK || loginStatus == http.StatusNoContent {
+			if (loginStatus == http.StatusOK || loginStatus == http.StatusNoContent) && loginBody != "no cookie" {
 				http.SetCookie(w, &http.Cookie{Name: "SID", Value: "s", Path: "/"})
 			}
 			w.WriteHeader(loginStatus)
 			_, _ = w.Write([]byte(loginBody))
-		case "/api/v2/torrents/resume":
+		case "/api/v2/torrents/start", "/api/v2/torrents/resume":
+			if r.URL.Path == "/api/v2/torrents/start" && resumeStatus == "legacy" {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
 			if _, err := r.Cookie("SID"); err != nil {
 				w.WriteHeader(http.StatusForbidden)
 				return
@@ -47,6 +51,8 @@ func TestLoginAndCommandAcrossServerVersions(t *testing.T) {
 		{"older server, Ok.", 200, "Ok.", "200", true},
 		{"newer server, empty 204", 204, "", "204", true},
 		{"older server, wrong password", 200, "Fails.", "200", false},
+		{"older server without the start command", 200, "Ok.", "legacy", true},
+		{"204 without a session cookie", 204, "no cookie", "204", false},
 		{"newer server, wrong password", 401, "Unauthorized", "200", false},
 		{"banned address", 403, "Your IP address has been banned", "200", false},
 	}
