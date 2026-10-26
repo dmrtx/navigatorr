@@ -6549,6 +6549,14 @@ async function openJob(id) {
   $("detail-controls").replaceChildren();
   $("detail-controls").hidden = true;
   $("detail-related").replaceChildren();
+  // Nothing of the job that was open before may show while this one loads: its
+  // files, its command history, its details.
+  state.detailJob = null;
+  $("batch-items-list").replaceChildren();
+  $("batch-items-note").textContent = "";
+  $("batch-items-prev").hidden = $("batch-items-next").hidden = true;
+  $("detail-command-list").replaceChildren();
+  $("detail-commands").hidden = true;
   resetDetailRows();
   syncDetailSections();
   // The list already holds this job: show it at once and let the server's
