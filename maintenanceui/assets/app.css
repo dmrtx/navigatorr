@@ -2463,10 +2463,12 @@ pre {
 .job-heading > .command-chip { font-size: 9px; }
 /* Phones: the title keeps the whole line beside the number and the status
    badge sits under it (see "Phones" further down), so the chip goes on that
-   row right after the badge, not at the far edge with a gap between them. */
+   row next to the badge, not at the far edge with a gap between them. */
 @media (max-width: 700px) {
   .job-row > .job-heading:has(> .command-chip) { grid-template-columns: 34px auto minmax(0, 1fr); }
   .job-row > .job-heading:has(> .command-chip) > .job-title { grid-column: 2 / -1; }
+  /* The decision icon stays at the title's right edge, which is now column 3. */
+  .job-row > .job-heading:has(> .command-chip) > .status-badge.decision-badge { grid-column: 2 / -1; }
   .job-row > .job-heading > .command-chip {
     grid-column: 3;
     grid-row: 2;

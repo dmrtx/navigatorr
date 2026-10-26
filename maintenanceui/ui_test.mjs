@@ -4601,6 +4601,8 @@ test("the decision flag is a small icon on the title line, not a second badge ro
   assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ padding-right: 26px; \}/);
   // With a command chip the status badge owns column 4; the flag must not take its cell.
   assert.match(css, /\.job-heading:has\(> \.command-chip\) > \.badge:not\(\.decision-badge\) \{ grid-column: 4; grid-row: 1; \}/);
+  // On a phone the chip shares the status badge's row; the decision icon keeps the title's right edge.
+  assert.match(css, /\.job-row > \.job-heading:has\(> \.command-chip\) > \.status-badge\.decision-badge \{ grid-column: 2 \/ -1; \}/);
   assert.doesNotMatch(css, /\.decision-badge \{[^}]*grid-row: [23]/);
   // Explicitly placing the flag would otherwise push the title and status badge out of their cells.
   assert.match(css, /\.job-heading:has\(> \.decision-badge\) > \.job-title \{ grid-column: 2; grid-row: 1; \}/);
