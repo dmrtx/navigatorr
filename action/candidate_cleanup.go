@@ -3,7 +3,9 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -561,7 +563,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
-			return replacedOriginalReason(ec), nil
+			return e.unpromotableOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
 			attempts, err := e.replacedBatchAttempts(parentID)
@@ -573,7 +575,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		if replaced[parentID][inst.ID] {
 			return "a batch settings revision replaced this attempt", nil
 		}
-		return replacedOriginalReason(ec), nil
+		return e.unpromotableOriginalReason(ec), nil
 	}
 	return "", nil
 }
@@ -585,6 +587,37 @@ func replacedOriginalReason(ec *ExecutionContext) string {
 	cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 	if getString(cleanup, "reason") == candidateRetiredReplaced && getString(cleanup, "outcome") == "kept" {
 		return "another attempt's promotion replaced this attempt's original"
+	}
+	return ""
+}
+
+// unpromotableOriginalReason names a finished attempt whose original is no
+// longer the file it encoded, so a promotion would refuse it. It covers
+// attempts that finished before sibling retirement existed, which no cleanup
+// record mentions. The original is only compared by size: a size that differs
+// from the one recorded when the attempt started is never the same bytes,
+// whereas a modification time can move without the content changing. An
+// original that is simply gone counts too, since the candidate file this is
+// asked about was itself found on the same share. Anything that cannot be read
+// is not evidence and keeps the candidate listed as promotable.
+func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
+	if reason := replacedOriginalReason(ec); reason != "" {
+		return reason
+	}
+	original := getString(ec.State, "resolved_path")
+	size := getInt64(ec.State, "original_size")
+	if original == "" || size <= 0 {
+		return ""
+	}
+	if _, err := e.promotionPath(original, false); err != nil {
+		return ""
+	}
+	info, err := os.Lstat(original)
+	switch {
+	case err == nil && info.Mode().IsRegular() && info.Size() != size:
+		return "the original is no longer the file this attempt encoded (its size changed)"
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		return "the original this attempt encoded no longer exists"
 	}
 	return ""
 }

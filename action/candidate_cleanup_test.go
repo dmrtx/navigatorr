@@ -1156,3 +1156,61 @@ func TestACompletedCandidateKeptAfterAReplacementStaysListed(t *testing.T) {
 		t.Fatalf("listing: %+v", page.Items)
 	}
 }
+
+func TestLeftoverListsCompletedAttemptsWhoseOriginalChanged(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	attempt := func(id, n, content string, recordedSize int) string {
+		original := filepath.Join(season, "sample-episode-"+n+".mkv")
+		if content != "" {
+			writeCandidateFile(t, original, content)
+		}
+		extra := map[string]any{"transcode_done": true}
+		if recordedSize > 0 {
+			extra["original_size"] = recordedSize
+		}
+		candidate := seedCandidateAttempt(t, st, id, StatusCompleted, original, "job-"+id, nil, extra)
+		writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+		return candidate
+	}
+	attempt("intact", "01", "original 01", len("original 01"))
+	changed := attempt("changed", "02", "a smaller replacement", len("original 02 with its old, larger size"))
+	gone := attempt("gone", "03", "", 500)
+	attempt("no-baseline", "04", "original 04", 0)
+	started := attempt("started", "05", "a smaller replacement", 500)
+	seedActionInstance(t, st, "promotion", "promote_transcode_candidate", StatusRunning, 3, "promote:custom-service:started", map[string]any{"transcode_action_id": "started"}, nil)
+
+	page, err := e.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]LeftoverCandidate{}
+	for _, item := range page.Items {
+		got[item.ActionID] = item
+	}
+	if len(got) != 2 || got["changed"].Path != changed || got["gone"].Path != gone || page.Bytes != 80 {
+		t.Fatalf("unexpected listing: %+v", page)
+	}
+	if !strings.Contains(got["changed"].Reason, "size changed") || !strings.Contains(got["gone"].Reason, "no longer exists") {
+		t.Fatalf("reasons: %+v", got)
+	}
+	for _, id := range []string{"intact", "no-baseline", "started"} {
+		if _, err := e.DiscardLeftoverCandidate(context.Background(), id); err == nil {
+			t.Fatalf("%s was discarded", id)
+		}
+	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("a candidate with a promotion was touched: %v", err)
+	}
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "changed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(changed); !os.IsNotExist(err) {
+		t.Fatalf("changed candidate kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(season, "sample-episode-02.mkv")); err != nil {
+		t.Fatalf("the library file was touched: %v", err)
+	}
+}
