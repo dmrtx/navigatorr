@@ -125,10 +125,12 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	}
 	var removal candidateRemoval
 	truncate, err := e.removeRecoveryFile(p.BackupPath + ".partial")
+	removal.add(0, truncate)
 	if err != nil && !os.IsNotExist(err) {
+		p.noteRecoveryTruncate(removal.Truncate)
+		_ = e.savePromotion(ctx, ec, p)
 		return nil, err
 	}
-	removal.add(0, truncate)
 	truncate, err = e.removeRecoveryFile(p.BackupPath)
 	if emptied {
 		truncate = truncateEmptied

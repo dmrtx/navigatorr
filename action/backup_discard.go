@@ -81,7 +81,16 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 		if err != nil || !now.Mode().IsRegular() || !os.SameFile(before, now) || before.Size() != now.Size() || !before.ModTime().Equal(now.ModTime()) {
 			return nil, fmt.Errorf("recovery copy changed before removal; stopped")
 		}
-		truncate, err := e.removeRecoveryFile(path)
+		var truncate string
+		if p.otherCopyInPlace() {
+			truncate, err = e.removeRecoveryFile(path)
+		} else {
+			// The recovery copy may be the only original left.
+			err = os.Remove(path)
+			if e.truncateBeforeDelete() {
+				truncate = truncateSkipped + "no replacement or original is in the library"
+			}
+		}
 		removal.add(0, truncate)
 		if err != nil {
 			return nil, err

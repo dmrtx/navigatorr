@@ -43,6 +43,19 @@ func (e *Engine) removeRecoveryFile(path string) (string, error) {
 	return truncate, err
 }
 
+// otherCopyInPlace reports whether the library holds the bytes the recovery
+// copy stands in for: the replacement at its final path, or the original still
+// at its own. A user discard of a recovery copy that is the only original
+// (the library deleted it and the import never finished) must leave the bytes
+// to the share's recycle bin, so it only empties the copy when this holds.
+func (p *promotionState) otherCopyInPlace() bool {
+	same := func(path string, size int64) bool {
+		info, err := os.Lstat(path)
+		return path != "" && size > 0 && err == nil && info.Mode().IsRegular() && info.Size() == size
+	}
+	return same(p.NewPath, p.CandidateBytes) || same(p.OriginalPath, p.OriginalBytes)
+}
+
 // noteRecoveryTruncate keeps what emptying the recovery copy did, so a
 // finished promotion shows it. An empty outcome (not tried) keeps what an
 // earlier run recorded.

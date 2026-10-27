@@ -429,3 +429,30 @@ func TestDiscardDuplicateFinishesAfterTheCopyWasEmptied(t *testing.T) {
 		t.Fatalf("the original was touched: %v", err)
 	}
 }
+
+// When the library deleted the original and the import never finished, the
+// recovery copy is the only original: a user discard keeps its bytes for the
+// share's recycle bin instead of emptying them.
+func TestDiscardKeepsTheBytesOfARecoveryCopyThatIsTheOnlyOriginal(t *testing.T) {
+	h := newPromotionHarness(t)
+	id, p := seedFailedBackup(t, h)
+	for _, path := range []string{p.OriginalPath, p.NewPath} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	h.engine.deps.Config.Cleanup.TruncateBeforeDelete = true
+	held := holdOpen(t, p.BackupPath)
+	if _, err := h.engine.DiscardTranscodeBackup(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if got := sizeOf(t, held); got != p.OriginalBytes {
+		t.Fatalf("the only original was emptied: %d of %d bytes", got, p.OriginalBytes)
+	}
+	if _, err := os.Lstat(p.BackupPath); !os.IsNotExist(err) {
+		t.Fatal("the discarded copy is still present")
+	}
+	if saved := persistedPromotion(t, h, id); !strings.HasPrefix(saved.RecoveryTruncate, truncateSkipped) {
+		t.Fatalf("outcome: %q", saved.RecoveryTruncate)
+	}
+}
