@@ -23,6 +23,10 @@ import (
 )
 
 const (
+	// foldLanes is how many walks someone is waiting on run at once. They are
+	// metadata reads at idle I/O priority, and the library sits on spinning disks
+	// that answer several at a time.
+	foldLanes    = 4
 	hashChunk    = 1 << 20
 	jobRetention = 15 * time.Minute
 	// defaultOrphanAfter is how long a job may go unasked-about before the helper
@@ -103,7 +107,7 @@ func NewServer(cfg Config) (*Server, error) {
 		instance:  hex.EncodeToString(idBytes),
 		sem:       make(chan struct{}, cfg.MaxHashes),
 		usageSem:  make(chan struct{}, 1),
-		foldSem:   make(chan struct{}, 2),
+		foldSem:   make(chan struct{}, foldLanes),
 		logf:      cfg.Logf,
 		baseCtx:   ctx,
 		cancel:    cancel,

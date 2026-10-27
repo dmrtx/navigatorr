@@ -154,9 +154,12 @@ func (s *Server) readFolder(ctx context.Context, root string, meter nasMeter) (b
 	if meter != nil {
 		if _, mapped := meter.Remote(root); mapped {
 			helperCtx, cancel := context.WithTimeout(ctx, storageFolderBudget)
-			res, err := meter.Usage(helperCtx, root, nil)
+			// The walk also sizes the folders two levels down, which fills the folder
+			// cache: the Files tab then finds every series and season measured.
+			res, err := meter.Usage(helperCtx, root, nil, nashelper.UsageChildren(nashelper.MaxUsageChildDepth))
 			cancel()
 			if err == nil {
+				s.folderSizes.adopt(s.engine.Deps().Store, root, res)
 				return res.Bytes, "helper", res.Skipped, true
 			}
 			if !nashelper.ShouldFallBack(err) {

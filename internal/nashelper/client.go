@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,7 +26,10 @@ const (
 	// deadline, if shorter, wins.
 	sampleTimeout = 5 * time.Minute
 	pollMin       = 250 * time.Millisecond
-	pollMax       = 2 * time.Second
+	// usagePollMin is how soon a usage walk is first asked about. Most finish in
+	// milliseconds, so the answer should not wait a quarter of a second.
+	usagePollMin = 20 * time.Millisecond
+	pollMax      = 2 * time.Second
 	// maxPollFailures is how many polls in a row may fail before the hash is given
 	// up (and cancelled on the helper).
 	maxPollFailures = 3
@@ -305,6 +309,7 @@ type UsageProgress func(bytes int64)
 
 type usageConfig struct {
 	interactive bool
+	childDepth  int
 	runBudget   time.Duration
 	onState     func(state string)
 }
@@ -316,6 +321,10 @@ type UsageOption func(*usageConfig)
 // walk does not queue behind the statistics' walk of a whole root. A helper that
 // predates the lanes ignores it.
 func UsageInteractive() UsageOption { return func(c *usageConfig) { c.interactive = true } }
+
+// UsageChildren also asks for the size of every folder up to depth levels below
+// the one measured (see UsageResult.Children). A helper that predates it sends none.
+func UsageChildren(depth int) UsageOption { return func(c *usageConfig) { c.childDepth = depth } }
 
 // UsageRunBudget limits how long the walk may run once the helper has started
 // it. Time spent queued does not count; the caller's context bounds that.
@@ -333,8 +342,15 @@ func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress
 		opt(&cfg)
 	}
 	route := "/v1/usage"
+	query := url.Values{}
 	if cfg.interactive {
-		route += "?priority=interactive"
+		query.Set("priority", "interactive")
+	}
+	if cfg.childDepth > 0 {
+		query.Set("children", strconv.Itoa(cfg.childDepth))
+	}
+	if len(query) > 0 {
+		route += "?" + query.Encode()
 	}
 	var job Job
 	if err := c.pathCall(ctx, c.timeout, route, local, &job); err != nil {
@@ -350,7 +366,7 @@ func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress
 		}
 	}()
 	instance := job.InstanceID
-	wait := pollMin
+	wait := usagePollMin
 	failures := 0
 	var seen string
 	var runStart time.Time

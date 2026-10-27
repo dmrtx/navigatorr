@@ -17,7 +17,10 @@ const maxUsageDepth = 64
 // is opened relative to its parent with O_NOFOLLOW, so a link swapped in while
 // the walk runs is skipped, never followed out of the root, and a directory on
 // another filesystem is left alone. tick receives the bytes counted so far.
-func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) (UsageResult, error) {
+//
+// childDepth asks for the size of every folder up to that many levels below path
+// to be reported as well (see UsageChild); 0 asks for none.
+func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64), childDepth int) (UsageResult, error) {
 	dir, err := r.OpenDir(path)
 	if err != nil {
 		return UsageResult{}, err
@@ -28,19 +31,18 @@ func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) 
 		return UsageResult{}, err
 	}
 	var res UsageResult
-	res.Stamps = map[string]int64{".": int64(st.Mtim.Sec)}
-	if err := walkUsage(ctx, dir, uint64(st.Dev), &res, tick, 0, "."); err != nil {
+	col := newUsageCollector(childDepth)
+	col.enter(".", int64(st.Mtim.Sec), &res)
+	if err := walkUsage(ctx, dir, uint64(st.Dev), &res, tick, col, 0, "."); err != nil {
 		return UsageResult{}, err
 	}
-	if res.Dirs+1 > MaxUsageStamps {
-		res.Stamps = nil
-	}
+	col.finish(&res)
 	return res, nil
 }
 
 // walkUsage stamps each directory from the stat taken before its entries are
 // read, so a change made during the walk shows up as newer than the stamp.
-func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, tick func(int64), depth int, rel string) error {
+func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, tick func(int64), col *usageCollector, depth int, rel string) error {
 	if depth > maxUsageDepth {
 		res.Skipped++
 		return nil
@@ -84,18 +86,13 @@ func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, 
 				if rel != "." {
 					childRel = rel + "/" + name
 				}
-				if res.Stamps != nil {
-					if len(res.Stamps) < MaxUsageStamps {
-						res.Stamps[childRel] = int64(st.Mtim.Sec)
-					} else {
-						res.Stamps = nil
-					}
-				}
-				werr := walkUsage(ctx, child, dev, res, tick, depth+1, childRel)
+				mark := col.enter(childRel, int64(st.Mtim.Sec), res)
+				werr := walkUsage(ctx, child, dev, res, tick, col, depth+1, childRel)
 				child.Close()
 				if werr != nil {
 					return werr
 				}
+				col.leave(mark, childRel, depth+1, res)
 			default:
 				// Links, sockets and devices hold no library bytes.
 			}

@@ -125,6 +125,10 @@ type UsageResult struct {
 	Dirs    int64            `json:"dirs,string"`
 	Skipped int64            `json:"skipped,string"`
 	Stamps  map[string]int64 `json:"stamps,omitempty"`
+	// Children holds the size of each folder down to the depth asked for, so one
+	// walk answers for the folders inside as well. It is absent when none was
+	// asked for or there are more than MaxUsageChildren.
+	Children []UsageChild `json:"children,omitempty"`
 }
 
 // MaxUsageStamps bounds how many directories a usage result stamps.
