@@ -75,12 +75,17 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	if err != nil {
 		return nil, err
 	}
-	if p.originalByMetadata() {
-		if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
+	// A run that emptied the verified copy and stopped before unlinking it
+	// has nothing left to verify.
+	emptied := p.recoveryEmptied(backupIdentity)
+	if !emptied {
+		if p.originalByMetadata() {
+			if err := e.verifyPromotionRecovery(ctx, p, p.BackupPath); err != nil {
+				return nil, err
+			}
+		} else if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint); err != nil {
 			return nil, err
 		}
-	} else if _, err := e.promotionVerifyByIdentity(ctx, p.BackupPath, p.OriginalSHA, p.BackupFingerprint); err != nil {
-		return nil, err
 	}
 	for _, path := range []string{p.BackupPath, p.BackupPath + ".partial"} {
 		if _, err := e.promotionPath(path, true); err != nil {
@@ -111,10 +116,29 @@ func (e *Engine) DiscardDuplicateTranscodeBackup(ctx context.Context, id string)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(p.BackupPath + ".partial"); err != nil && !os.IsNotExist(err) {
+	// The copy is verified; record the intent to empty it before it is.
+	e.planRecoveryEmptying(p, backupNow)
+	if p.RecoveryEmptyStarted {
+		if err := e.savePromotion(ctx, ec, p); err != nil {
+			return nil, err
+		}
+	}
+	var removal candidateRemoval
+	truncate, err := e.removeRecoveryFile(p.BackupPath + ".partial")
+	removal.add(0, truncate)
+	if err != nil && !os.IsNotExist(err) {
+		p.noteRecoveryTruncate(removal.Truncate)
+		_ = e.savePromotion(ctx, ec, p)
 		return nil, err
 	}
-	if err := os.Remove(p.BackupPath); err != nil {
+	truncate, err = e.removeRecoveryFile(p.BackupPath)
+	if emptied {
+		truncate = truncateEmptied
+	}
+	removal.add(0, truncate)
+	p.noteRecoveryTruncate(removal.Truncate)
+	if err != nil {
+		_ = e.savePromotion(ctx, ec, p)
 		return nil, err
 	}
 	p.BackupVerified = false

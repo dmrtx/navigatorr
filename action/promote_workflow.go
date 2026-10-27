@@ -559,11 +559,17 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-			return promoteFailed(err)
+	if backup, err := os.Lstat(p.BackupPath); err == nil {
+		// An earlier run that emptied the verified copy and stopped before
+		// unlinking it has nothing left to verify.
+		emptied := p.recoveryEmptied(backup)
+		if !emptied {
+			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+				return promoteFailed(err)
+			}
 		}
 		p.RecoveryCleanupStarted = true
+		e.planRecoveryEmptying(p, backup)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -573,7 +579,13 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		if err := e.cleanupProgress(ctx, ec, "removing_recovery", p.BackupPath, 0, p.OriginalBytes); err != nil {
 			return promoteFailed(err)
 		}
-		if err := os.Remove(p.BackupPath); err != nil {
+		truncate, err := e.removeRecoveryFile(p.BackupPath)
+		if emptied {
+			truncate = truncateEmptied
+		}
+		p.noteRecoveryTruncate(truncate)
+		if err != nil {
+			_ = e.savePromotion(ctx, ec, p)
 			return promoteFailed(err)
 		}
 	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {
@@ -606,6 +618,9 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
 	outputs := map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}
+	if p.RecoveryTruncate != "" {
+		outputs["recovery_truncate"] = p.RecoveryTruncate
+	}
 	if p.MovieID > 0 {
 		delete(outputs, "new_episode_file_id")
 		delete(outputs, "episode_ids")

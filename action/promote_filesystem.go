@@ -246,11 +246,17 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 	if err := e.promotionRemovePartial(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	if _, err := os.Lstat(p.BackupPath); err == nil {
-		if err := e.promotionVerifyRecovered(ctx, p); err != nil {
-			return promoteFailed(err)
+	if backup, err := os.Lstat(p.BackupPath); err == nil {
+		// An earlier run that emptied the verified copy and stopped before
+		// unlinking it has nothing left to verify.
+		emptied := p.recoveryEmptied(backup)
+		if !emptied {
+			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
+				return promoteFailed(err)
+			}
 		}
 		p.RecoveryCleanupStarted = true
+		e.planRecoveryEmptying(p, backup)
 		if err := e.savePromotion(ctx, ec, p); err != nil {
 			return promoteFailed(err)
 		}
@@ -260,7 +266,17 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 		if err := e.cleanupProgress(ctx, ec, "removing_recovery", p.BackupPath, 0, p.OriginalBytes); err != nil {
 			return promoteFailed(err)
 		}
-		if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return os.Remove(p.BackupPath) }); err != nil {
+		var truncate string
+		err := e.withBatchPromotionMutation(ctx, ec, p, func() (err error) {
+			truncate, err = e.removeRecoveryFile(p.BackupPath)
+			return err
+		})
+		if emptied {
+			truncate = truncateEmptied
+		}
+		p.noteRecoveryTruncate(truncate)
+		if err != nil {
+			_ = e.savePromotion(ctx, ec, p)
 			return promoteFailed(err)
 		}
 	} else if !os.IsNotExist(err) || !p.RecoveryCleanupStarted {
@@ -281,7 +297,11 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 	if p.OriginalBytes > 0 {
 		percent = float64(saved) / float64(p.OriginalBytes) * 100
 	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"promoted": true, "promotion": p, "final_path": p.NewPath, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent, "import_required": false}}, nil
+	outputs := map[string]any{"promoted": true, "promotion": p, "final_path": p.NewPath, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent, "import_required": false}
+	if p.RecoveryTruncate != "" {
+		outputs["recovery_truncate"] = p.RecoveryTruncate
+	}
+	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }
 
 // promotionMoveBackAfterFailedPublish moves a moved-aside original back to its

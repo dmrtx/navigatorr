@@ -62,6 +62,7 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 		return nil, err
 	}
 	var removed int64
+	var removal candidateRemoval
 	for _, path := range paths {
 		before := identities[path]
 		if before == nil {
@@ -80,7 +81,18 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 		if err != nil || !now.Mode().IsRegular() || !os.SameFile(before, now) || before.Size() != now.Size() || !before.ModTime().Equal(now.ModTime()) {
 			return nil, fmt.Errorf("recovery copy changed before removal; stopped")
 		}
-		if err := os.Remove(path); err != nil {
+		var truncate string
+		if p.otherCopyInPlace() {
+			truncate, err = e.removeRecoveryFile(path)
+		} else {
+			// The recovery copy may be the only original left.
+			err = os.Remove(path)
+			if e.truncateBeforeDelete() {
+				truncate = truncateSkipped + "no replacement or original is in the library"
+			}
+		}
+		removal.add(0, truncate)
+		if err != nil {
 			return nil, err
 		}
 		removed += before.Size()
@@ -89,6 +101,7 @@ func (e *Engine) DiscardTranscodeBackup(ctx context.Context, id string) (result 
 		}
 	}
 	p.BackupVerified = false
+	p.noteRecoveryTruncate(removal.Truncate)
 	ec.State["recovery_discarded_by_user"] = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return nil, err
