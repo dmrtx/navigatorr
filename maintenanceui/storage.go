@@ -43,7 +43,7 @@ const (
 type nasMeter interface {
 	Remote(local string) (string, bool)
 	Volumes(ctx context.Context) (nashelper.VolumeResponse, error)
-	Usage(ctx context.Context, local string, progress nashelper.UsageProgress) (nashelper.UsageResult, error)
+	Usage(ctx context.Context, local string, progress nashelper.UsageProgress, opts ...nashelper.UsageOption) (nashelper.UsageResult, error)
 }
 
 func (s *Server) nasMeter() nasMeter {

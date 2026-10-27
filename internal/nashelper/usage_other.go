@@ -17,6 +17,7 @@ func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) 
 	}
 	dir.Close()
 	var res UsageResult
+	stamps := map[string]int64{}
 	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, werr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -30,6 +31,11 @@ func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) 
 			if p != path {
 				res.Dirs++
 			}
+			if info, ierr := d.Info(); ierr == nil {
+				if rel, rerr := filepath.Rel(path, p); rerr == nil {
+					stamps[filepath.ToSlash(rel)] = info.ModTime().Unix()
+				}
+			}
 		case d.Type().IsRegular():
 			if info, ierr := d.Info(); ierr == nil {
 				res.Files++
@@ -40,6 +46,9 @@ func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) 
 	})
 	if err != nil {
 		return UsageResult{}, err
+	}
+	if len(stamps) <= MaxUsageStamps {
+		res.Stamps = stamps
 	}
 	if tick != nil {
 		tick(res.Bytes)

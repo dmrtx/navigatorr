@@ -30,8 +30,11 @@ func (s *Server) volumes(w http.ResponseWriter, _ *http.Request) {
 }
 
 // startUsage queues a walk that sums the regular files under a directory. Walks
-// run one at a time, at idle I/O priority: a library holds hundreds of thousands
-// of entries, and the NAS has other work.
+// run at idle I/O priority: a library holds hundreds of thousands of entries, and
+// the NAS has other work. Background walks (the default, and what the statistics
+// ask for whole roots) run one at a time; a walk asked for with
+// ?priority=interactive has its own lane, so a folder someone is looking at does
+// not wait for them. An older caller sends no priority and gets the old lane.
 func (s *Server) startUsage(w http.ResponseWriter, r *http.Request) {
 	path, ok := decodePath(w, r)
 	if !ok {
@@ -66,17 +69,21 @@ func (s *Server) startUsage(w http.ResponseWriter, r *http.Request) {
 	s.wg.Add(1)
 	s.mu.Unlock()
 
-	go s.runUsage(ctx, j)
+	go s.runUsage(ctx, j, r.URL.Query().Get("priority") == "interactive")
 	writeJSON(w, http.StatusAccepted, s.snapshot(j))
 }
 
-func (s *Server) runUsage(ctx context.Context, j *job) {
+func (s *Server) runUsage(ctx context.Context, j *job, interactive bool) {
 	defer s.wg.Done()
 	defer j.cancel()
 	go s.reapIfAbandoned(ctx, j)
+	sem := s.usageSem
+	if interactive {
+		sem = s.foldSem
+	}
 	select {
-	case s.usageSem <- struct{}{}:
-		defer func() { <-s.usageSem }()
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
 	case <-ctx.Done():
 		s.finishUsage(j, nil, ctx.Err())
 		return

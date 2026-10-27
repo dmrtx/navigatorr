@@ -1726,11 +1726,12 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
 }
 function showFolderSize(target, size) {
   target.dataset.pending = size?.status === "calculating" || size?.updating ? "1" : "0";
-  target.textContent = size?.status === "calculating" ? "Calculating…"
+  target.textContent = size?.status === "calculating" ? (size.queued ? "En cola…" : "Calculating…")
     : size?.bytes != null ? `${size.status === "partial" ? "≥ " : ""}${bytes(size.bytes)}`
     : "Unavailable";
   target.title = size?.note || (size?.status !== "calculating" && size?.measured_at
     ? `Total file bytes, excluding symbolic links. Measured ${new Date(size.measured_at).toLocaleString()}. Saved across restarts; changes checked in the background.${size.updating ? " Updating; last measured total remains visible." : ""}`
+    : size?.queued ? "Waiting for its turn; the folders on screen are measured first."
     : "Measuring total file bytes in this folder.");
 }
 // Sizes are only asked for while one is still being measured, and only for the
@@ -1787,7 +1788,7 @@ async function updateFolderSizes(revision, path, query, loaded, everything = fal
   } catch {
     if (current()) for (const targets of state.folderSizeTargets.values()) {
       for (const target of Array.isArray(targets) ? targets : [targets]) {
-        if (target.textContent === "Calculating…") showFolderSize(target, {note:"Could not retrieve folder size. Refresh to try again."});
+        if (target.textContent === "Calculating…" || target.textContent === "En cola…") showFolderSize(target, {note:"Could not retrieve folder size. Refresh to try again."});
       }
     }
   }

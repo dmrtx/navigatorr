@@ -40,7 +40,7 @@ func (f *fakeMeter) Volumes(context.Context) (nashelper.VolumeResponse, error) {
 	return nashelper.VolumeResponse{InstanceID: "test", Volumes: f.volumes}, nil
 }
 
-func (f *fakeMeter) Usage(_ context.Context, local string, _ nashelper.UsageProgress) (nashelper.UsageResult, error) {
+func (f *fakeMeter) Usage(_ context.Context, local string, _ nashelper.UsageProgress, _ ...nashelper.UsageOption) (nashelper.UsageResult, error) {
 	f.walked = append(f.walked, local)
 	if f.usageErr != nil {
 		return nashelper.UsageResult{}, f.usageErr

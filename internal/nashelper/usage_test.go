@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -27,6 +29,12 @@ func (f *fixture) tree() {
 			f.t.Fatal(err)
 		}
 	}
+}
+
+// sameTotals compares two results by their totals alone.
+func sameTotals(a, b UsageResult) bool {
+	a.Stamps, b.Stamps = nil, nil
+	return a.Bytes == b.Bytes && a.Files == b.Files && a.Dirs == b.Dirs && a.Skipped == b.Skipped
 }
 
 func (f *fixture) usage(path string) (int, Job, []byte) {
@@ -52,8 +60,11 @@ func TestUsageSumsTheTree(t *testing.T) {
 					t.Fatalf("%s: %d %s", path, status, raw)
 				}
 				done := f.waitJob(job.ID, JobDone, JobFailed)
-				if done.State != JobDone || done.Usage == nil || *done.Usage != want {
+				if done.State != JobDone || done.Usage == nil || !sameTotals(*done.Usage, want) {
 					t.Errorf("%s: %+v, want %+v", path, done, want)
+				}
+				if got := done.Usage.Stamps; got == nil || got["."] == 0 || len(got) != int(want.Dirs)+1 {
+					t.Errorf("%s: stamps %v, want one per directory", path, got)
 				}
 			}
 		})
@@ -156,7 +167,7 @@ func TestClientUsageAndVolumes(t *testing.T) {
 	f.tree()
 	c := f.client(t)
 	res, err := c.Usage(context.Background(), filepath.Join(f.root, "show"), nil)
-	if err != nil || res != (UsageResult{Bytes: 5010, Files: 4, Dirs: 3}) {
+	if err != nil || !sameTotals(res, UsageResult{Bytes: 5010, Files: 4, Dirs: 3}) {
 		t.Fatalf("%+v, %v", res, err)
 	}
 	vols, err := c.Volumes(context.Background())
@@ -177,4 +188,68 @@ func TestClientUsageAndVolumes(t *testing.T) {
 		t.Fatal("expected the deadline to end the call")
 	}
 	<-f.srv.usageSem
+}
+
+// A walk someone waits on has its own lane: it runs while the background lane is
+// held by the statistics' walk of a whole root.
+func TestInteractiveUsageDoesNotQueueBehindBackgroundWalks(t *testing.T) {
+	f := newFixture(t, 2)
+	f.tree()
+	f.srv.usageSem <- struct{}{}
+	defer func() { <-f.srv.usageSem }()
+
+	_, background, _ := f.usage(f.root)
+	if background.State != JobQueued {
+		t.Fatalf("the background walk should queue behind the held lane: %s", background.State)
+	}
+	status, raw := f.call("POST", "/v1/usage?priority=interactive", testToken, PathRequest{Path: filepath.Join(f.root, "show")})
+	var job Job
+	if status != http.StatusAccepted || json.Unmarshal(raw, &job) != nil {
+		t.Fatalf("%d %s", status, raw)
+	}
+	if done := f.waitJob(job.ID, JobDone, JobFailed); done.State != JobDone || done.Usage == nil || done.Usage.Bytes != 5010 {
+		t.Fatalf("%+v", done)
+	}
+}
+
+func TestUsageStampsDirectoriesOnlyWhenTheyAreFew(t *testing.T) {
+	f := newFixture(t, 2)
+	for i := 0; i < MaxUsageStamps+1; i++ {
+		if err := os.MkdirAll(filepath.Join(f.root, "many", "d"+strconv.Itoa(i)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, job, _ := f.usage(filepath.Join(f.root, "many"))
+	done := f.waitJob(job.ID, JobDone, JobFailed)
+	if done.State != JobDone || done.Usage.Dirs != MaxUsageStamps+1 || done.Usage.Stamps != nil {
+		t.Fatalf("a tree past the cap carries no stamps: %+v", done.Usage)
+	}
+}
+
+// The run budget starts when the helper starts the walk, so a long wait in the
+// queue does not use it up.
+func TestClientUsageBudgetCountsOnlyTheRun(t *testing.T) {
+	f := newFixture(t, 2)
+	f.tree()
+	c := f.client(t)
+	f.srv.foldSem <- struct{}{}
+	f.srv.foldSem <- struct{}{}
+	var states []string
+	var mu sync.Mutex
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		<-f.srv.foldSem
+		<-f.srv.foldSem
+	}()
+	res, err := c.Usage(context.Background(), filepath.Join(f.root, "show"), nil,
+		UsageInteractive(), UsageRunBudget(200*time.Millisecond),
+		UsageOnState(func(s string) { mu.Lock(); states = append(states, s); mu.Unlock() }))
+	if err != nil || res.Bytes != 5010 {
+		t.Fatalf("a queue longer than the budget must not fail the walk: %+v, %v", res, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(states) < 2 || states[0] != JobQueued || states[len(states)-1] == JobQueued {
+		t.Fatalf("states %v, want queued first and then past it", states)
+	}
 }
