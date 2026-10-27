@@ -153,6 +153,9 @@ func (e *Engine) prepareRestoredOriginalRetry(ctx context.Context, ec *Execution
 	if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
 		return first, err
 	}
+	// The original was just read whole, so an intent to empty it left by an
+	// earlier run is stale and must not excuse a short file later.
+	p.OriginalEmptyStarted = false
 	if err := e.promotionInspectAdopted(ctx, p, p.CandidatePath); err != nil {
 		return first, err
 	}

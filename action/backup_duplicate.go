@@ -21,7 +21,7 @@ func (e *Engine) duplicateBackupGuard(inst *store.ActionInstance, ec *ExecutionC
 	if p.movesAside() || p.MovedAside || p.MoveAsideStartedAt != "" || p.MoveBackStartedAt != "" {
 		return nil, fmt.Errorf("a moved-aside original has no duplicate recovery copy; recovery retained")
 	}
-	if p.OldRemoved || p.DeleteSentAt != "" || p.RecoveryCleanupStarted || getBool(ec.State, "filesystem_publish_started") {
+	if p.OldRemoved || p.DeleteSentAt != "" || p.RecoveryCleanupStarted || p.OriginalEmptyStarted || getBool(ec.State, "filesystem_publish_started") {
 		return nil, fmt.Errorf("original replacement started; recovery retained")
 	}
 	for _, cmd := range p.Commands {

@@ -267,7 +267,7 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 		}
 		if p.movesAside() {
 			// Moved aside above.
-		} else if _, err := os.Lstat(p.OriginalPath); err == nil {
+		} else if original, err := os.Lstat(p.OriginalPath); err == nil {
 			if err := e.promotionVerifyRecovered(ctx, p); err != nil {
 				return promoteFailed(err)
 			}
@@ -277,31 +277,47 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			if _, err := e.promotionPath(p.OriginalPath, true); err != nil {
 				return promoteFailed(err)
 			}
-			if err := e.verifyPromotionOriginal(ctx, p); os.IsNotExist(err) {
+			// An earlier run that emptied the verified original and stopped
+			// before unlinking it has nothing left to verify.
+			emptied := p.originalEmptied(original)
+			var verifyErr error
+			if !emptied {
+				verifyErr = e.verifyPromotionOriginal(ctx, p)
+			}
+			if os.IsNotExist(verifyErr) {
 				// The optional orphan disappeared after discovery. Do not issue
 				// a remove against a pathname that could now contain a new file.
-			} else if err != nil {
-				return promoteFailed(err)
+			} else if verifyErr != nil {
+				return promoteFailed(verifyErr)
 			} else {
+				empty, skip := e.planOriginalEmptying(p, original, adopted.Path)
 				if err := e.savePromotion(ctx, ec, p); err != nil {
 					return promoteFailed(err)
 				}
 				if err := ctx.Err(); err != nil {
 					return promoteFailed(err)
 				}
-				if err := os.Remove(p.OriginalPath); err != nil && !os.IsNotExist(err) {
+				truncate, err := e.removeOriginal(p, p.OriginalPath, adopted.Path, original, empty, skip)
+				if emptied {
+					truncate = truncateEmptied
+				}
+				p.noteOriginalTruncate(truncate)
+				if err != nil && !os.IsNotExist(err) {
+					_ = e.savePromotion(ctx, ec, p)
 					return promoteFailed(err)
 				}
 			}
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
+		} else {
+			p.noteOriginalTruncate(p.unconfirmedOriginalTruncate())
 		}
 	}
 	p.OldRemoved = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	return StepResult{Status: StepCompleted}, nil
+	return StepResult{Status: StepCompleted, Outputs: originalTruncateOutputs(p.OriginalTruncate)}, nil
 }
 
 func (e *Engine) promotionNoOldReferences(ctx context.Context, svc *arrservice.Service, p *promotionState) error {
@@ -620,6 +636,9 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 	outputs := map[string]any{"promoted": true, "promotion": p, "final_path": finalPath, "new_episode_file_id": p.NewFileID, "episode_ids": p.EpisodeIDs, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "one_active_file_per_episode": true, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent}
 	if p.RecoveryTruncate != "" {
 		outputs["recovery_truncate"] = p.RecoveryTruncate
+	}
+	if p.OriginalTruncate != "" {
+		outputs["original_truncate"] = p.OriginalTruncate
 	}
 	if p.MovieID > 0 {
 		delete(outputs, "new_episode_file_id")
