@@ -1006,7 +1006,108 @@ func (e *HTTPExecutor) RetryPublication(ctx context.Context, jobID string) error
 	return he
 }
 
+// PublishRetained POSTs /v1/jobs/{id}/publish. The request only starts the
+// worker's publication of a retained candidate and repeating it is harmless, so
+// a transport failure is an ordinary error the caller retries. A worker that
+// predates deferred publication answers 404 "not found" for the route (the same
+// code a missing job carries, so only the message tells them apart), which is
+// reported as transcode.ErrDeferredPublicationUnsupported and is
+// never evidence that the candidate is gone: only a 404 that says the job is
+// unknown is returned as the typed *HTTPError.
+func (e *HTTPExecutor) PublishRetained(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+	if strings.TrimSpace(jobID) == "" {
+		return transcode.JobStatus{}, errors.New("jobID is required")
+	}
+	if !validJobIDRegex.MatchString(jobID) {
+		return transcode.JobStatus{}, fmt.Errorf("invalid jobID %q", jobID)
+	}
+	path := "/v1/jobs/" + url.PathEscape(jobID) + "/publish"
+	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	defer cancel()
+	hreq, err := e.newRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return transcode.JobStatus{}, fmt.Errorf("building publish request: %w", err)
+	}
+	data, code, hdr, err := e.do(hreq, "publish_retained", jobID, false)
+	if err != nil {
+		return transcode.JobStatus{}, err
+	}
+	if code == http.StatusOK {
+		var st transcode.JobStatus
+		if err := json.Unmarshal(data, &st); err != nil {
+			return transcode.JobStatus{}, fmt.Errorf("parsing publish response: %w (bounded body %d bytes)", err, len(data))
+		}
+		if st.ID != jobID {
+			return transcode.JobStatus{}, fmt.Errorf("publish response is for job %q, not %q", st.ID, jobID)
+		}
+		return st, nil
+	}
+	he := newHTTPError(hreq, code, data, hdr)
+	switch {
+	case code == http.StatusNotFound && !strings.Contains(strings.ToLower(he.Message), "job not found"):
+		return transcode.JobStatus{}, transcode.ErrDeferredPublicationUnsupported
+	case code == http.StatusServiceUnavailable && he.Code == transcode.WorkerErrorHeld:
+		return transcode.JobStatus{}, transcode.ErrPublishHeld
+	case code == http.StatusConflict && he.Code == transcode.WorkerErrorNotRetained:
+		return transcode.JobStatus{}, transcode.ErrNotRetained
+	case code == http.StatusConflict && he.Code == transcode.WorkerErrorCandidateChanged:
+		return transcode.JobStatus{}, transcode.ErrRetainedCandidateChanged
+	}
+	return transcode.JobStatus{}, he
+}
+
+// ReleaseRetained POSTs /v1/jobs/{id}/cancel to drop a retained candidate and
+// says what became of it. Unlike Cancel it accepts every definitive answer a
+// retained job can give: cancelled (dropped), expired or unknown (nothing left),
+// completed (already published, so the file is on the share) and
+// release_refused (a publication is running). A transport failure is
+// *UncertainError; the caller keeps the candidate recorded and asks again.
+func (e *HTTPExecutor) ReleaseRetained(ctx context.Context, jobID string) (transcode.ReleaseOutcome, error) {
+	if strings.TrimSpace(jobID) == "" {
+		return "", errors.New("jobID is required")
+	}
+	if !validJobIDRegex.MatchString(jobID) {
+		return "", fmt.Errorf("invalid jobID %q", jobID)
+	}
+	path := "/v1/jobs/" + url.PathEscape(jobID) + "/cancel"
+	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	defer cancel()
+	hreq, err := e.newRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return "", fmt.Errorf("building release request: %w", err)
+	}
+	data, code, hdr, err := e.do(hreq, "release_retained", jobID, true)
+	if err != nil {
+		return "", e.mutatingDoErr("release_retained", jobID, err)
+	}
+	if code != http.StatusOK {
+		he := newHTTPError(hreq, code, data, hdr)
+		switch {
+		case code == http.StatusConflict && he.Code == transcode.WorkerErrorReleaseRefused:
+			return transcode.ReleaseRefused, nil
+		case code == http.StatusNotFound && strings.Contains(strings.ToLower(he.Message), "job not found"):
+			return transcode.ReleaseDropped, nil
+		}
+		return "", he
+	}
+	var res httpSubmitResult
+	if err := json.Unmarshal(data, &res); err != nil {
+		return "", e.failUncertain("release_retained", jobID, fmt.Errorf("parsing release acknowledgement (bounded body %d bytes): %w", len(data), err))
+	}
+	if res.ID != jobID {
+		return "", e.failUncertain("release_retained", jobID, fmt.Errorf("ambiguous release acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
+	}
+	switch res.Status {
+	case transcode.StatusCancelled, transcode.StatusExpired, transcode.StatusFailed:
+		return transcode.ReleaseDropped, nil
+	case transcode.StatusCompleted:
+		return transcode.ReleasePublished, nil
+	}
+	return "", e.failUncertain("release_retained", jobID, fmt.Errorf("ambiguous release acknowledgement: id=%q status=%q (bounded body %d bytes)", res.ID, res.Status, len(data)))
+}
+
 var (
-	_ transcode.Executor           = (*HTTPExecutor)(nil)
-	_ transcode.PublicationRetrier = (*HTTPExecutor)(nil)
+	_ transcode.Executor                 = (*HTTPExecutor)(nil)
+	_ transcode.PublicationRetrier       = (*HTTPExecutor)(nil)
+	_ transcode.RetainedCandidateHandler = (*HTTPExecutor)(nil)
 )

@@ -244,8 +244,18 @@ func (e *Engine) drainStatus(ctx context.Context, obs transcode.WorkerObservatio
 // classifyDrainRow says what an unfinished worker action is to the drain:
 // "queued" while held, "publication_pending" for a finished encode that could
 // not be saved, "running" while a job it submitted is open on its worker, and
-// "" for everything else (before its job, after it, or in a review).
+// "" for everything else (before its job, after it, or in a review). A
+// promotion uploading a retained candidate counts as running.
 func classifyDrainRow(r store.DrainActionRow) string {
+	// A promotion is on a worker only while the worker copies a retained
+	// candidate to the share for it; a candidate that is merely retained is
+	// not an open job (it survives a worker restart), so it never blocks.
+	if r.ActionName == "promote_transcode_candidate" {
+		if r.Uploading {
+			return transcode.DrainJobRunning
+		}
+		return ""
+	}
 	switch {
 	case r.WaitingCondition == drainWaitCondition:
 		return transcode.DrainJobQueued

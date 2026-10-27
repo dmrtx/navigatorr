@@ -78,7 +78,7 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 	if err != nil {
 		return fmt.Errorf("promotion state could not be read: %v", err)
 	}
-	if promotion != nil {
+	if promotion != nil && !(candidateIsOnWorker(ec.State) && promotionEndedForGood(promotion)) {
 		return fmt.Errorf("replacement %s references this candidate", promotion.ID)
 	}
 	parentID := getString(ec.Inputs, "parent_action_id")
@@ -158,6 +158,15 @@ func sameCandidateBytes(candidate, partial os.FileInfo) bool {
 // until its last name goes. pruneDir also removes the candidate directory when
 // it is left empty.
 func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (candidateRemoval, error) {
+	if candidateIsOnWorker(ec.State) {
+		return e.removeRetainedCandidate(ctx, inst, ec, pruneDir)
+	}
+	return e.removeOwnCandidateFromShare(ctx, inst, ec, pruneDir)
+}
+
+// removeOwnCandidateFromShare is removeOwnCandidate for a candidate on the
+// share.
+func (e *Engine) removeOwnCandidateFromShare(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (candidateRemoval, error) {
 	var removal candidateRemoval
 	candidate, partial, err := ownCandidateFiles(ec.State)
 	if err != nil {
@@ -274,7 +283,9 @@ func candidateNeedsWorkerCheck(state map[string]any) bool {
 // it does not know the job, lets the files go. Any other status, an
 // unreachable worker or no worker at all keeps them.
 func (e *Engine) candidateWorkerStopped(ctx context.Context, ec *ExecutionContext) error {
-	if !candidateNeedsWorkerCheck(ec.State) {
+	// A retained candidate has no job running: releasing it is itself the
+	// conversation with the worker, and it refuses while a copy is under way.
+	if candidateIsOnWorker(ec.State) || !candidateNeedsWorkerCheck(ec.State) {
 		return nil
 	}
 	const wait = "the worker job may still be writing; cancel it or wait"
@@ -321,6 +332,10 @@ func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionI
 	}
 	emptiedButKept := cause != nil && removal.Truncate == truncateEmptied
 	note := "candidate file removed"
+	if removal.Worker != "" {
+		outcome["released_from_worker"] = true
+		note = "retained candidate released on its worker"
+	}
 	if cause != nil {
 		outcome["outcome"], outcome["detail"] = "kept", cause.Error()
 		note = "candidate file kept: " + cause.Error()
@@ -332,7 +347,7 @@ func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionI
 		outcome["outcome"], outcome["bytes_freed"] = "removed", freed
 		ec.State[candidateRemovedKey], ec.State["candidate_removed_bytes"] = true, freed
 		ec.Outputs[candidateRemovedKey], ec.Outputs["candidate_removed_bytes"] = true, freed
-		if freed == 0 {
+		if freed == 0 && removal.Worker == "" {
 			note = "no candidate file was left"
 		}
 	}
@@ -462,6 +477,9 @@ type LeftoverCandidate struct {
 	PartialBytes int64  `json:"partial_bytes"`
 	Reason       string `json:"reason"`
 	WorkerCheck  bool   `json:"worker_check,omitempty"`
+	// Location is "worker" for a candidate the worker still holds (Bytes is
+	// its attested size); absent for a file on the share.
+	Location string `json:"location,omitempty"`
 }
 
 type LeftoverCandidatePage struct {
@@ -520,6 +538,16 @@ func (e *Engine) leftoverOf(inst *store.ActionInstance, replaced map[string]map[
 		return LeftoverCandidate{}, false
 	}
 	item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
+	if candidateIsOnWorker(ec.State) {
+		// Nothing of it is on the share. It is listed from the worker's
+		// attestation while the release has not gone through.
+		item.WorkerCheck, item.Location = false, candidateOnWorker
+		if getBool(ec.State, candidateRemovedKey) {
+			return LeftoverCandidate{}, false
+		}
+		item.Bytes = getInt64(ec.State, "candidate_size_bytes")
+		return item, item.Bytes > 0
+	}
 	var candidateInfo os.FileInfo
 	for _, path := range []string{candidate, partial} {
 		if _, err := e.promotionPath(path, false); err != nil {
@@ -583,6 +611,9 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
+			if reason, err := e.endedPromotionReason(inst, ec); reason != "" || err != nil {
+				return reason, err
+			}
 			return e.unpromotableOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
@@ -596,6 +627,38 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 			return "a batch settings revision replaced this attempt", nil
 		}
 		return e.unpromotableOriginalReason(ec), nil
+	}
+	return "", nil
+}
+
+// promotionEndedForGood reports a promotion that will never use its candidate:
+// it was cancelled, or it failed for a reason nothing retries (the owner
+// rejected it, or the candidate it needs is gone).
+func promotionEndedForGood(promotion *store.ActionInstance) bool {
+	switch promotion.Status {
+	case StatusCancelled:
+		return true
+	case StatusFailed:
+		var state map[string]any
+		return json.Unmarshal([]byte(promotion.StateJSON), &state) == nil && getBool(state, promotionReleaseRetainedKey)
+	}
+	return false
+}
+
+// endedPromotionReason names a retained candidate that a promotion left on its
+// worker: the release at the end of that promotion did not go through (the
+// worker was unreachable or busy copying, or the attempt was busy), and nothing
+// else would offer it to be discarded.
+func (e *Engine) endedPromotionReason(inst *store.ActionInstance, ec *ExecutionContext) (string, error) {
+	if !candidateIsOnWorker(ec.State) || getBool(ec.State, candidateRemovedKey) {
+		return "", nil
+	}
+	promotion, err := e.deps.Store.FindActionByIdempotencyKeySuffix("promote_transcode_candidate", ":"+inst.ID)
+	if err != nil {
+		return "", fmt.Errorf("promotion state could not be read: %v", err)
+	}
+	if promotion != nil && promotionEndedForGood(promotion) {
+		return "its replacement ended without using it and the worker still holds the candidate", nil
 	}
 	return "", nil
 }
@@ -640,8 +703,11 @@ func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
 	if _, err := e.promotionPath(candidate, false); err != nil {
 		return ""
 	}
-	if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
-		return ""
+	// A retained candidate is not on the share to be found.
+	if !candidateIsOnWorker(ec.State) {
+		if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
+			return ""
+		}
 	}
 	if _, err := e.promotionPath(original, false); err != nil {
 		return ""

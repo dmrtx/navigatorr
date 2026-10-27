@@ -154,7 +154,13 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support compact SDR conversion; upgrade the worker before encoding"}, nil
 		}
 	}
-	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize}
+	// Where the candidate waits for its promotion. Nothing is asked of the
+	// worker and nothing is stored unless the worker is configured for it.
+	publishPolicy, held := e.publishPolicyFor(ctx, ec)
+	if held != nil {
+		return *held, nil
+	}
+	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize, PublishPolicy: publishPolicy}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
 	// status query and deliberately does not take the parent admission lease.
@@ -194,6 +200,10 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 					return StepResult{}, perr
 				}
 				return StepResult{Status: StepCompleted, Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": getString(ec.State, "candidate_path"), "output_path": getString(ec.State, "output_path"), "transcode_status": st.Status, "reconciled": true, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
+			case transcode.StatusExpired:
+				// A retained candidate the worker dropped: nothing is there, and
+				// the same job id may be submitted again below.
+				clearTranscodeReconcileFlags(ec)
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile unexpected status %q (fail closed)", st.Status)}, nil
 			}
@@ -657,8 +667,18 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return res, nil
 	}
 	switch st.Status {
-	case transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled:
+	case transcode.StatusCompleted, transcode.StatusFailed, transcode.StatusCancelled, transcode.StatusExpired:
 		e.noteWorkerSlotFreed()
+	}
+	// The encode is finished and validated and the candidate stays on the
+	// worker: the job holds no slot and the action goes on to validate it from
+	// the worker's attestation.
+	if st.Status == transcode.StatusRunning && st.Retained {
+		e.noteWorkerSlotFreed()
+		return e.retainedWaitResult(ec, st, jobID), nil
+	}
+	if st.Status == transcode.StatusExpired {
+		return e.retainedExpiredResult(ec, jobID), nil
 	}
 	if st.RecoveryRequired {
 		out := transcodeWorkerMetadataOutputs(ec, st)

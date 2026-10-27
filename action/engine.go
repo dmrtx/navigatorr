@@ -769,6 +769,13 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 		result = buildActionResult(inst, len(tmpl.Steps), ec)
 	}
 
+	// A cancelled promotion never uses the candidate its attempt retained on a
+	// worker. A copy that is already under way cannot be dropped, and the
+	// attempt then lists the candidate to discard.
+	if inst.ActionName == "promote_transcode_candidate" {
+		e.releaseRetainedForPromotion(ctx, ec, candidateRetiredCancelled)
+	}
+
 	// A batch used to deliberately leave accepted children running. That makes
 	// "cancel the batch" operationally misleading and can leave the worker slots
 	// occupied by work the caller explicitly abandoned. Collect the children
@@ -810,7 +817,13 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 			cancelErrors = append(cancelErrors, fmt.Sprintf("reading child action %s: %v", childID, gerr))
 			continue
 		}
-		if child == nil || child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled {
+		if child != nil && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled) {
+			// Cancel refuses a finished child, but a candidate its worker
+			// still holds is never promoted from a cancelled batch.
+			e.releaseRetainedChild(requestCtx, childID, candidateRetiredCancelled)
+			continue
+		}
+		if child == nil {
 			continue
 		}
 		childReason := "parent transcode batch " + instanceID + " cancelled"
@@ -1005,6 +1018,15 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			if getBool(res.Outputs, candidateRejectedKey) {
 				e.retireCandidate(ctx, inst, ec, candidateRetiredRejected)
 			}
+			// A failure alone releases nothing, as it removes nothing from the
+			// share: the error may be a passing one (a share that dropped out
+			// during accept_result) and Retry resumes the attempt on its
+			// candidate. A failed attempt's candidate is listed as a leftover,
+			// where Discard releases it; the worker drops it at the end of its
+			// retention otherwise.
+			if inst.ActionName == "promote_transcode_candidate" && getBool(res.Outputs, promotionReleaseRetainedKey) {
+				e.releaseRetainedForPromotion(ctx, ec, candidateRetiredPromotionRefused)
+			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,
 				StepIndex:   stepIdx,
@@ -1189,6 +1211,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		inst.ID,
 		0,
 	)
+
+	// An attempt that ended without a candidate to promote (a size or saving
+	// guard refused it after the worker retained it) releases what the worker
+	// still holds.
+	if inst.ActionName == "transcode_media" && getBool(ec.State, "skip_transcode") && candidateIsOnWorker(ec.State) {
+		e.retireCandidate(ctx, inst, ec, candidateRetiredSkipped)
+	}
 
 	return buildActionResult(inst, totalSteps, ec), nil
 }

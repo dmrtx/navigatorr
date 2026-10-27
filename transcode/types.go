@@ -17,6 +17,10 @@ const (
 	StatusCompleted = "completed"
 	StatusFailed    = "failed"
 	StatusCancelled = "cancelled"
+	// StatusExpired is a retained candidate the worker dropped after its TTL.
+	// The job id stays known for a while so it can be told from a lost job;
+	// the only way forward is to encode again.
+	StatusExpired = "expired"
 )
 
 type SubtitleAction struct {
@@ -403,6 +407,15 @@ type JobStatus struct {
 	// copied the file: the request's digest, or the one it learned when the
 	// request had none. Response only; servers that predate it ignore it.
 	SourceSHA256 string `json:"source_sha256,omitempty"`
+	// Deferred publication (see docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md).
+	// A retained job reports status "running" with no process: its encode is
+	// finished and validated, and the candidate stays on the worker until a
+	// publish request. Older workers never send these fields.
+	PublishPolicy     string    `json:"publish_policy,omitempty"`
+	Retained          bool      `json:"retained,omitempty"`
+	RetainedAt        time.Time `json:"retained_at,omitzero"`
+	RetainedExpiresAt time.Time `json:"retained_expires_at,omitzero"`
+	FinalizationState string    `json:"finalization_state,omitempty"`
 }
 
 type PathMapping struct {

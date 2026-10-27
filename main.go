@@ -322,7 +322,7 @@ func buildTranscodeWorkers(tc config.TranscodeConfig) (*transcode.WorkerSet, err
 				address = u.Host
 			}
 			internal.Logf("transcode worker configured: %s http base=%s", wc.Name, exec.BaseURL())
-			workers = append(workers, transcode.NamedWorker{Name: wc.Name, Executor: exec, Address: address, Podcast: wc.Podcast, MaxParallelJobs: wc.MaxParallelJobs})
+			workers = append(workers, transcode.NamedWorker{Name: wc.Name, Executor: exec, Address: address, Podcast: wc.Podcast, MaxParallelJobs: wc.MaxParallelJobs, PublishPolicy: wc.PublishPolicy})
 		}
 		return transcode.NewWorkerSet(workers)
 	case "ssh":

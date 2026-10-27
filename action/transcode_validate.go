@@ -283,6 +283,17 @@ func (e *Engine) verifyPublishedCandidateLight(ctx context.Context, ec *Executio
 		return 0, fmt.Errorf("candidate path is missing (fail closed)")
 	}
 	expected := getInt64(ec.State, "candidate_size_bytes")
+	if candidateIsOnWorker(ec.State) {
+		// Not on the share yet: the worker's attestation is all there is, and
+		// there is nothing to stat. A candidate it already dropped is gone.
+		if getBool(ec.State, candidateRemovedKey) {
+			return 0, fmt.Errorf("the retained candidate %q was released on its worker; encode the file again", p)
+		}
+		if expected <= 0 {
+			return 0, fmt.Errorf("retained candidate %q has no worker-attested size (fail closed)", p)
+		}
+		return 0, nil
+	}
 	if strings.EqualFold(getString(ec.State, "storage_backend"), "smb_direct") {
 		if expected <= 0 {
 			return 0, fmt.Errorf("smb_direct candidate %q has no worker-attested size after verified publish (fail closed)", p)

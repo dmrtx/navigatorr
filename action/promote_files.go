@@ -316,6 +316,15 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	if p.OriginalSHA == "" || p.OriginalPath == "" || p.CandidatePath == "" || p.OriginalPath == p.CandidatePath {
 		return promoteFailed(fmt.Errorf("completed transcode is missing an original/candidate integrity baseline"))
 	}
+	if candidateIsOnWorker(source.State) {
+		if _, err := e.planRetainedCandidate(ctx, source, p); err != nil {
+			var gone *retainedGoneError
+			if errors.As(err, &gone) {
+				return promoteFailedFinal(err), nil
+			}
+			return promoteFailed(err)
+		}
+	}
 	if !temporaryPromotionPath(p.CandidatePath) || temporaryPromotionPath(p.OriginalPath) {
 		return promoteFailed(fmt.Errorf("candidate must be in .navigatorr-candidates and original must be in the active library"))
 	}
@@ -333,7 +342,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 		return promoteFailed(fmt.Errorf("original is not a readable regular file: %w", err))
 	}
 	if expected := getInt64(stateObject(source.State, "original"), "size_bytes"); expected > 0 && original.Size() != expected {
-		return promoteFailed(fmt.Errorf("integrity violation: original size changed since transcoding"))
+		return promoteFailedFinal(fmt.Errorf("integrity violation: original size changed since transcoding")), nil
 	}
 	p.OriginalBytes = original.Size()
 	// A transcode preflighted by metadata pinned the original's digest once.
@@ -342,7 +351,7 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	// file is read.
 	if size, mod, ok := recordedOriginalStat(source.State); ok && getString(source.State, originalIntegrityCheckKey) == "metadata" {
 		if size != original.Size() || !mod.Equal(original.ModTime()) {
-			return promoteFailed(errPromotionOriginalChanged)
+			return promoteFailedFinal(errPromotionOriginalChanged), nil
 		}
 		p.OriginalStatMod = mod.UTC().Format(time.RFC3339Nano)
 	}
@@ -350,37 +359,42 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 	// The converted file is the one read here; the review dialog shows how far.
 	progress := &promotionPreserveProgress{e: e, ec: ec, p: p}
 	defer delete(ec.State, "work_progress")
-	hashCtx := context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
-	p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(hashCtx, p.CandidatePath)
-	delete(ec.State, "work_progress")
-	if err != nil {
-		return promoteFailed(err)
-	}
-	// Modern workers attest the candidate before publication. Do not replace
-	// that baseline with a fresh digest of potentially changed NAS bytes.
-	if expected := getString(source.State, "candidate_sha256"); expected != "" && expected != p.CandidateSHA {
-		return promoteFailed(fmt.Errorf("candidate SHA-256 changed since worker validation; promotion blocked"))
-	}
-	if expected := getInt64(source.State, "candidate_size_bytes"); expected > 0 && expected != p.CandidateBytes {
-		return promoteFailed(fmt.Errorf("candidate size changed since worker validation; promotion blocked"))
-	}
-	// Reuse the full transcode stream validator without accepting any prior
-	// loss override. Approval is for a validated replacement, not lost streams.
-	// Promotion intentionally performs a real full inspection of the published
-	// candidate; the normal transcode pipeline's post-publish step stays
-	// lightweight (the worker already validated the local candidate).
-	validation, err := e.validateCandidateDetailed(ctx, source)
-	if err != nil {
-		return promoteFailed(err)
-	}
-	if validation.Status != StepCompleted {
-		return promoteFailed(fmt.Errorf("candidate failed promotion validation: %s %s", validation.Error, validation.WaitingReason))
-	}
-	// The hash must describe the same bytes that were probed and validated.
-	// Capturing a new digest only after probing could bless an intervening
-	// candidate modification as the promotion's integrity baseline.
-	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
-		return promoteFailed(err)
+	// A candidate still on its worker is not on the share to be read: the plan
+	// carries the worker's attestation, and preserve_original uploads the file
+	// and runs the same hash and full inspection on what arrived.
+	if !p.CandidateRetained {
+		hashCtx := context.WithValue(ctx, promotionHashProgressKey{}, progress.hashes(ctx))
+		p.CandidateSHA, p.CandidateBytes, err = e.promotionHash(hashCtx, p.CandidatePath)
+		delete(ec.State, "work_progress")
+		if err != nil {
+			return promoteFailed(err)
+		}
+		// Modern workers attest the candidate before publication. Do not replace
+		// that baseline with a fresh digest of potentially changed NAS bytes.
+		if expected := getString(source.State, "candidate_sha256"); expected != "" && expected != p.CandidateSHA {
+			return promoteFailed(fmt.Errorf("candidate SHA-256 changed since worker validation; promotion blocked"))
+		}
+		if expected := getInt64(source.State, "candidate_size_bytes"); expected > 0 && expected != p.CandidateBytes {
+			return promoteFailed(fmt.Errorf("candidate size changed since worker validation; promotion blocked"))
+		}
+		// Reuse the full transcode stream validator without accepting any prior
+		// loss override. Approval is for a validated replacement, not lost streams.
+		// Promotion intentionally performs a real full inspection of the published
+		// candidate; the normal transcode pipeline's post-publish step stays
+		// lightweight (the worker already validated the local candidate).
+		validation, err := e.validateCandidateDetailed(ctx, source)
+		if err != nil {
+			return promoteFailed(err)
+		}
+		if validation.Status != StepCompleted {
+			return promoteFailed(fmt.Errorf("candidate failed promotion validation: %s %s", validation.Error, validation.WaitingReason))
+		}
+		// The hash must describe the same bytes that were probed and validated.
+		// Capturing a new digest only after probing could bless an intervening
+		// candidate modification as the promotion's integrity baseline.
+		if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
+			return promoteFailed(err)
+		}
 	}
 	if p.Service == "filesystem" {
 		if seriesID > 0 || movieID > 0 {
@@ -530,6 +544,18 @@ func (e *Engine) stepPromotePreserve(ctx context.Context, ec *ExecutionContext) 
 	// The step's own result replaces this progress; never leave a finished or
 	// abandoned read looking current.
 	defer delete(ec.State, "work_progress")
+	if p.CandidateRetained && !p.CandidateUploaded {
+		// First, before the original is read or moved: the copy to the share is
+		// the worker's, and the file that arrives is held to the attestation.
+		if res, stop, err := e.uploadRetainedCandidate(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		} else if stop {
+			return res, nil
+		}
+		if err := e.inspectUploadedCandidate(ctx, ec, p); err != nil {
+			return promoteFailed(err)
+		}
+	}
 	if err := e.verifyPromotionOriginal(ctx, p); err != nil {
 		return promoteFailed(err)
 	}
