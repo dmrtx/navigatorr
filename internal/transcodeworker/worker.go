@@ -2223,10 +2223,12 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 		if cerr != nil {
 			return JobStatusResponse{ID: job.ID, Status: "failed", CandidatePath: job.Candidate, Error: cerr.Error()}, cerr
 		}
+		// Cleanup runs whatever the marker does: nothing cleans up a cancelled
+		// job in its regular directory later.
+		w.cleanupCancelledArtifacts(job)
 		if err := w.ensureCancelledTerminalMarker(newDir, job); err != nil {
 			return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate, Error: err.Error()}, err
 		}
-		w.cleanupCancelledArtifacts(job)
 		return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate}, nil
 	}
 

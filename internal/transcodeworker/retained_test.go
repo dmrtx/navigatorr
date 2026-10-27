@@ -1086,3 +1086,17 @@ func TestRetained_FreeDiskFloorCountsEncodesNotYetWritten(t *testing.T) {
 		t.Fatal("a second burst submit must see the first one's reservation")
 	}
 }
+
+// With neither limit configured, admission does not read the other jobs'
+// records, so an unrelated corrupt one cannot refuse every deferred submit.
+func TestRetained_NoLimitsMeansNoRecordScan(t *testing.T) {
+	f := newRetainedFixture(t, nil)
+	bad := filepath.Join(f.cfg.StateDir, "job-corrupt-9")
+	if err := os.MkdirAll(bad, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "job.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.submit("job-clean-9", "on_approval")
+}

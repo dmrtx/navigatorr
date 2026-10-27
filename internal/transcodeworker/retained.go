@@ -197,6 +197,17 @@ func removeShellDir(dir string) error {
 // encodes an expired job again under its old id; the tombstone has nothing left
 // to say once a new incarnation exists. Any other record is left alone.
 func removeExpiredTombstone(dir string) error {
+	// Under the directory's own lock: the sweep may be deleting the same
+	// tombstone from a record it loaded earlier, and its flock follows the inode
+	// of a directory removed from under it.
+	lock, err := acquireExistingJobLock(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	defer lock.Unlock()
 	job, err := LoadJob(filepath.Join(dir, "job.json"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -466,7 +477,7 @@ func (w *Worker) sweepRetained(ctx context.Context) error {
 			if err := w.sweepHiddenDir(ctx, name); err != nil {
 				errs = append(errs, err)
 			}
-		case !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_"):
+		case !strings.HasPrefix(name, "."):
 			if err := w.sweepRegularDir(name); err != nil {
 				errs = append(errs, err)
 			}
@@ -558,10 +569,10 @@ func (w *Worker) sweepHiddenDir(ctx context.Context, name string) error {
 		if job.Status == "cancelled" {
 			// The release also owes its cleanup, which the interrupted Cancel
 			// never reached.
-			if err := w.ensureCancelledTerminalMarker(regular, job); err != nil {
-				return err
-			}
+			// Cleanup first and whatever the marker does: a cancelled job in its
+			// regular directory is never cleaned up again.
 			w.cleanupCancelledArtifacts(job)
+			return w.ensureCancelledTerminalMarker(regular, job)
 		}
 		return nil
 	case !job.deferredPublication():
@@ -781,6 +792,9 @@ func (w *Worker) freeDiskBytes() (int64, error) {
 // worker_busy; a measurement that fails refuses the job rather than guessing.
 // Callers hold the capacity lock.
 func (w *Worker) admitDeferredLocked(expected int64) error {
+	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
+		return nil // nothing to enforce: do not read every record to say so
+	}
 	held, unwritten, err := w.retainedBytesLocked()
 	if err != nil {
 		return fmt.Errorf("measuring retained candidates: %w", err)
