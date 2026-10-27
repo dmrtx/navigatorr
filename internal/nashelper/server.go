@@ -55,7 +55,10 @@ type Server struct {
 	instance  string
 	sem       chan struct{}
 	usageSem  chan struct{}
-	logf      func(string, ...any)
+	// foldSem serves usage walks a person is waiting on. They must not queue
+	// behind the walk of a whole root that the statistics take.
+	foldSem chan struct{}
+	logf    func(string, ...any)
 
 	baseCtx context.Context
 	cancel  context.CancelFunc
@@ -100,6 +103,7 @@ func NewServer(cfg Config) (*Server, error) {
 		instance:  hex.EncodeToString(idBytes),
 		sem:       make(chan struct{}, cfg.MaxHashes),
 		usageSem:  make(chan struct{}, 1),
+		foldSem:   make(chan struct{}, 2),
 		logf:      cfg.Logf,
 		baseCtx:   ctx,
 		cancel:    cancel,

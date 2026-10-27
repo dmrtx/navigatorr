@@ -303,12 +303,41 @@ func (c *Client) Volumes(ctx context.Context) (VolumeResponse, error) {
 // UsageProgress receives the bytes counted so far, roughly every poll.
 type UsageProgress func(bytes int64)
 
+type usageConfig struct {
+	interactive bool
+	runBudget   time.Duration
+	onState     func(state string)
+}
+
+// UsageOption adjusts one Usage call.
+type UsageOption func(*usageConfig)
+
+// UsageInteractive asks for the lane of walks a person is waiting on, so the
+// walk does not queue behind the statistics' walk of a whole root. A helper that
+// predates the lanes ignores it.
+func UsageInteractive() UsageOption { return func(c *usageConfig) { c.interactive = true } }
+
+// UsageRunBudget limits how long the walk may run once the helper has started
+// it. Time spent queued does not count; the caller's context bounds that.
+func UsageRunBudget(d time.Duration) UsageOption { return func(c *usageConfig) { c.runBudget = d } }
+
+// UsageOnState is told each state the walk is seen in (JobQueued, JobRunning).
+func UsageOnState(fn func(state string)) UsageOption { return func(c *usageConfig) { c.onState = fn } }
+
 // Usage has the helper walk the directory locally and sum its regular files.
 // Like Hash it has no time limit of its own: the caller's context decides, and
 // on every way out before a result the job is cancelled on the helper.
-func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress) (UsageResult, error) {
+func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress, opts ...UsageOption) (UsageResult, error) {
+	var cfg usageConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	route := "/v1/usage"
+	if cfg.interactive {
+		route += "?priority=interactive"
+	}
 	var job Job
-	if err := c.pathCall(ctx, c.timeout, "/v1/usage", local, &job); err != nil {
+	if err := c.pathCall(ctx, c.timeout, route, local, &job); err != nil {
 		return UsageResult{}, err
 	}
 	if job.ID == "" || job.InstanceID == "" {
@@ -323,7 +352,21 @@ func (c *Client) Usage(ctx context.Context, local string, progress UsageProgress
 	instance := job.InstanceID
 	wait := pollMin
 	failures := 0
+	var seen string
+	var runStart time.Time
 	for {
+		if job.State != seen {
+			seen = job.State
+			if cfg.onState != nil {
+				cfg.onState(seen)
+			}
+			if seen == JobRunning {
+				runStart = time.Now()
+			}
+		}
+		if cfg.runBudget > 0 && !runStart.IsZero() && time.Since(runStart) > cfg.runBudget && (job.State == JobQueued || job.State == JobRunning) {
+			return UsageResult{}, context.DeadlineExceeded
+		}
 		switch job.State {
 		case JobDone:
 			if job.Usage == nil {

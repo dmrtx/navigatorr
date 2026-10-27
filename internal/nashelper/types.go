@@ -114,12 +114,21 @@ type VolumeResponse struct {
 // files, as ls and the coordinator's own folder scan count it. Links are not
 // followed, a directory on another filesystem is not entered, and Skipped counts
 // what could not be read or was left out for either reason.
+//
+// Stamps holds the modification time, in whole seconds, of every directory in the
+// tree (the root is "."), so a caller can tell later whether anything was added,
+// removed or renamed without walking it again. A tree with more than
+// MaxUsageStamps directories carries none.
 type UsageResult struct {
-	Bytes   int64 `json:"bytes,string"`
-	Files   int64 `json:"files,string"`
-	Dirs    int64 `json:"dirs,string"`
-	Skipped int64 `json:"skipped,string"`
+	Bytes   int64            `json:"bytes,string"`
+	Files   int64            `json:"files,string"`
+	Dirs    int64            `json:"dirs,string"`
+	Skipped int64            `json:"skipped,string"`
+	Stamps  map[string]int64 `json:"stamps,omitempty"`
 }
+
+// MaxUsageStamps bounds how many directories a usage result stamps.
+const MaxUsageStamps = 1024
 
 // Error codes.
 const (

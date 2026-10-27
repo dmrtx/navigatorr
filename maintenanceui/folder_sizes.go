@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,11 +31,15 @@ type folderSize struct {
 	MeasuredAt time.Time `json:"measured_at,omitempty"`
 	Note       string    `json:"note,omitempty"`
 	Updating   bool      `json:"updating,omitempty"`
+	// Queued says the measurement has not started: it waits for a scan slot or
+	// for the NAS helper to get to it.
+	Queued bool `json:"queued,omitempty"`
 }
 type folderSnapshot struct {
 	Size folderSize `json:"size"`
-	// Source is "helper" when the NAS measured the folder from inside, which
-	// leaves no directory stamps to compare against.
+	// Source is "helper" when the NAS measured the folder from inside. Its
+	// directory stamps then hold whole-second modification times ("s:<unix>"),
+	// and a helper that sends none leaves nothing to compare against.
 	Source string `json:"source,omitempty"`
 	// This fingerprint describes names, sizes and timestamps. It is not a
 	// content hash and must never authorize a replacement.
@@ -47,10 +52,49 @@ type folderSnapshot struct {
 // checks detect directory changes; a periodic metadata scan also catches edits
 // to existing files, which do not change their parent directory's timestamp.
 // Admission and traversal are bounded independently of browser polling.
+//
+// Only folderSizeSlots measurements run at once. The rest wait, and the next
+// slot goes to the folder asked about most recently, because that is the one on
+// screen; folders from a page the user has left wait behind it.
 type folderSizeCache struct {
 	mu      sync.Mutex
 	entries map[string]folderSnapshot
-	slots   chan struct{}
+	active  int
+	waiting map[string]*sizeTicket
+}
+type sizeTicket struct {
+	wanted time.Time
+	start  chan struct{}
+}
+
+const (
+	folderSizeSlots = 2
+	// folderRunBudget bounds one walk once it runs. Time spent queued is not
+	// counted, or a busy helper would make every folder look unmeasurable.
+	folderRunBudget = 2 * time.Minute
+	// folderQueueBudget bounds the wait for a slot and the helper's queue together
+	// with the run.
+	folderQueueBudget = 10 * time.Minute
+)
+
+// dispatchLocked starts waiting measurements while a slot is free, newest ask first.
+func (c *folderSizeCache) dispatchLocked() {
+	for c.active < folderSizeSlots && len(c.waiting) > 0 {
+		pick := ""
+		for path, ticket := range c.waiting {
+			if pick == "" || ticket.wanted.After(c.waiting[pick].wanted) {
+				pick = path
+			}
+		}
+		ticket := c.waiting[pick]
+		delete(c.waiting, pick)
+		c.active++
+		if entry, ok := c.entries[pick]; ok {
+			entry.Size.Queued = false
+			c.entries[pick] = entry
+		}
+		close(ticket.start)
+	}
 }
 
 func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.Store, meter nasMeter) folderSize {
@@ -58,7 +102,12 @@ func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.St
 	defer c.mu.Unlock()
 	if c.entries == nil {
 		c.entries = map[string]folderSnapshot{}
-		c.slots = make(chan struct{}, 2)
+	}
+	if c.waiting == nil {
+		c.waiting = map[string]*sizeTicket{}
+	}
+	if ticket := c.waiting[path]; ticket != nil {
+		ticket.wanted = time.Now()
 	}
 	entry, exists := c.entries[path]
 	inMemory := exists
@@ -92,21 +141,48 @@ func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.St
 		entry.Size = folderSize{Status: "calculating"}
 	}
 	entry.Size.Updating = true
+	entry.Size.Queued = true
 	c.entries[path] = entry
+	ticket := &sizeTicket{wanted: time.Now(), start: make(chan struct{})}
+	c.waiting[path] = ticket
+	c.dispatchLocked()
 	go func(previous folderSnapshot) {
-		c.slots <- struct{}{}
-		defer func() { <-c.slots }()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		<-ticket.start
+		defer func() {
+			c.mu.Lock()
+			c.active--
+			c.dispatchLocked()
+			c.mu.Unlock()
+		}()
+		// Through the helper the walk has its own run budget and this bounds the
+		// queue as well; over the mount there is no queue, only the walk.
+		budget := folderRunBudget
+		if meter != nil {
+			if _, mapped := meter.Remote(path); mapped {
+				budget = folderQueueBudget
+			}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
+		onState := func(state string) {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if current, ok := c.entries[path]; ok && current.Size.Updating {
+				current.Size.Queued = state == nashelper.JobQueued
+				c.entries[path] = current
+			}
+		}
 		value := previous
-		if previous.Size.Status != "ready" || time.Since(previous.Size.MeasuredAt) >= helperRemeasure(previous, 30*time.Minute) || (previous.Source != "helper" && folderDirectoriesChanged(ctx, path, previous.Directories, resolver)) {
-			value = measureFolderSnapshot(ctx, path, resolver, 100000, meter)
+		stamped := previous.Source != "helper" || len(previous.Directories) > 0
+		if previous.Size.Status != "ready" || time.Since(previous.Size.MeasuredAt) >= helperRemeasure(previous, 30*time.Minute) || (stamped && folderDirectoriesChanged(ctx, path, previous.Directories, resolver)) {
+			value = measureFolderSnapshot(ctx, path, resolver, 100000, meter, onState)
 			if value.Size.Status != "ready" && previous.Size.Status == "ready" {
 				value = previous
 				value.Size.Note = "Could not refresh the size; showing the last complete measurement."
 			}
 		}
 		value.Size.Updating = false
+		value.Size.Queued = false
 		value.CheckedAt = time.Now().UTC()
 		if st != nil && value.Size.Status == "ready" && (previous.Fingerprint != value.Fingerprint || !previous.Size.MeasuredAt.Equal(value.Size.MeasuredAt)) {
 			if raw, err := json.Marshal(value); err == nil {
@@ -122,6 +198,11 @@ func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.St
 func folderStamp(info fs.FileInfo) string {
 	return fmt.Sprintf("%d:%d:%d", info.ModTime().UnixNano(), info.Size(), info.Mode())
 }
+
+// secondsStamp is the stamp for a directory the NAS helper measured: its
+// modification time in whole seconds, which the helper and the mount agree on
+// where the nanoseconds, sizes and modes they report may not.
+func secondsStamp(info fs.FileInfo) string { return fmt.Sprintf("s:%d", info.ModTime().Unix()) }
 func folderDirectoriesChanged(ctx context.Context, root string, dirs map[string]string, resolver *fsop.Resolver) bool {
 	if len(dirs) == 0 {
 		return true
@@ -135,7 +216,14 @@ func folderDirectoriesChanged(ctx context.Context, root string, dirs map[string]
 			return true
 		}
 		info, err := os.Lstat(path)
-		if err != nil || !info.IsDir() || folderStamp(info) != stamp {
+		if err != nil || !info.IsDir() {
+			return true
+		}
+		if strings.HasPrefix(stamp, "s:") {
+			if secondsStamp(info) != stamp {
+				return true
+			}
+		} else if folderStamp(info) != stamp {
 			return true
 		}
 	}
@@ -146,29 +234,39 @@ func withinFolder(root, path string) bool {
 	return err == nil && rel != ".." && !filepath.IsAbs(rel) && len(rel) > 0 && (len(rel) < 3 || rel[:3] != ".."+string(os.PathSeparator))
 }
 
-// helperRemeasure is how long a size measured by the NAS helper is trusted. The
-// helper leaves no directory stamps to detect a change with, but its walk is
-// cheap, so it is simply repeated sooner.
+// helperRemeasure is how long a size measured by the NAS helper is trusted. A
+// helper that sent no directory stamps leaves nothing to detect a change with,
+// but its walk is cheap, so it is simply repeated sooner.
 func helperRemeasure(previous folderSnapshot, otherwise time.Duration) time.Duration {
-	if previous.Source == "helper" {
+	if previous.Source == "helper" && len(previous.Directories) == 0 {
 		return 10 * time.Minute
 	}
 	return otherwise
 }
 func measureFolderSize(ctx context.Context, path string, resolver *fsop.Resolver, limit int) folderSize {
-	return measureFolderSnapshot(ctx, path, resolver, limit, nil).Size
+	return measureFolderSnapshot(ctx, path, resolver, limit, nil, nil).Size
 }
 
 // measureFolderSnapshot sizes a folder, by the NAS helper when one covers it and
 // answers, and by walking the share otherwise.
-func measureFolderSnapshot(ctx context.Context, path string, resolver *fsop.Resolver, limit int, meter nasMeter) folderSnapshot {
+func measureFolderSnapshot(ctx context.Context, path string, resolver *fsop.Resolver, limit int, meter nasMeter, onState func(string)) folderSnapshot {
 	if meter != nil {
 		if _, mapped := meter.Remote(path); mapped {
-			if res, err := meter.Usage(ctx, path, nil); err == nil {
+			opts := []nashelper.UsageOption{nashelper.UsageInteractive(), nashelper.UsageRunBudget(folderRunBudget)}
+			if onState != nil {
+				opts = append(opts, nashelper.UsageOnState(onState))
+			}
+			if res, err := meter.Usage(ctx, path, nil, opts...); err == nil {
 				now := time.Now().UTC()
 				total := res.Bytes
 				snap := folderSnapshot{Size: folderSize{Status: "ready", Bytes: &total, MeasuredAt: now}, Source: "helper", CheckedAt: now,
 					Fingerprint: fmt.Sprintf("helper:%d:%d:%d", res.Bytes, res.Files, res.Dirs)}
+				if len(res.Stamps) > 0 {
+					snap.Directories = make(map[string]string, len(res.Stamps))
+					for rel, sec := range res.Stamps {
+						snap.Directories[filepath.Join(path, filepath.FromSlash(rel))] = fmt.Sprintf("s:%d", sec)
+					}
+				}
 				if res.Skipped > 0 {
 					snap.Size.Note = fmt.Sprintf("%d entries could not be read; the size may be a little low.", res.Skipped)
 				}

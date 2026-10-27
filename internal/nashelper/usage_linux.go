@@ -28,13 +28,19 @@ func (r *Roots) Usage(ctx context.Context, path string, tick func(bytes int64)) 
 		return UsageResult{}, err
 	}
 	var res UsageResult
-	if err := walkUsage(ctx, dir, uint64(st.Dev), &res, tick, 0); err != nil {
+	res.Stamps = map[string]int64{".": int64(st.Mtim.Sec)}
+	if err := walkUsage(ctx, dir, uint64(st.Dev), &res, tick, 0, "."); err != nil {
 		return UsageResult{}, err
+	}
+	if res.Dirs+1 > MaxUsageStamps {
+		res.Stamps = nil
 	}
 	return res, nil
 }
 
-func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, tick func(int64), depth int) error {
+// walkUsage stamps each directory from the stat taken before its entries are
+// read, so a change made during the walk shows up as newer than the stamp.
+func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, tick func(int64), depth int, rel string) error {
 	if depth > maxUsageDepth {
 		res.Skipped++
 		return nil
@@ -74,7 +80,18 @@ func walkUsage(ctx context.Context, dir *os.File, dev uint64, res *UsageResult, 
 				}
 				child := os.NewFile(uintptr(fd), name)
 				res.Dirs++
-				werr := walkUsage(ctx, child, dev, res, tick, depth+1)
+				childRel := name
+				if rel != "." {
+					childRel = rel + "/" + name
+				}
+				if res.Stamps != nil {
+					if len(res.Stamps) < MaxUsageStamps {
+						res.Stamps[childRel] = int64(st.Mtim.Sec)
+					} else {
+						res.Stamps = nil
+					}
+				}
+				werr := walkUsage(ctx, child, dev, res, tick, depth+1, childRel)
 				child.Close()
 				if werr != nil {
 					return werr

@@ -2650,6 +2650,11 @@ test("folder measurements update every alias and resume on returning to Files", 
  assert.equal(calls,1);
  h.run('showFolderSize(one,{status:"calculating",measured_at:"0001-01-01T00:00:00Z"})');
  assert.doesNotMatch(h.context.one.title,/Measured/);
+ // A size that has not started says it waits; once it runs it says it measures.
+ h.run('showFolderSize(one,{status:"calculating",queued:true,updating:true})');
+ assert.equal(h.context.one.textContent,"En cola…");assert.equal(h.context.one.dataset.pending,"1");
+ h.run('showFolderSize(one,{status:"calculating",updating:true})');
+ assert.equal(h.context.one.textContent,"Calculating…");
 });
 
 test("file marks say what a batch did with a file and roll a folder up to what needs attention", () => {
