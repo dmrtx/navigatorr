@@ -133,6 +133,10 @@ func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, string, error
 	}
 	truncate, err := e.removeDisposable(path, info)
 	if err != nil {
+		if truncate == truncateEmptied {
+			// The bytes are gone though the name is not: report them.
+			return info, truncate, err
+		}
 		return nil, truncate, err
 	}
 	return info, truncate, nil
@@ -312,10 +316,15 @@ func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionI
 	if removal.Truncate != "" {
 		outcome["truncate"] = removal.Truncate
 	}
+	emptiedButKept := cause != nil && removal.Truncate == truncateEmptied
 	note := "candidate file removed"
 	if cause != nil {
 		outcome["outcome"], outcome["detail"] = "kept", cause.Error()
 		note = "candidate file kept: " + cause.Error()
+		if emptiedButKept {
+			outcome["bytes_emptied"] = freed
+			note = "candidate file emptied but kept: " + cause.Error()
+		}
 	} else {
 		outcome["outcome"], outcome["bytes_freed"] = "removed", freed
 		ec.State[candidateRemovedKey], ec.State["candidate_removed_bytes"] = true, freed

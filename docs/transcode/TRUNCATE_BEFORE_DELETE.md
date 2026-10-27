@@ -18,6 +18,11 @@ Files Navigatorr created and nothing else depends on:
   discarded, retired (rejected, cancelled, replaced) or removed as a leftover
   (`removeOwnCandidateFile`).
 
+It does not apply to the temporary candidate that promotion leaves beside the
+imported file. Sonarr may hardlink the import, so that name can be the library
+file itself, and emptying it would destroy the library copy for no gain (the
+recycle bin would only keep another name for it). Finalize unlinks it as before.
+
 It does not apply to the recovery copy or the replaced original (planned
 separately), to `fs_safe_delete` (the owner's own deletes keep the recycle bin
 as their safety net), or to anything Sonarr, Radarr or the worker deletes.
@@ -27,7 +32,10 @@ as their safety net), or to anything Sonarr, Radarr or the worker deletes.
 * Only a regular file reached through the same root and symlink checks the
   removal already uses. The file is opened without following symlinks, and its
   identity (same file, size, modification time, one link) is checked on the
-  open descriptor before it is emptied.
+  open descriptor before it is emptied. Over SMB these checks are the best
+  available, not a guarantee: inode numbers and link counts come from the
+  client and may be cached, so a file with a second name that the mount does
+  not report would still be emptied.
 * A file with more than one link, or whose link count is unknown, is unlinked
   without being emptied: the other name keeps the bytes, and emptying would
   destroy them.
@@ -37,6 +45,9 @@ as their safety net), or to anything Sonarr, Radarr or the worker deletes.
 * The outcome is recorded in the attempt's `candidate_cleanup` as
   `truncate: "emptied"` or `truncate: "skipped: <reason>"`; it is absent when
   the setting is off.
+* If the file was emptied but the unlink then failed, the outcome is `kept`
+  with `truncate: "emptied"` and `bytes_emptied`, and the note says "emptied
+  but kept": the bytes are gone and only the empty name remains.
 
 ## Interrupted removal
 
@@ -45,8 +56,3 @@ an empty file is left under the same name. It holds no space and the leftover
 list does not show it, but nothing can use it: a promotion refuses it (size and
 hash no longer match), and approving the discard of that attempt again removes
 it, because that call looks at the disk.
-
-The temporary candidate a promotion leaves beside the imported file is removed
-by the finalize step. It saves `leftover_removal_started` before removing, and
-when it resumes and finds an empty file there with that mark set, it finishes
-the removal instead of failing on the digest.

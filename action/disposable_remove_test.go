@@ -215,8 +215,11 @@ func TestDiscardFinishesWhenAnEarlierRunStoppedAfterEmptyingTheFile(t *testing.T
 		t.Fatal("unlink should have failed in a read-only directory")
 	}
 	cleanup := candidateCleanupOf(t, f.e, mustInstance(t, f.st, "attempt"))
-	if getString(cleanup, "outcome") != "kept" || getString(cleanup, "truncate") != truncateEmptied {
+	if getString(cleanup, "outcome") != "kept" || getString(cleanup, "truncate") != truncateEmptied || getInt(cleanup, "bytes_emptied") != 40 {
 		t.Fatalf("a kept file that was already emptied must say so: %v", cleanup)
+	}
+	if detail := mustInstance(t, f.st, "attempt").WaitingReason; !strings.Contains(detail, "emptied but kept") {
+		t.Fatalf("the visible note must say the file was emptied: %q", detail)
 	}
 	if info, err := os.Stat(f.candidate); err != nil || info.Size() != 0 {
 		t.Fatalf("expected an emptied candidate to remain: %v", err)
@@ -244,62 +247,5 @@ func TestRemoveDisposableMissingFileIsAlreadyRemoved(t *testing.T) {
 	}
 	if note, err := f.e.removeDisposable(f.candidate, info); err != nil || !strings.HasPrefix(note, truncateSkipped) {
 		t.Fatalf("a vanished file: %q %v", note, err)
-	}
-}
-
-func TestFinalizeEmptiesTheLeftoverCandidateOnlyWhenTheSettingIsOn(t *testing.T) {
-	for _, on := range []bool{false, true} {
-		h := newPromotionHarness(t)
-		h.engine.deps.Config.Cleanup.TruncateBeforeDelete = on
-		id, _ := h.seedPostRenameFinalize(t, func(p *promotionState) { p.OriginalPath = h.final })
-		final, err := os.ReadFile(h.final)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(h.candidate, final, 0600); err != nil {
-			t.Fatal(err)
-		}
-		held := holdOpen(t, h.candidate)
-		if r := h.resume(id, ""); r.Status != StatusCompleted {
-			t.Fatalf("setting %v: finalize: %s %s", on, r.Status, r.Error)
-		}
-		if _, err := os.Lstat(h.candidate); !os.IsNotExist(err) {
-			t.Fatalf("setting %v: leftover kept: %v", on, err)
-		}
-		if got, want := sizeOf(t, held) == 0, on; got != want {
-			t.Fatalf("setting %v: leftover emptied = %v", on, got)
-		}
-	}
-}
-
-// With the decision saved, an empty leftover is the earlier run's own work and
-// is removed; without it, an empty file is a changed candidate and is kept.
-func TestFinalizeFinishesAnInterruptedLeftoverRemoval(t *testing.T) {
-	for _, started := range []bool{true, false} {
-		h := newPromotionHarness(t)
-		h.engine.deps.Config.Cleanup.TruncateBeforeDelete = true
-		id, p := h.seedPostRenameFinalize(t, func(p *promotionState) {
-			p.OriginalPath = h.final
-			p.LeftoverRemovalStarted = started
-		})
-		if err := os.WriteFile(h.candidate, nil, 0600); err != nil {
-			t.Fatal(err)
-		}
-		r := h.resume(id, "")
-		if started {
-			if r.Status != StatusCompleted {
-				t.Fatalf("interrupted removal not finished: %s %s", r.Status, r.Error)
-			}
-			if _, err := os.Lstat(h.candidate); !os.IsNotExist(err) {
-				t.Fatalf("empty leftover kept: %v", err)
-			}
-			continue
-		}
-		if r.Status != StatusFailed || !strings.Contains(r.Error, "SHA-256 changed") {
-			t.Fatalf("an unannounced empty file was accepted: %s %s", r.Status, r.Error)
-		}
-		if _, err := os.Stat(p.BackupPath); err != nil {
-			t.Fatalf("recovery removed: %v", err)
-		}
 	}
 }
