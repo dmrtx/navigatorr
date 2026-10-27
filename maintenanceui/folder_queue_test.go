@@ -263,3 +263,25 @@ func TestHelperSizesWithStampsAreWalkedAgainOnlyWhenADirectoryChanged(t *testing
 		return len(meter.started()) == 2
 	})
 }
+
+// A walk that began before a folder was measured on its own knows less about
+// that folder than the measurement does.
+func TestAWalkDoesNotReplaceASizeMeasuredAfterItBegan(t *testing.T) {
+	base := t.TempDir()
+	series := filepath.Join(base, "Cheers")
+	season := filepath.Join(series, "Season 1")
+	began := time.Now().UTC()
+	cache := &folderSizeCache{entries: map[string]folderSnapshot{}}
+	newer := helperSnapshot(season, 100, 5, 1, 0, nil, began.Add(time.Second))
+	older := helperSnapshot(filepath.Join(series, "Season 2"), 100, 5, 1, 0, nil, began.Add(-time.Hour))
+	cache.entries[season], cache.entries[filepath.Join(series, "Season 2")] = newer, older
+	cache.adopt(nil, series, began, nashelper.UsageResult{Children: []nashelper.UsageChild{
+		{Path: "Season 1", Bytes: 1}, {Path: "Season 2", Bytes: 2},
+	}})
+	if got := *cache.entries[season].Size.Bytes; got != 100 {
+		t.Fatalf("a newer measurement was replaced: %d", got)
+	}
+	if got := *cache.entries[filepath.Join(series, "Season 2")].Size.Bytes; got != 2 {
+		t.Fatalf("an older measurement was kept: %d", got)
+	}
+}

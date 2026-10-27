@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -308,15 +309,26 @@ func TestUsageReportsFoldersBelowWhenAsked(t *testing.T) {
 	}
 }
 
-func TestUsageReportsNoChildrenPastTheCap(t *testing.T) {
+// Long names must not push the answer past what the client accepts: the walk
+// reports the folders that fit and leaves the rest to be measured one by one.
+func TestUsageKeepsTheFoldersBelowWithinABudgetOfBytes(t *testing.T) {
 	f := newFixture(t, 2)
-	for i := 0; i < MaxUsageChildren+1; i++ {
-		if err := os.MkdirAll(filepath.Join(f.root, "many", "d"+strconv.Itoa(i)), 0o700); err != nil {
+	name := strings.Repeat("n", 200)
+	const total = 1500
+	for i := 0; i < total; i++ {
+		if err := os.MkdirAll(filepath.Join(f.root, "long", strconv.Itoa(i)+name), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	res, err := f.client(t).Usage(context.Background(), filepath.Join(f.root, "many"), nil, UsageChildren(1))
-	if err != nil || res.Dirs != MaxUsageChildren+1 || res.Children != nil {
-		t.Fatalf("a result with too many folders reports none: %d children, %v", len(res.Children), err)
+	res, err := f.client(t).Usage(context.Background(), filepath.Join(f.root, "long"), nil, UsageChildren(1))
+	if err != nil || res.Dirs != total {
+		t.Fatalf("%+v, %v", res, err)
+	}
+	if len(res.Children) == 0 || len(res.Children) >= total {
+		t.Fatalf("%d of %d folders reported, want some but not all", len(res.Children), total)
+	}
+	raw, _ := json.Marshal(res)
+	if len(raw) > maxChildBytes+64<<10 {
+		t.Fatalf("the answer is %d bytes", len(raw))
 	}
 }

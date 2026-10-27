@@ -180,9 +180,10 @@ func (c *folderSizeCache) get(path string, resolver *fsop.Resolver, st *store.St
 		value := previous
 		stamped := previous.Source != "helper" || len(previous.Directories) > 0
 		if previous.Size.Status != "ready" || time.Since(previous.Size.MeasuredAt) >= helperRemeasure(previous, 30*time.Minute) || (stamped && folderDirectoriesChanged(ctx, path, previous.Directories, resolver)) {
+			began := time.Now().UTC()
 			value = measureFolderSnapshot(ctx, path, resolver, 100000, meter, measureHooks{
 				state:    onState,
-				children: func(res nashelper.UsageResult) { c.adopt(st, path, res) },
+				children: func(res nashelper.UsageResult) { c.adopt(st, path, began, res) },
 			})
 			if value.Size.Status != "ready" && previous.Size.Status == "ready" {
 				value = previous
@@ -282,8 +283,9 @@ func helperSnapshot(path string, bytes, files, dirs, skipped int64, stamps map[s
 
 // adopt takes the sizes of the folders inside root from a walk of root, so
 // opening one of them later finds its size already measured. A folder whose own
-// measurement is under way is left to it.
-func (c *folderSizeCache) adopt(st *store.Store, root string, res nashelper.UsageResult) {
+// measurement is under way is left to it, and so is one measured after the walk
+// began, which knows more.
+func (c *folderSizeCache) adopt(st *store.Store, root string, began time.Time, res nashelper.UsageResult) {
 	if len(res.Children) == 0 {
 		return
 	}
@@ -295,7 +297,7 @@ func (c *folderSizeCache) adopt(st *store.Store, root string, res nashelper.Usag
 		if path == root || !withinFolder(root, path) {
 			continue
 		}
-		if current, ok := c.entries[path]; ok && current.Size.Updating {
+		if current, ok := c.entries[path]; ok && (current.Size.Updating || current.Size.MeasuredAt.After(began)) {
 			continue
 		}
 		snap := helperSnapshot(path, child.Bytes, child.Files, child.Dirs, child.Skipped, child.Stamps, now)

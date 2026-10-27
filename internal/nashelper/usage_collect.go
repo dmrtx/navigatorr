@@ -6,14 +6,20 @@ const (
 	// MaxUsageChildDepth is how many levels below the requested folder a result
 	// may report on.
 	MaxUsageChildDepth = 2
-	// MaxUsageChildren bounds how many subfolders one usage result reports; past
-	// it the result carries none, and the caller measures them one by one.
-	MaxUsageChildren = 3000
 	// maxChildStamps bounds the directories one child stamps. A subfolder with
 	// more is reported without stamps and its caller re-measures it on a timer.
 	maxChildStamps = 16
-	// maxCollectedDirs bounds the directories the walk remembers.
-	maxCollectedDirs = 200_000
+	// maxCollectedDirs bounds the directories a walk remembers while folders are
+	// being reported on; without them only MaxUsageStamps can be used.
+	maxCollectedDirs = 50_000
+	// maxChildBytes bounds what the folders below add to the answer, so it stays
+	// well under the client's response limit. Past it the walk reports the folders
+	// it has and the caller measures the rest one by one.
+	maxChildBytes = 256 << 10
+	// childOverhead is what a child costs in the answer besides its names.
+	childOverhead = 120
+	// stampOverhead is what one stamp costs besides its name.
+	stampOverhead = 24
 )
 
 // UsageChild is the size of a folder below the requested one, as if it had been
@@ -47,6 +53,8 @@ type usageCollector struct {
 	stampsOK   bool
 	children   []UsageChild
 	childrenOK bool
+	// childBytes estimates what the children add to the answer.
+	childBytes int
 }
 
 func newUsageCollector(childDepth int) *usageCollector {
@@ -57,7 +65,11 @@ func newUsageCollector(childDepth int) *usageCollector {
 func (c *usageCollector) enter(rel string, mtime int64, res *UsageResult) usageMark {
 	mark := usageMark{stamp: len(c.stamps), bytes: res.Bytes, files: res.Files, dirs: res.Dirs, skipped: res.Skipped}
 	if c.stampsOK {
-		if len(c.stamps) >= maxCollectedDirs {
+		limit := maxCollectedDirs
+		if c.depth == 0 || !c.childrenOK {
+			limit = MaxUsageStamps
+		}
+		if len(c.stamps) >= limit {
 			c.stampsOK, c.stamps = false, nil
 		} else {
 			c.stamps = append(c.stamps, dirStamp{rel, mtime})
@@ -69,10 +81,6 @@ func (c *usageCollector) enter(rel string, mtime int64, res *UsageResult) usageM
 // leave closes a directory that sits depth levels below the root.
 func (c *usageCollector) leave(mark usageMark, rel string, depth int, res *UsageResult) {
 	if !c.childrenOK || depth < 1 || depth > c.depth {
-		return
-	}
-	if len(c.children) >= MaxUsageChildren {
-		c.childrenOK, c.children = false, nil
 		return
 	}
 	child := UsageChild{
@@ -89,6 +97,15 @@ func (c *usageCollector) leave(mark usageMark, rel string, depth int, res *Usage
 			}
 		}
 	}
+	cost := childOverhead + len(rel)
+	for name := range child.Stamps {
+		cost += stampOverhead + len(name)
+	}
+	if c.childBytes+cost > maxChildBytes {
+		c.childrenOK = false
+		return
+	}
+	c.childBytes += cost
 	c.children = append(c.children, child)
 }
 
@@ -100,7 +117,5 @@ func (c *usageCollector) finish(res *UsageResult) {
 			res.Stamps[s.rel] = s.mtime
 		}
 	}
-	if c.childrenOK {
-		res.Children = c.children
-	}
+	res.Children = c.children
 }

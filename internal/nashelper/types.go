@@ -127,7 +127,8 @@ type UsageResult struct {
 	Stamps  map[string]int64 `json:"stamps,omitempty"`
 	// Children holds the size of each folder down to the depth asked for, so one
 	// walk answers for the folders inside as well. It is absent when none was
-	// asked for or there are more than MaxUsageChildren.
+	// asked for, and stops short when the answer would grow too large: the folders
+	// left out are measured on their own.
 	Children []UsageChild `json:"children,omitempty"`
 }
 

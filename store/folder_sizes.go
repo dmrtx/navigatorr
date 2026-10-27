@@ -4,7 +4,7 @@ import "database/sql"
 
 // folderSizeRows is how many folder totals are kept, the newest first. A walk of
 // a library reports a folder and the ones inside it, so a few thousand fit in one.
-const folderSizeRows = 10000
+const folderSizeRows = 20000
 
 // Folder totals are advisory metadata, never media integrity evidence.
 func (s *Store) FolderSizeSnapshot(path string) (string, error) {
