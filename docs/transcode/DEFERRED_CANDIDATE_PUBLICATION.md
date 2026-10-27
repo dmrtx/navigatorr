@@ -1,8 +1,9 @@
 # Deferred candidate publication
 
-Status: design, revision 3 (after two Opus reviews against the code). Not
-implemented. Each review found blockers the previous revision hid, so the worker
-side deserves one more read before the first worker PR.
+Status: design, revision 3 (after two Opus reviews against the code). Step 1
+(the worker, see "Worker implementation notes") is implemented behind the
+`deferred_publication` worker setting, off by default. The server, templates and
+UI (steps 2 to 5) are not. Each review found blockers the previous revision hid.
 
 A finished encode stays on the worker's local disk until the owner approves its
 replacement, and is copied to the media share only then. Today every validated
@@ -266,9 +267,12 @@ Everything below assumed the candidate was on the share. Each place must read
 
 0. **Independent of this design:** list stale leftovers (next section) and clean
    them. It gives the benefit now.
-1. Worker: the two predicates, hidden retained directories, `expired` state,
-   capability, publish and release routes, disk limits. The field is optional and
-   never sent, so this deploys alone.
+1. Worker (implemented): the two predicates, hidden retained directories,
+   `expired` state, capability, publish and release routes, disk limits. The field
+   is optional and never sent, so this deploys alone. Deploy order for the
+   capability: the server first, then the worker (a server that has not seen the
+   capability must not receive a fingerprint it cannot parse), then enable
+   `deferred_publication` on one worker.
 2. Server: `candidate_location` handling in cleanup, listing, validation and wait;
    the single release hook and the batch cancellation code; the upload inside
    `preserve_original` with the `candidate_location` write; the batch admission
@@ -282,6 +286,79 @@ Everything below assumed the candidate was on the share. Each place must read
    workers with small disks.
 
 Once `on_approval` is on, moving a job to a different or older worker is unsafe.
+
+## Worker implementation notes
+
+What the worker PR does where this document left a choice, or differs from it.
+
+- **Settings** (worker config, all optional, `deferred_publication` defaults to
+  off and the others to "no limit" except the TTL): `deferred_publication`,
+  `retained_ttl_hours` (default 720, so 30 days), `retained_candidates_max_bytes`,
+  `min_free_disk_bytes`. The capability is advertised only when
+  `deferred_publication` is on, and a worker that does not advertise it also
+  refuses `publish_policy: on_approval`.
+- **State.** `FinalizationState` gains `retained` and `expired`, which only ever
+  appear in a hidden directory. The record carries `publish_policy`,
+  `retain_reserve_bytes` (the admission reservation while encoding), `retained_at`
+  and `expired_at`. An encoded job that is not yet hidden is `pending` with
+  `publish_policy: on_approval`; nothing publishes that state and nothing marks it
+  `runner_killed`, so either crash window (before or after the rename) is finished
+  by the retained sweep.
+- **Predicates.** `IsPostEncodeFinished` ("never `runner_killed`") includes
+  retained and deferred-pending jobs; `IsPostEncodeFinalizationPending` ("must be
+  published") excludes them.
+- **Publish.** `POST /v1/jobs/{id}/publish` verifies the local file against the
+  checkpoint (size and SHA-256), saves `finalizing` while the directory is still
+  hidden, moves it back and returns. The existing post-encode sweep starts the
+  runner, so a publish **uses a video slot** and waits when every slot is busy
+  (the open question below stays open: a lane of its own was not built). The
+  retry budget is reset, so the usual automatic retries and `retry-publication`
+  apply afterwards. Answers: `not_retained` (409), `candidate_changed` (409),
+  `worker_held` (503, retryable) while the drain freeze is on.
+- **Release.** `Cancel` on a retained job removes the candidate and returns the job
+  to its regular directory as an ordinary cancelled job. For an `on_approval` job
+  it answers `release_refused` (409) from the moment a publish is requested until
+  the job completes, because a rename may have happened. A stuck publish is
+  therefore retried (`retry-publication`), not released.
+- **Expiry.** The retained sweep (piggybacking on the existing `post_encode`
+  scheduler sweep, at most once a minute, and once at startup) removes the
+  candidate after `retained_ttl_hours` and leaves an `expired` tombstone, which
+  `GET /v1/jobs/{id}` answers with `status: "expired"`. The tombstone is removed
+  after 30 days. A job whose publish was requested is never expired.
+- **Admission.** An `on_approval` submit is answered with the existing `worker_busy`
+  (429) when retained bytes plus the new job's source size would pass
+  `retained_candidates_max_bytes`, or when free space on the local work disk would
+  fall below `min_free_disk_bytes`. Encoding jobs are counted by their source size
+  until their candidate exists, so a burst of submits cannot overshoot. A failed
+  measurement refuses the job. `on_encode` submits are never subject to either.
+  The free-disk floor also subtracts the reservations of encodes that have not
+  written their candidate yet; it budgets the source size only, not a staged copy
+  on top of it.
+- **Stale directories.** The sweep also removes a job directory older than an hour
+  that holds nothing but its lock file. That is the whole collector: it never
+  touches `_work`, scratch directories (names starting with `_`, or without a
+  lock file) or candidates.
+- **Encoding again after expiry.** The coordinator reuses the job id, so a new
+  encode can finish while the old tombstone is still on disk. Retaining it
+  replaces the tombstone. `Cancel` on a tombstone leaves it expired.
+- **Interrupted release.** A release saves `cancelled`, moves the directory back
+  and cleans up. If it stops in between, the sweep or a repeated `Cancel` finishes
+  the move and the cleanup.
+- **Verification errors.** A read error or a cancelled request while the candidate
+  is hashed for a publish is answered 500 (retryable), not `candidate_changed`,
+  which is final. The hash runs inside the request while the job lock is held.
+- **Rollback limit.** The "older worker ignores it" guarantee covers hidden
+  directories. Between the encode checkpoint and the directory move a deferred job
+  is `pending` with a checkpoint under its regular name, which an older worker
+  would publish; the window is milliseconds, or longer only if the worker crashed
+  there and nobody has run the sweep. Drain the worker (no job running, sweep
+  once) before rolling back.
+- **Duplicate scan race.** Moves between the hidden and regular directory take the
+  job lock but not the capacity lock, so a submit that scans both at the instant
+  of a publish or release can miss the job. The coordinator submits a job id once
+  and only after reading its status, so this is not reachable in its flow.
+- **Logs.** `GET /v1/jobs/{id}/logs` still reads the regular directory, so it
+  answers not found for a retained job.
 
 ## Candidates already on the share
 

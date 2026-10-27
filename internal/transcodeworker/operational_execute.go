@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -372,6 +373,16 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 
 	if w.afterEncodeCheckpoint != nil {
 		w.afterEncodeCheckpoint(jobDir, job)
+	}
+
+	if job.deferredPublication() {
+		// Deferred publication: stop at the checkpoint. The staged source and its
+		// cache pins are no longer needed; the local candidate and the checkpoint
+		// stay. The runner (InternalRun) then hides the job directory, which is
+		// what frees the slot; until then the job is pending+deferred, a state
+		// nothing publishes.
+		w.releaseRetainedInputs(job)
+		return nil
 	}
 
 	return w.finalizeOperational(ctx, jobDir, jobFile, job, r)
@@ -1300,9 +1311,13 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			errs = append(errs, fmt.Errorf("statting job file %s for post-encode resume: %w", jobFile, serr))
 			continue
 		}
-		jobLock, lerr := acquireJobLock(jobDir)
+		// Never create the directory: a job that moved to its hidden retained
+		// directory since the stat above is simply not a candidate any more.
+		jobLock, lerr := acquireExistingJobLock(jobDir)
 		if lerr != nil {
-			errs = append(errs, fmt.Errorf("acquiring job lock for post-encode resume of %s: %w", name, lerr))
+			if !errors.Is(lerr, fs.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("acquiring job lock for post-encode resume of %s: %w", name, lerr))
+			}
 			continue
 		}
 		func() {

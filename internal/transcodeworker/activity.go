@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -20,7 +21,7 @@ func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 		return activity, fmt.Errorf("worker activity unavailable")
 	}
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
 		dir := filepath.Join(w.cfg.StateDir, entry.Name())

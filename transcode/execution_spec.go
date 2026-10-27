@@ -77,6 +77,10 @@ type canonicalExecutionSpec struct {
 	SourceSHA256 string `json:"source_sha256,omitempty"`
 	PlanDigest   string `json:"plan_digest"`
 	Plan         *Plan  `json:"plan,omitempty"`
+	// PublishPolicy is set only for PublishPolicyOnApproval. It must stay
+	// omitted otherwise: the digest of a running on_encode job is compared on
+	// every resubmit and on restart, so it must not change.
+	PublishPolicy string `json:"publish_policy,omitempty"`
 }
 
 // DigestTranscodeExecutionSpec computes the canonical digest for legacy callers
@@ -99,6 +103,18 @@ func DigestTranscodeExecutionSpec(sourcePath, candidatePath, profile string, pla
 // SHA-256 influence the digest. Empty, valid, or stale/tampered PlanDigest
 // values hash identically; only an actual content change alters the result.
 func DigestTranscodeExecutionSpecWithSourceSHA(sourcePath, candidatePath, profile, sourceSHA256 string, plan *Plan) (string, error) {
+	return DigestTranscodeExecutionSpecWithPublishPolicy(sourcePath, candidatePath, profile, sourceSHA256, "", plan)
+}
+
+// DigestTranscodeExecutionSpecWithPublishPolicy is the digest of a request that
+// may carry a publish policy. The policy is part of the digest only when it is
+// PublishPolicyOnApproval; empty and on_encode produce exactly the digest of
+// DigestTranscodeExecutionSpecWithSourceSHA, byte for byte.
+func DigestTranscodeExecutionSpecWithPublishPolicy(sourcePath, candidatePath, profile, sourceSHA256, publishPolicy string, plan *Plan) (string, error) {
+	policy, err := NormalizePublishPolicy(publishPolicy)
+	if err != nil {
+		return "", err
+	}
 	cleanSource := filepath.Clean(strings.TrimSpace(sourcePath))
 	cleanCandidate := filepath.Clean(strings.TrimSpace(candidatePath))
 	if cleanSource == "" || cleanSource == "." {
@@ -136,6 +152,8 @@ func DigestTranscodeExecutionSpecWithSourceSHA(sourcePath, candidatePath, profil
 		SourceSHA256: normSourceSHA,
 		PlanDigest:   planDigest,
 		Plan:         planCopy,
+
+		PublishPolicy: policy,
 	}
 	b, err := json.Marshal(canon)
 	if err != nil {

@@ -369,7 +369,7 @@ func defaultErrorCode(status int) string {
 // identity exactly as it did when it classified on status alone.
 func errorCodeRetryable(code string) bool {
 	switch code {
-	case transcode.WorkerErrorBusy, transcode.WorkerErrorInternal, transcode.WorkerErrorUnavailable:
+	case transcode.WorkerErrorBusy, transcode.WorkerErrorInternal, transcode.WorkerErrorUnavailable, transcode.WorkerErrorHeld:
 		return true
 	}
 	return false
@@ -539,7 +539,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(rest, "/")
 	parts := strings.Split(trimmed, "/")
 	var id string
-	var isCancel, isLogs, isRetryPublication bool
+	var isCancel, isLogs, isRetryPublication, isPublish bool
 	switch {
 	case len(parts) == 1:
 		id = parts[0]
@@ -552,6 +552,9 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "retry-publication":
 		id = parts[0]
 		isRetryPublication = true
+	case len(parts) == 2 && parts[1] == "publish":
+		id = parts[0]
+		isPublish = true
 	default:
 		writeHTTPError(w, http.StatusNotFound, "not found")
 		return
@@ -592,7 +595,23 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		default:
 			writeHTTPCodedJSON(w, http.StatusInternalServerError, transcode.WorkerErrorInternal, res)
 		}
-	case r.Method == http.MethodGet && !isCancel && !isRetryPublication:
+	case r.Method == http.MethodPost && isPublish:
+		res, err := s.worker.PublishRetained(r.Context(), id)
+		switch {
+		case err == nil:
+			writeHTTPJSON(w, http.StatusOK, res)
+		case isNotFoundError(err):
+			writeHTTPCodedJSON(w, http.StatusNotFound, transcode.WorkerErrorNotFound, res)
+		case errors.Is(err, ErrPublishHeld):
+			writeHTTPCodedJSON(w, http.StatusServiceUnavailable, transcode.WorkerErrorHeld, res)
+		case errors.Is(err, ErrRetainedCandidateChanged):
+			writeHTTPCodedJSON(w, http.StatusConflict, transcode.WorkerErrorCandidateChanged, res)
+		case errors.Is(err, ErrNotRetained):
+			writeHTTPCodedJSON(w, http.StatusConflict, transcode.WorkerErrorNotRetained, res)
+		default:
+			writeHTTPCodedJSON(w, http.StatusInternalServerError, transcode.WorkerErrorInternal, res)
+		}
+	case r.Method == http.MethodGet && !isCancel && !isRetryPublication && !isPublish:
 		st, err := s.worker.Status(r.Context(), id)
 		if err != nil {
 			// The ID was validated above, so the only failures left are a
@@ -607,6 +626,10 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(w, http.StatusOK, st)
 	case r.Method == http.MethodPost && isCancel:
 		res, err := s.worker.Cancel(r.Context(), id)
+		if errors.Is(err, ErrReleaseRefused) {
+			writeHTTPCodedJSON(w, http.StatusConflict, transcode.WorkerErrorReleaseRefused, res)
+			return
+		}
 		if err != nil {
 			status := http.StatusInternalServerError
 			if isNotFoundError(err) {
@@ -623,7 +646,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 		}
 		writeHTTPJSON(w, http.StatusOK, res)
 	default:
-		if isCancel || isRetryPublication {
+		if isCancel || isRetryPublication || isPublish {
 			writeHTTPError(w, http.StatusMethodNotAllowed, "use POST")
 			return
 		}

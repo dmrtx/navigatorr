@@ -765,6 +765,7 @@ type httpSubmitPayload struct {
 	ExecutionSpecDigest string          `json:"execution_spec_digest,omitempty"`
 	SourceSHA256        string          `json:"source_sha256,omitempty"`
 	SourceSizeBytes     int64           `json:"source_size_bytes,omitempty"`
+	PublishPolicy       string          `json:"publish_policy,omitempty"`
 }
 
 type httpSubmitResult struct {
@@ -813,11 +814,17 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (trans
 	if req.ExecutionSpecDigest != "" {
 		specDigest = strings.TrimSpace(req.ExecutionSpecDigest)
 	} else if req.Plan != nil {
-		if d, derr := transcode.DigestTranscodeExecutionSpecWithSourceSHA(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.Plan); derr == nil {
+		if d, derr := transcode.DigestTranscodeExecutionSpecWithPublishPolicy(remoteSource, remoteCandidate, profile, req.SourceSHA256, req.PublishPolicy, req.Plan); derr == nil {
 			specDigest = d
 		}
 	}
-	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256, SourceSizeBytes: req.SourceSizeBytes}
+	// on_encode is the default and is never sent: an older worker rejects the
+	// unknown field.
+	publishPolicy, perr := transcode.NormalizePublishPolicy(req.PublishPolicy)
+	if perr != nil {
+		return transcode.Job{}, perr
+	}
+	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256, SourceSizeBytes: req.SourceSizeBytes, PublishPolicy: publishPolicy}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return transcode.Job{}, fmt.Errorf("serializing submit payload: %w", err)

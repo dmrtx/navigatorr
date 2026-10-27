@@ -32,8 +32,11 @@ func (w *Worker) reconcileStoppedRunner(jobDir, jobFile string) (*JobRecord, err
 	if job.Status != "running" || job.PID <= 0 || w.jobAlive(job) {
 		return job, nil
 	}
-	if IsPostEncodeFinalizationPending(job) {
+	if IsPostEncodeFinished(job) {
 		job.PID, job.ProcessStartTime, job.Phase = 0, "", "publishing"
+		if !IsPostEncodeFinalizationPending(job) {
+			job.Phase = "retained"
+		}
 	} else if podcastASRCheckpoint(jobDir, job) {
 		job.Status, job.Phase, job.PID, job.ProcessStartTime = "queued", "transcribing", 0, ""
 	} else {
@@ -75,7 +78,9 @@ func (w *Worker) startJobHeartbeat(ctx context.Context, jobDir, jobFile string, 
 }
 
 func (w *Worker) persistJobHeartbeat(jobDir, jobFile string, now time.Time) error {
-	lock, err := acquireJobLock(jobDir)
+	// A job whose directory moved (it was retained) must not get a shell
+	// directory back from a late heartbeat.
+	lock, err := acquireExistingJobLock(jobDir)
 	if err != nil {
 		return err
 	}

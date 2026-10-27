@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -79,6 +78,22 @@ type WorkerConfig struct {
 	DisableSourceCache  bool  `json:"disable_source_cache" yaml:"disable_source_cache"`
 	SourceCacheMaxBytes int64 `json:"source_cache_max_bytes" yaml:"source_cache_max_bytes"`
 	SourceCacheTTLHours int   `json:"source_cache_ttl_hours" yaml:"source_cache_ttl_hours"`
+
+	// Deferred candidate publication (docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md).
+	// DeferredPublication lets the worker accept publish_policy on_approval and
+	// advertise the capability; off by default, so a worker behaves exactly as
+	// before until the operator enables it. A retained candidate expires after
+	// RetainedTTLHours (default 30 days) and is encoded again if still wanted.
+	// RetainedCandidatesMaxBytes bounds the disk retained candidates (and the
+	// reservations of on_approval jobs still encoding) may take, and
+	// MinFreeDiskBytes the free space that must remain on the local work disk
+	// after a new on_approval job is admitted. Past either limit a submit gets
+	// worker_busy. Zero disables that limit. None of these affect the
+	// execution-spec digest.
+	DeferredPublication        bool  `json:"deferred_publication" yaml:"deferred_publication"`
+	RetainedTTLHours           int   `json:"retained_ttl_hours" yaml:"retained_ttl_hours"`
+	RetainedCandidatesMaxBytes int64 `json:"retained_candidates_max_bytes" yaml:"retained_candidates_max_bytes"`
+	MinFreeDiskBytes           int64 `json:"min_free_disk_bytes" yaml:"min_free_disk_bytes"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -199,6 +214,15 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	if cfg.SourceCacheTTLHours < 0 {
 		return fmt.Errorf("source_cache_ttl_hours must not be negative (fail closed)")
 	}
+	if cfg.RetainedTTLHours < 0 {
+		return fmt.Errorf("retained_ttl_hours must not be negative (fail closed)")
+	}
+	if cfg.RetainedCandidatesMaxBytes < 0 {
+		return fmt.Errorf("retained_candidates_max_bytes must not be negative (fail closed)")
+	}
+	if cfg.MinFreeDiskBytes < 0 {
+		return fmt.Errorf("min_free_disk_bytes must not be negative (fail closed)")
+	}
 	if err := cfg.SMBDirect.Normalize(cfg.AllowedRoots); err != nil {
 		return err
 	}
@@ -282,6 +306,13 @@ type Worker struct {
 	// primitive before mutation. Nil is a no-op ("where applicable").
 	leaseManager *LeaseManager
 	mediaStore   directMediaStore
+
+	// freeDisk replaces the free-space measurement of the local work disk in
+	// tests. retainedSweepMu guards retainedSweepAt, the last scheduler-driven
+	// retained-candidate sweep.
+	freeDisk        func(path string) (int64, error)
+	retainedSweepMu sync.Mutex
+	retainedSweepAt time.Time
 }
 
 type directMediaStore interface {
@@ -528,6 +559,10 @@ type SubmitRequest struct {
 	// copies the file, and the staged copy must have this size. Ignored when a
 	// digest is present.
 	SourceSizeBytes int64 `json:"source_size_bytes,omitempty"`
+	// PublishPolicy is "on_approval" to keep the validated candidate on the
+	// worker until POST /v1/jobs/{id}/publish. Omitted (or "on_encode") keeps the
+	// historical behaviour: publish as soon as the candidate validates.
+	PublishPolicy string `json:"publish_policy,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
@@ -701,6 +736,22 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	if sourceSHA == "" {
 		expectedSourceSize = req.SourceSizeBytes
 	}
+	publishPolicy, err := transcode.NormalizePublishPolicy(req.PublishPolicy)
+	if err != nil {
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
+	if publishPolicy != "" {
+		if !w.cfg.DeferredPublication {
+			err := errors.New("publish_policy on_approval is not enabled on this worker")
+			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+		}
+		// A leading dot would put the job's directory in the namespace of the
+		// hidden directories retained jobs live in.
+		if strings.HasPrefix(trimmedID, ".") {
+			err := errors.New("publish_policy on_approval requires a job id that does not start with a dot")
+			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+		}
+	}
 
 	cleanSource := filepath.Clean(req.SourcePath)
 	cleanCandidate := filepath.Clean(req.CandidatePath)
@@ -757,6 +808,10 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("invalid transcode profile or plan: %v", err)}, err
 	}
 
+	if publishPolicy != "" && plan.Podcast != nil {
+		err := errors.New("publish_policy on_approval is not supported for podcast jobs")
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
 	if plan.Podcast != nil {
 		for _, path := range []string{cleanSource, cleanCandidate} {
 			if err := w.requirePodcastMediaPath(path); err != nil {
@@ -780,7 +835,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	// Canonical execution-spec digest over the immutable resolved request,
 	// including the source content identity when the coordinator supplied it.
 	// Never trust caller-supplied digest text: recompute and verify.
-	canonicalDigest, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(cleanSource, cleanCandidate, profile, sourceSHA, plan)
+	canonicalDigest, err := transcode.DigestTranscodeExecutionSpecWithPublishPolicy(cleanSource, cleanCandidate, profile, sourceSHA, publishPolicy, plan)
 	if err != nil {
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("computing execution spec digest: %v", err)}, err
 	}
@@ -886,7 +941,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		if match.Status == "running" || match.Status == "queued" {
 			if match.PID > 0 && !w.jobAlive(match) {
 				if match.Status == "running" {
-					if IsPostEncodeFinalizationPending(match) {
+					if IsPostEncodeFinished(match) {
 						// Phase 6B1: encoding finished but finalization is
 						// still pending and the runner is gone. This must
 						// never become runner_killed (nor be respawned): keep
@@ -928,6 +983,23 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			ID: match.ID, Status: match.Status, CandidatePath: match.Candidate,
 			Plan: match.Plan, IdempotencyKey: match.IdempotencyKey,
 			ExecutionSpecDigest: match.ExecutionSpecDigest, Reused: true,
+		}, nil
+	}
+
+	// A candidate retained under this key lives in a hidden directory the scan
+	// above does not read. Answer it as the same job: starting another encode
+	// for it would duplicate the work and strand the retained file.
+	if retainedMatch, rerr := w.findRetainedLocked(trimmedID, effKey); rerr != nil {
+		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("scanning retained jobs: %v", rerr)}, rerr
+	} else if retainedMatch != nil {
+		if retainedMatch.ExecutionSpecDigest != canonicalDigest {
+			ce := &IdempotencyConflictError{Key: effKey, ExistingJobID: retainedMatch.ID, ExistingDigest: retainedMatch.ExecutionSpecDigest, RequestedDigest: canonicalDigest}
+			return SubmitResponse{ID: retainedMatch.ID, Status: retainedMatch.Status, CandidatePath: retainedMatch.Candidate, Error: ce.Error()}, ce
+		}
+		return SubmitResponse{
+			ID: retainedMatch.ID, Status: retainedMatch.Status, CandidatePath: retainedMatch.Candidate,
+			Plan: retainedMatch.Plan, IdempotencyKey: retainedMatch.IdempotencyKey,
+			ExecutionSpecDigest: retainedMatch.ExecutionSpecDigest, Reused: true,
 		}, nil
 	}
 
@@ -1004,7 +1076,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			}
 			if existing.PID > 0 && !w.jobAlive(existing) {
 				if existing.Status == "running" {
-					if IsPostEncodeFinalizationPending(existing) {
+					if IsPostEncodeFinished(existing) {
 						// Phase 6B1: same post-encode protection as the
 						// strong-idempotency path and reconcileJob. Never
 						// runner_killed, never respawned; keep nonterminal
@@ -1076,6 +1148,19 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("resolving operational storage metadata: %v", metaErr)}, metaErr
 	}
 
+	if publishPolicy != "" {
+		if meta.FinalizationState == FinalizationStateNotRequired {
+			err := errors.New("publish_policy on_approval requires an external destination: this candidate is written in place")
+			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+		}
+		// The new job's output is bounded by its source for admission: a
+		// candidate the size policy accepts is smaller, and the average is far
+		// below that.
+		if err := w.admitDeferredLocked(fi.Size()); err != nil {
+			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+		}
+	}
+
 	// Phase 6 is local-output-first: an external destination must not require
 	// (or create) its remote directory at Submit time. Only local destinations
 	// keep the historical pre-create of the candidate directory.
@@ -1108,6 +1193,10 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		IntendedDestination: meta.IntendedDestination,
 		FinalizationState:   string(meta.FinalizationState),
 		PartialPath:         meta.PartialPath,
+		PublishPolicy:       publishPolicy,
+	}
+	if publishPolicy != "" {
+		job.RetainReserveBytes = fi.Size()
 	}
 	job.Phase = "queued"
 	w.initializeStorageTelemetry(job)
@@ -1198,7 +1287,7 @@ func (w *Worker) persistedExecutionDigest(rec *JobRecord) (string, *transcode.Pl
 	if err != nil {
 		return "", nil, fmt.Errorf("resolving persisted execution spec for job %q: %w", rec.ID, err)
 	}
-	d, err := transcode.DigestTranscodeExecutionSpecWithSourceSHA(rec.Source, rec.Candidate, rec.Profile, rec.SourceSHA256, resolved)
+	d, err := transcode.DigestTranscodeExecutionSpecWithPublishPolicy(rec.Source, rec.Candidate, rec.Profile, rec.SourceSHA256, rec.PublishPolicy, resolved)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1559,12 +1648,29 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	defer stopHeartbeat()
 
 	if postEncodeResume || job.EncodeComplete {
+		if isEncodedAwaitingRetention(job) {
+			// Encoded and waiting for approval: never published from here. The
+			// heartbeat must stop before the directory moves.
+			stopHeartbeat()
+			return w.retainJob(job.ID)
+		}
 		return w.finalizeOperational(ctx, jobDir, jobFile, job, resolved)
 	}
 	if job.Plan != nil && job.Plan.Podcast != nil {
 		return w.executePodcast(ctx, jobDir, jobFile, job, resolved)
 	}
-	return w.executeOperational(ctx, jobDir, jobFile, job, resolved)
+	if err := w.executeOperational(ctx, jobDir, jobFile, job, resolved); err != nil {
+		return err
+	}
+	if job.deferredPublication() {
+		// executeOperational stopped at the encode checkpoint when the job is
+		// deferred. Hide the directory so the job holds no slot and no runner.
+		if latest, lerr := LoadJob(jobFile); lerr == nil && isEncodedAwaitingRetention(latest) {
+			stopHeartbeat()
+			return w.retainJob(latest.ID)
+		}
+	}
+	return nil
 }
 
 // claimRunner durably records this process as the job's runner under the
@@ -1765,6 +1871,12 @@ func (w *Worker) ReconcileStartup(ctx context.Context) error {
 			return err
 		}
 	}
+	// Finish retains and publish requests a crash interrupted, and expire what
+	// is due. A failure here must not keep the scheduler from starting: the
+	// periodic sweep retries.
+	if err := w.sweepRetained(ctx); err != nil {
+		log.Printf("worker startup retained-candidate sweep: %v", err)
+	}
 	return nil
 }
 
@@ -1837,7 +1949,7 @@ func (w *Worker) reconcileJob(jobDir, jobFile string) error {
 	// existing public status "running" (no new client-visible Status) with the
 	// runner identity cleared to PID 0. InternalRun is not wired to resume
 	// finalization in this PR; 6B2 will use LocalCandidatePath/PartialPath.
-	if IsPostEncodeFinalizationPending(job) {
+	if IsPostEncodeFinished(job) {
 		job.PID = 0
 		job.ProcessStartTime = ""
 		if err := SaveJobAtomic(jobFile, job); err != nil {
@@ -1914,14 +2026,20 @@ type JobStatusResponse struct {
 	EncodeComplete      bool   `json:"encode_complete,omitempty"`
 	FinalizationState   string `json:"finalization_state,omitempty"`
 	PartialPath         string `json:"partial_path,omitempty"`
+
+	// Deferred publication (additive): the job's publish_policy, and for a
+	// retained candidate when it was retained and when it expires.
+	PublishPolicy     string    `json:"publish_policy,omitempty"`
+	Retained          bool      `json:"retained,omitempty"`
+	RetainedAt        time.Time `json:"retained_at,omitzero"`
+	RetainedExpiresAt time.Time `json:"retained_expires_at,omitzero"`
 }
 
 // Status reads the current status of a job.
 func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, error) {
-	jobDir := filepath.Join(w.cfg.StateDir, jobID)
+	// A retained candidate or an expired tombstone lives in a hidden directory.
+	jobDir, job, err := w.loadLocatedJob(jobID)
 	jobFile := filepath.Join(jobDir, "job.json")
-
-	job, err := loadJobForAPI(jobFile)
 	if err != nil {
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: jobLoadErrorMessage(err)}, err
 	}
@@ -2005,6 +2123,16 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		EncodeComplete:      job.EncodeComplete,
 		FinalizationState:   job.FinalizationState,
 		PartialPath:         job.PartialPath,
+
+		PublishPolicy: job.PublishPolicy,
+		Retained:      job.deferredPublication() && FinalizationState(job.FinalizationState) == FinalizationStateRetained,
+		RetainedAt:    job.RetainedAt,
+		RetainedExpiresAt: func() time.Time {
+			if job.RetainedAt.IsZero() || FinalizationState(job.FinalizationState) != FinalizationStateRetained {
+				return time.Time{}
+			}
+			return job.RetainedAt.Add(w.retainedTTL())
+		}(),
 	}, nil
 }
 
@@ -2035,23 +2163,22 @@ func jobLoadErrorMessage(err error) string {
 // incomplete artifacts are removed: never the semantic source and never a
 // finalized Phase 6 destination.
 func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, error) {
-	jobDir := filepath.Join(w.cfg.StateDir, jobID)
-	jobFile := filepath.Join(jobDir, "job.json")
-
 	// An unknown ID is answered before taking the lock, which would otherwise
-	// create an empty job directory for it.
-	if _, err := os.Stat(jobFile); errors.Is(err, fs.ErrNotExist) {
-		return JobStatusResponse{ID: jobID, Status: "failed", Error: "job not found"}, fmt.Errorf("%w: %w", ErrJobNotFound, err)
-	}
-	jobLock, err := acquireJobLock(jobDir)
-	if err != nil {
-		return JobStatusResponse{ID: jobID, Status: "failed", Error: fmt.Sprintf("acquiring job lock: %v", err)}, err
-	}
-	defer jobLock.Unlock()
-
-	job, err := loadJobForAPI(jobFile)
+	// create an empty job directory for it. A retained candidate is released
+	// through the same call: it lives in a hidden directory.
+	jobDir, jobLock, job, err := w.lockLocatedJob(jobID)
 	if err != nil {
 		return JobStatusResponse{ID: jobID, Status: "failed", Error: jobLoadErrorMessage(err)}, err
+	}
+	defer jobLock.Unlock()
+	jobFile := filepath.Join(jobDir, "job.json")
+
+	// A deferred job whose publication was requested may have a runner copying
+	// the candidate to the share, or may already have placed it there.
+	// Releasing it would remove the only local copy with the outcome unknown.
+	if w.releaseRefusedLocked(job) {
+		err := fmt.Errorf("%w: job %q", ErrReleaseRefused, job.ID)
+		return JobStatusResponse{ID: job.ID, Status: job.Status, CandidatePath: job.Candidate, Error: err.Error()}, err
 	}
 
 	switch job.Status {
@@ -2063,7 +2190,20 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 			CandidatePath: job.Candidate,
 			Error:         job.Error,
 		}, nil
+	case StatusExpired:
+		// The tombstone stays what it is: the candidate is already gone.
+		return JobStatusResponse{ID: job.ID, Status: StatusExpired, Error: job.Error}, nil
 	case "cancelled":
+		if job.deferredPublication() && filepath.Clean(jobDir) == w.retainedDir(job.ID) {
+			// A release that saved "cancelled" but never moved the job back or
+			// cleaned up: finish it.
+			regular, rerr := w.restoreRetainedLocked(jobDir, job)
+			if rerr != nil {
+				return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate, Error: rerr.Error()}, rerr
+			}
+			jobDir = regular
+			w.cleanupCancelledArtifacts(job)
+		}
 		// Idempotent: the durable record is never rewritten. A cancelled marker
 		// is ensured only when the record carries durable evidence.
 		if err := w.ensureCancelledTerminalMarker(jobDir, job); err != nil {
@@ -2074,6 +2214,22 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 			Status:        "cancelled",
 			CandidatePath: job.Candidate,
 		}, nil
+	}
+
+	if job.deferredPublication() && filepath.Clean(jobDir) == w.retainedDir(job.ID) {
+		// A retained candidate has no runner. Record the cancellation, move the
+		// job back to its regular directory, then clean up as for any cancel.
+		newDir, cerr := w.cancelRetainedLocked(jobDir, job)
+		if cerr != nil {
+			return JobStatusResponse{ID: job.ID, Status: "failed", CandidatePath: job.Candidate, Error: cerr.Error()}, cerr
+		}
+		// Cleanup runs whatever the marker does: nothing cleans up a cancelled
+		// job in its regular directory later.
+		w.cleanupCancelledArtifacts(job)
+		if err := w.ensureCancelledTerminalMarker(newDir, job); err != nil {
+			return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate, Error: err.Error()}, err
+		}
+		return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate}, nil
 	}
 
 	if job.PID > 1 && (job.Status == "running" || job.Status == "queued") {

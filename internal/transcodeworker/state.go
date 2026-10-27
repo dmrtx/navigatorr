@@ -92,6 +92,20 @@ type JobRecord struct {
 	// attempt whatever the last failure was; the sweep clears it when it
 	// reserves that attempt, so a failure that is not transient stops again.
 	OperatorRetryRequested bool `json:"operator_retry_requested,omitempty"`
+
+	// PublishPolicy is "on_approval" for a job whose validated candidate stays
+	// on the worker until a publish is requested; blank means on_encode. Part
+	// of the execution-spec digest only when set.
+	PublishPolicy string `json:"publish_policy,omitempty"`
+	// RetainReserveBytes is the disk an on_approval job is admitted against
+	// until its candidate exists and CandidateSizeBytes takes over.
+	RetainReserveBytes int64 `json:"retain_reserve_bytes,omitempty"`
+	// RetainedAt is when the job became a retained candidate; its expiry is
+	// measured from it.
+	RetainedAt time.Time `json:"retained_at,omitzero"`
+	// ExpiredAt is when an unpublished retained candidate was discarded; the
+	// record then stays as a tombstone so the job answers "expired", not 404.
+	ExpiredAt time.Time `json:"expired_at,omitzero"`
 }
 
 // ErrJobNotFound reports that a job has no job.json. Only fs.ErrNotExist maps

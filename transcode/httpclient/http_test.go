@@ -319,6 +319,44 @@ func TestHTTPExecutor_SubmitStatusCancel(t *testing.T) {
 	}
 }
 
+func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy string
+		want   bool
+	}{
+		{"omitted", "", false},
+		{"on_encode", transcode.PublishPolicyOnEncode, false},
+		{"on_approval", transcode.PublishPolicyOnApproval, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodPost && r.URL.Path == "/v1/jobs" {
+					_ = json.NewDecoder(r.Body).Decode(&got)
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprintln(w, `{"id": "job-1", "status": "queued"}`)
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer srv.Close()
+			exec := newTestHTTPExecutor(t, srv)
+			req := transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", PublishPolicy: tc.policy}
+			if _, err := exec.Submit(context.Background(), req); err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			// Only on_approval is sent: an older worker rejects the unknown field,
+			// and on_encode is the default.
+			if _, sent := got["publish_policy"]; sent != tc.want || (tc.want && got["publish_policy"] != tc.policy) {
+				t.Fatalf("publish_policy on the wire = %v, want present=%v value %q", got["publish_policy"], tc.want, tc.policy)
+			}
+		})
+	}
+}
+
 func TestHTTPExecutor_BearerAuth(t *testing.T) {
 	const token = "s3cret"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
