@@ -31,8 +31,9 @@ func (s *Server) workflowMemberIDs(id string) (string, []string, error) {
 
 // jobLeftovers reports, and on POST removes, the temporary files a job's
 // transcode attempts left beside the originals: candidates that nothing can
-// promote any more, such as those of cancelled or failed attempts. Originals
-// and candidates still waiting for a decision are never listed or touched.
+// promote any more, such as those of cancelled or failed attempts, or of
+// attempts whose original has since been replaced. Originals and candidates
+// that can still replace them are never listed or touched.
 func (s *Server) jobLeftovers(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID string `json:"id"`
