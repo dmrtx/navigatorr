@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jakenesler/navigatorr/internal/smbdirect"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -143,4 +145,47 @@ func TestRetryPublicationRouteAnswersWithTheWorkerEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEnvelope(t, doRequest(t, srv, http.MethodPost, "/v1/jobs/"+id+"/retry-publication", "", ""), http.StatusConflict, transcode.WorkerErrorNothingToRetry, false)
+}
+
+// A job queued before candidate names were bounded has a destination whose
+// ".partial.<job id>" file the NAS refuses. The requested retry renames it in
+// place, so the same encode publishes without being encoded again.
+func TestRetryPublicationShortensAnOverlongDestination(t *testing.T) {
+	failure := &smbdirect.Error{Class: smbdirect.SMBSessionInvalid, Op: "publish", Err: errors.New("session expired")}
+	w, _, id, encodes := schedulerPublicationFailure(t, failure, 1+MaxFinalizationRetries)
+
+	dir := filepath.Join(filepath.Dir(w.cfg.AllowedRoots[0]), "unmounted-media", "TV", ".navigatorr-candidates")
+	stem := strings.Repeat("私は受付嬢になりたい ", 16) + "Café"
+	long := filepath.Join(dir, stem+"."+id+".mkv")
+	if len(filepath.Base(long))+len(".partial."+id) <= transcode.MaxFileNameBytes {
+		t.Fatal("test name must be too long")
+	}
+	jobFile := filepath.Join(w.cfg.StateDir, id, "job.json")
+	job := pr6b1LoadJob(t, w.cfg.StateDir, id)
+	job.Candidate, job.IntendedDestination, job.PartialPath = long, long, PartialPathFor(long, id)
+	if err := SaveJobAtomic(jobFile, job); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := w.RetryPublication(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := pr6b1LoadJob(t, w.cfg.StateDir, id)
+	base := filepath.Base(got.Candidate)
+	switch {
+	case filepath.Dir(got.Candidate) != dir, !strings.HasSuffix(base, "."+id+".mkv"), !utf8.ValidString(base):
+		t.Fatalf("candidate lost its place or tail: %q", got.Candidate)
+	case len(base+".partial."+id) > transcode.MaxFileNameBytes:
+		t.Fatalf("candidate still too long: %d bytes", len(base))
+	case got.IntendedDestination != got.Candidate || got.PartialPath != PartialPathFor(got.Candidate, id):
+		t.Fatalf("destination and partial disagree: %+v", got)
+	case res.CandidatePath != got.Candidate:
+		t.Fatalf("status reports %q, job has %q", res.CandidatePath, got.Candidate)
+	case encodes.Load() != 1 || !got.OperatorRetryRequested:
+		t.Fatalf("encodes=%d retry requested=%v", encodes.Load(), got.OperatorRetryRequested)
+	}
+	if _, err := resolveOperationalForExecution(got); err != nil {
+		t.Fatalf("the renamed job must still resolve: %v", err)
+	}
 }

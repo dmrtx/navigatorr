@@ -70,7 +70,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	srcDir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
-	candidatePath := filepath.Join(srcDir, ".navigatorr-candidates", fmt.Sprintf("%s.%s%s", stem, jobID, ext))
+	candidatePath := filepath.Join(srcDir, ".navigatorr-candidates", transcode.CandidateFileName(stem, jobID, ext))
 	profile := getString(ec.State, "profile")
 	if profile == "" {
 		profile = "hevc-vt"
@@ -660,6 +660,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		e.noteWorkerSlotFreed()
 	}
 	if st.RecoveryRequired {
+		adoptShortenedCandidate(ec, st.CandidatePath)
 		out := transcodeWorkerMetadataOutputs(ec, st)
 		out["job_id"], out["external_reference"] = jobID, jobID
 		out["worker_error"] = st.Error
@@ -773,4 +774,20 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	default:
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: fmt.Sprintf("Transcode in progress (%s)", st.Status)}, nil
 	}
+}
+
+// adoptShortenedCandidate follows a worker that renamed a too-long candidate
+// while recovering its publication: the file will be published beside the one
+// recorded, under a shorter name, so cleanup and promotion must look there.
+// Any other difference is not adopted here.
+func adoptShortenedCandidate(ec *ExecutionContext, reported string) {
+	recorded := getString(ec.State, "candidate_path")
+	if reported == "" || reported == recorded || recorded == "" || filepath.Dir(reported) != filepath.Dir(recorded) {
+		return
+	}
+	if transcode.ShortenCandidatePath(recorded, getString(ec.State, "job_id")) != reported {
+		return
+	}
+	ec.State["candidate_path"] = reported
+	ec.State["output_path"] = reported
 }

@@ -8,12 +8,39 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // ErrNoPublicationToRetry reports a job that is not waiting to publish its
 // finished output: it is still encoding, already finished, or a runner is
 // publishing it right now.
 var ErrNoPublicationToRetry = errors.New("job is not waiting to retry a publication")
+
+// shortenPublicationNames renames the destination of a job queued before
+// candidate names were bounded, whose candidate or ".partial.<job id>" upload
+// file name exceeds the filesystem's 255-byte limit and so can never be
+// published. Only the stored names change, in the same directory, with the job
+// id and extension kept; the encoded file is untouched and the status now
+// reports the shortened candidate path, which the coordinator adopts. A name
+// that already fits is left exactly as it is. The idempotency digest is not
+// recomputed: it identifies the original request.
+func shortenPublicationNames(job *JobRecord) {
+	dest := job.Destination()
+	short := transcode.ShortenCandidatePath(dest, job.ID)
+	if dest == "" || short == dest {
+		return
+	}
+	if job.Candidate == dest {
+		job.Candidate = short
+	}
+	if job.IntendedDestination != "" {
+		job.IntendedDestination = short
+	}
+	if job.PartialPath != "" {
+		job.PartialPath = PartialPathFor(short, job.ID)
+	}
+}
 
 // RetryPublication is an operator's "try again" for a job whose encode
 // finished but whose output could not be published, after the worker stopped
@@ -46,6 +73,7 @@ func (w *Worker) RetryPublication(ctx context.Context, jobID string) (JobStatusR
 	if !isPostEncodeResume(job) || (job.PID != 0 && w.jobAlive(job)) {
 		return JobStatusResponse{ID: job.ID, Status: job.Status, CandidatePath: job.Candidate}, ErrNoPublicationToRetry
 	}
+	shortenPublicationNames(job)
 	job.FinalizationRetryCount = 0
 	job.NextFinalizationAt = time.Time{}
 	job.OperatorRetryRequested = true
