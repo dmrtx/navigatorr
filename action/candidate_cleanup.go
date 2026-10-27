@@ -3,7 +3,9 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -450,8 +452,8 @@ type LeftoverCandidatePage struct {
 
 // ListLeftoverCandidates reports, read-only, candidate files that finished
 // transcodes left in .navigatorr-candidates: rejected, cancelled, failed or
-// superseded attempts nothing promotes. Ready candidates, promotions and
-// recovery files are never listed. Inventory follows action ownership, never
+// superseded attempts nothing promotes, or whose original changed. Candidates
+// that can still be promoted, promotions and recovery files are never listed. Inventory follows action ownership, never
 // a directory sweep, so a page of actions may list nothing and still have a
 // next page. DiscardLeftoverCandidate removes one listed item.
 func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*LeftoverCandidatePage, error) {
@@ -561,7 +563,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
-			return replacedOriginalReason(ec), nil
+			return e.unpromotableOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
 			attempts, err := e.replacedBatchAttempts(parentID)
@@ -573,7 +575,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		if replaced[parentID][inst.ID] {
 			return "a batch settings revision replaced this attempt", nil
 		}
-		return replacedOriginalReason(ec), nil
+		return e.unpromotableOriginalReason(ec), nil
 	}
 	return "", nil
 }
@@ -587,6 +589,83 @@ func replacedOriginalReason(ec *ExecutionContext) string {
 		return "another attempt's promotion replaced this attempt's original"
 	}
 	return ""
+}
+
+// unpromotableOriginalReason names a finished attempt whose original is no
+// longer the file it encoded, so a promotion would refuse it. It covers
+// attempts that finished before sibling retirement existed, which no cleanup
+// record mentions. The original is only compared by size: a size that differs
+// from the one recorded when the attempt started is never the same bytes,
+// whereas a modification time can move without the content changing.
+//
+// A missing or changed original is only evidence while nothing is rewriting
+// it, so every other reading keeps the candidate listed as promotable: the
+// candidate file and the original's folder must both be readable (a share that
+// is not mounted shows neither), and no replacement may reference the file.
+// The checks run in the order of their cost, and the reason is only ever asked
+// for after the cheap ones, so a promoted attempt costs one stat.
+func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
+	if reason := replacedOriginalReason(ec); reason != "" {
+		return reason
+	}
+	original := getString(ec.State, "resolved_path")
+	size := getInt64(ec.State, "original_size")
+	if original == "" || size <= 0 || getBool(ec.State, candidateRemovedKey) {
+		return ""
+	}
+	candidate, _, err := ownCandidateFiles(ec.State)
+	if err != nil {
+		return ""
+	}
+	if _, err := e.promotionPath(candidate, false); err != nil {
+		return ""
+	}
+	if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	if _, err := e.promotionPath(original, false); err != nil {
+		return ""
+	}
+	if dir, err := os.Stat(filepath.Dir(original)); err != nil || !dir.IsDir() {
+		return ""
+	}
+	var reason string
+	info, err := os.Lstat(original)
+	switch {
+	case err == nil && info.Mode().IsRegular() && info.Size() != size:
+		reason = "the original is no longer the file this attempt encoded (its size changed); a replacement would refuse this candidate"
+	case err != nil && errors.Is(err, fs.ErrNotExist):
+		reason = "the original this attempt encoded is no longer at its path (it may have been replaced, renamed or moved); a replacement would refuse this candidate"
+	default:
+		return ""
+	}
+	if e.originalBeingReplaced(original) {
+		return ""
+	}
+	return reason
+}
+
+// originalBeingReplaced reports whether any replacement other than a finished
+// one names the file: while it runs, or after it failed halfway, the original
+// can be moved aside and put back, so another attempt's candidate must wait.
+// A store error counts as a replacement in progress.
+func (e *Engine) originalBeingReplaced(original string) bool {
+	needle := strings.Trim(toJSON(filepath.Base(filepath.Clean(original))), `"`)
+	const pageSize = 100
+	for offset := 0; ; offset += pageSize {
+		rows, err := e.deps.Store.ListActionInstancesByName("promote_transcode_candidate", pageSize, offset)
+		if err != nil {
+			return true
+		}
+		for i := range rows {
+			if rows[i].Status != StatusCompleted && strings.Contains(rows[i].StateJSON, needle) {
+				return true
+			}
+		}
+		if len(rows) < pageSize {
+			return false
+		}
+	}
 }
 
 // replacedBatchAttempts returns the children a batch's attempt history

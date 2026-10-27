@@ -1156,3 +1156,131 @@ func TestACompletedCandidateKeptAfterAReplacementStaysListed(t *testing.T) {
 		t.Fatalf("listing: %+v", page.Items)
 	}
 }
+
+func TestLeftoverListsCompletedAttemptsWhoseOriginalChanged(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	attempt := func(id, n, content string, recordedSize int) string {
+		original := filepath.Join(season, "sample-episode-"+n+".mkv")
+		if content != "" {
+			writeCandidateFile(t, original, content)
+		}
+		extra := map[string]any{"transcode_done": true}
+		if recordedSize > 0 {
+			extra["original_size"] = recordedSize
+		}
+		candidate := seedCandidateAttempt(t, st, id, StatusCompleted, original, "job-"+id, nil, extra)
+		writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+		return candidate
+	}
+	attempt("intact", "01", "original 01", len("original 01"))
+	changed := attempt("changed", "02", "a smaller replacement", len("original 02 with its old, larger size"))
+	gone := attempt("gone", "03", "", 500)
+	attempt("no-baseline", "04", "original 04", 0)
+	started := attempt("started", "05", "a smaller replacement", 500)
+	seedActionInstance(t, st, "promotion", "promote_transcode_candidate", StatusRunning, 3, "promote:custom-service:started", map[string]any{"transcode_action_id": "started"}, nil)
+
+	page, err := e.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]LeftoverCandidate{}
+	for _, item := range page.Items {
+		got[item.ActionID] = item
+	}
+	if len(got) != 2 || got["changed"].Path != changed || got["gone"].Path != gone || page.Bytes != 80 {
+		t.Fatalf("unexpected listing: %+v", page)
+	}
+	if !strings.Contains(got["changed"].Reason, "size changed") || !strings.Contains(got["gone"].Reason, "no longer at its path") {
+		t.Fatalf("reasons: %+v", got)
+	}
+	for _, id := range []string{"intact", "no-baseline", "started"} {
+		if _, err := e.DiscardLeftoverCandidate(context.Background(), id); err == nil {
+			t.Fatalf("%s was discarded", id)
+		}
+	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("a candidate with a promotion was touched: %v", err)
+	}
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "changed"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(changed); !os.IsNotExist(err) {
+		t.Fatalf("changed candidate kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(season, "sample-episode-02.mkv")); err != nil {
+		t.Fatalf("the library file was touched: %v", err)
+	}
+}
+
+func TestLeftoverOriginalChangedStaysSafe(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	attempt := func(id, n string, inputs map[string]any, recordedSize int, writeOriginal bool) (candidate, original string) {
+		original = filepath.Join(season, "sample-episode-"+n+".mkv")
+		if writeOriginal {
+			writeCandidateFile(t, original, "a smaller replacement")
+		}
+		candidate = seedCandidateAttempt(t, st, id, StatusCompleted, original, "job-"+id, inputs, map[string]any{"transcode_done": true, "original_size": recordedSize})
+		writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+		return candidate, original
+	}
+	listed := func() map[string]bool {
+		page, err := e.ListLeftoverCandidates(context.Background(), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, item := range page.Items {
+			out[item.ActionID] = true
+		}
+		return out
+	}
+
+	// A batch child goes through the same check.
+	seedActionInstance(t, st, "batch", "transcode_batch", StatusCompleted, 2, "", map[string]any{}, map[string]any{})
+	attempt("batch-child", "01", map[string]any{"parent_action_id": "batch"}, 500, true)
+
+	// A share that is not mounted shows neither the candidate nor the original:
+	// the recorded attempt is not evidence of anything.
+	unmounted, _ := attempt("unmounted", "02", nil, 500, false)
+	if err := os.Remove(unmounted); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unfinished or failed replacement of the same file holds the candidate.
+	_, midReplace := attempt("mid-replace", "03", nil, 500, true)
+	seedActionInstance(t, st, "replacing", "promote_transcode_candidate", StatusFailed, 5, "promote:custom-service:other", map[string]any{"transcode_action_id": "other"}, map[string]any{"original_path": midReplace})
+
+	// A finished replacement of the same file does not.
+	_, replaced := attempt("replaced", "04", nil, 500, true)
+	seedActionInstance(t, st, "replaced-promotion", "promote_transcode_candidate", StatusCompleted, 9, "promote:custom-service:winner", map[string]any{"transcode_action_id": "winner"}, map[string]any{"original_path": replaced})
+
+	// An original that is not a regular file is never compared.
+	dirOriginal := filepath.Join(season, "sample-episode-05.mkv")
+	if err := os.MkdirAll(dirOriginal, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	attempt("directory", "05", nil, 500, false)
+
+	got := listed()
+	if !got["batch-child"] || !got["replaced"] || got["unmounted"] || got["mid-replace"] || got["directory"] || len(got) != 2 {
+		t.Fatalf("unexpected listing: %v", got)
+	}
+	// Discarding by id repeats the check and refuses what the listing does not show.
+	for _, id := range []string{"unmounted", "mid-replace", "directory"} {
+		if _, err := e.DiscardLeftoverCandidate(context.Background(), id); err == nil {
+			t.Fatalf("%s was discarded", id)
+		}
+	}
+	if recorded := getBool(parseExecutionContext(mustInstance(t, st, "unmounted"), e).State, candidateRemovedKey); recorded {
+		t.Fatal("an unreadable share was recorded as a removed candidate")
+	}
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "replaced"); err != nil {
+		t.Fatal(err)
+	}
+}

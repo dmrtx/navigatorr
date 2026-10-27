@@ -4547,7 +4547,7 @@ async function archiveJob(job, archived) {
         title: "Archive this job?",
         content: [
           node("p", queuePresentation(job).title, "review-filename"),
-          node("p", `Its encode left ${leftoverSummary(found)} beside the original. Originals and files waiting for a decision are never touched.`),
+          node("p", `Its encode left ${leftoverSummary(found)} beside the original. Originals and candidates that can still replace them are never touched.`),
         ],
         confirmLabel: "Archive and delete temporary files",
         cancelLabel: "Back",
