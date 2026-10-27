@@ -554,6 +554,12 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		for i := range items {
 			it := &items[i]
 			if it.Status == "completed" || it.Status == "failed" || it.Status == "cancelled" || it.Status == "skip" {
+				// A finished child is left alone, except for a candidate its
+				// worker still holds: nothing will promote it from a cancelled
+				// batch, and Cancel refuses a finished child.
+				if it.ChildActionID != "" {
+					e.releaseRetainedChild(ctx, it.ChildActionID, candidateRetiredCancelled)
+				}
 				continue
 			}
 			if it.ChildActionID != "" {
@@ -585,7 +591,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 
 		items, _ = e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
 		outputs := buildBatchOutputs(ec.InstanceID, items, seriesTitle, isAnime, dryRun, getMaxOutputItems(ec.Inputs))
-		outputs["note"] = "Batch cancellation stops queued, waiting, and already-admitted remote transcode jobs. Completed items are left unchanged."
+		outputs["note"] = "Batch cancellation stops queued, waiting, and already-admitted remote transcode jobs. Completed items are left unchanged; a candidate a worker still holds for one is released."
 		if len(cancelErrors) > 0 {
 			outputs["cancel_errors"] = cancelErrors
 			return StepResult{

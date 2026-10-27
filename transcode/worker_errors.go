@@ -1,5 +1,7 @@
 package transcode
 
+import "strings"
+
 // Worker API error codes. The worker adds them to /v1 error bodies as the
 // additive "code" field next to "error" and "retryable"; workers that predate
 // the envelope send only "error", so clients must fall back to the status
@@ -46,3 +48,26 @@ const RequestIDHeader = "X-Request-ID"
 // JobIDHeader names the job a request concerns, so worker logs
 // can be searched by job even for submits, whose ID travels in the body.
 const JobIDHeader = "X-Navigatorr-Job-ID"
+
+// Retention refusals. A worker that keeps candidates for approval refuses a
+// deferred submit it has no room to retain with the ordinary worker_busy
+// answer (nothing was created). The message names which limit was hit, and the
+// coordinator reads these two markers to tell "no room to retain" from "no
+// free slot": the first can only clear when somebody approves or discards a
+// retained candidate, which a batch cannot wait for. They are part of the
+// worker's message, not of its envelope, so workers and coordinators of any
+// age keep treating the answer as busy.
+const (
+	RetentionRefusalBudget = "retained candidates would use"
+	RetentionRefusalDisk   = "free bytes would fall below"
+)
+
+// IsRetentionRefusal reports a worker_busy refusal that came from the worker's
+// retention limits (retained_candidates_max_bytes or min_free_disk_bytes).
+func IsRetentionRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "worker busy") && (strings.Contains(msg, RetentionRefusalBudget) || strings.Contains(msg, RetentionRefusalDisk))
+}

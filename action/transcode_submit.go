@@ -264,6 +264,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
 	}
 	job, err := e.actionWorker(ec).Submit(actx, req)
+	if err != nil && spillRetentionRefusal(ec, &req, err) {
+		job, err = e.actionWorker(ec).Submit(actx, req)
+	}
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true

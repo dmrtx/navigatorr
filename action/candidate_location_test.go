@@ -650,29 +650,6 @@ func TestPublishOnEncodeIsUnchanged(t *testing.T) {
 	}
 }
 
-func TestBatchChildrenAreRefusedDeferralAtAdmission(t *testing.T) {
-	root := candidateRoot(t)
-	st := setupTestStore(t)
-	w := newRetainedExecutor()
-	e := retainedEngine(t, st, root, w, transcode.PublishPolicyOnApproval)
-	ec := func(inputs map[string]any) *ExecutionContext {
-		return &ExecutionContext{InstanceID: "x", Inputs: inputs, State: map[string]any{}, Outputs: map[string]any{}}
-	}
-
-	standalone := ec(map[string]any{})
-	if policy, held := e.publishPolicyFor(context.Background(), standalone); policy != transcode.PublishPolicyOnApproval || held != nil || getString(standalone.State, publishPolicyKey) != transcode.PublishPolicyOnApproval {
-		t.Fatalf("a standalone file is deferred: %q %v", policy, held)
-	}
-
-	child := ec(map[string]any{"parent_action_id": "batch"})
-	if policy, held := e.publishPolicyFor(context.Background(), child); policy != "" || held != nil {
-		t.Fatalf("a batch child must publish on encode: %q %v", policy, held)
-	}
-	if _, ok := child.State[publishPolicyKey]; ok || getString(child.State, publishPolicyFallbackKey) != "batch_child" {
-		t.Fatalf("state: %v", child.State)
-	}
-}
-
 func TestThePublishPolicyIsDecidedOncePerAttempt(t *testing.T) {
 	root := candidateRoot(t)
 	st := setupTestStore(t)

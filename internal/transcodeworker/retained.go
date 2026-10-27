@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Deferred candidate publication (docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md).
@@ -801,7 +803,7 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 	}
 	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
 		if held+expected > limit {
-			return fmt.Errorf("worker busy: retained candidates would use %d of %d allowed bytes", held+expected, limit)
+			return fmt.Errorf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)
 		}
 	}
 	if floor := w.cfg.MinFreeDiskBytes; floor > 0 {
@@ -811,7 +813,7 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		}
 		// Encodes admitted earlier have not written their candidates yet.
 		if left := free - unwritten - expected; left < floor {
-			return fmt.Errorf("worker busy: %d free bytes would fall below the %d byte minimum", left, floor)
+			return fmt.Errorf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)
 		}
 	}
 	return nil

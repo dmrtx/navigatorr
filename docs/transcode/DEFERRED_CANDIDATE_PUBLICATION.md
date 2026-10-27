@@ -1,10 +1,11 @@
 # Deferred candidate publication
 
-Status: design, revision 3 (after two Opus reviews against the code). Step 1
+Status: design, revision 4 (after two Opus reviews against the code). Step 1
 (the worker, see "Worker implementation notes") is implemented behind the
 `deferred_publication` worker setting, off by default. Step 2 (the server side,
 see "Server implementation notes") is implemented behind the per-worker
-`publish_policy` setting, off by default. The UI and storage view (step 4) and
+`publish_policy` setting, off by default; since revision 4 it covers the
+children of a batch too (see "Batches"). The UI and storage view (step 4) and
 making `on_approval` the default (step 5) are not. Each review found blockers the
 previous revision hid.
 
@@ -230,14 +231,9 @@ Everything below assumed the candidate was on the share. Each place must read
 - Drain: readiness is computed from database rows (`classifyDrainRow` returns ""
   for a done row, `worker_drain.go:254`). Retained candidates must not block a
   deploy; an upload inside `preserve_original` should, which needs a new row class.
-- Batches (decided: batch children are refused deferral at admission, see
-  "Server implementation notes"). The reasoning behind it: the batch approval comes after every child has encoded
-  (`schedule_batch` then `promote_batch`). If a batch is larger than the worker's
-  retained limit, the remaining children get "busy" forever, nothing can be
-  approved, and the first candidates expire and are encoded again in a loop. The
-  admission rule must be one of: the worker does not count a batch's own
-  candidates, or the batch is split to fit, or the batch is refused at admission.
-  Open question below.
+- Batches: decided, see "Batches". A batch child defers like any attempt; its
+  promotion needs no new plan step, and a worker with no room left to retain
+  makes the child publish on encode instead of waiting.
 - Rollback of the server: an older server cannot plan a retained candidate ("not
   accessible"). That fails closed but strands candidates until expiry, so release
   first or accept re-encoding.
@@ -375,20 +371,15 @@ decision (`publish_policy` in the attempt's state), so a resubmit after an
 uncertain submit sends what the first submit sent. An attempt defers only when all
 of these hold: the assigned worker is configured `publish_policy: on_approval`; its
 executor can publish and release retained candidates; it advertises
-`deferred_publication`; the attempt is not a batch child. When a worker is
-configured for deferral but cannot do it, the attempt publishes on encode and
+`deferred_publication`; the worker has not refused the attempt for lack of room to
+retain (`publish_policy_fallback: retention_full`, batch children only). When a
+worker is configured for deferral but cannot do it, the attempt publishes on encode and
 records why in `publish_policy_fallback`; a capability lookup that fails holds the
 submit rather than silently publishing on encode.
 
-**Batch rule: batch children are refused deferral at admission** (they always
-publish on encode). A batch's promotion is one reviewed plan that hashes its
-candidates on the share, and a batch is admitted by free worker slots, which a pool
-of retained candidates would starve: the remaining children would wait forever
-while the first candidates expired and encoded again. The cost is that a batch
-still publishes every candidate up front, as today; only standalone attempts defer.
-The release paths that batches reach (revision, cancellation, sibling replacement)
-still go through the one release hook, so they already handle a retained candidate
-if a later change lifts this rule.
+**Batch children defer too** (revision 4; revisions 1 to 3 refused them at
+admission). `publishPolicyFor` no longer looks at `parent_action_id`. "Batches"
+below gives the reasoning and the one rule that keeps a batch from stalling.
 
 **Where the candidate is.** `candidate_location` is `share` (or absent) or
 `worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot
@@ -453,6 +444,126 @@ sets the promotion's `work_progress.phase` to `uploading` and records
 a deploy waits for it. The promotion deliberately does not record the source's
 `job_id`, so cancelling a promotion never cancels (releases) the source's job.
 
+## Batches
+
+A batch (`transcode_batch`) fans out `transcode_media` children, and when it was
+started with `promote_candidates` (or is reviewed afterwards) it asks for one
+approval of a replacement plan and then promotes the members. Revisions 1 to 3
+kept batch children out of deferral because they assumed that plan hashed the
+candidates on the share, and that a pool of retained candidates would starve the
+batch's admission. The first assumption was wrong and the second needs one rule.
+
+**Promotion needs no new step.** The batch plan (`buildBatchPromotionPlan`,
+`BatchCandidates`) is built from the evidence the encode left on each child:
+`candidate_path` (the planned path) and the worker's attested `candidate_sha256`.
+It reads no file on the share. The approval is one decision on the plan's digest.
+Each member is then promoted by its own `promote_transcode_candidate` child, at
+most `promotion_parallelism` (1 or 2) at a time, and that is the promotion this
+document already describes: its plan asks the worker whether the candidate can
+still be uploaded (`planRetainedCandidate`), and `preserve_original` uploads it
+before the original is touched, holds the arrived file to the attestation
+(`verifyBatchPromotionApproval` compares the member's SHA with the promotion's),
+and records `candidate_location: share`. So a batch approval uploads at most two
+candidates at a time, which also bounds the worker's upload bandwidth, and a
+member that waits for its upload (the worker is busy, draining or restarting)
+leaves the batch waiting on `batch_promotion` with the original untouched.
+
+**A retained job holds no slot.** The child's `wait_transcode` completes at
+retention and its batch item turns `completed`; `batchAvailableSlots` counts only
+`running` items, and the worker counts a retained job as no running job. The next
+child is admitted as soon as the encode ends. Slots are therefore never the
+limit; the worker's disk is.
+
+**Admission rule: a batch spills, it does not wait.** The worker's limits
+(`retained_candidates_max_bytes`, `min_free_disk_bytes`) answer a deferred submit
+that does not fit with `worker_busy` (nothing created), counting the candidates
+it holds and the encodes that have not written theirs. For a standalone attempt
+the answer is a wait: the owner approves or discards the candidates that fill the
+worker one by one, and room appears. A batch cannot wait. Nothing in it is
+approved before every child has encoded, so the candidates of its first children
+would stay on the worker, the others would wait for room that cannot appear, and
+when the first candidates reached `retained_ttl_hours` they would expire and be
+encoded again, in a loop. The alternatives considered:
+
+- *Wait for room* (the standalone rule): deadlocks, as above.
+- *A cap per batch or per worker on the coordinator*: it stops the batch earlier
+  but the remaining children still wait for approvals that cannot come.
+- *Approve a batch in parts while it encodes*: a different feature (the plan, the
+  digest and the review are made for a finished batch) and not needed to be safe.
+- *Refuse deferral for batches* (revisions 1 to 3): safe, and a no-op for the
+  workload that matters, since nearly every file in production is a batch child.
+
+So the rule is: **a batch child the worker has no room to retain publishes on
+encode.** `spillRetentionRefusal` (`action/candidate_location.go`) recognises the
+refusal by its message (`transcode.IsRetentionRefusal`: `worker busy` plus the
+budget or the free-disk marker the worker writes), clears the attempt's
+`publish_policy`, records `publish_policy_fallback: retention_full` and sends the
+same job again without a policy. That is safe because a busy answer created
+nothing, the job id and idempotency key are unchanged, and the digest of a job
+without a policy is the one it always had. Later submits of the attempt (a
+reconcile that finds no job) keep publishing on encode, and a manual retry decides
+again. A refusal for slots (`max parallel jobs`, from an older worker) is not
+touched. The cost is bounded and visible: a batch retains what the worker's
+budget allows, and the rest publishes up front, exactly as every batch did before.
+A worker with no limits configured never refuses, so it retains the whole batch
+and its disk is the only bound; set `retained_candidates_max_bytes` before using
+deferral for large batches. A free-disk refusal also spills, so a burst of
+`on_encode` jobs can use the disk the floor was protecting; keep the floor below
+what one encode needs and the budget below what the disk can hold.
+
+The worker's message is the contract, not a new code: the strings are constants in
+`transcode/worker_errors.go`, the worker builds its messages from them, and a test
+on the worker side fails if either stops matching. Workers and servers of any
+age keep reading the answer as the busy it always was, and the server needs no
+new capability.
+
+While a batch holds the budget, standalone files on that worker wait for room,
+since their candidates are not the batch's to release. This is the same
+trade-off as before the change (a batch occupying the worker's slots) and is a
+reason to give a very large batch its own worker.
+
+**Every end of a retained child goes through the one hook.**
+
+| Event | Path |
+|---|---|
+| Batch cancelled (`Engine.Cancel`) | `releaseRetainedChild` for each finished child |
+| Batch cancelled by its schedule step's `cancel` decision | the same, added in revision 4: the step used to leave `completed` children alone |
+| Settings revision of a file | `retireSupersededCandidates` |
+| Sibling replaced | `retireReplacedSiblings` |
+| Member promotion rejected, cancelled or failed for good | `releaseRetainedForPromotion` |
+| Leftover discarded by the owner | `DiscardLeftoverCandidate` |
+| A child skipped by a size or saving guard | `retireCandidate` from the child itself |
+
+The batch plan being rejected is deliberately not on the list: as for candidates
+on the share, a rejected plan keeps the candidates and a later review can replace
+them (`BatchCandidates` offers every finished member that has no promotion yet).
+
+**Expiry in a batch.** A batch may wait for approval for weeks, as the
+retention (default 30 days) may end first. The expiry is found when a member's
+promotion plans or uploads, as for a standalone file: that member's promotion
+fails for good ("encode the file again"), releases what is left, and the batch
+reports `N batch promotion(s) need attention` naming the file, while the other
+members promote normally and the original of the expired one is untouched. The
+member is then re-encoded with the batch's file revision (the same action that
+changes a file's settings), which supersedes the finished attempt. Choose
+`retained_ttl_hours` longer than the longest wait expected for a batch's approval.
+
+**Worker restarts.** A retained job lives in a hidden directory and survives a
+restart. An upload that was under way answers uncertain; the member's promotion
+waits and asks again (the request is idempotent), so the same batch approval
+finishes the upload once the worker is back. A restart does not hand a retained
+child to the sweep that publishes, so nothing reaches the share without a
+promotion asking for it.
+
+**Rollout for batches.** Nothing changes until a worker is configured
+`publish_policy: on_approval` and advertises `deferred_publication`, so this
+deploys inert. Roll the server out first, then the worker (its messages are
+unchanged, the new constants only name them). Enabling a worker for batches is a
+separate step: start with one worker, set `retained_candidates_max_bytes`, run one
+batch larger than that budget and check that the overflow publishes on encode
+(`publish_policy_fallback: retention_full` on those children) and that one
+approval promotes both the retained and the published members.
+
 ## Candidates already on the share
 
 A finished attempt whose original was replaced by another attempt cannot be
@@ -473,10 +584,11 @@ checks.
   The job directory also holds the staged source, released at retention.
 - `retained_ttl`: batches have waited weeks. Resolved: expiry is lazy (see "Server
   implementation notes"); nothing polls completed actions.
-- The batch admission rule: resolved, batch children publish on encode.
+- The batch admission rule: resolved, see "Batches": batch children defer, and a child the worker has no room to retain publishes on encode.
 - Should publishing use an encode slot or a lane of its own? With every slot
   encoding, an approval can wait hours.
 - Support for workers without direct SMB (a local mount): the filesystem path
   publishes by copy and should work but is untested.
 - Publish concurrency for approving a whole series, given one worker's upload
-  bandwidth.
+  bandwidth. For a batch it is bounded by `promotion_parallelism` (at most 2);
+  a standalone series approved one file at a time is not bounded.

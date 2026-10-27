@@ -747,6 +747,11 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 		if status, code := classifySubmitError(err); status != http.StatusTooManyRequests || code != transcode.WorkerErrorBusy {
 			t.Fatalf("classify = %d %q (%v), want 429 worker_busy", status, code, err)
 		}
+		// The coordinator tells "no room to retain" from "no free slot" by the
+		// message (a batch child publishes on encode instead of waiting).
+		if !transcode.IsRetentionRefusal(err) {
+			t.Fatalf("%v is not recognised as a retention refusal", err)
+		}
 	}
 	t.Run("retained bytes", func(t *testing.T) {
 		f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = srcSize + srcSize/2 })

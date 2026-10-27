@@ -40,6 +40,10 @@ const (
 	candidateExpiredCountKey    = "candidate_expired_count"
 	promotionReleaseRetainedKey = "release_retained_candidate"
 
+	// fallbackRetentionFull is the publish_policy_fallback of a batch child the
+	// worker had no room to retain.
+	fallbackRetentionFull = "retention_full"
+
 	// maxCandidateExpiries bounds how often one attempt encodes again because
 	// the worker dropped its candidate at the end of its retention.
 	maxCandidateExpiries = 2
@@ -93,14 +97,16 @@ func isBatchChild(ec *ExecutionContext) bool {
 }
 
 // publishPolicyFor decides, once, whether this attempt's candidate is kept on
-// the worker. Deferral needs all of: the assigned worker is configured
-// publish_policy on_approval, it advertises deferred_publication, and the
-// attempt is not a batch child. A batch publishes every child on encode: its
-// promotion is one reviewed plan over candidates that must already be on the
-// share (a batch replacement review hashes them), and it admits children by the
-// worker's free slots, which a pool of retained candidates would otherwise
-// starve. The decision is stored with the attempt, so a resubmit after an
+// the worker. Deferral needs both: the assigned worker is configured
+// publish_policy on_approval and it advertises deferred_publication. A batch
+// child is an attempt like any other: the batch's replacement is approved as
+// one plan, but each member is promoted by its own promotion, which uploads the
+// candidate its worker still holds (see DEFERRED_CANDIDATE_PUBLICATION.md,
+// "Batches"). The decision is stored with the attempt, so a resubmit after an
 // uncertain submit sends what the first submit sent.
+//
+// An attempt that was refused for lack of room to retain (see
+// spillRetentionRefusal) stays on publish-on-encode.
 //
 // The result is "" (publish on encode, the default and the only value a worker
 // that was not configured for deferral ever sees) or on_approval. A non-nil
@@ -109,12 +115,11 @@ func (e *Engine) publishPolicyFor(ctx context.Context, ec *ExecutionContext) (st
 	if v := getString(ec.State, publishPolicyKey); v != "" {
 		return v, nil
 	}
-	w, ok := e.deps.Workers.Get(e.resolveWorker(assignedWorker(ec.State)))
-	if !ok || w.PublishPolicy != transcode.PublishPolicyOnApproval {
+	if getString(ec.State, publishPolicyFallbackKey) == fallbackRetentionFull {
 		return "", nil
 	}
-	if isBatchChild(ec) {
-		ec.State[publishPolicyFallbackKey] = "batch_child"
+	w, ok := e.deps.Workers.Get(e.resolveWorker(assignedWorker(ec.State)))
+	if !ok || w.PublishPolicy != transcode.PublishPolicyOnApproval {
 		return "", nil
 	}
 	if _, ok := retainedHandler(w.Executor); !ok {
@@ -135,6 +140,30 @@ func (e *Engine) publishPolicyFor(ctx context.Context, ec *ExecutionContext) (st
 	}
 	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
 	return transcode.PublishPolicyOnApproval, nil
+}
+
+// spillRetentionRefusal handles a worker that refused a deferred submit because
+// it has no room left to retain another candidate. A batch child must not wait
+// for that room: nothing in a batch can be approved until every child has
+// encoded, so the retained candidates that fill the worker would never leave,
+// the remaining children would wait forever and the first candidates would
+// expire and be encoded again. The child publishes on encode instead, as it did
+// before deferral existed, and records why. A standalone attempt keeps waiting
+// (the caller's busy handling): its owner approves or discards the candidates
+// that fill the worker one by one.
+//
+// It reports whether the submit should be sent again with publish on encode.
+// The refused submit created nothing, so changing the policy cannot collide
+// with a job the worker already holds.
+func spillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err error) bool {
+	if req.PublishPolicy != transcode.PublishPolicyOnApproval || !isBatchChild(ec) || !transcode.IsRetentionRefusal(err) {
+		return false
+	}
+	req.PublishPolicy = ""
+	delete(ec.State, publishPolicyKey)
+	ec.State[publishPolicyFallbackKey] = fallbackRetentionFull
+	log.Printf("action %s: the worker has no room to retain another candidate (%v); this batch file publishes on encode", ec.InstanceID, err)
+	return true
 }
 
 // retainedWaitResult finishes wait_transcode for a job whose encode is done and
