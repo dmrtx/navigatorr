@@ -70,7 +70,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	srcDir := filepath.Dir(cleanPath)
 	base := filepath.Base(cleanPath)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
-	candidatePath := filepath.Join(srcDir, ".navigatorr-candidates", fmt.Sprintf("%s.%s%s", stem, jobID, ext))
+	candidatePath := filepath.Join(srcDir, ".navigatorr-candidates", transcode.CandidateFileName(stem, jobID, ext))
 	profile := getString(ec.State, "profile")
 	if profile == "" {
 		profile = "hevc-vt"
@@ -652,6 +652,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode status failed (fail closed): %v", err), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 	}
 	e.observeTranscodeStatus(ec, st)
+	adoptShortenedCandidate(ec, jobID, st.CandidatePath)
 	if res, conflict := originalDigestConflict(ec); conflict {
 		return res, nil
 	}
@@ -773,4 +774,21 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	default:
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: fmt.Sprintf("Transcode in progress (%s)", st.Status)}, nil
 	}
+}
+
+// adoptShortenedCandidate follows a worker that renamed a too-long candidate
+// while recovering its publication: the file will be published beside the one
+// recorded, under a shorter name, so cleanup and promotion must look there.
+// It runs on every status read, since after a requested retry the worker is no
+// longer asking for intervention. Any other difference is not adopted here.
+func adoptShortenedCandidate(ec *ExecutionContext, jobID, reported string) {
+	recorded := getString(ec.State, "candidate_path")
+	if reported == "" || reported == recorded || recorded == "" || filepath.Dir(reported) != filepath.Dir(recorded) {
+		return
+	}
+	if transcode.ShortenCandidatePath(recorded, jobID) != reported {
+		return
+	}
+	ec.State["candidate_path"] = reported
+	ec.State["output_path"] = reported
 }

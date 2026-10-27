@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -119,7 +120,9 @@ func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, string, error
 		return nil, "", err
 	}
 	info, err := e.promotionLstat(path)
-	if os.IsNotExist(err) {
+	// A name over the filesystem limit cannot exist: a candidate that was
+	// named before names were bounded was never written under it.
+	if os.IsNotExist(err) || errors.Is(err, syscall.ENAMETOOLONG) {
 		return nil, "", nil
 	}
 	if err != nil {
