@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -232,14 +233,16 @@ func TestClientUsageBudgetCountsOnlyTheRun(t *testing.T) {
 	f := newFixture(t, 2)
 	f.tree()
 	c := f.client(t)
-	f.srv.foldSem <- struct{}{}
-	f.srv.foldSem <- struct{}{}
+	for range cap(f.srv.foldSem) {
+		f.srv.foldSem <- struct{}{}
+	}
 	var states []string
 	var mu sync.Mutex
 	go func() {
 		time.Sleep(400 * time.Millisecond)
-		<-f.srv.foldSem
-		<-f.srv.foldSem
+		for range cap(f.srv.foldSem) {
+			<-f.srv.foldSem
+		}
 	}()
 	res, err := c.Usage(context.Background(), filepath.Join(f.root, "show"), nil,
 		UsageInteractive(), UsageRunBudget(200*time.Millisecond),
@@ -251,5 +254,81 @@ func TestClientUsageBudgetCountsOnlyTheRun(t *testing.T) {
 	defer mu.Unlock()
 	if len(states) < 2 || states[0] != JobQueued || states[len(states)-1] == JobQueued {
 		t.Fatalf("states %v, want queued first and then past it", states)
+	}
+}
+
+// One walk reports the folders below it as if each had been asked for alone.
+func TestUsageReportsFoldersBelowWhenAsked(t *testing.T) {
+	for _, walk := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "walk"}[walk], func(t *testing.T) {
+			f := newFixtureWith(t, 2, walk)
+			f.tree()
+			c := f.client(t)
+
+			plain, err := c.Usage(context.Background(), f.root, nil)
+			if err != nil || plain.Children != nil {
+				t.Fatalf("children are only sent when asked for: %+v, %v", plain.Children, err)
+			}
+
+			res, err := c.Usage(context.Background(), f.root, nil, UsageChildren(2))
+			if err != nil || !sameTotals(res, UsageResult{Bytes: 6010, Files: 5, Dirs: 4}) {
+				t.Fatalf("%+v, %v", res, err)
+			}
+			got := map[string]UsageChild{}
+			for _, child := range res.Children {
+				got[child.Path] = child
+			}
+			// show (depth 1), show/s1, show/.hidden and show/empty (depth 2).
+			if len(got) != 4 {
+				t.Fatalf("children %+v", res.Children)
+			}
+			show := got["show"]
+			if show.Bytes != 5010 || show.Files != 4 || show.Dirs != 3 || len(show.Stamps) != 4 || show.Stamps["."] == 0 || show.Stamps["s1"] == 0 {
+				t.Fatalf("show: %+v", show)
+			}
+			s1 := got["show/s1"]
+			if s1.Bytes != 5000 || s1.Files != 2 || s1.Dirs != 0 || len(s1.Stamps) != 1 || s1.Stamps["."] == 0 {
+				t.Fatalf("show/s1: %+v", s1)
+			}
+
+			one, err := c.Usage(context.Background(), f.root, nil, UsageChildren(1))
+			if err != nil || len(one.Children) != 1 || one.Children[0].Path != "show" {
+				t.Fatalf("depth 1 reports only the first level: %+v, %v", one.Children, err)
+			}
+			// What a child reports is what asking for it alone would have said.
+			alone, err := c.Usage(context.Background(), filepath.Join(f.root, "show"), nil)
+			if err != nil || !sameTotals(alone, UsageResult{Bytes: show.Bytes, Files: show.Files, Dirs: show.Dirs}) {
+				t.Fatalf("%+v, %v", alone, err)
+			}
+			for rel, mtime := range show.Stamps {
+				if alone.Stamps[rel] != mtime {
+					t.Fatalf("stamp %q: child says %d, the folder alone says %d", rel, mtime, alone.Stamps[rel])
+				}
+			}
+		})
+	}
+}
+
+// Long names must not push the answer past what the client accepts: the walk
+// reports the folders that fit and leaves the rest to be measured one by one.
+func TestUsageKeepsTheFoldersBelowWithinABudgetOfBytes(t *testing.T) {
+	f := newFixture(t, 2)
+	name := strings.Repeat("n", 200)
+	const total = 1500
+	for i := 0; i < total; i++ {
+		if err := os.MkdirAll(filepath.Join(f.root, "long", strconv.Itoa(i)+name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res, err := f.client(t).Usage(context.Background(), filepath.Join(f.root, "long"), nil, UsageChildren(1))
+	if err != nil || res.Dirs != total {
+		t.Fatalf("%+v, %v", res, err)
+	}
+	if len(res.Children) == 0 || len(res.Children) >= total {
+		t.Fatalf("%d of %d folders reported, want some but not all", len(res.Children), total)
+	}
+	raw, _ := json.Marshal(res)
+	if len(raw) > maxChildBytes+64<<10 {
+		t.Fatalf("the answer is %d bytes", len(raw))
 	}
 }

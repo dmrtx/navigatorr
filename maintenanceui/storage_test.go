@@ -23,6 +23,7 @@ type fakeMeter struct {
 	volumesErr error
 	usage      map[string]int64
 	usageErr   error
+	children   map[string][]nashelper.UsageChild
 	walked     []string
 }
 
@@ -45,7 +46,7 @@ func (f *fakeMeter) Usage(_ context.Context, local string, _ nashelper.UsageProg
 	if f.usageErr != nil {
 		return nashelper.UsageResult{}, f.usageErr
 	}
-	return nashelper.UsageResult{Bytes: f.usage[local], Files: 3, Dirs: 1}, nil
+	return nashelper.UsageResult{Bytes: f.usage[local], Files: 3, Dirs: 1, Children: f.children[local]}, nil
 }
 
 // storageRoots makes two served roots and a UI that serves them.
@@ -97,6 +98,38 @@ func TestStorageMeasuredByTheHelperFromInsideTheNAS(t *testing.T) {
 	}
 	if view.Folders[0].Path != roots[0] || view.Folders[0].Bytes != 300 || view.Folders[0].Source != "helper" || view.Folders[0].Name != "Anime" {
 		t.Fatalf("folders %+v", view.Folders)
+	}
+}
+
+// The storage round walks every root already. What it learns about the folders
+// inside is saved, so the Files tab opens with sizes instead of calculating them.
+func TestStorageRoundFillsTheFolderCacheFromTheFoldersInside(t *testing.T) {
+	s, roots := storageRoots(t, "Series")
+	show := filepath.Join(roots[0], "Cheers")
+	if err := os.MkdirAll(filepath.Join(show, "Season 1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	s.nas = &fakeMeter{
+		prefix:  filepath.Dir(roots[0]),
+		volumes: []nashelper.Volume{{Root: "/nas", FSID: "v", TotalBytes: 1000, FreeBytes: 500, AvailBytes: 500}},
+		usage:   map[string]int64{roots[0]: 80},
+		children: map[string][]nashelper.UsageChild{roots[0]: {
+			{Path: "Cheers", Bytes: 60, Files: 4, Dirs: 2},
+			{Path: "Cheers/Season 1", Bytes: 50, Files: 3, Dirs: 1},
+		}},
+	}
+	if _, err := s.measureStorage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	walked := len(s.nas.(*fakeMeter).walked)
+	for path, want := range map[string]int64{show: 60, filepath.Join(show, "Season 1"): 50} {
+		size := s.folderSizes.get(path, s.engine.Deps().Fs, s.engine.Deps().Store, s.nas)
+		if size.Status != "ready" || size.Bytes == nil || *size.Bytes != want || size.Updating {
+			t.Fatalf("%s opened without its size: %+v", path, size)
+		}
+	}
+	if after := len(s.nas.(*fakeMeter).walked); after != walked {
+		t.Fatalf("opening the folders walked the NAS again: %d walks", after-walked)
 	}
 }
 

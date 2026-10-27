@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -35,6 +36,8 @@ func (s *Server) volumes(w http.ResponseWriter, _ *http.Request) {
 // ask for whole roots) run one at a time; a walk asked for with
 // ?priority=interactive has its own lane, so a folder someone is looking at does
 // not wait for them. An older caller sends no priority and gets the old lane.
+// ?children=N (up to MaxUsageChildDepth) also reports the size of every folder
+// N levels down, so one walk answers for what is inside as well.
 func (s *Server) startUsage(w http.ResponseWriter, r *http.Request) {
 	path, ok := decodePath(w, r)
 	if !ok {
@@ -69,11 +72,12 @@ func (s *Server) startUsage(w http.ResponseWriter, r *http.Request) {
 	s.wg.Add(1)
 	s.mu.Unlock()
 
-	go s.runUsage(ctx, j, r.URL.Query().Get("priority") == "interactive")
+	childDepth, _ := strconv.Atoi(r.URL.Query().Get("children"))
+	go s.runUsage(ctx, j, r.URL.Query().Get("priority") == "interactive", min(max(childDepth, 0), MaxUsageChildDepth))
 	writeJSON(w, http.StatusAccepted, s.snapshot(j))
 }
 
-func (s *Server) runUsage(ctx context.Context, j *job, interactive bool) {
+func (s *Server) runUsage(ctx context.Context, j *job, interactive bool, childDepth int) {
 	defer s.wg.Done()
 	defer j.cancel()
 	go s.reapIfAbandoned(ctx, j)
@@ -91,7 +95,7 @@ func (s *Server) runUsage(ctx context.Context, j *job, interactive bool) {
 	runtime.LockOSThread()
 	lowerIOPriority()
 	j.set(JobRunning)
-	res, err := s.roots.Usage(ctx, j.path, func(bytes int64) { j.read.Store(bytes) })
+	res, err := s.roots.Usage(ctx, j.path, func(bytes int64) { j.read.Store(bytes) }, childDepth)
 	if err != nil {
 		s.finishUsage(j, nil, err)
 		return
