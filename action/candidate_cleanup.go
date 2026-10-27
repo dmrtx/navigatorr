@@ -33,6 +33,7 @@ const (
 	candidateRetiredCancelled  = "cancelled"
 	candidateRetiredSuperseded = "superseded"
 	candidateRetiredDiscarded  = "discarded"
+	candidateRetiredReplaced   = "replaced"
 )
 
 func rejectedCandidateResult() StepResult {
@@ -362,6 +363,69 @@ func (e *Engine) retireSupersededCandidates(ctx context.Context, ids []string) {
 	}
 }
 
+// retireReplacedSiblings removes the candidates of the other finished attempts
+// at the file a completed promotion just replaced. Batch admission lets the
+// same file into two batches, so two attempts can each hold a candidate for one
+// original; once either is promoted the original is gone and the other can
+// never be promoted. An attempt still running is left alone: its candidate is
+// removed when the owner rejects it. Nothing here fails the promotion.
+func (e *Engine) retireReplacedSiblings(ctx context.Context, p *promotionState) {
+	if e.deps.Store == nil || p == nil || p.OriginalPath == "" {
+		return
+	}
+	original := filepath.Clean(p.OriginalPath)
+	// The state is stored with toJSON, so the file name appears in it exactly
+	// as this encodes it; only matching rows are parsed in full.
+	needle := strings.Trim(toJSON(filepath.Base(original)), `"`)
+	var siblings []string
+	const pageSize = 100
+	for offset := 0; ; offset += pageSize {
+		instances, err := e.deps.Store.ListActionInstancesByName("transcode_media", pageSize, offset)
+		if err != nil {
+			log.Printf("action %s: listing replaced attempts: %v", p.SourceActionID, err)
+			return
+		}
+		for i := range instances {
+			inst := &instances[i]
+			if inst.ID == p.SourceActionID || !strings.Contains(inst.StateJSON, needle) {
+				continue
+			}
+			switch inst.Status {
+			case StatusCompleted, StatusFailed, StatusCancelled:
+				siblings = append(siblings, inst.ID)
+			}
+		}
+		if len(instances) < pageSize {
+			break
+		}
+	}
+	for _, id := range siblings {
+		childCtx, release, err := e.claimExecution(ctx, id, false)
+		if err != nil {
+			log.Printf("action %s: replaced candidate kept: %v", id, err)
+			continue
+		}
+		child, err := e.deps.Store.GetActionInstanceIfExists(id)
+		// The status is read again under the lease: a retry may have started
+		// the attempt since it was listed.
+		if err == nil && child != nil && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled) {
+			ec := parseExecutionContext(child, e)
+			// The path alone is not the file: a later attempt can be at the
+			// same path after this promotion replaced it, so the original's
+			// hash must match too.
+			sameOriginal := filepath.Clean(getString(ec.State, "resolved_path")) == original && p.OriginalSHA != "" && getString(ec.State, "original_sha256") == p.OriginalSHA
+			if sameOriginal && getString(ec.State, "candidate_path") != "" && !getBool(ec.State, candidateRemovedKey) {
+				if err := e.candidateWorkerStopped(childCtx, ec); err != nil {
+					e.recordCandidateCleanup(childCtx, child, ec, candidateRetiredReplaced, 0, err)
+				} else {
+					e.retireCandidate(childCtx, child, ec, candidateRetiredReplaced)
+				}
+			}
+		}
+		release()
+	}
+}
+
 // LeftoverCandidate is a candidate file whose owning action is finished and
 // was never promoted. Listing it deletes nothing. WorkerCheck marks an
 // attempt whose worker job might still write: the listing does not ask the
@@ -497,7 +561,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
-			return "", nil
+			return replacedOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
 			attempts, err := e.replacedBatchAttempts(parentID)
@@ -509,8 +573,20 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		if replaced[parentID][inst.ID] {
 			return "a batch settings revision replaced this attempt", nil
 		}
+		return replacedOriginalReason(ec), nil
 	}
 	return "", nil
+}
+
+// replacedOriginalReason names a finished attempt whose original another
+// attempt's promotion replaced and whose candidate cleanup kept the file, so
+// it stays listed instead of being offered for a promotion that cannot pass.
+func replacedOriginalReason(ec *ExecutionContext) string {
+	cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
+	if getString(cleanup, "reason") == candidateRetiredReplaced && getString(cleanup, "outcome") == "kept" {
+		return "another attempt's promotion replaced this attempt's original"
+	}
+	return ""
 }
 
 // replacedBatchAttempts returns the children a batch's attempt history
