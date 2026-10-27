@@ -49,7 +49,7 @@ old file is not covered; only the removal of an orphan the library left on
 disk and the filesystem promotion's removal are.
 
 Conditions, all checked with the file's lstat just before it is opened and
-again when it is opened: the replacement was read in full against its recorded
+again when it is opened: the replacement was verified against its recorded
 digest in this step; a recovery copy made by a full read of the original is
 published and has the recorded size; neither is the original's inode; the
 original is the recorded size and its only link. The intent
