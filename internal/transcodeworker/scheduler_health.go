@@ -45,6 +45,11 @@ func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath str
 			err = w.schedulerSweepHook(name)
 		} else if name == "post_encode" {
 			count, err = w.ResumePostEncode(ctx, selfExe, configPath)
+			// Retained-candidate maintenance rides on this sweep: the health
+			// report knows exactly two sweeps.
+			if rerr := w.SweepRetained(ctx); rerr != nil {
+				err = errors.Join(err, rerr)
+			}
 		} else {
 			count, err = w.ScheduleQueued(ctx, selfExe, configPath)
 		}

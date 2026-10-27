@@ -277,6 +277,11 @@ type Request struct {
 	// LearnSourceDigest): the worker hashes the file while it copies it, and the
 	// size is the only identity it can check the copy against.
 	SourceSizeBytes int64 `json:"source_size_bytes,omitempty"`
+	// PublishPolicy is PublishPolicyOnApproval for a worker that advertises
+	// DeferredPublication and keeps the candidate until it is asked to publish
+	// it. Empty means PublishPolicyOnEncode and is never sent: a worker that
+	// predates the field rejects unknown request fields.
+	PublishPolicy string `json:"publish_policy,omitempty"`
 }
 type Job struct {
 	ID string `json:"id"`

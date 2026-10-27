@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // This file defines the Phase 6B1 operational storage model: the staging and
@@ -29,6 +31,15 @@ const (
 	FinalizationStatePending     FinalizationState = "pending"
 	FinalizationStateFinalizing  FinalizationState = "finalizing"
 	FinalizationStateCompleted   FinalizationState = "completed"
+	// FinalizationStateRetained is an encoded, validated candidate kept on the
+	// worker until its publication is requested. Jobs in this state live in a
+	// hidden directory (see retained.go), so a worker that predates the state
+	// never reads one.
+	FinalizationStateRetained FinalizationState = "retained"
+	// FinalizationStateExpired is the tombstone of a retained candidate that
+	// was not published within the retention period: the file is gone, the
+	// record answers status so the coordinator can tell it from a lost job.
+	FinalizationStateExpired FinalizationState = "expired"
 )
 
 var (
@@ -66,7 +77,8 @@ func ValidateStagingState(raw string) error {
 // finalization state. Blank is legacy/unspecified, not known.
 func IsKnownFinalizationState(raw string) bool {
 	switch FinalizationState(strings.TrimSpace(raw)) {
-	case FinalizationStateNotRequired, FinalizationStatePending, FinalizationStateFinalizing, FinalizationStateCompleted:
+	case FinalizationStateNotRequired, FinalizationStatePending, FinalizationStateFinalizing, FinalizationStateCompleted,
+		FinalizationStateRetained, FinalizationStateExpired:
 		return true
 	default:
 		return false
@@ -80,7 +92,7 @@ func ValidateFinalizationState(raw string) error {
 		return nil
 	}
 	if !IsKnownFinalizationState(raw) {
-		return fmt.Errorf("%w: %q (want not_required|pending|finalizing|completed)", ErrInvalidFinalizationState, raw)
+		return fmt.Errorf("%w: %q (want not_required|pending|finalizing|completed|retained|expired)", ErrInvalidFinalizationState, raw)
 	}
 	return nil
 }
@@ -92,20 +104,47 @@ func PartialPathFor(destination, jobID string) string {
 	return destination + ".partial." + jobID
 }
 
+// IsPostEncodeFinished reports whether encoding has completed and the output
+// has not completed its life yet: it still awaits publication, is being
+// published, or is retained until publication is requested. A dead/missing
+// runner on such a job must never be classified runner_killed, whatever
+// happens to the job next.
+func IsPostEncodeFinished(job *JobRecord) bool {
+	if job == nil || !job.EncodeComplete {
+		return false
+	}
+	switch FinalizationState(strings.TrimSpace(job.FinalizationState)) {
+	case FinalizationStatePending, FinalizationStateFinalizing, FinalizationStateRetained:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsPostEncodeFinalizationPending reports whether encoding has completed and
-// the output still awaits finalization. A dead/missing runner on such a job
-// must be restarted for finalization and must never be classified
-// runner_killed.
+// the output must be published: a dead/missing runner on such a job must be
+// restarted for finalization. A retained candidate is not pending, and neither
+// is an on_approval job in the state it has between its encode checkpoint and
+// the move to its hidden directory: nothing publishes before a publish request
+// moves it to finalizing.
 func IsPostEncodeFinalizationPending(job *JobRecord) bool {
 	if job == nil || !job.EncodeComplete {
 		return false
 	}
 	switch FinalizationState(strings.TrimSpace(job.FinalizationState)) {
-	case FinalizationStatePending, FinalizationStateFinalizing:
+	case FinalizationStateFinalizing:
 		return true
+	case FinalizationStatePending:
+		return !job.deferredPublication()
 	default:
 		return false
 	}
+}
+
+// deferredPublication reports whether the job's candidate is kept on the
+// worker until a publish is requested.
+func (j *JobRecord) deferredPublication() bool {
+	return j != nil && strings.TrimSpace(j.PublishPolicy) == transcode.PublishPolicyOnApproval
 }
 
 // Destination returns the intended semantic destination, falling back to the

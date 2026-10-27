@@ -21,6 +21,20 @@ const (
 	// WorkerErrorNothingToRetry (409) answers a retry-publication request for
 	// a job that is not waiting to publish. It is definitive.
 	WorkerErrorNothingToRetry = "nothing_to_retry"
+	// WorkerErrorHeld (503) answers a publish request while the drain freeze is
+	// on. Nothing changed; repeat it after the freeze is lifted.
+	WorkerErrorHeld = "worker_held"
+	// WorkerErrorNotRetained (409) answers a publish request for a job that is
+	// not a retained candidate (unknown policy, still encoding, released or
+	// expired). It is definitive.
+	WorkerErrorNotRetained = "not_retained"
+	// WorkerErrorCandidateChanged (409) means the retained local file no longer
+	// matches the size and SHA-256 the worker attested. Nothing was published and
+	// the candidate must not be: release it and encode again.
+	WorkerErrorCandidateChanged = "candidate_changed"
+	// WorkerErrorReleaseRefused (409) answers a cancel of a retained job whose
+	// publication has started and may already have changed the share.
+	WorkerErrorReleaseRefused = "release_refused"
 	WorkerErrorInternal       = "internal"
 	WorkerErrorUnavailable    = "unavailable"
 )

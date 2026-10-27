@@ -14,6 +14,9 @@ func (w *Worker) Capabilities(ctx context.Context) (transcode.WorkerCapabilities
 		return caps, err
 	}
 	caps.Podcast = w.podcastCapabilities(ctx)
+	// Advertised only when the operator enabled retention: until then a worker
+	// must look, and fingerprint, exactly as it did before the capability.
+	caps.DeferredPublication = w.cfg.DeferredPublication
 	caps.CapabilityFingerprint, err = transcode.ComputeCapabilityFingerprint(caps)
 	return caps, err
 }
