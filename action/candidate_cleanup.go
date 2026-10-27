@@ -78,7 +78,7 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 	if err != nil {
 		return fmt.Errorf("promotion state could not be read: %v", err)
 	}
-	if promotion != nil {
+	if promotion != nil && !(candidateIsOnWorker(ec.State) && promotionEndedForGood(promotion)) {
 		return fmt.Errorf("replacement %s references this candidate", promotion.ID)
 	}
 	parentID := getString(ec.Inputs, "parent_action_id")
@@ -611,6 +611,9 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
+			if reason, err := e.endedPromotionReason(inst, ec); reason != "" || err != nil {
+				return reason, err
+			}
 			return e.unpromotableOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
@@ -624,6 +627,38 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 			return "a batch settings revision replaced this attempt", nil
 		}
 		return e.unpromotableOriginalReason(ec), nil
+	}
+	return "", nil
+}
+
+// promotionEndedForGood reports a promotion that will never use its candidate:
+// it was cancelled, or it failed for a reason nothing retries (the owner
+// rejected it, or the candidate it needs is gone).
+func promotionEndedForGood(promotion *store.ActionInstance) bool {
+	switch promotion.Status {
+	case StatusCancelled:
+		return true
+	case StatusFailed:
+		var state map[string]any
+		return json.Unmarshal([]byte(promotion.StateJSON), &state) == nil && getBool(state, promotionReleaseRetainedKey)
+	}
+	return false
+}
+
+// endedPromotionReason names a retained candidate that a promotion left on its
+// worker: the release at the end of that promotion did not go through (the
+// worker was unreachable or busy copying, or the attempt was busy), and nothing
+// else would offer it to be discarded.
+func (e *Engine) endedPromotionReason(inst *store.ActionInstance, ec *ExecutionContext) (string, error) {
+	if !candidateIsOnWorker(ec.State) || getBool(ec.State, candidateRemovedKey) {
+		return "", nil
+	}
+	promotion, err := e.deps.Store.FindActionByIdempotencyKeySuffix("promote_transcode_candidate", ":"+inst.ID)
+	if err != nil {
+		return "", fmt.Errorf("promotion state could not be read: %v", err)
+	}
+	if promotion != nil && promotionEndedForGood(promotion) {
+		return "its replacement ended without using it and the worker still holds the candidate", nil
 	}
 	return "", nil
 }

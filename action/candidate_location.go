@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -46,7 +47,6 @@ const (
 
 // More reasons a candidate is retired.
 const (
-	candidateRetiredFailed           = "failed"
 	candidateRetiredSkipped          = "skipped"
 	candidateRetiredPromotionRefused = "promotion_refused"
 	candidateRetiredExpired          = "expired"
@@ -54,9 +54,26 @@ const (
 	errRetainedCandidateGone         = "the worker no longer holds this candidate (its retention ended or it was released); encode the file again"
 )
 
-// retainedUploadPoll is how often an upload looks at the worker; a variable so
-// tests can shorten it.
-var retainedUploadPoll = 2 * time.Second
+// retainedLeaseWait is how long a release or an upload waits for the lease of
+// the attempt whose candidate it handles; a variable so tests can shorten it.
+var retainedLeaseWait = 10 * time.Second
+
+// claimExecutionWithin is claimExecution that waits up to d for a busy lease.
+// The lease itself is not bound to d.
+func (e *Engine) claimExecutionWithin(ctx context.Context, id string, d time.Duration) (context.Context, func(), error) {
+	deadline := time.Now().Add(d)
+	for {
+		lease, release, err := e.claimExecution(ctx, id, false)
+		if !errors.Is(err, errActionBusy) || !time.Now().Before(deadline) {
+			return lease, release, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
 
 // candidateIsOnWorker reports an attempt whose candidate is still on its
 // worker.
@@ -217,16 +234,21 @@ func (e *Engine) removeRetainedCandidate(ctx context.Context, inst *store.Action
 	}
 	switch outcome {
 	case transcode.ReleaseDropped:
-		removal.Worker = candidateWorkerReleased
-		return removal, nil
+		// A copy to the share that was asked for and failed can leave the
+		// attempt's own files there. They are removed through the same guards,
+		// and a clean share costs two stats.
+		swept, err := e.removeOwnCandidateFromShare(ctx, inst, ec, pruneDir)
+		swept.Worker = candidateWorkerReleased
+		return swept, err
 	case transcode.ReleasePublished:
 		// The worker finished a publication, so the file is on the share now.
+		// Whoever released it has no use for it, and the removal runs while the
+		// attempt still says "worker": a promotion that ended is not a reference
+		// to keep it for, an active one is.
+		removal, err := e.removeOwnCandidateFromShare(ctx, inst, ec, pruneDir)
 		ec.State[candidateLocationKey] = candidateOnShare
 		ec.Outputs[candidateLocationKey] = candidateOnShare
-		if byPromotion {
-			return removal, fmt.Errorf("the worker had already copied the candidate to the share; it stays there")
-		}
-		return e.removeOwnCandidateFromShare(ctx, inst, ec, pruneDir)
+		return removal, err
 	}
 	return removal, fmt.Errorf("the worker is copying the candidate to the share; release it again once that finishes")
 }
@@ -259,28 +281,41 @@ func (e *Engine) planRetainedCandidate(ctx context.Context, source *ExecutionCon
 		return false, &retainedGoneError{errRetainedCandidateGone}
 	case st.Status == transcode.StatusCompleted:
 		return false, nil
-	case st.Status == transcode.StatusRunning && (st.Retained || st.FinalizationState == "finalizing" || st.FinalizationState == "pending"):
+	case st.Status == transcode.StatusRunning && (st.Retained || st.FinalizationState == "finalizing"):
 		p.CandidateRetained = true
 		p.CandidateSHA, p.CandidateBytes = sha, size
 		return true, nil
+	case st.Status == transcode.StatusFailed || st.RecoveryRequired:
+		// A copy that was asked for ended badly. That says nothing about
+		// whether the candidate can still be had, and the worker may have left
+		// bytes on the share: the owner decides, so nothing is released here.
+		return false, fmt.Errorf("the worker reports the candidate's job as %q (%s); try the promotion again, or discard the candidate and encode the file again", st.Status, strings.TrimSpace(st.Error))
 	}
 	return false, &retainedGoneError{fmt.Sprintf("the worker reports the candidate's job as %q, so it cannot be uploaded; encode the file again", st.Status)}
 }
 
 // uploadRetainedCandidate has the worker copy the retained candidate to the
-// share and waits until it is there. It runs inside preserve_original, before
-// anything reads or moves the original, and it is idempotent: after a restart
-// the same request answers the same job.
+// share. It runs inside preserve_original, before anything reads or moves the
+// original, and it is idempotent: every run asks for the publication again and
+// the worker answers the same job. A copy that is still going is a wait, not a
+// loop: the scheduler asks again, and neither this executor nor the promotion's
+// lease is held for as long as the copy sits behind encodes on the worker.
 //
-// The promotion's progress says "uploading" for the whole wait, which is what
-// keeps a worker deploy from starting while the copy runs (retained candidates
-// that are not being uploaded never block one).
+// The wait keeps the promotion's progress at "uploading", which is what keeps a
+// worker deploy from starting while the copy runs (retained candidates that
+// are not being uploaded never block one).
 func (e *Engine) uploadRetainedCandidate(ctx context.Context, ec *ExecutionContext, p *promotionState) (StepResult, bool, error) {
 	source, err := e.deps.Store.GetActionInstance(p.SourceActionID)
 	if err != nil || source == nil {
 		return promoteFailedResult(fmt.Errorf("the transcode action could not be read: %v", err)), true, nil
 	}
 	sec := parseExecutionContext(source, e)
+	if !candidateIsOnWorker(sec.State) {
+		// An earlier run saw the copy finish and recorded it on the attempt,
+		// then stopped before recording it here. The worker may have forgotten
+		// the job since, so it is not asked again.
+		return StepResult{}, false, nil
+	}
 	jobID := getString(sec.State, "job_id")
 	worker := e.resolveWorker(assignedWorker(sec.State))
 	h, ok := retainedHandler(e.actionWorker(sec))
@@ -289,52 +324,55 @@ func (e *Engine) uploadRetainedCandidate(ctx context.Context, ec *ExecutionConte
 	}
 	ec.State["upload_worker"] = worker
 	ec.State["upload_job_id"] = jobID
-	set := func() error {
-		ec.State["work_progress"] = map[string]any{"phase": "uploading", "total_bytes": p.CandidateBytes, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
-		return e.persistExecutionState(ctx, ec)
-	}
-	if err := set(); err != nil {
+	ec.State["work_progress"] = uploadingProgress(p)
+	if err := e.persistExecutionState(ctx, ec); err != nil {
 		return promoteFailedResult(err), true, nil
 	}
 	st, err := h.PublishRetained(ctx, jobID)
-	for {
-		if err != nil {
-			return e.uploadFailure(err), true, nil
-		}
-		switch {
-		case st.Status == transcode.StatusCompleted:
-			return StepResult{}, false, e.finishRetainedUpload(ctx, ec, p, source)
-		case st.Status == transcode.StatusExpired:
-			return promoteFailedFinal(errors.New(errRetainedCandidateGone)), true, nil
-		case st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled:
-			msg := st.Error
-			if msg == "" {
-				msg = "the worker ended the job"
+	if err != nil {
+		return e.uploadFailure(err, p), true, nil
+	}
+	switch {
+	case st.Status == transcode.StatusCompleted:
+		if err := e.finishRetainedUpload(ctx, ec, p, source); err != nil {
+			if errors.Is(err, errActionBusy) {
+				return uploadingWait(p, "The transcode action is busy; the upload is recorded when it is free"), true, nil
 			}
-			return promoteFailedResult(fmt.Errorf("the worker could not copy the candidate to the share (%s); try the promotion again, or encode the file again", msg)), true, nil
-		case st.RecoveryRequired:
-			return promoteFailedResult(fmt.Errorf("the worker could not copy the candidate to the share and needs intervention: %s", st.Error)), true, nil
-		}
-		select {
-		case <-ctx.Done():
-			return StepResult{}, true, ctx.Err()
-		case <-time.After(retainedUploadPoll):
-		}
-		if err := set(); err != nil {
 			return promoteFailedResult(err), true, nil
 		}
-		st, err = e.actionWorker(sec).Status(ctx, jobID)
-		if err != nil && isRetryableWorkerPollError(err) {
-			err = nil // keep waiting; the copy is the worker's
-			st = transcode.JobStatus{Status: transcode.StatusRunning}
+		return StepResult{}, false, nil
+	case st.Status == transcode.StatusExpired:
+		return promoteFailedFinal(errors.New(errRetainedCandidateGone)), true, nil
+	case st.Status == transcode.StatusFailed || st.Status == transcode.StatusCancelled:
+		msg := st.Error
+		if msg == "" {
+			msg = "the worker ended the job"
 		}
+		return promoteFailedResult(fmt.Errorf("the worker could not copy the candidate to the share (%s); try the promotion again, or encode the file again", msg)), true, nil
+	case st.RecoveryRequired:
+		return promoteFailedResult(fmt.Errorf("the worker could not copy the candidate to the share and needs intervention: %s", st.Error)), true, nil
 	}
+	return uploadingWait(p, "The worker is copying the candidate to the share; the replacement continues when it is there"), true, nil
+}
+
+// uploadingProgress is the promotion's progress while its candidate is copied.
+func uploadingProgress(p *promotionState) map[string]any {
+	return map[string]any{"phase": "uploading", "total_bytes": p.CandidateBytes, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+}
+
+// uploadingWait waits for a copy that may be under way. Its result carries the
+// progress marker again: the step drops its own progress when it returns, and
+// a deploy must keep seeing the upload for as long as the wait lasts.
+func uploadingWait(p *promotionState, reason string) StepResult {
+	res := promoteWaitResult(reason)
+	res.Outputs = map[string]any{"work_progress": uploadingProgress(p)}
+	return res
 }
 
 // uploadFailure maps a worker's answer to a publish request to the promotion's
 // result. Nothing here releases the candidate unless the worker says it is no
 // longer what was attested.
-func (e *Engine) uploadFailure(err error) StepResult {
+func (e *Engine) uploadFailure(err error, p *promotionState) StepResult {
 	switch {
 	case errors.Is(err, transcode.ErrPublishHeld):
 		return promoteWaitResult("The worker is draining and holds publication; the replacement continues when it accepts work again")
@@ -345,7 +383,8 @@ func (e *Engine) uploadFailure(err error) StepResult {
 	case errors.Is(err, transcode.ErrRetainedCandidateChanged):
 		return promoteFailedFinal(errors.New("the retained candidate no longer matches what the worker attested; it was not published. Encode the file again"))
 	case httpclient.IsTransportUncertain(err), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return promoteWaitResult("The worker holding the candidate cannot be reached; the upload is retried automatically")
+		// The request may have arrived and the copy may be under way.
+		return uploadingWait(p, "The worker holding the candidate cannot be reached; the upload is retried automatically")
 	}
 	return promoteFailedResult(fmt.Errorf("the worker refused to upload the candidate: %v", err))
 }
@@ -355,9 +394,7 @@ func (e *Engine) uploadFailure(err error) StepResult {
 // touched, so a failure from here on is handled as the failure of a candidate
 // on the share.
 func (e *Engine) finishRetainedUpload(ctx context.Context, ec *ExecutionContext, p *promotionState, source *store.ActionInstance) error {
-	claimCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	lease, release, err := e.claimExecution(claimCtx, source.ID, true)
+	lease, release, err := e.claimExecutionWithin(ctx, source.ID, retainedLeaseWait)
 	if err != nil {
 		return fmt.Errorf("the transcode action could not be updated after the upload: %w", err)
 	}
@@ -410,7 +447,7 @@ func (e *Engine) releaseRetainedForPromotion(ctx context.Context, ec *ExecutionC
 	if sourceID == "" {
 		return
 	}
-	lease, release, err := e.claimExecution(ctx, sourceID, false)
+	lease, release, err := e.claimExecutionWithin(ctx, sourceID, retainedLeaseWait)
 	if err != nil {
 		log.Printf("action %s: retained candidate of %s kept: %v", ec.InstanceID, sourceID, err)
 		return
@@ -430,7 +467,7 @@ func (e *Engine) releaseRetainedForPromotion(ctx context.Context, ec *ExecutionC
 // releaseRetainedChild releases the retained candidate of a finished batch
 // child. Engine.cancel refuses a completed action, so it cannot reach one.
 func (e *Engine) releaseRetainedChild(ctx context.Context, id, why string) {
-	lease, release, err := e.claimExecution(ctx, id, false)
+	lease, release, err := e.claimExecutionWithin(ctx, id, retainedLeaseWait)
 	if err != nil {
 		log.Printf("action %s: retained candidate kept: %v", id, err)
 		return

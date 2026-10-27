@@ -398,27 +398,47 @@ attested size and does not stat the share. The detailed ffprobe validation moves
 after the upload (below), because it needs the file.
 
 **The release hook.** `retireCandidate` is the single hook; `removeOwnCandidate`
-branches on location and asks the worker to release. It is called from: a failed
-action (the engine's failure branch, which covers failed validate and failed
-accept), the reject after the size wait, an attempt that ends skipped by a size or
-saving guard, a rejected or failed promotion plan, batch revision, batch
-cancellation (finished children go through `releaseRetainedChild`), sibling
-replacement and leftover discard. A worker that cannot be reached, refuses
+branches on location and asks the worker to release. It is called from: the reject
+after the size wait, an attempt that ends skipped by a size or saving guard, a
+rejected, cancelled or failed promotion (`releaseRetainedForPromotion`), batch
+revision, batch cancellation (finished children go through `releaseRetainedChild`),
+sibling replacement and leftover discard. A worker that cannot be reached, refuses
 (a publication is running) or cannot release leaves the candidate recorded as
 kept and listed. A worker that already published it makes the candidate a share
-file again, removed by the ordinary cleanup unless a promotion released it (that
-file is the promotion's).
+file again, which is removed.
+
+**A failure alone releases nothing.** An attempt that fails (a share that dropped
+out during `accept_result`, a validation that can be repeated) keeps its retained
+candidate, as a failed `on_encode` attempt keeps its file: Retry resumes it on that
+candidate. It is listed as a leftover from the worker's attestation, Discard
+releases it, and the worker drops it at the end of its retention otherwise.
+Releasing on failure made Retry unable to recover hours of encoding.
+
+**Releases that do not go through.** The release of a promotion's candidate waits
+up to ten seconds for the attempt's lease. A promotion that ended for good
+(cancelled, or failed with the release flag: rejected, or the candidate is gone)
+while its worker could not be reached or was copying leaves the candidate on the
+worker: the attempt lists it with the reason, and Discard is allowed although the
+promotion still references it. Discard releases the candidate and removes anything
+a failed or finished copy left on the share, so a copy that landed after a
+cancellation does not stay as an unlisted file.
 
 **Promotion.** The plan asks the worker whether the candidate can still be
 uploaded and carries its attestation instead of hashing a file. `preserve_original`
-first asks the worker to publish (`POST /v1/jobs/{id}/publish`) and waits for the
-copy, with the original untouched; then it writes `candidate_location: share` on
-the source attempt, hashes the file that arrived against the attestation, runs the
-detailed validation, and only then continues as for a candidate that was always on
-the share. A worker that is draining or unreachable makes the promotion wait; a
-candidate the worker no longer holds (expired, released, changed) is a final
-failure that releases what is left; any other failure is transient and keeps the
-candidate on the worker.
+first asks the worker to publish (`POST /v1/jobs/{id}/publish`), with the original
+untouched; while the copy is going the step returns a wait and the scheduler asks
+again (the request is idempotent), so neither an executor nor the promotion's lease
+is held for as long as the copy sits behind encodes. The wait keeps
+`work_progress.phase = "uploading"`, so a deploy keeps seeing the upload. When the
+copy is done it writes `candidate_location: share` on the source attempt (a source
+that stays busy is another wait), hashes the file that arrived against the
+attestation, runs the detailed validation, and only then continues as for a
+candidate that was always on the share. A run that finds the location already
+`share` does not ask the worker again. A worker that is draining or unreachable
+makes the promotion wait; a candidate the worker no longer holds (expired,
+released, changed, unknown) is a final failure that releases what is left. A job
+the worker reports as failed after a copy was requested is not a verdict: it is a
+transient failure, the candidate stays, and the owner retries or discards it.
 
 **Expiry is lazy.** A retained attempt is a completed action, so nothing polls it.
 The worker's `expired` answer is found when `wait_transcode` or the reconcile path

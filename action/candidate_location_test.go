@@ -190,7 +190,7 @@ func TestReleaseOutcomes(t *testing.T) {
 			} else {
 				noShareRemoval(t, e)
 			}
-			inst := retireUnderLease(t, e, "attempt", candidateRetiredFailed)
+			inst := retireUnderLease(t, e, "attempt", candidateRetiredRejected)
 			state := parseExecutionContext(inst, e).State
 			cleanup := candidateCleanupOf(t, e, inst)
 			if got := getBool(state, candidateRemovedKey); got != tc.removed {
@@ -331,6 +331,41 @@ func TestDiscardingAWorkerLeftoverReleasesItAndAnUnreachableWorkerKeepsIt(t *tes
 	}
 	if page, _ := e.ListLeftoverCandidates(context.Background(), 0); len(page.Items) != 0 {
 		t.Fatalf("a released candidate must not be listed: %+v", page)
+	}
+}
+
+// A copy to the share that was asked for and failed can leave the attempt's own
+// files there; releasing the candidate removes them with it.
+func TestReleasingARetainedCandidateRemovesWhatAFailedCopyLeftOnTheShare(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	w := newRetainedExecutor()
+	e := retainedEngine(t, st, root, w, transcode.PublishPolicyOnApproval)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	candidate := seedRetainedAttempt(t, st, "attempt", StatusFailed, original, nil, nil)
+	markRejected(t, st, "attempt")
+	_, partial, err := ownCandidateFiles(parseExecutionContext(mustInstance(t, st, "attempt"), e).State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCandidateFile(t, partial, strings.Repeat("p", 120))
+
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.releases(); len(got) != 1 {
+		t.Fatalf("releases: %v", got)
+	}
+	if _, err := os.Lstat(partial); !os.IsNotExist(err) {
+		t.Fatalf("the failed copy's partial stayed on the share: %v", err)
+	}
+	if _, err := os.Lstat(candidate); !os.IsNotExist(err) {
+		t.Fatalf("candidate: %v", err)
+	}
+	cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "attempt"))
+	if cleanup["outcome"] != "removed" || cleanup["released_from_worker"] != true {
+		t.Fatalf("cleanup: %v", cleanup)
 	}
 }
 
@@ -476,7 +511,10 @@ func TestCancellingAReviewedRetainedCandidateReleasesIt(t *testing.T) {
 	}
 }
 
-func TestAFailedAttemptReleasesItsRetainedCandidate(t *testing.T) {
+// A failure is not a decision: the error may be a passing one, and Retry
+// resumes the attempt on its candidate, so the worker keeps it. Until someone
+// discards it the attempt lists it as a leftover.
+func TestAFailedAttemptKeepsItsRetainedCandidateUntilItIsDiscarded(t *testing.T) {
 	root := candidateRoot(t)
 	st := setupTestStore(t)
 	w := newRetainedExecutor()
@@ -492,18 +530,39 @@ func TestAFailedAttemptReleasesItsRetainedCandidate(t *testing.T) {
 	if err := st.UpdateActionInstance(*inst); err != nil {
 		t.Fatal(err)
 	}
-	res, err := e.Retry(context.Background(), "attempt")
+	for i := 0; i < 2; i++ {
+		res, err := e.Retry(context.Background(), "attempt")
+		if err != nil {
+			t.Fatalf("retry %d: %v", i, err)
+		}
+		if res.Status != StatusFailed || !strings.Contains(res.Error, "resolved plan missing") {
+			t.Fatalf("expected validation to fail: %s %s", res.Status, res.Error)
+		}
+		if got := w.releases(); len(got) != 0 {
+			t.Fatalf("a failed attempt released its retained candidate: %v", got)
+		}
+	}
+	state := parseExecutionContext(mustInstance(t, st, "attempt"), e).State
+	if getBool(state, candidateRemovedKey) || getString(state, candidateLocationKey) != candidateOnWorker {
+		t.Fatalf("the failed attempt lost its candidate: %v", state)
+	}
+	page, err := e.LeftoverCandidatesOf(context.Background(), []string{"attempt"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Status != StatusFailed || !strings.Contains(res.Error, "resolved plan missing") {
-		t.Fatalf("expected validation to fail: %s %s", res.Status, res.Error)
+	if len(page.Items) != 1 || page.Items[0].Location != candidateOnWorker || page.Items[0].Bytes != 300 {
+		t.Fatalf("the kept candidate must be listed from its attestation: %+v", page.Items)
+	}
+	noShareRemoval(t, e)
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "attempt"); err != nil {
+		t.Fatal(err)
 	}
 	if got := w.releases(); len(got) != 1 || got[0] != "job-attempt" {
-		t.Fatalf("a failed attempt kept its retained candidate: %v", got)
+		t.Fatalf("discard must release the candidate on its worker: %v", got)
 	}
-	if cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "attempt")); getString(cleanup, "reason") != candidateRetiredFailed || cleanup["outcome"] != "removed" {
-		t.Fatalf("cleanup: %v", cleanup)
+	// Once released, Retry cannot resume it: the candidate is gone.
+	if _, err := e.Retry(context.Background(), "attempt"); err == nil || !strings.Contains(err.Error(), "removed") {
+		t.Fatalf("retry of a released attempt: %v", err)
 	}
 }
 
@@ -871,35 +930,60 @@ func TestPromotionUploadsARetainedCandidateOnlyOnceApproved(t *testing.T) {
 	}
 }
 
+// A copy that is still going is a wait the scheduler comes back to, not a loop
+// inside the step: the promotion's progress keeps saying "uploading" through it
+// (a deploy must keep waiting), the publication is asked for again each time
+// and the original is left alone.
 func TestPromotionWaitsForAnUploadTheWorkerIsStillDoing(t *testing.T) {
-	old := retainedUploadPoll
-	retainedUploadPoll = time.Millisecond
-	t.Cleanup(func() { retainedUploadPoll = old })
 	rp := newRetainedPromotion(t)
+	asks := 0
 	rp.w.publish = func(_ context.Context, jobID string) (transcode.JobStatus, error) {
-		return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning, FinalizationState: "finalizing"}, nil
-	}
-	polls := 0
-	rp.w.statusFunc = func(_ context.Context, jobID string) (transcode.JobStatus, error) {
-		if len(rp.w.published) == 0 {
-			return rp.workerStatus(), nil
-		}
-		polls++
-		switch polls {
+		asks++
+		switch asks {
 		case 1:
 			return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning, FinalizationState: "finalizing"}, nil
 		case 2:
-			return transcode.JobStatus{}, &httpclient.UncertainError{Op: "status", JobID: jobID, Err: errors.New("connection refused")}
+			return transcode.JobStatus{}, &httpclient.UncertainError{Op: "publish", JobID: jobID, Err: errors.New("connection refused")}
 		}
 		writeCandidateFile(t, rp.candidate, string(rp.content))
+		rp.published = true
 		return transcode.JobStatus{ID: jobID, Status: transcode.StatusCompleted}, nil
 	}
 	r := runLocalPromotion(t, rp.promotionHarness)
 	r = rp.resume(r.ID, "approve")
-	if r.Status != StatusCompleted || polls < 3 {
-		t.Fatalf("promotion: %+v polls=%d", r, polls)
+	for wait := 1; wait <= 2; wait++ {
+		if r.Status != StatusWaitingExternal || asks != wait {
+			t.Fatalf("wait %d: %s asks=%d %s", wait, r.Status, asks, r.Error)
+		}
+		inst := mustInstance(t, rp.st, r.ID)
+		state := parseExecutionContext(inst, rp.engine).State
+		if progress, _ := state["work_progress"].(map[string]any); getString(progress, "phase") != "uploading" || getString(state, "upload_worker") == "" {
+			t.Fatalf("a waiting upload must still read as an upload: %v", state)
+		}
+		rows, err := rp.st.ListDrainActions()
+		if err != nil {
+			t.Fatal(err)
+		}
+		uploading := false
+		for _, row := range rows {
+			uploading = uploading || (row.ID == r.ID && row.Uploading)
+		}
+		if !uploading {
+			t.Fatalf("wait %d: the drain does not see the upload: %+v", wait, rows)
+		}
+		if _, err := os.Stat(rp.original); err != nil {
+			t.Fatalf("the original was touched while the copy ran: %v", err)
+		}
+		var rerr error
+		r, rerr = rp.engine.Resume(context.Background(), r.ID, "", nil)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
 	}
-	if len(rp.w.published) != 1 {
+	if r.Status != StatusCompleted || asks != 3 {
+		t.Fatalf("promotion: %+v asks=%d", r, asks)
+	}
+	if len(rp.w.published) != 3 {
 		t.Fatalf("publish requested %d times", len(rp.w.published))
 	}
 }
@@ -999,7 +1083,22 @@ func TestPromotionPlanReleasesACandidateThatCanNeverBeUploaded(t *testing.T) {
 		{name: "retention ended", status: func() transcode.JobStatus { return transcode.JobStatus{Status: transcode.StatusExpired} }},
 		{name: "worker forgot the job", err: &httpclient.HTTPError{StatusCode: 404, Code: transcode.WorkerErrorNotFound}},
 		{name: "job cancelled", status: func() transcode.JobStatus { return transcode.JobStatus{Status: transcode.StatusCancelled} }},
+		// The worker refuses to publish a job that has not finished encoding, so
+		// a plan that took it for uploadable would promise what it cannot do.
+		{name: "not retained yet", status: func() transcode.JobStatus {
+			return transcode.JobStatus{Status: transcode.StatusRunning, FinalizationState: "pending"}
+		}},
 		{name: "worker unreachable", err: &httpclient.UncertainError{Op: "status", JobID: "job-source", Err: errors.New("connection refused")}, kept: true},
+		// A copy that was asked for and ended badly is not a verdict on the
+		// candidate: it may have left bytes on the share, so the owner decides.
+		{name: "an earlier copy failed", status: func() transcode.JobStatus {
+			return transcode.JobStatus{Status: transcode.StatusFailed, Error: "copy retries exhausted"}
+		}, kept: true},
+		{name: "an earlier copy needs intervention", status: func() transcode.JobStatus {
+			st := transcode.JobStatus{Status: transcode.StatusRunning, Error: "share unreachable"}
+			st.RecoveryRequired = true
+			return st
+		}, kept: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rp := newRetainedPromotion(t)
@@ -1084,5 +1183,220 @@ func TestAWorkerSetOnlyTakesANormalizedPublishPolicy(t *testing.T) {
 		if (err == nil) != ok {
 			t.Errorf("policy %q: %v", policy, err)
 		}
+	}
+}
+
+// --- review round: releases that do not go through ---------------------------
+
+func holdLease(t *testing.T, e *Engine, id string) func() {
+	t.Helper()
+	_, release, err := e.claimExecution(context.Background(), id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
+// A source that is busy for a moment must not keep its candidate on the worker.
+func TestAReleaseWaitsBrieflyForABusyAttempt(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	w := newRetainedExecutor()
+	e := retainedEngine(t, st, root, w, transcode.PublishPolicyOnApproval)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	seedRetainedAttempt(t, st, "attempt", StatusCompleted, original, nil, nil)
+	release := holdLease(t, e, "attempt")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		release()
+	}()
+	e.releaseRetainedChild(context.Background(), "attempt", candidateRetiredCancelled)
+	if got := w.releases(); len(got) != 1 {
+		t.Fatalf("a briefly busy attempt kept its candidate: %v", got)
+	}
+	if !getBool(parseExecutionContext(mustInstance(t, st, "attempt"), e).State, candidateRemovedKey) {
+		t.Fatal("the release was not recorded")
+	}
+}
+
+// Cancelling a promotion ends it for good: its attempt's candidate goes too.
+func TestCancellingAPromotionReleasesTheRetainedCandidate(t *testing.T) {
+	rp := newRetainedPromotion(t)
+	r := runLocalPromotion(t, rp.promotionHarness)
+	if r.Status != StatusWaitingDecision {
+		t.Fatalf("plan: %+v", r)
+	}
+	if _, err := rp.engine.Cancel(context.Background(), r.ID, "not wanted"); err != nil {
+		t.Fatal(err)
+	}
+	if got := rp.w.releases(); len(got) != 1 || got[0] != "job-source" {
+		t.Fatalf("a cancelled promotion left the candidate on the worker: %v", got)
+	}
+	if !getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatal("the release was not recorded")
+	}
+	if len(rp.w.published) != 0 {
+		t.Fatal("a cancelled promotion uploaded")
+	}
+}
+
+// A promotion cancelled while the worker copies cannot drop the candidate. The
+// copy lands on the share anyway: the attempt lists it, and discarding it
+// removes the file.
+func TestACandidateTheWorkerWasCopyingWhenItsPromotionWasCancelledCanBeDiscarded(t *testing.T) {
+	rp := newRetainedPromotion(t)
+	rp.w.publish = func(_ context.Context, jobID string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning, FinalizationState: "finalizing"}, nil
+	}
+	rp.w.release = func(context.Context, string) (transcode.ReleaseOutcome, error) { return transcode.ReleaseRefused, nil }
+	r := runLocalPromotion(t, rp.promotionHarness)
+	r = rp.resume(r.ID, "approve")
+	if r.Status != StatusWaitingExternal {
+		t.Fatalf("upload: %+v", r)
+	}
+	if _, err := rp.engine.Cancel(context.Background(), r.ID, "not wanted"); err != nil {
+		t.Fatal(err)
+	}
+	if candidateCleanupOf(t, rp.engine, mustInstance(t, rp.st, "source-transcode"))["outcome"] != "kept" || getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatalf("a copy under way cannot be dropped: %v", rp.sourceState())
+	}
+	page, err := rp.engine.LeftoverCandidatesOf(context.Background(), []string{"source-transcode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].Location != candidateOnWorker {
+		t.Fatalf("the candidate must stay listed: %+v", page.Items)
+	}
+
+	// The copy finishes: the file is on the share and the worker says so.
+	writeCandidateFile(t, rp.candidate, string(rp.content))
+	rp.w.release = func(context.Context, string) (transcode.ReleaseOutcome, error) {
+		return transcode.ReleasePublished, nil
+	}
+	if _, err := rp.engine.DiscardLeftoverCandidate(context.Background(), "source-transcode"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(rp.candidate); !os.IsNotExist(err) {
+		t.Fatalf("the copy of a cancelled promotion stayed on the share: %v", err)
+	}
+	if got := getString(rp.sourceState(), candidateLocationKey); got != candidateOnShare {
+		t.Fatalf("location: %q", got)
+	}
+	if _, err := os.Stat(rp.original); err != nil {
+		t.Fatalf("the original was touched: %v", err)
+	}
+}
+
+// A promotion that ended for good while its worker could not be reached leaves
+// a candidate nothing would offer: it is listed, and discarding it is allowed
+// although a promotion references it.
+func TestACandidateLeftByAnEndedPromotionIsListedAndDiscardable(t *testing.T) {
+	rp := newRetainedPromotion(t)
+	rp.w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{Status: transcode.StatusExpired}, nil
+	}
+	reachable := false
+	rp.w.release = func(context.Context, string) (transcode.ReleaseOutcome, error) {
+		if !reachable {
+			return "", &httpclient.UncertainError{Op: "release", JobID: "job-source", Err: errors.New("connection refused")}
+		}
+		return transcode.ReleaseDropped, nil
+	}
+	if r := runLocalPromotion(t, rp.promotionHarness); r.Status != StatusFailed {
+		t.Fatalf("plan: %+v", r)
+	}
+	if getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatal("an unreachable worker released the candidate")
+	}
+	page, err := rp.engine.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ActionID != "source-transcode" || page.Items[0].Location != candidateOnWorker {
+		t.Fatalf("the candidate is not offered: %+v", page.Items)
+	}
+	reachable = true
+	if _, err := rp.engine.DiscardLeftoverCandidate(context.Background(), "source-transcode"); err != nil {
+		t.Fatal(err)
+	}
+	if !getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatal("the discard was not recorded")
+	}
+	if page, _ := rp.engine.ListLeftoverCandidates(context.Background(), 0); len(page.Items) != 0 {
+		t.Fatalf("a released candidate must not be listed: %+v", page.Items)
+	}
+}
+
+// A promotion that is still alive keeps its candidate out of reach of Discard.
+func TestAPendingPromotionStillProtectsItsRetainedCandidate(t *testing.T) {
+	rp := newRetainedPromotion(t)
+	if r := runLocalPromotion(t, rp.promotionHarness); r.Status != StatusWaitingDecision {
+		t.Fatalf("plan: %+v", r)
+	}
+	if page, _ := rp.engine.ListLeftoverCandidates(context.Background(), 0); len(page.Items) != 0 {
+		t.Fatalf("a candidate under review is not a leftover: %+v", page.Items)
+	}
+	if _, err := rp.engine.DiscardLeftoverCandidate(context.Background(), "source-transcode"); err == nil {
+		t.Fatal("discarded a candidate a pending promotion references")
+	}
+	if len(rp.w.releases()) != 0 {
+		t.Fatal("released")
+	}
+}
+
+// --- review round: the upload ------------------------------------------------
+
+// A server that stopped after the file arrived but before the promotion
+// recorded it must not ask a worker that may have forgotten the job.
+func TestAnUploadThatAlreadyArrivedIsNotRequestedAgain(t *testing.T) {
+	rp := newRetainedPromotion(t)
+	r := runLocalPromotion(t, rp.promotionHarness)
+	if r.Status != StatusWaitingDecision {
+		t.Fatalf("plan: %+v", r)
+	}
+	writeCandidateFile(t, rp.candidate, string(rp.content))
+	inst := mustInstance(t, rp.st, "source-transcode")
+	ec := parseExecutionContext(inst, rp.engine)
+	ec.State[candidateLocationKey] = candidateOnShare
+	inst.StateJSON = toJSON(ec.State)
+	if err := rp.st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	rp.w.publish = func(context.Context, string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404, Code: transcode.WorkerErrorNotFound}
+	}
+	r = rp.resume(r.ID, "approve")
+	if r.Status != StatusCompleted {
+		t.Fatalf("promotion: %+v", r)
+	}
+	if len(rp.w.published) != 0 {
+		t.Fatalf("a file that is on the share was asked for again: %v", rp.w.published)
+	}
+}
+
+// A source that stays busy is a wait for the upload, not a failure of it.
+func TestAnUploadWaitsForABusyAttemptInsteadOfFailing(t *testing.T) {
+	old := retainedLeaseWait
+	retainedLeaseWait = 50 * time.Millisecond
+	t.Cleanup(func() { retainedLeaseWait = old })
+	rp := newRetainedPromotion(t)
+	r := runLocalPromotion(t, rp.promotionHarness)
+	release := holdLease(t, rp.engine, "source-transcode")
+	r = rp.resume(r.ID, "approve")
+	if r.Status != StatusWaitingExternal {
+		release()
+		t.Fatalf("a busy attempt failed the promotion: %+v", r)
+	}
+	if _, err := os.Stat(rp.original); err != nil {
+		t.Fatalf("the original was touched: %v", err)
+	}
+	release()
+	r, err := rp.engine.Resume(context.Background(), r.ID, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusCompleted {
+		t.Fatalf("promotion: %+v", r)
 	}
 }
