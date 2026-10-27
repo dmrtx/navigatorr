@@ -88,19 +88,20 @@ func TestFolderSizesWaitInTurnAndTheNewestAskRunsFirst(t *testing.T) {
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	// The user comes back to c: it is the folder on screen now.
-	ask("c")
+	// The user comes back to d: it is the folder on screen now. First come, first
+	// served would pick c, and no refresh on a repeated ask would pick e.
+	ask("d")
 
 	close(meter.gates[paths["a"]])
 	eventually(t, "a slot to pass to the newest ask", func() bool { return len(meter.started()) == 3 })
-	if got := meter.started()[2]; got != paths["c"] {
+	if got := meter.started()[2]; got != paths["d"] {
 		t.Fatalf("the slot went to %s, not the folder asked about last", got)
 	}
-	if size := ask("c"); size.Queued {
-		t.Fatalf("c has started: %+v", size)
+	if size := ask("c"); !size.Queued {
+		t.Fatalf("c still waits: %+v", size)
 	}
-	if size := ask("d"); !size.Queued {
-		t.Fatalf("d still waits: %+v", size)
+	if size := ask("d"); size.Queued {
+		t.Fatalf("d has started: %+v", size)
 	}
 	for _, name := range names[1:] {
 		close(meter.gates[paths[name]])
