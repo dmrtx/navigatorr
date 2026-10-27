@@ -187,11 +187,19 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 			return promoteFailed(err)
 		}
 	}
+	var truncate string
 	if p.NewPath != p.OriginalPath && !p.movesAside() {
-		if _, err := os.Lstat(p.OriginalPath); err == nil {
-			if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
-				return promoteFailed(err)
+		if original, err := os.Lstat(p.OriginalPath); err == nil {
+			// An earlier run that emptied the verified original and stopped before
+			// unlinking it has nothing left to verify; the replacement and the
+			// recovery copy were verified above.
+			emptied := p.originalEmptied(original)
+			if !emptied {
+				if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
+					return promoteFailed(err)
+				}
 			}
+			empty, skip := e.planOriginalEmptying(p, original, p.NewPath)
 			p.DeleteSentAt = "filesystem_remove_intent"
 			if err := e.savePromotion(ctx, ec, p); err != nil {
 				return promoteFailed(err)
@@ -199,10 +207,21 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 			if err := ctx.Err(); err != nil {
 				return promoteFailed(err)
 			}
-			if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
-				return promoteFailed(err)
+			if !emptied {
+				if err := e.verifyPromotionOriginalStable(ctx, p); err != nil {
+					return promoteFailed(err)
+				}
 			}
-			if err := e.withBatchPromotionMutation(ctx, ec, p, func() error { return os.Remove(p.OriginalPath) }); err != nil {
+			err := e.withBatchPromotionMutation(ctx, ec, p, func() (err error) {
+				truncate, err = e.removeOriginal(p, p.OriginalPath, p.NewPath, original, empty, skip)
+				return err
+			})
+			if emptied {
+				truncate = truncateEmptied
+			}
+			p.noteOriginalTruncate(truncate)
+			if err != nil {
+				_ = e.savePromotion(ctx, ec, p)
 				return promoteFailed(err)
 			}
 		} else if !os.IsNotExist(err) || p.DeleteSentAt == "" {
@@ -213,7 +232,10 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	return StepResult{Status: StepCompleted}, nil
+	if truncate == "" {
+		return StepResult{Status: StepCompleted}, nil
+	}
+	return StepResult{Status: StepCompleted, Outputs: map[string]any{"original_truncate": truncate}}, nil
 }
 
 func (e *Engine) localPromotionVerifyFinal(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
@@ -300,6 +322,9 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 	outputs := map[string]any{"promoted": true, "promotion": p, "final_path": p.NewPath, "original_integrity": "verified_before_replacement", "candidate_sha256": p.CandidateSHA, "recovery_retained": false, "size_saved_bytes": saved, "size_saved_percent": percent, "import_required": false}
 	if p.RecoveryTruncate != "" {
 		outputs["recovery_truncate"] = p.RecoveryTruncate
+	}
+	if p.OriginalTruncate != "" {
+		outputs["original_truncate"] = p.OriginalTruncate
 	}
 	return StepResult{Status: StepCompleted, Outputs: outputs}, nil
 }

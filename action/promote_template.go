@@ -86,6 +86,13 @@ type promotionState struct {
 	// What emptying the recovery copy before its unlink did: "emptied" or
 	// "skipped: <reason>"; empty when it was off or not tried.
 	RecoveryTruncate string `json:"recovery_truncate,omitempty"`
+	// Persisted with the removal intent, before cleanup.truncate_before_delete
+	// empties the replaced original: a resumed removal that finds the original
+	// empty finishes the unlink instead of verifying its bytes again.
+	OriginalEmptyStarted bool `json:"original_empty_started,omitempty"`
+	// What emptying the original before its unlink did: "emptied" or
+	// "skipped: <reason>"; empty when it was off or not tried.
+	OriginalTruncate string `json:"original_truncate,omitempty"`
 	// How the recovery copy was made; see promotionCopyData.
 	RecoveryCopy *promotionCopyResult `json:"recovery_copy,omitempty"`
 	// move_aside renames the original into the recovery directory right
