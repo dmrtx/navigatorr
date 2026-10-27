@@ -184,6 +184,8 @@ transcode:
   #     # publish_policy: on_encode (default) copies a finished candidate to the
   #     # share at once. on_approval keeps it on the worker's disk until the
   #     # promotion is approved; only for a worker with deferred_publication on.
+  #     # Batch files defer too; one the worker has no room to retain (its
+  #     # retained_candidates_max_bytes) publishes at once instead of waiting.
   #     publish_policy: on_encode
   #     path_mappings:
   #       - local_prefix: "/media"

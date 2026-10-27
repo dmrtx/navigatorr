@@ -264,6 +264,16 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
 	}
 	job, err := e.actionWorker(ec).Submit(actx, req)
+	if err != nil && canSpillRetentionRefusal(ec, &req, err) {
+		// The second submit creates a job like the first: it needs the parent
+		// lease the first one was checked against, which a slow refusal may
+		// have outlasted.
+		if !e.parentLeaseHeld(lease) {
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before resubmit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
+		}
+		spillRetentionRefusal(ec, &req, err)
+		job, err = e.actionWorker(ec).Submit(actx, req)
+	}
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
 			ec.State["transcode_reconcile"] = true

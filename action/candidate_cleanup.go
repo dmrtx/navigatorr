@@ -89,7 +89,9 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 	if err != nil {
 		return fmt.Errorf("the batch replacement review could not be read: %v", err)
 	}
-	if parent == nil {
+	// A cancelled batch is never reviewed again, whatever plan it was
+	// holding when it was cancelled.
+	if parent == nil || parent.Status == StatusCancelled {
 		return nil
 	}
 	var state map[string]any
@@ -626,6 +628,12 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		if replaced[parentID][inst.ID] {
 			return "a batch settings revision replaced this attempt", nil
 		}
+		if reason, err := e.endedPromotionReason(inst, ec); reason != "" || err != nil {
+			return reason, err
+		}
+		if reason, err := e.cancelledBatchReason(parentID, ec); reason != "" || err != nil {
+			return reason, err
+		}
 		return e.unpromotableOriginalReason(ec), nil
 	}
 	return "", nil
@@ -659,6 +667,23 @@ func (e *Engine) endedPromotionReason(inst *store.ActionInstance, ec *ExecutionC
 	}
 	if promotion != nil && promotionEndedForGood(promotion) {
 		return "its replacement ended without using it and the worker still holds the candidate", nil
+	}
+	return "", nil
+}
+
+// cancelledBatchReason names a retained candidate that a cancelled batch left
+// on its worker: the release at cancellation did not go through (the worker
+// was unreachable or busy copying), and no promotion will ever reference it.
+func (e *Engine) cancelledBatchReason(parentID string, ec *ExecutionContext) (string, error) {
+	if !candidateIsOnWorker(ec.State) || getBool(ec.State, candidateRemovedKey) {
+		return "", nil
+	}
+	parent, err := e.deps.Store.GetActionInstanceIfExists(parentID)
+	if err != nil {
+		return "", err
+	}
+	if parent != nil && parent.Status == StatusCancelled {
+		return "the batch was cancelled and the worker still holds the candidate", nil
 	}
 	return "", nil
 }
