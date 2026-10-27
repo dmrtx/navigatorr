@@ -73,6 +73,13 @@ type promotionState struct {
 	DeleteSentAt                      string                       `json:"delete_sent_at,omitempty"`
 	OldRemoved                        bool                         `json:"old_removed"`
 	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
+	// Persisted with RecoveryCleanupStarted, before cleanup.truncate_before_delete
+	// empties the verified recovery copy: a resumed cleanup that finds the
+	// copy empty finishes the unlink instead of verifying it again.
+	RecoveryEmptyStarted bool `json:"recovery_empty_started,omitempty"`
+	// What emptying the recovery copy before its unlink did: "emptied" or
+	// "skipped: <reason>"; empty when it was off or not tried.
+	RecoveryTruncate string `json:"recovery_truncate,omitempty"`
 	// How the recovery copy was made; see promotionCopyData.
 	RecoveryCopy *promotionCopyResult `json:"recovery_copy,omitempty"`
 	// move_aside renames the original into the recovery directory right

@@ -740,7 +740,7 @@ func (e *Engine) promotionMakeRecoveryCopy(ctx context.Context, ec *ExecutionCon
 			}
 			// No library mutation removed the original. It was just
 			// reverified, so an interrupted private copy can be rebuilt safely.
-			if err := os.Remove(partial); err != nil {
+			if _, err := e.removeRecoveryFile(partial); err != nil {
 				return err
 			}
 		} else if !os.IsNotExist(err) {
