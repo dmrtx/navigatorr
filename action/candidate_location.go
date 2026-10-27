@@ -152,11 +152,15 @@ func (e *Engine) publishPolicyFor(ctx context.Context, ec *ExecutionContext) (st
 // (the caller's busy handling): its owner approves or discards the candidates
 // that fill the worker one by one.
 //
+// The worker's disk floor is not a retention refusal: a job that publishes on
+// encode needs that disk too, so that answer stays an ordinary wait.
+//
 // It reports whether the submit should be sent again with publish on encode.
-// The refused submit created nothing, so changing the policy cannot collide
-// with a job the worker already holds.
+// The refused submit created no job (the worker may have left an empty job
+// directory with no state in it), so changing the policy cannot collide with a
+// job the worker already holds.
 func spillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err error) bool {
-	if req.PublishPolicy != transcode.PublishPolicyOnApproval || !isBatchChild(ec) || !transcode.IsRetentionRefusal(err) {
+	if !canSpillRetentionRefusal(ec, req, err) {
 		return false
 	}
 	req.PublishPolicy = ""
@@ -164,6 +168,12 @@ func spillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err err
 	ec.State[publishPolicyFallbackKey] = fallbackRetentionFull
 	log.Printf("action %s: the worker has no room to retain another candidate (%v); this batch file publishes on encode", ec.InstanceID, err)
 	return true
+}
+
+// canSpillRetentionRefusal says whether err is a refusal spillRetentionRefusal
+// would act on, without acting on it.
+func canSpillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err error) bool {
+	return req.PublishPolicy == transcode.PublishPolicyOnApproval && isBatchChild(ec) && transcode.IsRetentionRefusal(err)
 }
 
 // retainedWaitResult finishes wait_transcode for a job whose encode is done and
@@ -494,22 +504,30 @@ func (e *Engine) releaseRetainedForPromotion(ctx context.Context, ec *ExecutionC
 }
 
 // releaseRetainedChild releases the retained candidate of a finished batch
-// child. Engine.cancel refuses a completed action, so it cannot reach one.
-func (e *Engine) releaseRetainedChild(ctx context.Context, id, why string) {
+// child. Engine.cancel refuses a completed action, so it cannot reach one. A
+// candidate it could not release stays on its worker and is listed as a
+// leftover to discard; the error says why, for the caller to report. Nothing
+// else depends on it: the decision that led here is already durable.
+func (e *Engine) releaseRetainedChild(ctx context.Context, id, why string) error {
 	lease, release, err := e.claimExecutionWithin(ctx, id, retainedLeaseWait)
 	if err != nil {
 		log.Printf("action %s: retained candidate kept: %v", id, err)
-		return
+		return fmt.Errorf("action %s: retained candidate kept: %v", id, err)
 	}
 	defer release()
 	child, err := e.deps.Store.GetActionInstanceIfExists(id)
 	if err != nil || child == nil || child.ActionName != "transcode_media" {
-		return
+		return nil
 	}
 	ec := parseExecutionContext(child, e)
-	if candidateIsOnWorker(ec.State) && !getBool(ec.State, candidateRemovedKey) {
-		e.retireCandidate(lease, child, ec, why)
+	if !candidateIsOnWorker(ec.State) || getBool(ec.State, candidateRemovedKey) {
+		return nil
 	}
+	e.retireCandidate(lease, child, ec, why)
+	if cleanup, _ := ec.State[candidateCleanupKey].(map[string]any); getString(cleanup, "outcome") == "kept" {
+		return fmt.Errorf("action %s: retained candidate kept: %s", id, getString(cleanup, "detail"))
+	}
+	return nil
 }
 
 func promoteFailedResult(err error) StepResult {

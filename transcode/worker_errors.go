@@ -51,11 +51,13 @@ const JobIDHeader = "X-Navigatorr-Job-ID"
 
 // Retention refusals. A worker that keeps candidates for approval refuses a
 // deferred submit it has no room to retain with the ordinary worker_busy
-// answer (nothing was created). The message names which limit was hit, and the
-// coordinator reads these two markers to tell "no room to retain" from "no
-// free slot": the first can only clear when somebody approves or discards a
-// retained candidate, which a batch cannot wait for. They are part of the
-// worker's message, not of its envelope, so workers and coordinators of any
+// answer (nothing was created). The message names which limit was hit. The
+// coordinator reads the first marker to tell "the retention budget is full"
+// from "no free slot": that can only clear when somebody approves or discards a
+// retained candidate, which a batch cannot wait for. The second marker is the
+// free-disk floor, which a deferred and an ordinary job both need; it is not a
+// reason to publish on encode, so it is only a busy answer. They are part of
+// the worker's message, not of its envelope, so workers and coordinators of any
 // age keep treating the answer as busy.
 const (
 	RetentionRefusalBudget = "retained candidates would use"
@@ -63,11 +65,12 @@ const (
 )
 
 // IsRetentionRefusal reports a worker_busy refusal that came from the worker's
-// retention limits (retained_candidates_max_bytes or min_free_disk_bytes).
+// retained_candidates_max_bytes budget. A free-disk refusal is not one: a job
+// that publishes on encode needs that disk too.
 func IsRetentionRefusal(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "worker busy") && (strings.Contains(msg, RetentionRefusalBudget) || strings.Contains(msg, RetentionRefusalDisk))
+	return strings.Contains(msg, "worker busy") && strings.Contains(msg, RetentionRefusalBudget)
 }

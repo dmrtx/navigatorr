@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -96,30 +97,35 @@ func TestABatchChildAcceptedByTheWorkerIsRetained(t *testing.T) {
 // A batch cannot wait for room: nothing in it is approved before every child
 // has encoded, so the candidates that fill the worker would never leave.
 func TestABatchChildTheWorkerHasNoRoomToRetainPublishesOnEncode(t *testing.T) {
-	for name, refusal := range map[string]error{
-		"retained budget": retentionBusy(fmt.Sprintf("%s 90 of 80 allowed bytes", transcode.RetentionRefusalBudget)),
-		"free disk floor": retentionBusy(fmt.Sprintf("10 %s the 50 byte minimum", transcode.RetentionRefusalDisk)),
-	} {
-		t.Run(name, func(t *testing.T) {
-			ec, res, w, e, _ := batchChildSubmit(t, refusal)
-			if res.Status != StepCompleted {
-				t.Fatalf("the child waited instead of publishing on encode: %+v", res)
-			}
-			if len(w.requests) != 2 || w.requests[0].PublishPolicy != transcode.PublishPolicyOnApproval || w.requests[1].PublishPolicy != "" {
-				t.Fatalf("requests: %+v", w.requests)
-			}
-			if w.requests[0].ID != w.requests[1].ID || w.requests[0].IdempotencyKey != w.requests[1].IdempotencyKey {
-				t.Fatalf("the second submit must name the same job: %+v", w.requests)
-			}
-			if _, ok := ec.State[publishPolicyKey]; ok || getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull {
-				t.Fatalf("state: %v", ec.State)
-			}
-			// The decision holds for later submits of the same attempt (a reconcile
-			// that finds no job), and the engine does not defer it again.
-			if policy, held := e.publishPolicyFor(context.Background(), ec); policy != "" || held != nil {
-				t.Fatalf("a spilled child deferred again: %q %v", policy, held)
-			}
-		})
+	ec, res, w, e, _ := batchChildSubmit(t, retentionBusy(fmt.Sprintf("%s 90 of 80 allowed bytes", transcode.RetentionRefusalBudget)))
+	if res.Status != StepCompleted {
+		t.Fatalf("the child waited instead of publishing on encode: %+v", res)
+	}
+	if len(w.requests) != 2 || w.requests[0].PublishPolicy != transcode.PublishPolicyOnApproval || w.requests[1].PublishPolicy != "" {
+		t.Fatalf("requests: %+v", w.requests)
+	}
+	if w.requests[0].ID != w.requests[1].ID || w.requests[0].IdempotencyKey != w.requests[1].IdempotencyKey {
+		t.Fatalf("the second submit must name the same job: %+v", w.requests)
+	}
+	if _, ok := ec.State[publishPolicyKey]; ok || getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull {
+		t.Fatalf("state: %v", ec.State)
+	}
+	// The decision holds for later submits of the same attempt (a reconcile
+	// that finds no job), and the engine does not defer it again.
+	if policy, held := e.publishPolicyFor(context.Background(), ec); policy != "" || held != nil {
+		t.Fatalf("a spilled child deferred again: %q %v", policy, held)
+	}
+}
+
+// The disk floor is not a lack of room to retain: a job that publishes on
+// encode needs that disk too, so the child waits like any busy submit.
+func TestABatchChildWaitsWhenTheDiskFloorRefusesIt(t *testing.T) {
+	ec, res, w, _, _ := batchChildSubmit(t, retentionBusy(fmt.Sprintf("10 %s the 50 byte minimum", transcode.RetentionRefusalDisk)))
+	if res.Status != StepWaitingExternal || len(w.requests) != 1 {
+		t.Fatalf("%+v requests=%d", res, len(w.requests))
+	}
+	if _, ok := ec.State[publishPolicyFallbackKey]; ok || getString(ec.State, publishPolicyKey) != transcode.PublishPolicyOnApproval {
+		t.Fatalf("a disk refusal changed the policy: %v", ec.State)
 	}
 }
 
@@ -152,11 +158,19 @@ func TestOnlyABatchChildSpillsAndOnlyForARetentionRefusal(t *testing.T) {
 
 // A refusal on both submits is an ordinary busy answer: the child waits.
 func TestABatchChildStillWaitsWhenEvenPublishOnEncodeIsRefused(t *testing.T) {
-	_, res, w, _, _ := batchChildSubmit(t,
+	ec, res, w, e, _ := batchChildSubmit(t,
 		retentionBusy(transcode.RetentionRefusalBudget+" 9 of 8 allowed bytes"),
 		retentionBusy("max parallel jobs reached"))
-	if res.Status == StepCompleted || len(w.requests) != 2 {
+	if res.Status != StepWaitingExternal || res.WaitingCondition != "worker_busy" || len(w.requests) != 2 {
 		t.Fatalf("%+v requests=%d", res, len(w.requests))
+	}
+	// The next submit goes straight out without a policy: the refusal that
+	// spilled it is remembered.
+	if getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull {
+		t.Fatalf("state: %v", ec.State)
+	}
+	if policy, held := e.publishPolicyFor(context.Background(), ec); policy != "" || held != nil {
+		t.Fatalf("the next submit deferred again: %q %v", policy, held)
 	}
 }
 
@@ -172,10 +186,11 @@ func retainedBatch(t *testing.T) (*retainedPromotion, string) {
 		t.Fatal(err)
 	}
 	source.OutputsJSON = toJSON(map[string]any{"candidate_path": rp.candidate, "original_intact": true})
+	batchID := "retained-batch"
+	rp.makeBatchChild(source, batchID)
 	if err := rp.st.UpdateActionInstance(*source); err != nil {
 		t.Fatal(err)
 	}
-	batchID := "retained-batch"
 	if err := rp.st.CreateActionInstance(store.ActionInstance{ID: batchID, ActionName: "transcode_batch", Status: StatusWaitingExternal, CurrentStep: 2, InputsJSON: `{"service":"sonarr","series_id":1,"promote_candidates":true}`, StateJSON: "{}", OutputsJSON: "{}"}); err != nil {
 		t.Fatal(err)
 	}
@@ -183,6 +198,19 @@ func retainedBatch(t *testing.T) (*retainedPromotion, string) {
 		t.Fatal(err)
 	}
 	return rp, batchID
+}
+
+// makeBatchChild makes the source attempt a child of the batch, as the
+// attempts of a real batch are: that is what sends its release and its
+// leftover listing through the batch's plan.
+func (rp *retainedPromotion) makeBatchChild(source *store.ActionInstance, batchID string) {
+	rp.t.Helper()
+	var inputs map[string]any
+	if err := json.Unmarshal([]byte(source.InputsJSON), &inputs); err != nil {
+		rp.t.Fatal(err)
+	}
+	inputs["parent_action_id"] = batchID
+	source.InputsJSON = toJSON(inputs)
 }
 
 func (rp *retainedPromotion) resumeBatch(batchID, decision string) *ActionResult {
@@ -372,9 +400,15 @@ func TestCancellingTheBatchFromItsScheduleStepReleasesFinishedChildren(t *testin
 }
 
 // Rejecting the promotion of one retained child ends its candidate and no
-// other.
+// other, and a batch child is released like any other attempt.
 func TestRejectingOneRetainedChildOfABatchReleasesOnlyItsCandidate(t *testing.T) {
 	rp := newRetainedPromotion(t)
+	source := mustInstance(t, rp.st, "source-transcode")
+	rp.makeBatchChild(source, "retained-batch")
+	if err := rp.st.UpdateActionInstance(*source); err != nil {
+		t.Fatal(err)
+	}
+	seedBatchParent(t, rp.st, "retained-batch", StatusWaitingExternal, map[string]any{})
 	seedRetainedAttempt(t, rp.st, "other-child", StatusCompleted, filepath.Join(rp.root, "other.mkv"), map[string]any{"parent_action_id": "retained-batch"}, nil)
 	r := runLocalPromotion(t, rp.promotionHarness)
 	if r.Status != StatusWaitingDecision {
@@ -386,5 +420,60 @@ func TestRejectingOneRetainedChildOfABatchReleasesOnlyItsCandidate(t *testing.T)
 	}
 	if got := rp.w.releases(); len(got) != 1 || got[0] != "job-source" {
 		t.Fatalf("released %v, want only the rejected child's", got)
+	}
+}
+
+// Cancelling a batch that is waiting for approval of its plan still releases
+// the candidates the plan names: a cancelled batch is never reviewed again.
+func TestCancellingABatchWaitingOnItsPlanReleasesTheCandidatesItNames(t *testing.T) {
+	rp, batchID := retainedBatch(t)
+	if r := rp.resumeBatch(batchID, ""); r.Status != StatusWaitingDecision {
+		t.Fatalf("plan: %+v", r)
+	}
+	if plan, err := rp.engine.BatchPromotionPlan(context.Background(), batchID); err != nil || plan == nil || len(plan.Members) != 1 {
+		t.Fatalf("the batch holds no plan: %+v %v", plan, err)
+	}
+	if _, err := rp.engine.Cancel(context.Background(), batchID, "no longer wanted"); err != nil {
+		t.Fatal(err)
+	}
+	if got := rp.w.releases(); len(got) != 1 || got[0] != "job-source" {
+		t.Fatalf("released %v, want the planned candidate's", got)
+	}
+	if !getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatalf("the release was not recorded: %v", rp.sourceState())
+	}
+}
+
+// A release the worker cannot take (it is unreachable) leaves the candidate
+// there. The cancelled batch reports it and lists it to be discarded later,
+// where a candidate of a live batch is not listed.
+func TestACandidateTheCancelledBatchCouldNotReleaseIsReportedAndListed(t *testing.T) {
+	rp, batchID := retainedBatch(t)
+	rp.w.release = func(_ context.Context, jobID string) (transcode.ReleaseOutcome, error) {
+		return "", &httpclient.UncertainError{Op: "release", JobID: jobID, Err: errors.New("connection refused")}
+	}
+	if page, err := rp.engine.LeftoverCandidatesOf(context.Background(), []string{"source-transcode"}); err != nil || len(page.Items) != 0 {
+		t.Fatalf("a candidate of a live batch is listed: %+v %v", page, err)
+	}
+	if err := rp.engine.releaseRetainedChild(context.Background(), "source-transcode", candidateRetiredCancelled); err == nil || !strings.Contains(err.Error(), "retained candidate kept") {
+		t.Fatalf("an unreleased candidate was not reported: %v", err)
+	}
+	if page, err := rp.engine.LeftoverCandidatesOf(context.Background(), []string{"source-transcode"}); err != nil || len(page.Items) != 0 {
+		t.Fatalf("a candidate of a live batch is listed: %+v %v", page, err)
+	}
+	if _, err := rp.engine.Cancel(context.Background(), batchID, "no longer wanted"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := rp.engine.LeftoverCandidatesOf(context.Background(), []string{"source-transcode"})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Location != candidateOnWorker {
+		t.Fatalf("the kept candidate is not listed: %+v %v", page, err)
+	}
+	// Discarding it once the worker answers frees it.
+	rp.w.release = nil
+	if _, err := rp.engine.DiscardLeftoverCandidate(context.Background(), "source-transcode"); err != nil {
+		t.Fatal(err)
+	}
+	if !getBool(rp.sourceState(), candidateRemovedKey) {
+		t.Fatalf("the discard was not recorded: %v", rp.sourceState())
 	}
 }

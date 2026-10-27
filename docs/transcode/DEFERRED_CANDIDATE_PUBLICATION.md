@@ -496,20 +496,25 @@ encoded again, in a loop. The alternatives considered:
 So the rule is: **a batch child the worker has no room to retain publishes on
 encode.** `spillRetentionRefusal` (`action/candidate_location.go`) recognises the
 refusal by its message (`transcode.IsRetentionRefusal`: `worker busy` plus the
-budget or the free-disk marker the worker writes), clears the attempt's
-`publish_policy`, records `publish_policy_fallback: retention_full` and sends the
-same job again without a policy. That is safe because a busy answer created
-nothing, the job id and idempotency key are unchanged, and the digest of a job
-without a policy is the one it always had. Later submits of the attempt (a
+budget marker the worker writes for `retained_candidates_max_bytes`), clears the
+attempt's `publish_policy`, records `publish_policy_fallback: retention_full` and
+sends the same job again without a policy, once it has checked that the parent
+admission lease is still held (the second submit creates a job like the first).
+That is safe because a busy answer created no job (the worker may leave an empty
+job directory with no state in it), the job id and idempotency key are unchanged,
+and the digest of a job without a policy is the one it always had. Later submits of the attempt (a
 reconcile that finds no job) keep publishing on encode, and a manual retry decides
 again. A refusal for slots (`max parallel jobs`, from an older worker) is not
 touched. The cost is bounded and visible: a batch retains what the worker's
 budget allows, and the rest publishes up front, exactly as every batch did before.
 A worker with no limits configured never refuses, so it retains the whole batch
 and its disk is the only bound; set `retained_candidates_max_bytes` before using
-deferral for large batches. A free-disk refusal also spills, so a burst of
-`on_encode` jobs can use the disk the floor was protecting; keep the floor below
-what one encode needs and the budget below what the disk can hold.
+deferral for large batches. The free-disk floor (`min_free_disk_bytes`) does not
+spill: a job that publishes on encode stages and encodes on the same disk, so
+sending it there would only move the refusal to an out-of-space failure. That answer is an
+ordinary busy wait. It can only clear by itself if retained candidates are not
+what fills the disk, so keep `retained_candidates_max_bytes` below what the disk
+holds above the floor.
 
 The worker's message is the contract, not a new code: the strings are constants in
 `transcode/worker_errors.go`, the worker builds its messages from them, and a test
@@ -526,13 +531,19 @@ reason to give a very large batch its own worker.
 
 | Event | Path |
 |---|---|
-| Batch cancelled (`Engine.Cancel`) | `releaseRetainedChild` for each finished child |
-| Batch cancelled by its schedule step's `cancel` decision | the same, added in revision 4: the step used to leave `completed` children alone |
+| Batch cancelled (`Engine.Cancel`) | `releaseRetainedChild` for each finished child; a cancelled batch no longer counts as holding a plan (`candidatePromotionStarted`), so a plan awaiting approval does not keep its candidates |
+| Batch cancelled by its schedule step's `cancel` decision | the same, added in revision 4: the step used to leave `completed` children alone. A release that is kept is listed in the step's `retained_candidates_kept` output |
 | Settings revision of a file | `retireSupersededCandidates` |
 | Sibling replaced | `retireReplacedSiblings` |
 | Member promotion rejected, cancelled or failed for good | `releaseRetainedForPromotion` |
 | Leftover discarded by the owner | `DiscardLeftoverCandidate` |
 | A child skipped by a size or saving guard | `retireCandidate` from the child itself |
+
+A candidate that a release could not take (the worker unreachable or busy copying)
+stays on the worker. The child's cleanup record says `kept`, and the leftover
+listing offers it for the owner to discard once its promotion ended for good
+(`endedPromotionReason`) or its batch was cancelled (`cancelledBatchReason`);
+`leftoverCandidateReason` applies both to batch children as to standalone ones.
 
 The batch plan being rejected is deliberately not on the list: as for candidates
 on the share, a rejected plan keeps the candidates and a later review can replace

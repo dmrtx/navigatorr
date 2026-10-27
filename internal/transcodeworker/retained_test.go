@@ -747,10 +747,14 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 		if status, code := classifySubmitError(err); status != http.StatusTooManyRequests || code != transcode.WorkerErrorBusy {
 			t.Fatalf("classify = %d %q (%v), want 429 worker_busy", status, code, err)
 		}
-		// The coordinator tells "no room to retain" from "no free slot" by the
-		// message (a batch child publishes on encode instead of waiting).
-		if !transcode.IsRetentionRefusal(err) {
-			t.Fatalf("%v is not recognised as a retention refusal", err)
+	}
+	// The coordinator tells "the retention budget is full" from "no free slot"
+	// by the message (a batch child publishes on encode instead of waiting). A
+	// free-disk refusal is only busy: an on_encode job needs that disk too.
+	budget := func(t *testing.T, err error, want bool) {
+		t.Helper()
+		if got := transcode.IsRetentionRefusal(err); got != want {
+			t.Fatalf("IsRetentionRefusal(%v) = %v, want %v", err, got, want)
 		}
 	}
 	t.Run("retained bytes", func(t *testing.T) {
@@ -759,6 +763,7 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 		// A burst: the first job is still encoding, its reservation counts.
 		_, err := f.w.Submit(ctx, f.request("job-limit-2", "on_approval"), "test-exe", "")
 		busy(t, err)
+		budget(t, err, true)
 		if _, serr := f.w.Submit(ctx, f.request("job-limit-3", ""), "test-exe", ""); serr != nil {
 			t.Fatalf("an on_encode submit is not subject to the retention limit: %v", serr)
 		}
@@ -768,6 +773,7 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 		}
 		_, err = f.w.Submit(ctx, f.request("job-limit-2", "on_approval"), "test-exe", "")
 		busy(t, err)
+		budget(t, err, true)
 		if _, err := f.w.Cancel(ctx, "job-limit-1"); err != nil {
 			t.Fatal(err)
 		}
@@ -781,6 +787,7 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 		f.w.freeDisk = func(string) (int64, error) { return free, nil }
 		_, err := f.w.Submit(ctx, f.request("job-disk-1", "on_approval"), "test-exe", "")
 		busy(t, err)
+		budget(t, err, false)
 		if _, serr := f.w.Submit(ctx, f.request("job-disk-2", ""), "test-exe", ""); serr != nil {
 			t.Fatalf("an on_encode submit is not subject to the free-disk floor: %v", serr)
 		}
