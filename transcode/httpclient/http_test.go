@@ -326,7 +326,7 @@ func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
 		want   bool
 	}{
 		{"omitted", "", false},
-		{"on_encode", transcode.PublishPolicyOnEncode, true},
+		{"on_encode", transcode.PublishPolicyOnEncode, false},
 		{"on_approval", transcode.PublishPolicyOnApproval, true},
 	}
 	for _, tc := range tests {
@@ -348,7 +348,8 @@ func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
 			if _, err := exec.Submit(context.Background(), req); err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
-			// The wire carries what the caller set and nothing when it set nothing.
+			// Only on_approval is sent: an older worker rejects the unknown field,
+			// and on_encode is the default.
 			if _, sent := got["publish_policy"]; sent != tc.want || (tc.want && got["publish_policy"] != tc.policy) {
 				t.Fatalf("publish_policy on the wire = %v, want present=%v value %q", got["publish_policy"], tc.want, tc.policy)
 			}

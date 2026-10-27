@@ -192,6 +192,24 @@ func removeShellDir(dir string) error {
 	return os.Remove(dir)
 }
 
+// removeExpiredTombstone deletes the record of an expired candidate that sits
+// where a new encode of the same job id must be retained. The coordinator
+// encodes an expired job again under its old id; the tombstone has nothing left
+// to say once a new incarnation exists. Any other record is left alone.
+func removeExpiredTombstone(dir string) error {
+	job, err := LoadJob(filepath.Join(dir, "job.json"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if job == nil || job.Status != StatusExpired {
+		return nil
+	}
+	return os.RemoveAll(dir)
+}
+
 // releaseRetainedInputs frees what a deferred job no longer needs once the
 // candidate is accepted: the per-job staged source and its source-cache pins.
 // The local candidate and the checkpoint stay. Idempotent.
@@ -210,6 +228,9 @@ func (w *Worker) releaseRetainedInputs(job *JobRecord) {
 func (w *Worker) completeRetentionLocked(jobDir string, job *JobRecord) error {
 	hidden := w.retainedDir(job.ID)
 	if filepath.Clean(jobDir) != hidden {
+		if err := removeExpiredTombstone(hidden); err != nil {
+			return fmt.Errorf("clearing the expired record of job %q: %w", job.ID, err)
+		}
 		if err := removeShellDir(hidden); err != nil {
 			return fmt.Errorf("preparing retained directory for job %q: %w", job.ID, err)
 		}
@@ -323,6 +344,10 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 		return refuse(ErrPublishHeld)
 	}
 	if err := verifyCheckpointCandidate(w.withJobDigestMemo(ctx), job, job.LocalCandidatePath); err != nil {
+		if retainedVerifyTransient(ctx, err) {
+			// Not a verdict on the file: the caller may ask again.
+			return refuse(fmt.Errorf("verifying the retained candidate of job %q: %w", jobID, err))
+		}
 		return refuse(fmt.Errorf("%w: %v", ErrRetainedCandidateChanged, err))
 	}
 
@@ -346,6 +371,21 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 	lock.Unlock()
 	locked = false
 	return w.Status(ctx, jobID)
+}
+
+// retainedVerifyTransient reports whether a failed candidate check says nothing
+// about the file itself: a cancelled request or a read error while hashing. A
+// missing file, a size or hash mismatch or a failed attestation is a verdict.
+func retainedVerifyTransient(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var classed *classedError
+	if errors.As(err, &classed) {
+		return false
+	}
+	var pathErr *fs.PathError
+	return errors.As(err, &pathErr) && !errors.Is(err, fs.ErrNotExist)
 }
 
 // releaseRefusedLocked reports whether Cancel must refuse a deferred job: a
@@ -426,7 +466,7 @@ func (w *Worker) sweepRetained(ctx context.Context) error {
 			if err := w.sweepHiddenDir(ctx, name); err != nil {
 				errs = append(errs, err)
 			}
-		case !strings.HasPrefix(name, "."):
+		case !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_"):
 			if err := w.sweepRegularDir(name); err != nil {
 				errs = append(errs, err)
 			}
@@ -511,8 +551,19 @@ func (w *Worker) sweepHiddenDir(ctx context.Context, name string) error {
 		}
 	case job.Status == "cancelled", job.Status == "completed", job.Status == "failed":
 		// A release or publication interrupted between saving and moving back.
-		_, err := w.restoreRetainedLocked(dir, job)
-		return err
+		regular, err := w.restoreRetainedLocked(dir, job)
+		if err != nil {
+			return err
+		}
+		if job.Status == "cancelled" {
+			// The release also owes its cleanup, which the interrupted Cancel
+			// never reached.
+			if err := w.ensureCancelledTerminalMarker(regular, job); err != nil {
+				return err
+			}
+			w.cleanupCancelledArtifacts(job)
+		}
+		return nil
 	case !job.deferredPublication():
 		return nil
 	case job.Status != "running":
@@ -556,6 +607,11 @@ func (w *Worker) expireRetainedLocked(dir string, job *JobRecord, now time.Time)
 	return SaveJobAtomic(filepath.Join(dir, "job.json"), job)
 }
 
+func holdsOnlyLockFile(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	return err == nil && len(entries) == 1 && entries[0].Name() == ".lock"
+}
+
 // collectShellDir removes an old directory that holds nothing but a lock file:
 // the leftover of a job directory created by a lock acquisition that raced a
 // move, or of a submit that failed before saving. Anything else is left alone.
@@ -568,6 +624,12 @@ func (w *Worker) collectShellDir(dir string) error {
 		return err
 	}
 	if time.Since(fi.ModTime()) < shellDirGrace {
+		return nil
+	}
+	// A shell is what a lock acquisition leaves: a directory holding exactly
+	// the lock file. Work and scratch directories (empty, or with files) are
+	// not job directories and are never touched, not even to take a lock.
+	if !holdsOnlyLockFile(dir) {
 		return nil
 	}
 	lock, err := acquireExistingJobLock(dir)
@@ -642,15 +704,18 @@ func (w *Worker) findRetainedLocked(jobID, key string) (*JobRecord, error) {
 // retainedBytesLocked sums the disk held or reserved by deferred jobs that have
 // not finished: encoding ones by their admission reservation, finished ones by
 // their attested size. Callers hold the capacity lock.
-func (w *Worker) retainedBytesLocked() (int64, error) {
+//
+// unwritten is the part of that total still only promised: reservations of
+// encodes that have not produced their candidate, which free disk space does
+// not reflect yet.
+func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, nil
+			return 0, 0, nil
 		}
-		return 0, err
+		return 0, 0, err
 	}
-	var total int64
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
@@ -670,7 +735,7 @@ func (w *Worker) retainedBytesLocked() (int64, error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
+			return 0, 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
 		}
 		if job == nil || job.ID != id || !job.deferredPublication() || (job.Status != "queued" && job.Status != "running") {
 			continue
@@ -679,9 +744,10 @@ func (w *Worker) retainedBytesLocked() (int64, error) {
 			total += job.CandidateSizeBytes
 		} else {
 			total += job.RetainReserveBytes
+			unwritten += job.RetainReserveBytes
 		}
 	}
-	return total, nil
+	return total, unwritten, nil
 }
 
 // freeDiskBytes measures the free space of the filesystem holding the local
@@ -715,11 +781,11 @@ func (w *Worker) freeDiskBytes() (int64, error) {
 // worker_busy; a measurement that fails refuses the job rather than guessing.
 // Callers hold the capacity lock.
 func (w *Worker) admitDeferredLocked(expected int64) error {
+	held, unwritten, err := w.retainedBytesLocked()
+	if err != nil {
+		return fmt.Errorf("measuring retained candidates: %w", err)
+	}
 	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
-		held, err := w.retainedBytesLocked()
-		if err != nil {
-			return fmt.Errorf("measuring retained candidates: %w", err)
-		}
 		if held+expected > limit {
 			return fmt.Errorf("worker busy: retained candidates would use %d of %d allowed bytes", held+expected, limit)
 		}
@@ -729,8 +795,9 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		if err != nil {
 			return fmt.Errorf("measuring free disk: %w", err)
 		}
-		if free-expected < floor {
-			return fmt.Errorf("worker busy: %d free bytes would fall below the %d byte minimum", free-expected, floor)
+		// Encodes admitted earlier have not written their candidates yet.
+		if left := free - unwritten - expected; left < floor {
+			return fmt.Errorf("worker busy: %d free bytes would fall below the %d byte minimum", left, floor)
 		}
 	}
 	return nil

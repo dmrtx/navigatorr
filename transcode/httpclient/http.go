@@ -818,7 +818,13 @@ func (e *HTTPExecutor) Submit(ctx context.Context, req transcode.Request) (trans
 			specDigest = d
 		}
 	}
-	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256, SourceSizeBytes: req.SourceSizeBytes, PublishPolicy: req.PublishPolicy}
+	// on_encode is the default and is never sent: an older worker rejects the
+	// unknown field.
+	publishPolicy, perr := transcode.NormalizePublishPolicy(req.PublishPolicy)
+	if perr != nil {
+		return transcode.Job{}, perr
+	}
+	payload := httpSubmitPayload{ID: req.ID, SourcePath: remoteSource, CandidatePath: remoteCandidate, Profile: profile, Plan: req.Plan, IdempotencyKey: effKey, ExecutionSpecDigest: specDigest, SourceSHA256: req.SourceSHA256, SourceSizeBytes: req.SourceSizeBytes, PublishPolicy: publishPolicy}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return transcode.Job{}, fmt.Errorf("serializing submit payload: %w", err)

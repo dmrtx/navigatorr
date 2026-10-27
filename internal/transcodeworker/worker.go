@@ -2190,7 +2190,20 @@ func (w *Worker) Cancel(ctx context.Context, jobID string) (JobStatusResponse, e
 			CandidatePath: job.Candidate,
 			Error:         job.Error,
 		}, nil
+	case StatusExpired:
+		// The tombstone stays what it is: the candidate is already gone.
+		return JobStatusResponse{ID: job.ID, Status: StatusExpired, Error: job.Error}, nil
 	case "cancelled":
+		if job.deferredPublication() && filepath.Clean(jobDir) == w.retainedDir(job.ID) {
+			// A release that saved "cancelled" but never moved the job back or
+			// cleaned up: finish it.
+			regular, rerr := w.restoreRetainedLocked(jobDir, job)
+			if rerr != nil {
+				return JobStatusResponse{ID: job.ID, Status: "cancelled", CandidatePath: job.Candidate, Error: rerr.Error()}, rerr
+			}
+			jobDir = regular
+			w.cleanupCancelledArtifacts(job)
+		}
 		// Idempotent: the durable record is never rewritten. A cancelled marker
 		// is ensured only when the record carries durable evidence.
 		if err := w.ensureCancelledTerminalMarker(jobDir, job); err != nil {

@@ -941,3 +941,148 @@ func TestRetained_SchedulerSweepRunsMaintenance(t *testing.T) {
 		t.Fatalf("scheduler health must still report exactly two sweeps, got %d", sweeps)
 	}
 }
+
+// Review findings: the coordinator encodes an expired job again under the same
+// id while its tombstone is still on disk.
+func TestRetained_ReencodeOverAnExpiredTombstone(t *testing.T) {
+	ctx := context.Background()
+	f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedTTLHours = 1 })
+	f.retain("job-again-1")
+	f.rewriteHidden("job-again-1", func(j *JobRecord) { j.RetainedAt = time.Now().Add(-2 * time.Hour) })
+	if err := f.w.sweepRetained(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := f.w.Status(ctx, "job-again-1"); err != nil || st.Status != StatusExpired {
+		t.Fatalf("status = %+v err=%v, want the tombstone", st, err)
+	}
+	// Cancel keeps the tombstone a tombstone.
+	if st, err := f.w.Cancel(ctx, "job-again-1"); err != nil || st.Status != StatusExpired {
+		t.Fatalf("Cancel of a tombstone = %+v err=%v, want it left expired", st, err)
+	}
+	if got := f.loadHidden("job-again-1"); got.Status != StatusExpired {
+		t.Fatalf("tombstone = %+v, want unchanged", got)
+	}
+
+	// Encoded again while the tombstone is still there: retaining must replace it.
+	f.submit("job-again-1", "on_approval")
+	if err := f.w.InternalRun(ctx, "job-again-1"); err != nil {
+		t.Fatalf("a re-encode over a tombstone must retain, got: %v", err)
+	}
+	f.assertRetained("job-again-1")
+	if got := f.loadHidden("job-again-1"); got.Status == StatusExpired || got.ExpiredAt.After(time.Time{}) {
+		t.Fatalf("job = %+v, want the new incarnation", got)
+	}
+	f.publishAndRun("job-again-1")
+	if _, err := os.Stat(f.dest("job-again-1")); err != nil {
+		t.Fatalf("the re-encoded candidate must publish: %v", err)
+	}
+}
+
+func TestRetained_PublishTransientVerifyFailureIsNotAVerdict(t *testing.T) {
+	ctx := context.Background()
+	f := newRetainedFixture(t, nil)
+	f.retain("job-verify-1")
+	job := f.loadHidden("job-verify-1")
+
+	// A cancelled request must not discard a good candidate.
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := f.w.PublishRetained(cancelled, "job-verify-1"); err == nil || errors.Is(err, ErrRetainedCandidateChanged) {
+		t.Fatalf("cancelled request err = %v, want a retryable failure", err)
+	}
+	f.assertRetained("job-verify-1")
+
+	for name, tc := range map[string]struct {
+		err       error
+		transient bool
+	}{
+		"read error":       {&os.PathError{Op: "read", Path: job.LocalCandidatePath, Err: errors.New("input/output error")}, true},
+		"missing file":     {&os.PathError{Op: "open", Path: job.LocalCandidatePath, Err: os.ErrNotExist}, false},
+		"classed mismatch": {candidateInvalid(errors.New("sha changed")), false},
+		"plain mismatch":   {errors.New("size policy"), false},
+	} {
+		if got := retainedVerifyTransient(ctx, tc.err); got != tc.transient {
+			t.Errorf("%s: transient = %v, want %v", name, got, tc.transient)
+		}
+	}
+
+	// A real change is still a verdict.
+	if err := os.WriteFile(job.LocalCandidatePath, []byte("tampered-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.w.PublishRetained(ctx, "job-verify-1"); !errors.Is(err, ErrRetainedCandidateChanged) {
+		t.Fatalf("err = %v, want ErrRetainedCandidateChanged", err)
+	}
+}
+
+func TestRetained_InterruptedReleaseIsFinishedBySweepAndRetry(t *testing.T) {
+	ctx := context.Background()
+	for _, how := range []string{"sweep", "retried cancel"} {
+		t.Run(how, func(t *testing.T) {
+			f := newRetainedFixture(t, nil)
+			f.retain("job-half-1")
+			local := f.loadHidden("job-half-1").LocalCandidatePath
+			// A release that saved "cancelled" and crashed before moving back.
+			f.rewriteHidden("job-half-1", func(j *JobRecord) {
+				j.Status = "cancelled"
+				j.FinalizationState = string(FinalizationStatePending)
+				j.FinishedAt = time.Now().UTC()
+			})
+			if how == "sweep" {
+				if err := f.w.sweepRetained(ctx); err != nil {
+					t.Fatal(err)
+				}
+			} else if st, err := f.w.Cancel(ctx, "job-half-1"); err != nil || st.Status != "cancelled" {
+				t.Fatalf("Cancel = %+v err=%v", st, err)
+			}
+			if _, err := os.Stat(local); !os.IsNotExist(err) {
+				t.Fatalf("the candidate of a released job must not leak: %v", err)
+			}
+			if _, err := os.Stat(f.hiddenDir("job-half-1")); !os.IsNotExist(err) {
+				t.Fatalf("hidden directory must be gone: %v", err)
+			}
+			if got := pr6b1LoadJob(t, f.cfg.StateDir, "job-half-1"); got.Status != "cancelled" {
+				t.Fatalf("job = %+v, want cancelled", got)
+			}
+		})
+	}
+}
+
+func TestRetained_CollectorLeavesWorkAndScratchDirectories(t *testing.T) {
+	f := newRetainedFixture(t, nil)
+	old := time.Now().Add(-3 * time.Hour)
+	var dirs []string
+	for _, name := range []string{"_work", "quality-probe-scratch", "_podcast-probe"} {
+		dir := filepath.Join(f.cfg.StateDir, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(dir, old, old); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, dir)
+	}
+	if err := f.w.sweepRetained(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("%s is not a job directory and must stay: %v", dir, err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, ".lock")); !os.IsNotExist(err) {
+			t.Fatalf("%s: the sweep must not drop a lock file into it: %v", dir, err)
+		}
+	}
+}
+
+func TestRetained_FreeDiskFloorCountsEncodesNotYetWritten(t *testing.T) {
+	ctx := context.Background()
+	srcSize := int64(len("dummy-media"))
+	// Room for exactly one more candidate above the floor.
+	f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 1000 - srcSize - srcSize/2 })
+	f.w.freeDisk = func(string) (int64, error) { return 1000, nil }
+	f.submit("job-burst-1", "on_approval")
+	if _, err := f.w.Submit(ctx, f.request("job-burst-2", "on_approval"), "test-exe", ""); err == nil {
+		t.Fatal("a second burst submit must see the first one's reservation")
+	}
+}

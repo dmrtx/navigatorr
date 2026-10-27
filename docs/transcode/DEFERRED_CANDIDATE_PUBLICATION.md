@@ -331,9 +331,32 @@ What the worker PR does where this document left a choice, or differs from it.
   fall below `min_free_disk_bytes`. Encoding jobs are counted by their source size
   until their candidate exists, so a burst of submits cannot overshoot. A failed
   measurement refuses the job. `on_encode` submits are never subject to either.
-- **Stale directories.** The sweep also removes an empty job directory (only a
-  lock file) older than an hour. That is the whole collector: it does not look at
-  `_work` or at candidates.
+  The free-disk floor also subtracts the reservations of encodes that have not
+  written their candidate yet; it budgets the source size only, not a staged copy
+  on top of it.
+- **Stale directories.** The sweep also removes a job directory older than an hour
+  that holds nothing but its lock file. That is the whole collector: it never
+  touches `_work`, scratch directories (names starting with `_`, or without a
+  lock file) or candidates.
+- **Encoding again after expiry.** The coordinator reuses the job id, so a new
+  encode can finish while the old tombstone is still on disk. Retaining it
+  replaces the tombstone. `Cancel` on a tombstone leaves it expired.
+- **Interrupted release.** A release saves `cancelled`, moves the directory back
+  and cleans up. If it stops in between, the sweep or a repeated `Cancel` finishes
+  the move and the cleanup.
+- **Verification errors.** A read error or a cancelled request while the candidate
+  is hashed for a publish is answered 500 (retryable), not `candidate_changed`,
+  which is final. The hash runs inside the request while the job lock is held.
+- **Rollback limit.** The "older worker ignores it" guarantee covers hidden
+  directories. Between the encode checkpoint and the directory move a deferred job
+  is `pending` with a checkpoint under its regular name, which an older worker
+  would publish; the window is milliseconds, or longer only if the worker crashed
+  there and nobody has run the sweep. Drain the worker (no job running, sweep
+  once) before rolling back.
+- **Duplicate scan race.** Moves between the hidden and regular directory take the
+  job lock but not the capacity lock, so a submit that scans both at the instant
+  of a publish or release can miss the job. The coordinator submits a job id once
+  and only after reading its status, so this is not reachable in its flow.
 - **Logs.** `GET /v1/jobs/{id}/logs` still reads the regular directory, so it
   answers not found for a retained job.
 
