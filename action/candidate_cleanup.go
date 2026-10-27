@@ -111,29 +111,35 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 }
 
 // removeOwnCandidateFile removes one owned file, through the same root and
-// symlink checks promotion uses, and returns what it removed. A missing file
+// symlink checks promotion uses, and returns what it removed and, when the
+// file was emptied first, how that went (see removeDisposable). A missing file
 // is already removed.
-func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, error) {
+func (e *Engine) removeOwnCandidateFile(path string) (os.FileInfo, string, error) {
 	if _, err := e.promotionPath(path, true); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	info, err := e.promotionLstat(path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, "", nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+		return nil, "", fmt.Errorf("%s is not a regular file", filepath.Base(path))
 	}
 	if e.candidateRemoveHook != nil {
 		e.candidateRemoveHook(path)
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return nil, err
+	truncate, err := e.removeDisposable(path, info)
+	if err != nil {
+		if truncate == truncateEmptied {
+			// The bytes are gone though the name is not: report them.
+			return info, truncate, err
+		}
+		return nil, truncate, err
 	}
-	return info, nil
+	return info, truncate, nil
 }
 
 // sameCandidateBytes reports whether the partial is another name for the
@@ -148,31 +154,33 @@ func sameCandidateBytes(candidate, partial os.FileInfo) bool {
 // (the partial of a link-based publish, a hard link elsewhere) frees nothing
 // until its last name goes. pruneDir also removes the candidate directory when
 // it is left empty.
-func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (int64, error) {
+func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (candidateRemoval, error) {
+	var removal candidateRemoval
 	candidate, partial, err := ownCandidateFiles(ec.State)
 	if err != nil {
-		return 0, err
+		return removal, err
 	}
 	if err := e.candidatePromotionStarted(inst, ec, candidate); err != nil {
-		return 0, err
+		return removal, err
 	}
-	var freed int64
 	for _, path := range []string{candidate, partial} {
 		if err := ctx.Err(); err != nil {
-			return freed, err
+			return removal, err
 		}
-		info, err := e.removeOwnCandidateFile(path)
+		info, truncate, err := e.removeOwnCandidateFile(path)
+		var freed int64
 		if info != nil && candidateLastLink(info) {
-			freed += info.Size()
+			freed = info.Size()
 		}
+		removal.add(freed, truncate)
 		if err != nil {
-			return freed, err
+			return removal, err
 		}
 	}
 	if pruneDir {
 		_ = os.Remove(filepath.Dir(candidate)) // Empty-only; other candidates survive.
 	}
-	return freed, nil
+	return removal, nil
 }
 
 // retireCandidate removes the candidate an attempt recorded, and the worker's
@@ -185,8 +193,8 @@ func (e *Engine) retireCandidate(ctx context.Context, inst *store.ActionInstance
 	if inst.ActionName != "transcode_media" || getString(ec.State, "candidate_path") == "" || getBool(ec.State, candidateRemovedKey) {
 		return
 	}
-	freed, err := e.removeOwnCandidate(ctx, inst, ec, true)
-	e.recordCandidateCleanup(ctx, inst, ec, why, freed, err)
+	removal, err := e.removeOwnCandidate(ctx, inst, ec, true)
+	e.recordCandidateCleanup(ctx, inst, ec, why, removal, err)
 }
 
 // DiscardLeftoverCandidate is the owner's approval to remove one listed
@@ -234,11 +242,11 @@ func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*Acti
 		return nil, fmt.Errorf("candidate file kept: %v", err)
 	}
 	recorded := getBool(ec.State, candidateRemovedKey)
-	freed, err := e.removeOwnCandidate(ctx, inst, ec, false)
-	if err == nil && freed == 0 && recorded {
+	removal, err := e.removeOwnCandidate(ctx, inst, ec, false)
+	if err == nil && removal.Freed == 0 && recorded {
 		return e.Status(ctx, id)
 	}
-	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredDiscarded, freed, err)
+	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredDiscarded, removal, err)
 	if err != nil {
 		return nil, fmt.Errorf("candidate file kept: %v", err)
 	}
@@ -302,12 +310,21 @@ func workerJobUnknown(err error) bool {
 // recordCandidateCleanup persists the cleanup outcome and says it in the
 // action's own message: the error of a rejected attempt, the reason of a
 // cancelled one. A superseded completed attempt keeps its message.
-func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, why string, freed int64, cause error) {
+func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, why string, removal candidateRemoval, cause error) {
+	freed := removal.Freed
 	outcome := map[string]any{"reason": why, "at": time.Now().UTC().Format(time.RFC3339Nano)}
+	if removal.Truncate != "" {
+		outcome["truncate"] = removal.Truncate
+	}
+	emptiedButKept := cause != nil && removal.Truncate == truncateEmptied
 	note := "candidate file removed"
 	if cause != nil {
 		outcome["outcome"], outcome["detail"] = "kept", cause.Error()
 		note = "candidate file kept: " + cause.Error()
+		if emptiedButKept {
+			outcome["bytes_emptied"] = freed
+			note = "candidate file emptied but kept: " + cause.Error()
+		}
 	} else {
 		outcome["outcome"], outcome["bytes_freed"] = "removed", freed
 		ec.State[candidateRemovedKey], ec.State["candidate_removed_bytes"] = true, freed
@@ -418,7 +435,7 @@ func (e *Engine) retireReplacedSiblings(ctx context.Context, p *promotionState) 
 			sameOriginal := filepath.Clean(getString(ec.State, "resolved_path")) == original && p.OriginalSHA != "" && getString(ec.State, "original_sha256") == p.OriginalSHA
 			if sameOriginal && getString(ec.State, "candidate_path") != "" && !getBool(ec.State, candidateRemovedKey) {
 				if err := e.candidateWorkerStopped(childCtx, ec); err != nil {
-					e.recordCandidateCleanup(childCtx, child, ec, candidateRetiredReplaced, 0, err)
+					e.recordCandidateCleanup(childCtx, child, ec, candidateRetiredReplaced, candidateRemoval{}, err)
 				} else {
 					e.retireCandidate(childCtx, child, ec, candidateRetiredReplaced)
 				}
