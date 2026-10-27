@@ -406,10 +406,20 @@ func (e *Engine) retireReplacedSiblings(ctx context.Context, p *promotionState) 
 			continue
 		}
 		child, err := e.deps.Store.GetActionInstanceIfExists(id)
-		if err == nil && child != nil {
+		// The status is read again under the lease: a retry may have started
+		// the attempt since it was listed.
+		if err == nil && child != nil && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled) {
 			ec := parseExecutionContext(child, e)
-			if filepath.Clean(getString(ec.State, "resolved_path")) == original {
-				e.retireCandidate(childCtx, child, ec, candidateRetiredReplaced)
+			// The path alone is not the file: a later attempt can be at the
+			// same path after this promotion replaced it, so the original's
+			// hash must match too.
+			sameOriginal := filepath.Clean(getString(ec.State, "resolved_path")) == original && p.OriginalSHA != "" && getString(ec.State, "original_sha256") == p.OriginalSHA
+			if sameOriginal && getString(ec.State, "candidate_path") != "" && !getBool(ec.State, candidateRemovedKey) {
+				if err := e.candidateWorkerStopped(childCtx, ec); err != nil {
+					e.recordCandidateCleanup(childCtx, child, ec, candidateRetiredReplaced, 0, err)
+				} else {
+					e.retireCandidate(childCtx, child, ec, candidateRetiredReplaced)
+				}
 			}
 		}
 		release()
@@ -551,7 +561,7 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 	case StatusCompleted:
 		parentID := getString(ec.Inputs, "parent_action_id")
 		if parentID == "" {
-			return "", nil
+			return replacedOriginalReason(ec), nil
 		}
 		if replaced[parentID] == nil {
 			attempts, err := e.replacedBatchAttempts(parentID)
@@ -563,8 +573,20 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		if replaced[parentID][inst.ID] {
 			return "a batch settings revision replaced this attempt", nil
 		}
+		return replacedOriginalReason(ec), nil
 	}
 	return "", nil
+}
+
+// replacedOriginalReason names a finished attempt whose original another
+// attempt's promotion replaced and whose candidate cleanup kept the file, so
+// it stays listed instead of being offered for a promotion that cannot pass.
+func replacedOriginalReason(ec *ExecutionContext) string {
+	cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
+	if getString(cleanup, "reason") == candidateRetiredReplaced && getString(cleanup, "outcome") == "kept" {
+		return "another attempt's promotion replaced this attempt's original"
+	}
+	return ""
 }
 
 // replacedBatchAttempts returns the children a batch's attempt history

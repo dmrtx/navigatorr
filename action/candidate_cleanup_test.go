@@ -1063,7 +1063,8 @@ func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
 	writeCandidateFile(t, original, "replaced")
 	writeCandidateFile(t, sameName, "another show")
 	winner := seedCandidateAttempt(t, st, "winner", StatusCompleted, original, "job-winner", nil, nil)
-	loser := seedCandidateAttempt(t, st, "loser", StatusCompleted, original, "job-loser", nil, nil)
+	done := map[string]any{"transcode_done": true}
+	loser := seedCandidateAttempt(t, st, "loser", StatusCompleted, original, "job-loser", nil, done)
 	running := seedCandidateAttempt(t, st, "running", StatusRunning, original, "job-running", nil, nil)
 	reserved := seedCandidateAttempt(t, st, "reserved", StatusCompleted, original, "job-reserved", nil, nil)
 	unrelated := seedCandidateAttempt(t, st, "unrelated", StatusCompleted, sameName, "job-unrelated", nil, nil)
@@ -1072,7 +1073,7 @@ func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
 	}
 	seedActionInstance(t, st, "replacement", "promote_transcode_candidate", StatusWaitingDecision, 1, "promote:filesystem:reserved", map[string]any{"transcode_action_id": "reserved"}, nil)
 
-	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner})
+	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner, OriginalSHA: "baseline"})
 
 	if _, err := os.Lstat(loser); !os.IsNotExist(err) {
 		t.Fatalf("the other finished candidate was kept: %v", err)
@@ -1093,8 +1094,65 @@ func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
 		t.Fatalf("a running attempt was retired: %v", cleanup)
 	}
 	// Running it again, as a resumed finalize does, changes nothing.
-	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner})
+	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner, OriginalSHA: "baseline"})
 	if cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "loser")); getString(cleanup, "outcome") != "removed" {
 		t.Fatalf("a repeat changed the outcome: %v", cleanup)
+	}
+}
+
+func TestPromotionKeepsSiblingsItCannotProveAreOfTheSameOriginal(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := candidateEngine(t, st, root, nil)
+	mock := &mockTranscodeExecutor{statusFunc: func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: jobID, Status: transcode.StatusRunning}, nil
+	}}
+	e.deps.Workers = transcode.SingleWorker(mock)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "replaced")
+	winner := seedCandidateAttempt(t, st, "winner", StatusCompleted, original, "job-winner", nil, nil)
+	// A later attempt at the same path, after the replacement: another file.
+	later := seedCandidateAttempt(t, st, "later", StatusCompleted, original, "job-later", nil, map[string]any{"original_sha256": "after-the-replacement", "transcode_done": true})
+	// A cancelled attempt whose worker has not confirmed it stopped.
+	unconfirmed := seedCandidateAttempt(t, st, "unconfirmed", StatusCancelled, original, "job-unconfirmed", nil, nil)
+	for _, path := range []string{later, unconfirmed} {
+		writeCandidateFile(t, path, strings.Repeat("x", 50))
+	}
+
+	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner, OriginalSHA: "baseline"})
+
+	if _, err := os.Stat(later); err != nil {
+		t.Fatalf("a candidate of a different original was removed: %v", err)
+	}
+	if cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "later")); cleanup != nil {
+		t.Fatalf("a different original was retired: %v", cleanup)
+	}
+	if _, err := os.Stat(unconfirmed); err != nil {
+		t.Fatalf("a candidate the worker may still write was removed: %v", err)
+	}
+	cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "unconfirmed"))
+	if getString(cleanup, "reason") != candidateRetiredReplaced || getString(cleanup, "outcome") != "kept" {
+		t.Fatalf("the kept file was not recorded: %v", cleanup)
+	}
+}
+
+func TestACompletedCandidateKeptAfterAReplacementStaysListed(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := candidateEngine(t, st, root, nil)
+	original := filepath.Join(root, "Sample Show", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "replaced")
+	kept := map[string]any{candidateCleanupKey: map[string]any{"reason": candidateRetiredReplaced, "outcome": "kept", "detail": "busy"}}
+	candidate := seedCandidateAttempt(t, st, "kept", StatusCompleted, original, "job-kept", nil, kept)
+	untouched := seedCandidateAttempt(t, st, "ready", StatusCompleted, original, "job-ready", nil, nil)
+	writeCandidateFile(t, candidate, strings.Repeat("x", 50))
+	writeCandidateFile(t, untouched, strings.Repeat("x", 50))
+
+	page, err := e.LeftoverCandidatesOf(context.Background(), []string{"kept", "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ActionID != "kept" || !strings.Contains(page.Items[0].Reason, "replaced") {
+		t.Fatalf("listing: %+v", page.Items)
 	}
 }
