@@ -5897,6 +5897,16 @@ test("only a job that left no file and replaced nothing is Not converted", () =>
   assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
 });
 
+test("a batch with files still waiting is not Replaced because one file was", () => {
+  const h = harness();
+  const batch = { total: 11, completed: 1, waiting_decision: 4 };
+  const job = { id: "b", action_name: "transcode_media", status: "waiting_decision", batch, savings: { realized_saved_bytes: 1000 }, replaced_files: 1, remaining_candidates: 0 };
+  h.context.probe = job;
+  assert.notEqual(h.run("queuePresentation(probe).status"), "Replaced");
+  h.context.probe = { ...job, status: "completed", batch: { total: 11, completed: 11 } };
+  assert.equal(h.run("queuePresentation(probe).status"), "Replaced");
+});
+
 // ---- One-step batch replacement approval ----
 const flatten = (el) => [el, ...(el.children || []).flatMap(flatten)];
 const textOf = (el) => flatten(el).map((e) => e.textContent).filter(Boolean).join(" ");

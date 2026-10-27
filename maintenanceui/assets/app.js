@@ -5132,8 +5132,10 @@ function queuePresentation(job) {
     ? job.activities.every(activity => activity.waiting_condition === "worker_unreachable")
     : workerUnavailable(job);
   const observation = workerProgressObservation(job);
-  const replacementComplete = job.savings?.realized_saved_bytes != null ||
-    (job.replaced && job.status === "completed");
+  // Freed bytes appear with the first replaced file; a batch still working on
+  // the rest is not "Replaced" yet.
+  const replacementComplete = !operationIsActive(job.status) && (job.savings?.realized_saved_bytes != null ||
+    (job.replaced && job.status === "completed"));
   // Nothing was made, so there are no savings to report.
   const leftNoFile = notConverted(job);
   const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.paused === true ? "Paused" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
