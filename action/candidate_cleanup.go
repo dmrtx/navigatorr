@@ -158,6 +158,15 @@ func sameCandidateBytes(candidate, partial os.FileInfo) bool {
 // until its last name goes. pruneDir also removes the candidate directory when
 // it is left empty.
 func (e *Engine) removeOwnCandidate(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (candidateRemoval, error) {
+	if candidateIsOnWorker(ec.State) {
+		return e.removeRetainedCandidate(ctx, inst, ec, pruneDir)
+	}
+	return e.removeOwnCandidateFromShare(ctx, inst, ec, pruneDir)
+}
+
+// removeOwnCandidateFromShare is removeOwnCandidate for a candidate on the
+// share.
+func (e *Engine) removeOwnCandidateFromShare(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, pruneDir bool) (candidateRemoval, error) {
 	var removal candidateRemoval
 	candidate, partial, err := ownCandidateFiles(ec.State)
 	if err != nil {
@@ -274,7 +283,9 @@ func candidateNeedsWorkerCheck(state map[string]any) bool {
 // it does not know the job, lets the files go. Any other status, an
 // unreachable worker or no worker at all keeps them.
 func (e *Engine) candidateWorkerStopped(ctx context.Context, ec *ExecutionContext) error {
-	if !candidateNeedsWorkerCheck(ec.State) {
+	// A retained candidate has no job running: releasing it is itself the
+	// conversation with the worker, and it refuses while a copy is under way.
+	if candidateIsOnWorker(ec.State) || !candidateNeedsWorkerCheck(ec.State) {
 		return nil
 	}
 	const wait = "the worker job may still be writing; cancel it or wait"
@@ -321,6 +332,10 @@ func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionI
 	}
 	emptiedButKept := cause != nil && removal.Truncate == truncateEmptied
 	note := "candidate file removed"
+	if removal.Worker != "" {
+		outcome["released_from_worker"] = true
+		note = "retained candidate released on its worker"
+	}
 	if cause != nil {
 		outcome["outcome"], outcome["detail"] = "kept", cause.Error()
 		note = "candidate file kept: " + cause.Error()
@@ -332,7 +347,7 @@ func (e *Engine) recordCandidateCleanup(ctx context.Context, inst *store.ActionI
 		outcome["outcome"], outcome["bytes_freed"] = "removed", freed
 		ec.State[candidateRemovedKey], ec.State["candidate_removed_bytes"] = true, freed
 		ec.Outputs[candidateRemovedKey], ec.Outputs["candidate_removed_bytes"] = true, freed
-		if freed == 0 {
+		if freed == 0 && removal.Worker == "" {
 			note = "no candidate file was left"
 		}
 	}
@@ -462,6 +477,9 @@ type LeftoverCandidate struct {
 	PartialBytes int64  `json:"partial_bytes"`
 	Reason       string `json:"reason"`
 	WorkerCheck  bool   `json:"worker_check,omitempty"`
+	// Location is "worker" for a candidate the worker still holds (Bytes is
+	// its attested size); absent for a file on the share.
+	Location string `json:"location,omitempty"`
 }
 
 type LeftoverCandidatePage struct {
@@ -520,6 +538,16 @@ func (e *Engine) leftoverOf(inst *store.ActionInstance, replaced map[string]map[
 		return LeftoverCandidate{}, false
 	}
 	item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
+	if candidateIsOnWorker(ec.State) {
+		// Nothing of it is on the share. It is listed from the worker's
+		// attestation while the release has not gone through.
+		item.WorkerCheck, item.Location = false, candidateOnWorker
+		if getBool(ec.State, candidateRemovedKey) {
+			return LeftoverCandidate{}, false
+		}
+		item.Bytes = getInt64(ec.State, "candidate_size_bytes")
+		return item, item.Bytes > 0
+	}
 	var candidateInfo os.FileInfo
 	for _, path := range []string{candidate, partial} {
 		if _, err := e.promotionPath(path, false); err != nil {
@@ -640,8 +668,11 @@ func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
 	if _, err := e.promotionPath(candidate, false); err != nil {
 		return ""
 	}
-	if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
-		return ""
+	// A retained candidate is not on the share to be found.
+	if !candidateIsOnWorker(ec.State) {
+		if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
+			return ""
+		}
 	}
 	if _, err := e.promotionPath(original, false); err != nil {
 		return ""

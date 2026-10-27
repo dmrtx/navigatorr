@@ -810,7 +810,13 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 			cancelErrors = append(cancelErrors, fmt.Sprintf("reading child action %s: %v", childID, gerr))
 			continue
 		}
-		if child == nil || child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled {
+		if child != nil && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled) {
+			// Cancel refuses a finished child, but a candidate its worker
+			// still holds is never promoted from a cancelled batch.
+			e.releaseRetainedChild(requestCtx, childID, candidateRetiredCancelled)
+			continue
+		}
+		if child == nil {
 			continue
 		}
 		childReason := "parent transcode batch " + instanceID + " cancelled"
@@ -1004,6 +1010,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			// The rejection is durable now; nothing promotes this candidate.
 			if getBool(res.Outputs, candidateRejectedKey) {
 				e.retireCandidate(ctx, inst, ec, candidateRetiredRejected)
+			} else if inst.ActionName == "transcode_media" && candidateIsOnWorker(ec.State) {
+				// Whatever stopped the attempt, a retained candidate of a failed
+				// action is never promoted: the worker drops it.
+				e.retireCandidate(ctx, inst, ec, candidateRetiredFailed)
+			}
+			if inst.ActionName == "promote_transcode_candidate" && getBool(res.Outputs, promotionReleaseRetainedKey) {
+				e.releaseRetainedForPromotion(ctx, ec, candidateRetiredPromotionRefused)
 			}
 			_ = e.deps.Store.LogActionStep(store.ActionStepLog{
 				InstanceID:  inst.ID,
@@ -1189,6 +1202,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		inst.ID,
 		0,
 	)
+
+	// An attempt that ended without a candidate to promote (a size or saving
+	// guard refused it after the worker retained it) releases what the worker
+	// still holds.
+	if inst.ActionName == "transcode_media" && getBool(ec.State, "skip_transcode") && candidateIsOnWorker(ec.State) {
+		e.retireCandidate(ctx, inst, ec, candidateRetiredSkipped)
+	}
 
 	return buildActionResult(inst, totalSteps, ec), nil
 }

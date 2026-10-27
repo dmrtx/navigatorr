@@ -87,9 +87,12 @@ type DrainActionRow struct {
 	Done             bool // transcode_done: the worker job ended
 	RecoveryRequired bool // the encode finished and only saving it failed
 	WorkerQueued     bool // transcode_status is queued: accepted by the worker, not encoding yet
+	Uploading        bool // a promotion is having the worker copy a retained candidate to the share
 }
 
-// ListDrainActions returns the unfinished actions that run worker jobs.
+// ListDrainActions returns the unfinished actions that run worker jobs, and the
+// promotions that are having a worker copy a retained candidate to the share
+// (every other promotion is listed too; the drain classifies it as nothing).
 func (s *Store) ListDrainActions() ([]DrainActionRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,15 +101,16 @@ func (s *Store) ListDrainActions() ([]DrainActionRow, error) {
 	}
 	rows, err := s.db.Query(`SELECT id, action_name, status, waiting_condition,
 		COALESCE(json_extract(inputs_json, '$.parent_action_id'), json_extract(state_json, '$.parent_action_id'), ''),
-		COALESCE(json_extract(state_json, '$.worker'), ''),
+		COALESCE(json_extract(state_json, '$.worker'), json_extract(state_json, '$.upload_worker'), ''),
 		COALESCE(json_extract(state_json, '$.job_id'), ''),
 		COALESCE(json_extract(state_json, '$.external_reference'), ''),
 		COALESCE(json_extract(state_json, '$.resolved_path'), json_extract(inputs_json, '$.path'), ''),
 		` + flag("transcode_submitted") + `, ` + flag("transcode_reconcile") + `, ` + flag("transcode_submit_rejected") + `, ` + flag("transcode_done") + `, ` + flag("recovery_required") + `,
-		COALESCE(json_extract(state_json, '$.transcode_status'), '') = 'queued'
+		COALESCE(json_extract(state_json, '$.transcode_status'), '') = 'queued',
+		COALESCE(json_extract(state_json, '$.work_progress.phase'), '') = 'uploading'
 		FROM action_instances
 		WHERE status IN ('pending', 'running', 'waiting_external', 'waiting_decision')
-		AND action_name IN ('transcode_media', 'clean_podcast_ads')
+		AND action_name IN ('transcode_media', 'clean_podcast_ads', 'promote_transcode_candidate')
 		AND json_valid(state_json)
 		ORDER BY id`)
 	if err != nil {
@@ -117,7 +121,7 @@ func (s *Store) ListDrainActions() ([]DrainActionRow, error) {
 	for rows.Next() {
 		var r DrainActionRow
 		if err := rows.Scan(&r.ID, &r.ActionName, &r.Status, &r.WaitingCondition, &r.ParentID, &r.Worker, &r.JobID, &r.ExternalRef, &r.Path,
-			&r.Submitted, &r.Reconcile, &r.Rejected, &r.Done, &r.RecoveryRequired, &r.WorkerQueued); err != nil {
+			&r.Submitted, &r.Reconcile, &r.Rejected, &r.Done, &r.RecoveryRequired, &r.WorkerQueued, &r.Uploading); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

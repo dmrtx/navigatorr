@@ -34,6 +34,9 @@ type NamedWorker struct {
 	// MaxParallelJobs caps the video jobs the server assigns this worker at
 	// once; 0 follows the worker's own video pool.
 	MaxParallelJobs int
+	// PublishPolicy is "" (on_encode) or PublishPolicyOnApproval: when this
+	// worker copies a finished candidate to the share.
+	PublishPolicy string
 }
 
 // WorkerSet is the configured workers in config order. Config order breaks
@@ -63,6 +66,9 @@ func NewWorkerSet(list []NamedWorker) (*WorkerSet, error) {
 		}
 		if w.MaxParallelJobs < 0 {
 			return nil, fmt.Errorf("transcode workers: worker %q max_parallel_jobs must not be negative", w.Name)
+		}
+		if policy, err := NormalizePublishPolicy(w.PublishPolicy); err != nil || policy != w.PublishPolicy {
+			return nil, fmt.Errorf("transcode workers: worker %q has publish_policy %q", w.Name, w.PublishPolicy)
 		}
 		if w.Podcast {
 			podcast++

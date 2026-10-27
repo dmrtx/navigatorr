@@ -213,3 +213,126 @@ func TestHTTPExecutor_RetryPublicationAnswers(t *testing.T) {
 		t.Fatal("an unsafe job id must be refused before any request")
 	}
 }
+
+func TestHTTPExecutor_PublishRetainedAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+		fail   bool // the worker's own *HTTPError
+		state  string
+	}{
+		{"publishing", http.StatusOK, `{"id":"job-1","status":"running","finalization_state":"finalizing"}`, nil, false, "running"},
+		{"already published", http.StatusOK, `{"id":"job-1","status":"completed"}`, nil, false, "completed"},
+		{"worker without the endpoint", http.StatusNotFound, `{"error":"not found","code":"not_found","retryable":false}`, transcode.ErrDeferredPublicationUnsupported, false, ""},
+		{"older worker without envelope", http.StatusNotFound, `{"error":"not found"}`, transcode.ErrDeferredPublicationUnsupported, false, ""},
+		{"job unknown", http.StatusNotFound, `{"error":"job not found","code":"not_found","retryable":false}`, nil, true, ""},
+		{"worker is draining", http.StatusServiceUnavailable, `{"error":"publication is held","code":"worker_held","retryable":true}`, transcode.ErrPublishHeld, false, ""},
+		{"not retained", http.StatusConflict, `{"error":"job holds no retained candidate","code":"not_retained","retryable":false}`, transcode.ErrNotRetained, false, ""},
+		{"candidate changed", http.StatusConflict, `{"error":"retained candidate changed","code":"candidate_changed","retryable":false}`, transcode.ErrRetainedCandidateChanged, false, ""},
+		{"worker error", http.StatusInternalServerError, `{"error":"saving job","code":"internal","retryable":true}`, nil, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			var path string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				path = r.Method + " " + r.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			st, err := newTestHTTPExecutor(t, srv).PublishRetained(context.Background(), "job-1")
+			switch {
+			case tc.fail:
+				var he *HTTPError
+				if !errors.As(err, &he) || he.StatusCode != tc.status || errors.Is(err, transcode.ErrDeferredPublicationUnsupported) {
+					t.Fatalf("want the worker's own error, got %v", err)
+				}
+			case tc.want != nil:
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("got %v want %v", err, tc.want)
+				}
+			case err != nil || st.Status != tc.state:
+				t.Fatalf("got %+v %v", st, err)
+			}
+			if attempts.Load() != 1 || path != "POST /v1/jobs/job-1/publish" {
+				t.Fatalf("attempts=%d request=%q", attempts.Load(), path)
+			}
+		})
+	}
+	// An answer for another job is not the answer to this request.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"other","status":"completed"}`))
+	}))
+	defer srv.Close()
+	if _, err := newTestHTTPExecutor(t, srv).PublishRetained(context.Background(), "job-1"); err == nil {
+		t.Fatal("a response for another job was accepted")
+	}
+	// A transport failure is an ordinary error: the request is idempotent and
+	// the caller repeats it.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	exec := newTestHTTPExecutor(t, dead)
+	dead.Close()
+	if _, err := exec.PublishRetained(context.Background(), "job-1"); err == nil {
+		t.Fatal("a closed worker answered")
+	}
+	unused := httptest.NewServer(http.NotFoundHandler())
+	defer unused.Close()
+	if _, err := newTestHTTPExecutor(t, unused).PublishRetained(context.Background(), "../evil"); err == nil {
+		t.Fatal("an unsafe job id must be refused before any request")
+	}
+}
+
+func TestHTTPExecutor_ReleaseRetainedAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    int
+		body      string
+		want      transcode.ReleaseOutcome
+		wantErr   bool
+		uncertain bool
+	}{
+		{"dropped", http.StatusOK, `{"id":"job-1","status":"cancelled"}`, transcode.ReleaseDropped, false, false},
+		{"retention already ended", http.StatusOK, `{"id":"job-1","status":"expired"}`, transcode.ReleaseDropped, false, false},
+		{"job failed", http.StatusOK, `{"id":"job-1","status":"failed"}`, transcode.ReleaseDropped, false, false},
+		{"already published", http.StatusOK, `{"id":"job-1","status":"completed"}`, transcode.ReleasePublished, false, false},
+		{"publication is running", http.StatusConflict, `{"error":"a publication is running","code":"release_refused","retryable":true}`, transcode.ReleaseRefused, false, false},
+		{"job unknown", http.StatusNotFound, `{"error":"job not found","code":"not_found","retryable":false}`, transcode.ReleaseDropped, false, false},
+		{"404 that does not name the job", http.StatusNotFound, `{"error":"not found","code":"not_found","retryable":false}`, "", true, false},
+		{"bare 404 from a proxy", http.StatusNotFound, `<html>nope</html>`, "", true, false},
+		{"still running", http.StatusOK, `{"id":"job-1","status":"running"}`, "", true, true},
+		{"answer for another job", http.StatusOK, `{"id":"other","status":"cancelled"}`, "", true, true},
+		{"unparseable", http.StatusOK, `not json`, "", true, true},
+		{"worker error", http.StatusInternalServerError, `{"error":"saving job","code":"internal","retryable":true}`, "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var path string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path = r.Method + " " + r.URL.Path
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			got, err := newTestHTTPExecutor(t, srv).ReleaseRetained(context.Background(), "job-1")
+			if (err != nil) != tc.wantErr || got != tc.want || IsTransportUncertain(err) != tc.uncertain {
+				t.Fatalf("got %q %v (uncertain=%v)", got, err, IsTransportUncertain(err))
+			}
+			if path != "POST /v1/jobs/job-1/cancel" {
+				t.Fatalf("request=%q", path)
+			}
+		})
+	}
+	dead := httptest.NewServer(http.NotFoundHandler())
+	exec := newTestHTTPExecutor(t, dead)
+	dead.Close()
+	if got, err := exec.ReleaseRetained(context.Background(), "job-1"); err == nil || got != "" || !IsTransportUncertain(err) {
+		t.Fatalf("an unreachable worker must be uncertain, never a release: %q %v", got, err)
+	}
+	unused := httptest.NewServer(http.NotFoundHandler())
+	defer unused.Close()
+	if _, err := newTestHTTPExecutor(t, unused).ReleaseRetained(context.Background(), "../evil"); err == nil {
+		t.Fatal("an unsafe job id must be refused before any request")
+	}
+}

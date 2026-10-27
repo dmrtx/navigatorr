@@ -2,8 +2,11 @@
 
 Status: design, revision 3 (after two Opus reviews against the code). Step 1
 (the worker, see "Worker implementation notes") is implemented behind the
-`deferred_publication` worker setting, off by default. The server, templates and
-UI (steps 2 to 5) are not. Each review found blockers the previous revision hid.
+`deferred_publication` worker setting, off by default. Step 2 (the server side,
+see "Server implementation notes") is implemented behind the per-worker
+`publish_policy` setting, off by default. The UI and storage view (step 4) and
+making `on_approval` the default (step 5) are not. Each review found blockers the
+previous revision hid.
 
 A finished encode stays on the worker's local disk until the owner approves its
 replacement, and is copied to the media share only then. Today every validated
@@ -227,7 +230,8 @@ Everything below assumed the candidate was on the share. Each place must read
 - Drain: readiness is computed from database rows (`classifyDrainRow` returns ""
   for a done row, `worker_drain.go:254`). Retained candidates must not block a
   deploy; an upload inside `preserve_original` should, which needs a new row class.
-- Batches: the batch approval comes after every child has encoded
+- Batches (decided: batch children are refused deferral at admission, see
+  "Server implementation notes"). The reasoning behind it: the batch approval comes after every child has encoded
   (`schedule_batch` then `promote_batch`). If a batch is larger than the worker's
   retained limit, the remaining children get "busy" forever, nothing can be
   approved, and the first candidates expire and are encoded again in a loop. The
@@ -360,6 +364,75 @@ What the worker PR does where this document left a choice, or differs from it.
 - **Logs.** `GET /v1/jobs/{id}/logs` still reads the regular directory, so it
   answers not found for a retained job.
 
+## Server implementation notes
+
+Step 2 changes no template and is inert while a worker's `publish_policy` is
+`on_encode` (the default): no `publish_policy` is sent, no `candidate_location` is
+written, and nothing is asked of the worker's retained-candidate routes.
+
+**Deciding to defer.** `publishPolicyFor` decides once per attempt and stores the
+decision (`publish_policy` in the attempt's state), so a resubmit after an
+uncertain submit sends what the first submit sent. An attempt defers only when all
+of these hold: the assigned worker is configured `publish_policy: on_approval`; its
+executor can publish and release retained candidates; it advertises
+`deferred_publication`; the attempt is not a batch child. When a worker is
+configured for deferral but cannot do it, the attempt publishes on encode and
+records why in `publish_policy_fallback`; a capability lookup that fails holds the
+submit rather than silently publishing on encode.
+
+**Batch rule: batch children are refused deferral at admission** (they always
+publish on encode). A batch's promotion is one reviewed plan that hashes its
+candidates on the share, and a batch is admitted by free worker slots, which a pool
+of retained candidates would starve: the remaining children would wait forever
+while the first candidates expired and encoded again. The cost is that a batch
+still publishes every candidate up front, as today; only standalone attempts defer.
+The release paths that batches reach (revision, cancellation, sibling replacement)
+still go through the one release hook, so they already handle a retained candidate
+if a later change lifts this rule.
+
+**Where the candidate is.** `candidate_location` is `share` (or absent) or
+`worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot
+freed) and copies the worker's attested size and SHA-256 into the attempt. A
+retained job that attests neither fails closed. `validate_result` trusts the
+attested size and does not stat the share. The detailed ffprobe validation moves to
+after the upload (below), because it needs the file.
+
+**The release hook.** `retireCandidate` is the single hook; `removeOwnCandidate`
+branches on location and asks the worker to release. It is called from: a failed
+action (the engine's failure branch, which covers failed validate and failed
+accept), the reject after the size wait, an attempt that ends skipped by a size or
+saving guard, a rejected or failed promotion plan, batch revision, batch
+cancellation (finished children go through `releaseRetainedChild`), sibling
+replacement and leftover discard. A worker that cannot be reached, refuses
+(a publication is running) or cannot release leaves the candidate recorded as
+kept and listed. A worker that already published it makes the candidate a share
+file again, removed by the ordinary cleanup unless a promotion released it (that
+file is the promotion's).
+
+**Promotion.** The plan asks the worker whether the candidate can still be
+uploaded and carries its attestation instead of hashing a file. `preserve_original`
+first asks the worker to publish (`POST /v1/jobs/{id}/publish`) and waits for the
+copy, with the original untouched; then it writes `candidate_location: share` on
+the source attempt, hashes the file that arrived against the attestation, runs the
+detailed validation, and only then continues as for a candidate that was always on
+the share. A worker that is draining or unreachable makes the promotion wait; a
+candidate the worker no longer holds (expired, released, changed) is a final
+failure that releases what is left; any other failure is transient and keeps the
+candidate on the worker.
+
+**Expiry is lazy.** A retained attempt is a completed action, so nothing polls it.
+The worker's `expired` answer is found when `wait_transcode` or the reconcile path
+reads the job, or when a promotion plans or uploads; the attempt then encodes the
+same job again (bounded at two re-encodes per attempt, then it fails and says to
+check the worker's retention).
+
+**Drain.** Readiness reads database rows. A retained candidate is a done
+`transcode_media`, which classifies as idle, so it never blocks a deploy. An upload
+sets the promotion's `work_progress.phase` to `uploading` and records
+`upload_worker`; `classifyDrainRow` treats that as a running job on that worker, so
+a deploy waits for it. The promotion deliberately does not record the source's
+`job_id`, so cancelling a promotion never cancels (releases) the source's job.
+
 ## Candidates already on the share
 
 A finished attempt whose original was replaced by another attempt cannot be
@@ -378,9 +451,9 @@ checks.
 
 - How much free disk do the worker Macs have for retained candidates? Not measured.
   The job directory also holds the staged source, released at retention.
-- `retained_ttl`: batches have waited weeks. Expiry is resolved lazily (at plan time
-  and in the leftover listing) or by a new poll of completed actions; which?
-- The batch admission rule above.
+- `retained_ttl`: batches have waited weeks. Resolved: expiry is lazy (see "Server
+  implementation notes"); nothing polls completed actions.
+- The batch admission rule: resolved, batch children publish on encode.
 - Should publishing use an encode slot or a lane of its own? With every slot
   encoding, an approval can wait hours.
 - Support for workers without direct SMB (a local mount): the filesystem path

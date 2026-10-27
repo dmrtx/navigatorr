@@ -734,6 +734,11 @@ type TranscodeWorkerConfig struct {
 	// Podcast marks the one worker that runs podcast work and keeps the ad
 	// catalog. Without it on any worker, the first one does.
 	Podcast bool `yaml:"podcast"`
+	// PublishPolicy is when this worker copies a finished candidate to the
+	// share: "on_encode" (the default) or "on_approval", which keeps it on the
+	// worker's disk until the promotion is approved. Only set it on a worker that
+	// runs a version with deferred publication and enables it.
+	PublishPolicy string `yaml:"publish_policy"`
 }
 
 // EffectiveWorkers is the configured worker list: `workers`, or the single
@@ -774,6 +779,11 @@ func (t *TranscodeConfig) EffectiveWorkers() ([]TranscodeWorkerConfig, error) {
 		if w.MaxParallelJobs < 0 {
 			return nil, fmt.Errorf("transcode worker %q: max_parallel_jobs must not be negative", w.Name)
 		}
+		policy, err := transcode.NormalizePublishPolicy(w.PublishPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("transcode worker %q: %w", w.Name, err)
+		}
+		w.PublishPolicy = policy
 		if w.Podcast {
 			podcast++
 		}
@@ -795,6 +805,8 @@ type WorkerExecutorConfig struct {
 	HTTP            httpclient.HTTPConfig
 	Podcast         bool
 	MaxParallelJobs int
+	// PublishPolicy is "" for on_encode, or transcode.PublishPolicyOnApproval.
+	PublishPolicy string
 }
 
 // BuildWorkerConfigs maps the effective worker list onto the
@@ -811,7 +823,7 @@ func (t *TranscodeConfig) BuildWorkerConfigs() ([]WorkerExecutorConfig, error) {
 		for j, m := range w.PathMappings {
 			mappings[j] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
 		}
-		out[i] = WorkerExecutorConfig{Name: w.Name, Podcast: w.Podcast, MaxParallelJobs: w.MaxParallelJobs, HTTP: httpclient.HTTPConfig{
+		out[i] = WorkerExecutorConfig{Name: w.Name, Podcast: w.Podcast, MaxParallelJobs: w.MaxParallelJobs, PublishPolicy: w.PublishPolicy, HTTP: httpclient.HTTPConfig{
 			BaseURL:        strings.TrimSpace(w.BaseURL),
 			Token:          strings.TrimSpace(w.Token),
 			TokenFile:      strings.TrimSpace(w.TokenFile),

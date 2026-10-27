@@ -17,6 +17,9 @@ type candidateRemoval struct {
 	// attempted (the setting is off, or every file was already empty),
 	// "emptied", or "skipped: <reason>". A skip wins over an emptied file.
 	Truncate string
+	// Worker is "released" when the candidate was on its worker and the worker
+	// dropped it: no file of the share was involved.
+	Worker string
 }
 
 // add folds one more file's outcome in.

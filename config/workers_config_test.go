@@ -57,6 +57,7 @@ func TestTranscodeWorkersValidation(t *testing.T) {
 		{"same base_url", list(worker("m1", "http://192.0.2.1:8097", ""), worker("m4", "http://192.0.2.1:8097/", "")), "same base_url"},
 		{"bad url", list(worker("m1", "notaurl", "")), "absolute http(s) URL"},
 		{"negative cap", list(worker("m1", "http://192.0.2.1:8097", "      max_parallel_jobs: -1\n")), "must not be negative"},
+		{"unknown publish policy", list(worker("m1", "http://192.0.2.1:8097", "      publish_policy: later\n")), "unknown publish_policy"},
 		{"two podcast workers", list(worker("m1", "http://192.0.2.1:8097", "      podcast: true\n"), worker("m4", "http://192.0.2.2:8097", "      podcast: true\n")), "only one worker may set podcast"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,5 +66,34 @@ func TestTranscodeWorkersValidation(t *testing.T) {
 				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestTranscodeWorkerPublishPolicy(t *testing.T) {
+	p := writeHTTPConfig(t, "policy.yaml", `
+transcode:
+  enabled: true
+  workers:
+    - name: m1
+      base_url: "http://192.0.2.1:8097"
+    - name: m4
+      base_url: "http://192.0.2.2:8097"
+      publish_policy: on_encode
+    - name: m5
+      base_url: "http://192.0.2.3:8097"
+      publish_policy: " On_Approval "
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	workers, err := cfg.Transcode.BuildWorkerConfigs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only a worker that asks for it defers publication; the default is the
+	// empty policy that every earlier configuration already means.
+	if workers[0].PublishPolicy != "" || workers[1].PublishPolicy != "" || workers[2].PublishPolicy != "on_approval" {
+		t.Fatalf("publish policies: %q %q %q", workers[0].PublishPolicy, workers[1].PublishPolicy, workers[2].PublishPolicy)
 	}
 }

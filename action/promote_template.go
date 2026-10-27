@@ -44,18 +44,24 @@ type promotionCommand struct {
 }
 
 type promotionState struct {
-	MovieID                           int                          `json:"movie_id,omitempty"`
-	SourceActionID                    string                       `json:"transcode_action_id"`
-	Service                           string                       `json:"service"`
-	SeriesID                          int                          `json:"series_id"`
-	SeriesPath                        string                       `json:"series_path"`
-	OriginalPath                      string                       `json:"original_path"`
-	CandidatePath                     string                       `json:"candidate_path"`
-	OriginalSHA                       string                       `json:"original_sha256"`
-	CandidateSHA                      string                       `json:"candidate_sha256"`
-	OriginalBytes                     int64                        `json:"original_bytes"`
-	CandidateBytes                    int64                        `json:"candidate_bytes"`
-	CandidateMediaVerified            bool                         `json:"candidate_media_verified,omitempty"`
+	MovieID                int    `json:"movie_id,omitempty"`
+	SourceActionID         string `json:"transcode_action_id"`
+	Service                string `json:"service"`
+	SeriesID               int    `json:"series_id"`
+	SeriesPath             string `json:"series_path"`
+	OriginalPath           string `json:"original_path"`
+	CandidatePath          string `json:"candidate_path"`
+	OriginalSHA            string `json:"original_sha256"`
+	CandidateSHA           string `json:"candidate_sha256"`
+	OriginalBytes          int64  `json:"original_bytes"`
+	CandidateBytes         int64  `json:"candidate_bytes"`
+	CandidateMediaVerified bool   `json:"candidate_media_verified,omitempty"`
+	// CandidateRetained marks a candidate that is still on its worker when the
+	// plan is made: its size and SHA-256 are the worker's attestation, and
+	// preserve_original has the worker upload it before anything else.
+	// CandidateUploaded says that upload finished.
+	CandidateRetained                 bool                         `json:"candidate_retained,omitempty"`
+	CandidateUploaded                 bool                         `json:"candidate_uploaded,omitempty"`
 	ExpectedVideoCodec                string                       `json:"expected_video_codec,omitempty"`
 	OriginalFileID                    int                          `json:"original_episode_file_id"`
 	EpisodeIDs                        []int                        `json:"episode_ids"`
@@ -274,7 +280,9 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 			}
 			p.Approved = true
 		case "reject", "cancel":
-			return promoteFailed(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched"))
+			// A candidate still on its worker is released with the rejected plan;
+			// one on the share stays, as it always has.
+			return promoteFailedFinal(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched")), nil
 		default:
 			reason := "Approve the verified candidate and affected library items before replacement"
 			if p.RegrabWarning != "" {
