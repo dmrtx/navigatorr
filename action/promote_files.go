@@ -962,10 +962,17 @@ func (e *Engine) promotionRemoveLeftoverCandidate(ctx context.Context, ec *Execu
 	if _, err := e.promotionPath(p.CandidatePath, true); err != nil {
 		return err
 	}
-	if _, err := e.promotionLstat(p.CandidatePath); os.IsNotExist(err) {
+	info, err := e.promotionLstat(p.CandidatePath)
+	if os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return err
+	}
+	// An earlier run saved its decision to remove this leftover and may have
+	// emptied the file before it stopped. An empty file here is that run's own
+	// work: finish the removal, there is no digest left to verify.
+	if p.LeftoverRemovalStarted && info.Mode().IsRegular() && info.Size() == 0 {
+		return e.removeLeftoverCandidate(p.CandidatePath, info)
 	}
 	if err := e.verifyPromotionHash(ctx, p.CandidatePath, p.CandidateSHA); err != nil {
 		// ENOENT from opening/reading the optional leftover is authoritative.
@@ -982,16 +989,25 @@ func (e *Engine) promotionRemoveLeftoverCandidate(ctx context.Context, ec *Execu
 			return fmt.Errorf("temporary candidate path is still registered in Sonarr")
 		}
 	}
+	p.LeftoverRemovalStarted = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := os.Remove(p.CandidatePath); err != nil && !os.IsNotExist(err) {
-		return err
+	return e.removeLeftoverCandidate(p.CandidatePath, info)
+}
+
+// removeLeftoverCandidate unlinks the leftover temporary candidate, emptying it
+// first when the setting is on. Emptying that is skipped is only logged: the
+// leftover goes either way.
+func (e *Engine) removeLeftoverCandidate(path string, info os.FileInfo) error {
+	truncate, err := e.removeDisposable(path, info)
+	if strings.HasPrefix(truncate, truncateSkipped) {
+		log.Printf("leftover candidate %s removed without emptying it first (%s)", filepath.Base(path), strings.TrimPrefix(truncate, truncateSkipped))
 	}
-	return nil
+	return err
 }
 
 func (e *Engine) promotionInspectAdopted(ctx context.Context, p *promotionState, path string) error {

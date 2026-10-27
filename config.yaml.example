@@ -268,6 +268,13 @@ queue:
 #     - local: /volume1/Media
 #       remote: /volume1/Media
 
+# Throwaway files Navigatorr created itself (discarded transcode candidates) can
+# be emptied before they are unlinked. Use it when the share keeps SMB deletes in
+# a recycle bin you do not want to fill. Off by default; a file that another name
+# still links to is never emptied. See docs/transcode/TRUNCATE_BEFORE_DELETE.md.
+# cleanup:
+#   truncate_before_delete: false
+
 # ==============================================================================
 # 7. PERSISTENT STATE & DATABASE (SQLITE)
 # ==============================================================================

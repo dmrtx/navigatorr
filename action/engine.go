@@ -762,7 +762,7 @@ func (e *Engine) cancel(ctx context.Context, instanceID, reason string) (*Action
 	// remote job at all) lets the attempt's own files go.
 	if inst.ActionName == "transcode_media" && getString(ec.State, "candidate_path") != "" && !getBool(ec.State, candidateRemovedKey) {
 		if remoteErr != nil {
-			e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredCancelled, 0, fmt.Errorf("the worker did not confirm the cancellation"))
+			e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredCancelled, candidateRemoval{}, fmt.Errorf("the worker did not confirm the cancellation"))
 		} else {
 			e.retireCandidate(ctx, inst, ec, candidateRetiredCancelled)
 		}

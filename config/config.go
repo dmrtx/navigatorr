@@ -36,9 +36,19 @@ type Config struct {
 	MCP               MCPConfig                `yaml:"mcp"`
 	Web               WebConfig                `yaml:"web"`
 	NASHelper         NASHelperConfig          `yaml:"nas_helper"`
+	Cleanup           CleanupConfig            `yaml:"cleanup"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 	LoadedPath        string                   `yaml:"-"`
+}
+
+// CleanupConfig tunes how Navigatorr removes files it created itself and no
+// longer needs.
+type CleanupConfig struct {
+	// TruncateBeforeDelete empties a throwaway file before unlinking it, so a
+	// share whose recycle bin keeps what SMB clients delete holds an empty
+	// file instead of the whole one. Off by default; see docs/transcode/TRUNCATE_BEFORE_DELETE.md.
+	TruncateBeforeDelete bool `yaml:"truncate_before_delete"`
 }
 
 // Web is opt-in and shares the persistent MCP HTTP listener.

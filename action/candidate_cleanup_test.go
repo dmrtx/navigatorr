@@ -160,8 +160,8 @@ fi
 	if removals != 1 || again.ErrorJSON != inst.ErrorJSON {
 		t.Fatalf("second cleanup changed something: %d %s", removals, again.ErrorJSON)
 	}
-	if freed, err := e.removeOwnCandidate(context.Background(), again, parseExecutionContext(again, e), true); freed != 0 || err != nil {
-		t.Fatalf("missing candidate is not a clean no-op: %d %v", freed, err)
+	if removal, err := e.removeOwnCandidate(context.Background(), again, parseExecutionContext(again, e), true); removal.Freed != 0 || err != nil {
+		t.Fatalf("missing candidate is not a clean no-op: %d %v", removal.Freed, err)
 	}
 	if _, err := e.Retry(context.Background(), res.ID); err == nil || !strings.Contains(err.Error(), "candidate was removed") {
 		t.Fatalf("retry of a removed candidate allowed: %v", err)
