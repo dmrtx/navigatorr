@@ -113,3 +113,27 @@ func (p *promotionState) noteOriginalTruncate(truncate string) {
 		p.OriginalTruncate = truncate
 	}
 }
+
+// truncateUnconfirmed is the outcome of a removal whose run stopped after the
+// intent to empty the original and before the outcome was recorded; the
+// original is gone, and whether it was emptied first is unknown.
+const truncateUnconfirmed = "unconfirmed: the run stopped before the outcome was recorded"
+
+// unconfirmedOriginalTruncate is the outcome to record when a resumed removal
+// finds the original already gone: the intent says emptying was planned, and
+// no recorded outcome says how it ended. Empty when emptying was never planned.
+func (p *promotionState) unconfirmedOriginalTruncate() string {
+	if p.OriginalEmptyStarted && p.OriginalTruncate == "" {
+		return truncateUnconfirmed
+	}
+	return ""
+}
+
+// originalTruncateOutputs is the step output that shows the outcome, nil when
+// emptying was not tried.
+func originalTruncateOutputs(truncate string) map[string]any {
+	if truncate == "" {
+		return nil
+	}
+	return map[string]any{"original_truncate": truncate}
+}

@@ -309,13 +309,15 @@ func (e *Engine) stepPromoteRemoveOld(ctx context.Context, ec *ExecutionContext)
 			}
 		} else if !os.IsNotExist(err) {
 			return promoteFailed(err)
+		} else {
+			p.noteOriginalTruncate(p.unconfirmedOriginalTruncate())
 		}
 	}
 	p.OldRemoved = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	return StepResult{Status: StepCompleted}, nil
+	return StepResult{Status: StepCompleted, Outputs: originalTruncateOutputs(p.OriginalTruncate)}, nil
 }
 
 func (e *Engine) promotionNoOldReferences(ctx context.Context, svc *arrservice.Service, p *promotionState) error {

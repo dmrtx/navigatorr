@@ -226,16 +226,16 @@ func (e *Engine) localPromotionRemoveOriginal(ctx context.Context, ec *Execution
 			}
 		} else if !os.IsNotExist(err) || p.DeleteSentAt == "" {
 			return promoteFailed(fmt.Errorf("original disappeared without a recorded removal intent; recovery retained"))
+		} else {
+			truncate = p.unconfirmedOriginalTruncate()
+			p.noteOriginalTruncate(truncate)
 		}
 	}
 	p.OldRemoved = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)
 	}
-	if truncate == "" {
-		return StepResult{Status: StepCompleted}, nil
-	}
-	return StepResult{Status: StepCompleted, Outputs: map[string]any{"original_truncate": truncate}}, nil
+	return StepResult{Status: StepCompleted, Outputs: originalTruncateOutputs(truncate)}, nil
 }
 
 func (e *Engine) localPromotionVerifyFinal(ctx context.Context, ec *ExecutionContext) (StepResult, error) {

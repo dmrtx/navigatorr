@@ -585,3 +585,69 @@ func orphanedOriginal(t *testing.T, truncate bool) (*promotionHarness, string, *
 	held := holdOpen(t, h.original)
 	return h, r.ID, held, sizeOf(t, held)
 }
+
+// A stop after the original was unlinked and before the outcome was saved
+// leaves the intent and no outcome; the resumed step says so instead of
+// showing nothing.
+func TestFilesystemPromotionReportsAnUnconfirmedOutcomeAfterTheOriginalIsGone(t *testing.T) {
+	h, r, _ := copyModeFilesystemPromotion(t, true)
+	tmpl, _ := h.engine.GetTemplate("promote_transcode_candidate")
+	run := tmpl.Steps[4].Run
+	tmpl.Steps[4].Run = func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+		p, err := loadPromotion(ec)
+		if err != nil {
+			return StepResult{}, err
+		}
+		// What the interrupted run left: intent persisted, original unlinked.
+		p.OriginalEmptyStarted, p.DeleteSentAt = true, "filesystem_remove_intent"
+		if err := h.engine.savePromotion(ctx, ec, p); err != nil {
+			return StepResult{}, err
+		}
+		if err := os.Remove(h.original); err != nil {
+			return StepResult{}, err
+		}
+		return run(ctx, ec)
+	}
+	h.engine.RegisterTemplate(tmpl)
+	r = h.resume(r.ID, "approve")
+	if r.Status != StatusCompleted {
+		t.Fatalf("promotion: %s %s", r.Status, r.Error)
+	}
+	if r.Outputs["original_truncate"] != truncateUnconfirmed {
+		t.Fatalf("outcome: %v", r.Outputs["original_truncate"])
+	}
+	if saved, err := loadPromotion(&ExecutionContext{State: r.State}); err != nil || saved.OriginalTruncate != truncateUnconfirmed {
+		t.Fatalf("outcome not persisted: %+v %v", saved, err)
+	}
+}
+
+// A reimport retry reads the restored original whole, so an intent to empty it
+// from an earlier run is stale and is cleared; it must not excuse a short file
+// later.
+func TestRestoredOriginalRetryClearsAStaleEmptyingIntent(t *testing.T) {
+	h, id := restoredOriginalFixtureMode(t, 4, true)
+	inst, err := h.st.GetActionInstance(id)
+	if err != nil || inst == nil {
+		t.Fatalf("instance: %v", err)
+	}
+	ec := parseExecutionContext(inst, h.engine)
+	p, err := loadPromotion(ec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.OriginalEmptyStarted = true
+	if err := h.engine.savePromotion(context.Background(), ec, p); err != nil {
+		t.Fatal(err)
+	}
+	r, err := h.engine.Retry(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = h.finish(r)
+	if r.Status != StatusCompleted {
+		t.Fatalf("retry: %s %s", r.Status, r.Error)
+	}
+	if saved, err := loadPromotion(&ExecutionContext{State: r.State}); err != nil || saved.OriginalEmptyStarted {
+		t.Fatalf("stale intent kept: %+v %v", saved, err)
+	}
+}

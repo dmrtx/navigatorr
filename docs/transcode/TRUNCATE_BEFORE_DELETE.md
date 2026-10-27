@@ -57,6 +57,23 @@ original is the recorded size and its only link. The intent
 step that finds a zero-byte original with that intent finishes the unlink
 without hashing it, while a short original without it still fails
 verification. A failed emptying falls back to the plain unlink.
+If a run stops after the unlink and before the outcome is saved, the resumed
+step records `original_truncate: "unconfirmed: ..."` (the original is gone and
+whether it was emptied first is unknown). A reimport retry that reads the
+restored original whole clears a stale intent.
+
+Two things to know before turning the setting on for originals:
+
+* The hard-link guard trusts the link count the mount reports. A library
+  original is the kind of file that is hardlinked (Sonarr/Radarr import with
+  hardlinks, a torrent client seeding it). If the SMB client reports a link
+  count of 1 for every file, a second name is not seen and emptying the
+  original empties the seed too. Check `stat` on a file known to be hardlinked
+  on the share before relying on this; the recovery copy keeps the promotion
+  itself safe, but it is later removed.
+* Discarding a promotion's recovery copy after the original was emptied (for
+  example because its unlink failed) leaves the original's bytes nowhere,
+  recycle bin included. That is what a finished promotion's cleanup does too.
 
 ## Rules
 
