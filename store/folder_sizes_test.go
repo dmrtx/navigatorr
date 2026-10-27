@@ -12,6 +12,12 @@ func TestFolderSizeSnapshotsAreSavedTogetherAndKeptWithinTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	if err := s.SaveFolderSizeSnapshot("/nas/one", `{"n":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := s.FolderSizeSnapshot("/nas/one"); err != nil || raw != `{"n":1}` {
+		t.Fatalf("%q %v", raw, err)
+	}
 	batch := map[string]string{}
 	for i := 0; i < folderSizeRows+25; i++ {
 		batch[fmt.Sprintf("/nas/f%05d", i)] = fmt.Sprintf(`{"n":%d}`, i)
@@ -25,11 +31,5 @@ func TestFolderSizeSnapshotsAreSavedTogetherAndKeptWithinTheCap(t *testing.T) {
 	}
 	if err := s.SaveFolderSizeSnapshots(nil); err != nil {
 		t.Fatal(err)
-	}
-	if err := s.SaveFolderSizeSnapshot("/nas/one", `{"n":1}`); err != nil {
-		t.Fatal(err)
-	}
-	if raw, err := s.FolderSizeSnapshot("/nas/one"); err != nil || raw != `{"n":1}` {
-		t.Fatalf("%q %v", raw, err)
 	}
 }
