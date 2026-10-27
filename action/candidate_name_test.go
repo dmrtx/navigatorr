@@ -60,19 +60,23 @@ func TestRecheckAdoptsTheCandidateTheWorkerShortened(t *testing.T) {
 		t.Fatal("test candidate must be too long")
 	}
 	for name, tc := range map[string]struct {
+		status   string
 		reported string
 		want     string
 	}{
-		"shortened":        {short, short},
-		"unchanged":        {old, old},
-		"elsewhere":        {"/Volumes/other/" + filepath.Base(short), old},
-		"something else":   {dir + "unrelated.mkv", old},
-		"nothing reported": {"", old},
+		"shortened while recovering": {transcode.StatusRunning, short, short},
+		"shortened then failed":      {transcode.StatusFailed, short, short},
+		"unchanged":                  {transcode.StatusRunning, old, old},
+		"elsewhere":                  {transcode.StatusRunning, "/Volumes/other/" + filepath.Base(short), old},
+		"something else":             {transcode.StatusRunning, dir + "unrelated.mkv", old},
+		"nothing reported":           {transcode.StatusRunning, "", old},
 	} {
 		t.Run(name, func(t *testing.T) {
 			w := &retryingExecutor{mockTranscodeExecutor: &mockTranscodeExecutor{}}
+			// After a requested retry the worker is recovering on its own, so it
+			// no longer reports that it needs a person.
 			w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
-				return transcode.JobStatus{ID: job, Status: transcode.StatusRunning, CandidatePath: tc.reported, Error: "cannot publish candidate", JobTelemetry: transcode.JobTelemetry{Phase: "publication_pending", RecoveryRequired: true}}, nil
+				return transcode.JobStatus{ID: job, Status: tc.status, CandidatePath: tc.reported, JobTelemetry: transcode.JobTelemetry{Phase: "publication_pending"}}, nil
 			}
 			e := NewEngine(EngineDeps{Transcode: w})
 			ec := testReconcileEC("")

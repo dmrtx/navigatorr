@@ -652,6 +652,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode status failed (fail closed): %v", err), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "attempt": getInt(ec.State, "attempt"), "retry_count": getInt(ec.State, "retry_count")}}, nil
 	}
 	e.observeTranscodeStatus(ec, st)
+	adoptShortenedCandidate(ec, jobID, st.CandidatePath)
 	if res, conflict := originalDigestConflict(ec); conflict {
 		return res, nil
 	}
@@ -660,7 +661,6 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		e.noteWorkerSlotFreed()
 	}
 	if st.RecoveryRequired {
-		adoptShortenedCandidate(ec, st.CandidatePath)
 		out := transcodeWorkerMetadataOutputs(ec, st)
 		out["job_id"], out["external_reference"] = jobID, jobID
 		out["worker_error"] = st.Error
@@ -779,13 +779,14 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 // adoptShortenedCandidate follows a worker that renamed a too-long candidate
 // while recovering its publication: the file will be published beside the one
 // recorded, under a shorter name, so cleanup and promotion must look there.
-// Any other difference is not adopted here.
-func adoptShortenedCandidate(ec *ExecutionContext, reported string) {
+// It runs on every status read, since after a requested retry the worker is no
+// longer asking for intervention. Any other difference is not adopted here.
+func adoptShortenedCandidate(ec *ExecutionContext, jobID, reported string) {
 	recorded := getString(ec.State, "candidate_path")
 	if reported == "" || reported == recorded || recorded == "" || filepath.Dir(reported) != filepath.Dir(recorded) {
 		return
 	}
-	if transcode.ShortenCandidatePath(recorded, getString(ec.State, "job_id")) != reported {
+	if transcode.ShortenCandidatePath(recorded, jobID) != reported {
 		return
 	}
 	ec.State["candidate_path"] = reported
