@@ -272,6 +272,7 @@ func (e *Engine) localPromotionFinalize(ctx context.Context, ec *ExecutionContex
 		_ = os.Remove(parentDir)
 	}
 	_ = os.Remove(filepath.Dir(p.CandidatePath)) // Empty-only; other candidates survive.
+	e.retireReplacedSiblings(ctx, p)
 	p.BackupVerified, p.RecoveryCleanupCompleted = false, true
 	if err := e.savePromotion(ctx, ec, p); err != nil {
 		return promoteFailed(err)

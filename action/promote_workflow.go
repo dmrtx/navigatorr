@@ -594,6 +594,7 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 			_ = os.Remove(candidateDir)
 		}
 	}
+	e.retireReplacedSiblings(ctx, p)
 	p.BackupVerified = false
 	p.RecoveryCleanupCompleted = true
 	if err := e.savePromotion(ctx, ec, p); err != nil {

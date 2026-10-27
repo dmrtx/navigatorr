@@ -1051,3 +1051,50 @@ func TestLeftoverCandidatesOfListsOnlyTheNamedAttempts(t *testing.T) {
 		t.Fatalf("no ids, no files: %+v %v", page, err)
 	}
 }
+
+func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := candidateEngine(t, st, root, nil)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	elsewhere := filepath.Join(root, "Other Show", "Season 1")
+	original := filepath.Join(season, "sample-episode-01.mkv")
+	sameName := filepath.Join(elsewhere, "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "replaced")
+	writeCandidateFile(t, sameName, "another show")
+	winner := seedCandidateAttempt(t, st, "winner", StatusCompleted, original, "job-winner", nil, nil)
+	loser := seedCandidateAttempt(t, st, "loser", StatusCompleted, original, "job-loser", nil, nil)
+	running := seedCandidateAttempt(t, st, "running", StatusRunning, original, "job-running", nil, nil)
+	reserved := seedCandidateAttempt(t, st, "reserved", StatusCompleted, original, "job-reserved", nil, nil)
+	unrelated := seedCandidateAttempt(t, st, "unrelated", StatusCompleted, sameName, "job-unrelated", nil, nil)
+	for _, path := range []string{loser, running, reserved, unrelated} {
+		writeCandidateFile(t, path, strings.Repeat("x", 50))
+	}
+	seedActionInstance(t, st, "replacement", "promote_transcode_candidate", StatusWaitingDecision, 1, "promote:filesystem:reserved", map[string]any{"transcode_action_id": "reserved"}, nil)
+
+	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner})
+
+	if _, err := os.Lstat(loser); !os.IsNotExist(err) {
+		t.Fatalf("the other finished candidate was kept: %v", err)
+	}
+	for name, path := range map[string]string{"running": running, "reserved": reserved, "unrelated": unrelated} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s candidate touched: %v", name, err)
+		}
+	}
+	cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "loser"))
+	if getString(cleanup, "reason") != candidateRetiredReplaced || getString(cleanup, "outcome") != "removed" {
+		t.Fatalf("replaced cleanup not recorded: %v", cleanup)
+	}
+	if got := mustInstance(t, st, "loser").Status; got != StatusCompleted {
+		t.Fatalf("the finished attempt changed status: %s", got)
+	}
+	if cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "running")); cleanup != nil {
+		t.Fatalf("a running attempt was retired: %v", cleanup)
+	}
+	// Running it again, as a resumed finalize does, changes nothing.
+	e.retireReplacedSiblings(context.Background(), &promotionState{SourceActionID: "winner", OriginalPath: original, CandidatePath: winner})
+	if cleanup := candidateCleanupOf(t, e, mustInstance(t, st, "loser")); getString(cleanup, "outcome") != "removed" {
+		t.Fatalf("a repeat changed the outcome: %v", cleanup)
+	}
+}

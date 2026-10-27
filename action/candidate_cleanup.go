@@ -33,6 +33,7 @@ const (
 	candidateRetiredCancelled  = "cancelled"
 	candidateRetiredSuperseded = "superseded"
 	candidateRetiredDiscarded  = "discarded"
+	candidateRetiredReplaced   = "replaced"
 )
 
 func rejectedCandidateResult() StepResult {
@@ -357,6 +358,59 @@ func (e *Engine) retireSupersededCandidates(ctx context.Context, ids []string) {
 		child, err := e.deps.Store.GetActionInstanceIfExists(id)
 		if err == nil && child != nil && (child.Status == StatusCompleted || child.Status == StatusFailed || child.Status == StatusCancelled) {
 			e.retireCandidate(childCtx, child, parseExecutionContext(child, e), candidateRetiredSuperseded)
+		}
+		release()
+	}
+}
+
+// retireReplacedSiblings removes the candidates of the other finished attempts
+// at the file a completed promotion just replaced. Batch admission lets the
+// same file into two batches, so two attempts can each hold a candidate for one
+// original; once either is promoted the original is gone and the other can
+// never be promoted. An attempt still running is left alone: its candidate is
+// removed when the owner rejects it. Nothing here fails the promotion.
+func (e *Engine) retireReplacedSiblings(ctx context.Context, p *promotionState) {
+	if e.deps.Store == nil || p == nil || p.OriginalPath == "" {
+		return
+	}
+	original := filepath.Clean(p.OriginalPath)
+	// The state is stored with toJSON, so the file name appears in it exactly
+	// as this encodes it; only matching rows are parsed in full.
+	needle := strings.Trim(toJSON(filepath.Base(original)), `"`)
+	var siblings []string
+	const pageSize = 100
+	for offset := 0; ; offset += pageSize {
+		instances, err := e.deps.Store.ListActionInstancesByName("transcode_media", pageSize, offset)
+		if err != nil {
+			log.Printf("action %s: listing replaced attempts: %v", p.SourceActionID, err)
+			return
+		}
+		for i := range instances {
+			inst := &instances[i]
+			if inst.ID == p.SourceActionID || !strings.Contains(inst.StateJSON, needle) {
+				continue
+			}
+			switch inst.Status {
+			case StatusCompleted, StatusFailed, StatusCancelled:
+				siblings = append(siblings, inst.ID)
+			}
+		}
+		if len(instances) < pageSize {
+			break
+		}
+	}
+	for _, id := range siblings {
+		childCtx, release, err := e.claimExecution(ctx, id, false)
+		if err != nil {
+			log.Printf("action %s: replaced candidate kept: %v", id, err)
+			continue
+		}
+		child, err := e.deps.Store.GetActionInstanceIfExists(id)
+		if err == nil && child != nil {
+			ec := parseExecutionContext(child, e)
+			if filepath.Clean(getString(ec.State, "resolved_path")) == original {
+				e.retireCandidate(childCtx, child, ec, candidateRetiredReplaced)
+			}
 		}
 		release()
 	}
