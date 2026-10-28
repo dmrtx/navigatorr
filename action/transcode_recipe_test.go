@@ -298,7 +298,7 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 		want string
 	}{
 		"finished file": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now(), ValidationStartedAt: time.Now()}}, "came out at 9.00 GB"},
-		"stopped early": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now()}}, "was stopped partway through the encode, on course for 9.00 GB"},
+		"stopped early": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now()}}, "was stopped partway through the encode, on course for at least 9.00 GB"},
 	} {
 		c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
 		planRecipe(t, c)

@@ -906,7 +906,8 @@ func formatBudgetBytesUp(n int64) string {
 
 // sizeRefusedWhileEncoding reports a size refusal the worker made while the
 // encode still ran: it stops an encode whose file cannot pass the size policy
-// and reports the final size it projected, never validating a file. A refusal
+// and reports the size it was on course for (at least what it had written),
+// never validating a file. A refusal
 // of a finished file always follows the start of its validation.
 func sizeRefusedWhileEncoding(st transcode.JobStatus) bool {
 	return !st.EncodeFinishedAt.IsZero() && st.ValidationStartedAt.IsZero()
@@ -916,7 +917,7 @@ func sizeRefusedWhileEncoding(st transcode.JobStatus) bool {
 // out at, or the size the worker projected when it stopped the encode early.
 func cameOutAt(n int64, projected bool) string {
 	if projected {
-		return "was stopped partway through the encode, on course for " + formatBudgetBytes(n)
+		return "was stopped partway through the encode, on course for at least " + formatBudgetBytes(n)
 	}
 	return "came out at " + formatBudgetBytes(n)
 }
