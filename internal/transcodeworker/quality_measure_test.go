@@ -13,21 +13,23 @@ import (
 func TestBuildReferenceExtractionArgs_ArgvExactness(t *testing.T) {
 	sourcePath := "/media/movies/movie.mkv"
 	refPath := "/state/bench-123/samples/ref_sample_0.mkv"
-	startSec := 12.5
-	durationSec := 20.0
+	firstFrameSec := 0.5
+	fromSec, toSec := 12.5, 32.5
 	videoIndex := 0
 
-	args := BuildReferenceExtractionArgs(sourcePath, refPath, videoIndex, startSec, durationSec)
+	args := BuildReferenceExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec)
 
 	expected := []string{
 		"-y",
 		"-nostats",
-		"-accurate_seek",
-		"-ss", "12.500000",
+		"-copyts",
+		"-noaccurate_seek",
+		"-seek_timestamp", "1",
+		"-ss", "13.000000",
 		"-i", sourcePath,
-		"-t", "20.000000",
-		"-avoid_negative_ts", "make_zero",
 		"-map", "0:0",
+		"-filter:v:0", "settb=AVTB,trim=start=13.000000:end=33.000000",
+		"-avoid_negative_ts", "make_zero",
 		"-c:v", "ffv1",
 		"-fps_mode:v:0", "passthrough",
 		"-enc_time_base:v:0", "demux",
