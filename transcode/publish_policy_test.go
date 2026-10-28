@@ -121,4 +121,16 @@ func TestDeferredPublicationCapabilityFingerprint(t *testing.T) {
 	if !strings.Contains(string(raw), `"deferred_publication":true`) {
 		t.Fatalf("the capability must be on the wire when advertised: %s", raw)
 	}
+	if strings.Contains(string(raw), "start_retention_admission") {
+		t.Fatalf("an unadvertised capability must be omitted: %s", raw)
+	}
+	atStart := on
+	atStart.StartRetentionAdmission = true
+	if fp, _ := ComputeCapabilityFingerprint(atStart); fp == with {
+		t.Fatal("advertising start_retention_admission must change the fingerprint")
+	}
+	raw, _ = json.Marshal(atStart)
+	if !strings.Contains(string(raw), `"start_retention_admission":true`) {
+		t.Fatalf("the capability must be on the wire when advertised: %s", raw)
+	}
 }

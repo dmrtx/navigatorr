@@ -325,15 +325,26 @@ What the worker PR does where this document left a choice, or differs from it.
   candidate after `retained_ttl_hours` and leaves an `expired` tombstone, which
   `GET /v1/jobs/{id}` answers with `status: "expired"`. The tombstone is removed
   after 30 days. A job whose publish was requested is never expired.
-- **Admission.** An `on_approval` submit is answered with the existing `worker_busy`
-  (429) when retained bytes plus the new job's source size would pass
-  `retained_candidates_max_bytes`, or when free space on the local work disk would
-  fall below `min_free_disk_bytes`. Encoding jobs are counted by their source size
-  until their candidate exists, so a burst of submits cannot overshoot. A failed
-  measurement refuses the job. `on_encode` submits are never subject to either.
-  The free-disk floor also subtracts the reservations of encodes that have not
-  written their candidate yet; it budgets the source size only, not a staged copy
-  on top of it.
+- **Admission** (revision 5: when the job starts, not at submit). Every
+  `on_approval` submit is queued. When the job's slot comes up the scheduler
+  (`admitAtStartLocked`) checks whether retained bytes plus the job's source size
+  would pass `retained_candidates_max_bytes`, and whether free space on the local
+  work disk would fall below `min_free_disk_bytes`. Jobs that have started count
+  by their source size until their candidate exists (`retain_reserve_bytes`), so
+  jobs started one after the other cannot overshoot. A queued job that has not
+  started counts for nothing: it has staged nothing and written nothing. A failed
+  measurement leaves the job queued. `on_encode` jobs are never subject to
+  either. The free-disk floor also subtracts the reservations of encodes that
+  have not written their candidate yet; it budgets the source size only, not a
+  staged copy on top of it.
+  Past the budget, a job submitted with `retention_wait` stays queued
+  (`retention_blocked: retention_budget` in its status). A job without it starts
+  and publishes on encode (`publish_fallback: retention_full`; `publish_policy`
+  keeps the requested value, so the execution-spec digest of a resubmit still
+  matches). Past the floor, every job waits (`retention_blocked: free_disk`). A
+  waiting job never holds back the jobs queued behind it; the scheduler's
+  periodic sweep checks it again. The worker advertises
+  `start_retention_admission` alongside `deferred_publication`.
 - **Stale directories.** The sweep also removes a job directory older than an hour
   that holds nothing but its lock file. That is the whole collector: it never
   touches `_work`, scratch directories (names starting with `_`, or without a
@@ -521,6 +532,22 @@ The worker's message is the contract, not a new code: the strings are constants 
 on the worker side fails if either stops matching. Workers and servers of any
 age keep reading the answer as the busy it always was, and the server needs no
 new capability.
+
+**Revision 5: the budget is applied when the job starts.** Revisions 1 to 4
+checked the limits at submit and reserved each queued job's source size. The
+coordinator keeps many jobs queued on a worker that encodes one or two at a
+time, so the queue alone could fill the budget. Much of a worker's queue then
+spilled to publish on encode before any of it had started. The worker now takes every submit and applies
+the limits in its scheduler, just before it spawns the job. Only jobs that have
+started hold room (see "Admission" under the worker notes). The spill moves to
+the worker: the coordinator sends `retention_wait` for a standalone attempt
+(`publish_retention_wait` in its state), never for a batch child. A batch child
+that finds the budget full when its slot comes up starts and publishes on
+encode. The coordinator records the worker's `publish_fallback` in
+`publish_policy_fallback` and leaves `publish_policy` as it was sent. Old
+workers keep the submit-time refusal, and `spillRetentionRefusal` still handles
+it. A queued job submitted before the upgrade carries no `retention_wait`, so it
+falls back rather than waits: an old batch child cannot stall.
 
 While a batch holds the budget, standalone files on that worker wait for room,
 since their candidates are not the batch's to release. This is the same

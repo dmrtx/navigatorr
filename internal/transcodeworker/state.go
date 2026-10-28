@@ -97,8 +97,22 @@ type JobRecord struct {
 	// on the worker until a publish is requested; blank means on_encode. Part
 	// of the execution-spec digest only when set.
 	PublishPolicy string `json:"publish_policy,omitempty"`
+	// PublishFallback is transcode.PublishFallbackRetentionFull for an
+	// on_approval job that found
+	// the retention budget full when its slot came up and was started to
+	// publish on encode instead. PublishPolicy keeps the requested value so the
+	// execution-spec digest of a resubmit still matches.
+	PublishFallback string `json:"publish_fallback,omitempty"`
+	// RetentionWait keeps an on_approval job queued while the retention budget
+	// is full, instead of falling back to publish on encode. The coordinator
+	// asks for it for a standalone attempt only (a batch child must not wait).
+	RetentionWait bool `json:"retention_wait,omitempty"`
+	// RetentionBlocked is why a queued on_approval job is not starting
+	// (retentionBlockedBudget or retentionBlockedDisk); blank once it starts.
+	RetentionBlocked string `json:"retention_blocked,omitempty"`
 	// RetainReserveBytes is the disk an on_approval job is admitted against
-	// until its candidate exists and CandidateSizeBytes takes over.
+	// once it starts, until its candidate exists and CandidateSizeBytes takes
+	// over.
 	RetainReserveBytes int64 `json:"retain_reserve_bytes,omitempty"`
 	// RetainedAt is when the job became a retained candidate; its expiry is
 	// measured from it.

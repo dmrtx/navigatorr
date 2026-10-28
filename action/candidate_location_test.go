@@ -25,6 +25,7 @@ type retainedExecutor struct {
 	*mockTranscodeExecutor
 	mu        sync.Mutex
 	deferred  bool // advertises deferred_publication
+	atStart   bool // advertises start_retention_admission
 	published []string
 	released  []string
 	publish   func(context.Context, string) (transcode.JobStatus, error)
@@ -39,6 +40,7 @@ func newRetainedExecutor() *retainedExecutor {
 func (r *retainedExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabilities, error) {
 	caps, err := r.mockTranscodeExecutor.Capabilities(ctx)
 	caps.DeferredPublication = r.deferred
+	caps.StartRetentionAdmission = r.deferred && r.atStart
 	caps.CapabilityFingerprint, _ = transcode.ComputeCapabilityFingerprint(caps)
 	return caps, err
 }

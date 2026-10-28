@@ -160,7 +160,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if held != nil {
 		return *held, nil
 	}
-	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize, PublishPolicy: publishPolicy}
+	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize, PublishPolicy: publishPolicy, RetentionWait: publishPolicy != "" && getBool(ec.State, publishRetentionWaitKey)}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
 	// status query and deliberately does not take the parent admission lease.
@@ -716,6 +716,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 		if st.Phase != "" {
 			reason += "; phase: " + st.Phase
+		}
+		if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
+			reason += "; waiting for room on the worker to keep the candidate (" + st.RetentionBlocked + ")"
 		}
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:

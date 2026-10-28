@@ -321,13 +321,17 @@ func TestHTTPExecutor_SubmitStatusCancel(t *testing.T) {
 
 func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
 	tests := []struct {
-		name   string
-		policy string
-		want   bool
+		name     string
+		policy   string
+		wait     bool
+		want     bool
+		wantWait bool
 	}{
-		{"omitted", "", false},
-		{"on_encode", transcode.PublishPolicyOnEncode, false},
-		{"on_approval", transcode.PublishPolicyOnApproval, true},
+		{"omitted", "", false, false, false},
+		{"on_encode", transcode.PublishPolicyOnEncode, false, false, false},
+		{"on_approval", transcode.PublishPolicyOnApproval, false, true, false},
+		{"on_approval waiting for room", transcode.PublishPolicyOnApproval, true, true, true},
+		{"a wait without deferral is not sent", "", true, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -344,7 +348,7 @@ func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
 			}))
 			defer srv.Close()
 			exec := newTestHTTPExecutor(t, srv)
-			req := transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", PublishPolicy: tc.policy}
+			req := transcode.Request{ID: "job-1", SourcePath: "/local/media/a.mkv", CandidatePath: "/local/media/b.mkv", Profile: "hevc-vt", PublishPolicy: tc.policy, RetentionWait: tc.wait}
 			if _, err := exec.Submit(context.Background(), req); err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
@@ -352,6 +356,9 @@ func TestHTTPExecutor_SubmitSendsPublishPolicyOnlyWhenSet(t *testing.T) {
 			// and on_encode is the default.
 			if _, sent := got["publish_policy"]; sent != tc.want || (tc.want && got["publish_policy"] != tc.policy) {
 				t.Fatalf("publish_policy on the wire = %v, want present=%v value %q", got["publish_policy"], tc.want, tc.policy)
+			}
+			if _, sent := got["retention_wait"]; sent != tc.wantWait {
+				t.Fatalf("retention_wait on the wire = %v, want present=%v", got["retention_wait"], tc.wantWait)
 			}
 		})
 	}

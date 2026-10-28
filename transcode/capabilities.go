@@ -83,6 +83,10 @@ type WorkerCapabilities struct {
 	// publishes it to the share only when asked (POST /v1/jobs/{id}/publish).
 	// It is advertised only when the worker's configuration enables retention.
 	DeferredPublication bool `json:"deferred_publication,omitempty"`
+	// StartRetentionAdmission reports a worker that applies its retention
+	// limits when an on_approval job's slot comes up rather than at submit,
+	// and accepts retention_wait on a submit.
+	StartRetentionAdmission bool `json:"start_retention_admission,omitempty"`
 	// SizeModeV3 reports a worker that executes size policy v3: lossless
 	// audio compaction, 8-bit to Main10 size encodes and duration-scaled
 	// final validation windows.
@@ -208,6 +212,7 @@ type fingerprintPayload struct {
 	CompactAudio              bool                           `json:"compact_audio,omitempty"`
 	CoverArt                  bool                           `json:"cover_art,omitempty"`
 	DeferredPublication       bool                           `json:"deferred_publication,omitempty"`
+	StartRetentionAdmission   bool                           `json:"start_retention_admission,omitempty"`
 	SizeModeV3                bool                           `json:"size_mode_v3,omitempty"`
 	SizeAudioOnly             bool                           `json:"size_audio_only,omitempty"`
 	SizeAudioLevels           bool                           `json:"size_audio_levels,omitempty"`
@@ -264,6 +269,7 @@ func ComputeCapabilityFingerprint(caps WorkerCapabilities) (string, error) {
 		CompactAudio:              caps.CompactAudio,
 		CoverArt:                  caps.CoverArt,
 		DeferredPublication:       caps.DeferredPublication,
+		StartRetentionAdmission:   caps.StartRetentionAdmission,
 		SizeModeV3:                caps.SizeModeV3,
 		SizeAudioOnly:             caps.SizeAudioOnly,
 		SizeAudioLevels:           caps.SizeAudioLevels,

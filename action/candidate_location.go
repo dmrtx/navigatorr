@@ -35,6 +35,7 @@ const (
 
 	publishPolicyKey            = "publish_policy"
 	publishPolicyFallbackKey    = "publish_policy_fallback"
+	publishRetentionWaitKey     = "publish_retention_wait"
 	candidateRetainedAtKey      = "candidate_retained_at"
 	candidateRetainedUntilKey   = "candidate_retained_expires_at"
 	candidateExpiredCountKey    = "candidate_expired_count"
@@ -42,7 +43,7 @@ const (
 
 	// fallbackRetentionFull is the publish_policy_fallback of a batch child the
 	// worker had no room to retain.
-	fallbackRetentionFull = "retention_full"
+	fallbackRetentionFull = transcode.PublishFallbackRetentionFull
 
 	// maxCandidateExpiries bounds how often one attempt encodes again because
 	// the worker dropped its candidate at the end of its retention.
@@ -108,6 +109,12 @@ func isBatchChild(ec *ExecutionContext) bool {
 // An attempt that was refused for lack of room to retain (see
 // spillRetentionRefusal) stays on publish-on-encode.
 //
+// A worker that advertises start_retention_admission applies its retention
+// budget when the job's slot comes up, not at submit. A standalone attempt then
+// asks it to wait in the queue for room (publish_retention_wait); a batch child
+// does not, and the worker starts it to publish on encode if the budget is
+// full (see recordPublishFallback).
+//
 // The result is "" (publish on encode, the default and the only value a worker
 // that was not configured for deferral ever sees) or on_approval. A non-nil
 // result must be returned by the caller.
@@ -139,7 +146,23 @@ func (e *Engine) publishPolicyFor(ctx context.Context, ec *ExecutionContext) (st
 		return "", nil
 	}
 	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
+	if caps.StartRetentionAdmission && !isBatchChild(ec) {
+		ec.State[publishRetentionWaitKey] = true
+	}
 	return transcode.PublishPolicyOnApproval, nil
+}
+
+// recordPublishFallback records that the worker started an on_approval job to
+// publish on encode because its retention budget was full when the job's slot
+// came up. publish_policy stays as it was sent, so a resubmit of the same job
+// still matches its execution-spec digest; the candidate's location follows the
+// job's status as for any job.
+func recordPublishFallback(ec *ExecutionContext, st transcode.JobStatus) {
+	if st.PublishFallback == "" || getString(ec.State, publishPolicyFallbackKey) == st.PublishFallback {
+		return
+	}
+	ec.State[publishPolicyFallbackKey] = st.PublishFallback
+	log.Printf("action %s: the worker had no room to retain another candidate when job %s started; it publishes on encode", ec.InstanceID, st.ID)
 }
 
 // spillRetentionRefusal handles a worker that refused a deferred submit because
