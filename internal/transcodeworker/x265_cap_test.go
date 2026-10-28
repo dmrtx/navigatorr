@@ -352,3 +352,44 @@ func TestResumePostEncodeIgnoresTheX265Cap(t *testing.T) {
 		t.Fatalf("post-encode job was not resumed: %+v", got)
 	}
 }
+
+func TestSlotLimitsPublicationLane(t *testing.T) {
+	pub := jobSlot{kind: slotKindVideo, publication: true}
+	full := slotLimits{Ceiling: 1, Video: 1, Podcast: 1}
+	if !full.hasRoom(pub, slotCounts{Video: 1}) {
+		t.Fatal("a publication must not need the encode ceiling")
+	}
+	if full.hasRoom(pub, slotCounts{Publication: 1}) {
+		t.Fatal("an unset lane is one publication")
+	}
+	two := slotLimits{Ceiling: 1, Video: 1, Podcast: 1, Publication: 2}
+	if !two.hasRoom(pub, slotCounts{Publication: 1}) || two.hasRoom(pub, slotCounts{Publication: 2}) {
+		t.Fatal("the lane must admit up to its limit")
+	}
+	var use slotCounts
+	use.add(pub)
+	if use.Video != 0 || use.X265 != 0 || use.Publication != 1 {
+		t.Fatalf("a publication counted as %+v, want only the publication lane", use)
+	}
+	if !full.hasRoom(jobSlot{kind: slotKindVideo}, use) {
+		t.Fatal("a running publication must not take the encode slot")
+	}
+}
+
+func TestIsApprovedPublication(t *testing.T) {
+	approved := &JobRecord{PublishPolicy: transcode.PublishPolicyOnApproval, EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)}
+	if !isApprovedPublication(approved) {
+		t.Fatal("an approved retained candidate is a publication")
+	}
+	for name, job := range map[string]*JobRecord{
+		"nil":                nil,
+		"publish on encode":  {EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)},
+		"fell back at start": {PublishPolicy: transcode.PublishPolicyOnApproval, PublishFallback: transcode.PublishFallbackRetentionFull, EncodeComplete: true, FinalizationState: string(FinalizationStateFinalizing)},
+		"still encoding":     {PublishPolicy: transcode.PublishPolicyOnApproval, FinalizationState: string(FinalizationStateFinalizing)},
+		"retained":           {PublishPolicy: transcode.PublishPolicyOnApproval, EncodeComplete: true, FinalizationState: string(FinalizationStateRetained)},
+	} {
+		if isApprovedPublication(job) {
+			t.Errorf("%s: must use the encode slot rules", name)
+		}
+	}
+}

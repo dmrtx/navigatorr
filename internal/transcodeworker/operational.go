@@ -148,6 +148,15 @@ func (j *JobRecord) deferredPublication() bool {
 	return j != nil && strings.TrimSpace(j.PublishPolicy) == transcode.PublishPolicyOnApproval && j.PublishFallback == ""
 }
 
+// isApprovedPublication reports a retained candidate the operator approved: its
+// encode is done and a publish request moved it to finalizing, so all that
+// is left is copying the file to the share. It draws on the publication lane,
+// not on an encode slot.
+func isApprovedPublication(job *JobRecord) bool {
+	return job.deferredPublication() && job.EncodeComplete &&
+		FinalizationState(strings.TrimSpace(job.FinalizationState)) == FinalizationStateFinalizing
+}
+
 // Destination returns the intended semantic destination, falling back to the
 // legacy Candidate field for records persisted before IntendedDestination
 // existed. It never mutates the record.
