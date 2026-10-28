@@ -194,8 +194,8 @@ func TestMetricGraphPairsNTSCHFRByFrameIndex(t *testing.T) {
 	runFFmpeg(t, ctx, ffmpeg, "-y", "-nostdin", "-v", "error", "-i", source, "-c:v", "libx265", "-crf", "20", "-x265-params", "log-level=error", "-pix_fmt", "yuv420p", candidate)
 	refSample := filepath.Join(dir, "ref.mkv")
 	candSample := filepath.Join(dir, "cand.mkv")
-	runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildReferenceExtractionArgs(source, refSample, 0, 3.217, 2)...)...)
-	runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildReferenceExtractionArgs(candidate, candSample, 0, 3.217, 2)...)...)
+	extractSampleWindow(t, ctx, ffmpeg, ffprobe, source, refSample, 3.217, 2, 60000.0/1001)
+	extractSampleWindow(t, ctx, ffmpeg, ffprobe, candidate, candSample, 3.217, 2, 60000.0/1001)
 	refPTS, err := probeSamplePTS(ctx, ffprobe, refSample)
 	if err != nil {
 		t.Fatal(err)

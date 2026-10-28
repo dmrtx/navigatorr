@@ -32,7 +32,7 @@ func TestVerifyContentAlignmentDetectsOneFrameShift(t *testing.T) {
 
 	extract := func(in, name string) string {
 		out := filepath.Join(dir, name)
-		runFFmpeg(t, ctx, ffmpeg, append([]string{"-v", "error"}, BuildReferenceExtractionArgs(in, out, 0, 1, 1.5)...)...)
+		extractSampleWindow(t, ctx, ffmpeg, ffprobe, in, out, 1, 1.5, 25)
 		return out
 	}
 	ref := extract(source, "ref.mkv")

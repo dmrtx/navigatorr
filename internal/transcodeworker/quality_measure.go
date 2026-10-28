@@ -24,35 +24,41 @@ import (
 // BuildReferenceExtractionArgs constructs the exact, safe FFmpeg argument slice
 // for extracting a frame-aligned, timestamp-normalized, lossless reference sample.
 //
-// Frame alignment & windowing rationale:
-//  1. Fast & frame-accurate seeking: Placing `-accurate_seek -ss <startSec>` before `-i`
-//     enables demuxer keyframe seeking immediately before the target timestamp, followed
-//     by accurate frame-by-frame decoding and discarding up to the requested point. This avoids
-//     decoding the entire media file from time 0 while guaranteeing deterministic frame boundaries.
-//  2. Deterministic window duration: `-t <durationSec>` extracts the requested window,
-//     which is deterministically frame-aligned and frame-quantized for VFR/timebase sources
-//     rather than a mathematically continuous floating-point cut.
-//  3. PTS normalization: `-avoid_negative_ts make_zero` resets stream and container timestamps
-//     so that the extracted sample starts cleanly at PTS 0.
+// The window is fromSec..toSec after firstFrameSec, the timestamp of the
+// file's first picture (probeFirstFrameTime), with the bounds from
+// sampleFrameBounds. The final gate cuts the same window from the source and
+// from its encode, so the cut must pick the same pictures in both files:
+//  1. No time base rounding: `-ss` with `-accurate_seek` shifts timestamps by
+//     the seek point rounded to the stream's time base and trims there. In a
+//     1/fps time base (AVI) that rounding moves the cut by up to half a frame,
+//     while the encode's 1 ms Matroska time base does not, so the source kept
+//     a picture its encode did not. `-copyts` keeps the decoded timestamps
+//     untouched; `-seek_timestamp` makes `-ss` that same absolute time, and
+//     `-noaccurate_seek` only seeks to the keyframe at or before it.
+//  2. Exact selection: `settb=AVTB,trim` keeps the pictures between the bounds,
+//     compared in microseconds, and ends the decode at the end bound. The
+//     bounds lie halfway between frames, so a picture cannot fall on either
+//     side of one depending on the file's time base.
+//  3. PTS normalization: `-avoid_negative_ts make_zero` makes the extracted
+//     sample start at PTS 0.
 //  4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
 //     bit depth, and frame cadence with zero generational loss.
-//     Source timestamps pass through unchanged (sourceTimestampArgs), so a
-//     window cut from the source and one cut from its encode hold the same frames.
+//     Source timestamps pass through unchanged (sourceTimestampArgs).
 //  5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
-//  6. Deterministic candidate alignment: Candidate samples are subsequently encoded from this
-//     FFV1 reference master from frame 0 to end without seeking or trimming. While the source
-//     window itself is frame-quantized, the candidate-to-reference frame correspondence is
-//     strictly 1:1 and exact for downstream VMAF/SSIM metric evaluation.
-func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, startSec, durationSec float64) []string {
-	return []string{
-		"-y",
-		"-nostats",
-		"-accurate_seek",
-		"-ss", fmt.Sprintf("%.6f", startSec),
+func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) []string {
+	from, to := firstFrameSec+fromSec, firstFrameSec+toSec
+	args := []string{"-y", "-nostats", "-copyts", "-noaccurate_seek"}
+	selection := fmt.Sprintf("settb=AVTB,trim=end=%.6f", to)
+	// A window from the first picture needs neither a seek nor a start bound.
+	if fromSec > 0 {
+		args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", from))
+		selection = fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", from, to)
+	}
+	return append(args,
 		"-i", sourcePath,
-		"-t", fmt.Sprintf("%.6f", durationSec),
-		"-avoid_negative_ts", "make_zero",
 		"-map", fmt.Sprintf("0:%d", videoIndex),
+		"-filter:v:0", selection,
+		"-avoid_negative_ts", "make_zero",
 		"-c:v", "ffv1",
 		sourceTimestampArgs[0], sourceTimestampArgs[1],
 		sourceTimestampArgs[2], sourceTimestampArgs[3],
@@ -60,7 +66,18 @@ func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, st
 		"-sn",
 		"-dn",
 		refPath,
-	}
+	)
+}
+
+// sampleFrameBounds places a sample window on the frame grid: it starts at
+// the first frame at or after startSec and holds round(durationSec×fps)
+// frames. Both bounds are measured from the first picture and lie halfway
+// between frames, half a frame clear of any picture of a constant-rate
+// source or of its encode, whatever their time bases round to.
+func sampleFrameBounds(startSec, durationSec, fps float64) (from, to float64) {
+	first := math.Ceil(startSec * fps)
+	frames := max(1, math.Round(durationSec*fps))
+	return (first - 0.5) / fps, (first + frames - 0.5) / fps
 }
 
 // isSupportedSourceChroma returns true if the source pixel format has safe 4:2:0 chroma subsampling.
@@ -368,8 +385,16 @@ func readMetricLogFile(logPath string) ([]byte, error) {
 }
 
 // withReferenceChain inserts the compact picture chain into reference
-// extraction args, ahead of the lossless FFV1 encode.
+// extraction args, ahead of the lossless FFV1 encode. Args that already
+// filter the video (the window selection) run the chain after that filter.
 func withReferenceChain(args []string, chain string) []string {
+	for i, a := range args {
+		if a == "-filter:v:0" && i+1 < len(args) {
+			out := append([]string(nil), args...)
+			out[i+1] += "," + chain
+			return out
+		}
+	}
 	out := make([]string, 0, len(args)+2)
 	inserted := false
 	for _, a := range args {
