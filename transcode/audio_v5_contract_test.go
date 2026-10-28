@@ -2,13 +2,16 @@ package transcode
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
 // TestSizeAudioV5Contract is the audio contract of plan version
 // transcode-modes-v5, written out in full. The size goal's audio levels are
 // decided by code, not by a field of the frozen policy: the plan carries only
-// "size_aac" or "size_he_aac", and the coordinator's estimate, the worker's
+// "size_aac" or "size_he_aac" (or their bed pair, "size_aac_bed" and
+// "size_he_aac_bed", which differ only for lossy object audio), and the
+// coordinator's estimate, the worker's
 // builder and both validations recompute each track from the source. So a job
 // frozen under v5 stays correct only while this table stays true.
 //
@@ -94,46 +97,68 @@ func TestSizeAudioV5Contract(t *testing.T) {
 		if r.he > 0 {
 			he = sprintOutput("aac_at", "HE", r.he)
 		}
-		check := func(level, what string, track AudioTrack, want string) {
-			t.Helper()
-			if g := got(AudioOutputFor(level, track)); g != want {
-				t.Errorf("%s %s %s at %d kbps: %s, want %s", level, name, what, track.BitrateKbps, g, want)
-			}
-		}
-		for _, kind := range []struct {
-			name, codec, profile string
-			lossless             bool
-		}{{"lossy", "eac3", "", false}, {"lossless", "flac", "", true}} {
-			track := func(kbps int) AudioTrack {
-				return AudioTrack{Codec: kind.codec, Profile: kind.profile, Channels: r.channels, Layout: r.layout, BitrateKbps: kbps}
-			}
-			// Level 1: copy below 1.25 x the target, the AAC-LC target at and above.
-			check(AudioModeSizeAAC, kind.name, track(r.lcBelow), "copy")
-			check(AudioModeSizeAAC, kind.name, track(r.lcAt), lc)
-			check(AudioModeSizeAAC, kind.name, track(r.lcAt*4), lc)
-			// Level 2: the HE-AAC target where the layout has one, else level 1.
-			if he != "" {
-				check(AudioModeSizeHEAAC, kind.name, track(r.heBelow), "copy")
-				check(AudioModeSizeHEAAC, kind.name, track(r.heAt), he)
-				check(AudioModeSizeHEAAC, kind.name, track(r.heAt*10), he)
-			} else {
-				check(AudioModeSizeHEAAC, kind.name, track(r.lcBelow), "copy")
-				check(AudioModeSizeHEAAC, kind.name, track(r.lcAt), lc)
-				check(AudioModeSizeHEAAC, kind.name, track(r.lcAt*4), lc)
-			}
-			// A bitrate the probe did not state: lossy is copied, lossless converted
-			// (to HE-AAC at level 2 where the layout has it).
-			unknown := track(0)
-			wantL1, wantL2 := "copy", "copy"
-			if kind.lossless {
-				wantL1, wantL2 = lc, lc
-				if he != "" {
-					wantL2 = he
+		for _, pair := range [][]string{ObjectCopyAudioLevelModes, AudioLevelModes} {
+			l1, l2 := pair[0], pair[1]
+			check := func(level, what string, track AudioTrack, want string) {
+				t.Helper()
+				if g := got(AudioOutputFor(level, track)); g != want {
+					t.Errorf("%s %s %s at %d kbps: %s, want %s", level, name, what, track.BitrateKbps, g, want)
 				}
 			}
-			check(AudioModeSizeAAC, kind.name, unknown, wantL1)
-			check(AudioModeSizeHEAAC, kind.name, unknown, wantL2)
+			for _, kind := range []struct {
+				name, codec, profile string
+				lossless             bool
+			}{{"lossy", "eac3", "", false}, {"lossless", "flac", "", true}} {
+				track := func(kbps int) AudioTrack {
+					return AudioTrack{Codec: kind.codec, Profile: kind.profile, Channels: r.channels, Layout: r.layout, BitrateKbps: kbps}
+				}
+				// Level 1: copy below 1.25 x the target, the AAC-LC target at and above.
+				check(l1, kind.name, track(r.lcBelow), "copy")
+				check(l1, kind.name, track(r.lcAt), lc)
+				check(l1, kind.name, track(r.lcAt*4), lc)
+				// Level 2: the HE-AAC target where the layout has one, else level 1.
+				if he != "" {
+					check(l2, kind.name, track(r.heBelow), "copy")
+					check(l2, kind.name, track(r.heAt), he)
+					check(l2, kind.name, track(r.heAt*10), he)
+				} else {
+					check(l2, kind.name, track(r.lcBelow), "copy")
+					check(l2, kind.name, track(r.lcAt), lc)
+					check(l2, kind.name, track(r.lcAt*4), lc)
+				}
+				// A bitrate the probe did not state: lossy is copied, lossless converted
+				// (to HE-AAC at level 2 where the layout has it).
+				unknown := track(0)
+				wantL1, wantL2 := "copy", "copy"
+				if kind.lossless {
+					wantL1, wantL2 = lc, lc
+					if he != "" {
+						wantL2 = he
+					}
+				}
+				check(l1, kind.name, unknown, wantL1)
+				check(l2, kind.name, unknown, wantL2)
+			}
 		}
+	}
+
+	// Lossy object audio: the first pair copies it, the bed pair converts its
+	// channel bed like any other lossy track.
+	joc := AudioTrack{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 6, Layout: "5.1", BitrateKbps: 768}
+	for _, level := range ObjectCopyAudioLevelModes {
+		if g := got(AudioOutputFor(level, joc)); g != "copy" {
+			t.Errorf("E-AC-3 JOC at %s: %s, want copy", level, g)
+		}
+	}
+	if g := got(AudioOutputFor(AudioModeSizeAACBed, joc)); g != sprintOutput("aac_at", "LC", 384) {
+		t.Errorf("E-AC-3 JOC at %s: %s", AudioModeSizeAACBed, g)
+	}
+	if g := got(AudioOutputFor(AudioModeSizeHEAACBed, joc)); g != sprintOutput("aac_at", "HE", 160) {
+		t.Errorf("E-AC-3 JOC at %s: %s", AudioModeSizeHEAACBed, g)
+	}
+	titled := AudioTrack{Codec: "eac3", Title: "English Atmos", Channels: 6, Layout: "5.1(side)", BitrateKbps: 448}
+	if g := got(AudioOutputFor(AudioModeSizeAACBed, titled)); g != "copy" {
+		t.Errorf("E-AC-3 Atmos below 1.25x at %s: %s, want copy", AudioModeSizeAACBed, g)
 	}
 
 	// Tracks no level converts, whatever their bitrate.
@@ -141,14 +166,13 @@ func TestSizeAudioV5Contract(t *testing.T) {
 		name  string
 		track AudioTrack
 	}{
-		{"E-AC-3 JOC", AudioTrack{Codec: "eac3", Profile: "Dolby Digital Plus + Dolby Atmos", Channels: 6, Layout: "5.1", BitrateKbps: 768}},
 		{"layout AAC cannot keep", AudioTrack{Codec: "ac3", Channels: 7, Layout: "6.1", BitrateKbps: 1000}},
 		{"layout of another channel count", AudioTrack{Codec: "ac3", Channels: 2, Layout: "5.1", BitrateKbps: 1000}},
 		{"unknown layout", AudioTrack{Codec: "flac", Channels: 2, Layout: "unknown", BitrateKbps: 1000}},
 		{"more than 8 channels", AudioTrack{Codec: "truehd", Channels: 16, BitrateKbps: 5000}},
 		{"no channels", AudioTrack{Codec: "flac", BitrateKbps: 1000}},
 	} {
-		for _, level := range AudioLevelModes {
+		for _, level := range append(slices.Clone(ObjectCopyAudioLevelModes), AudioLevelModes...) {
 			if out := AudioOutputFor(level, tc.track); out.Codec != "copy" {
 				t.Errorf("%s at %s: %+v, want copy", tc.name, level, out)
 			}

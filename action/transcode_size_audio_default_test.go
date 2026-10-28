@@ -2,6 +2,7 @@ package action
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -13,6 +14,25 @@ import (
 func preLevelSizePolicy(t *testing.T, p ModePolicySnapshot) ModePolicySnapshot {
 	t.Helper()
 	p.Profile.Audio.Mode = transcode.AudioModeCompactLossless
+	if err := digestModePolicy(&p); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// objectCopySizePolicy is a size snapshot as it was frozen before the bed audio
+// levels: level 1 of the pair that copies lossy Atmos, and that pair for a
+// budget.
+func objectCopySizePolicy(t *testing.T, p ModePolicySnapshot) ModePolicySnapshot {
+	t.Helper()
+	if p.Profile.Audio.Mode == transcode.AudioModeSizeAACBed {
+		p.Profile.Audio.Mode = transcode.AudioModeSizeAAC
+	}
+	if p.Size != nil && p.Size.SizeBudget != nil && p.Size.SizeBudget.Audio != nil {
+		size, budget, audio := *p.Size, *p.Size.SizeBudget, *p.Size.SizeBudget.Audio
+		audio.Modes = slices.Clone(transcode.ObjectCopyAudioLevelModes)
+		budget.Audio, size.SizeBudget, p.Size = &audio, &budget, &size
+	}
 	if err := digestModePolicy(&p); err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +66,7 @@ func TestNewSizeGoalFreezesAudioLevelOne(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := freezeFresh(t, inputs)
-			if p.Profile.Audio.Mode != transcode.AudioModeSizeAAC || p.workerVersion() != transcode.ModePolicyV5 {
+			if p.Profile.Audio.Mode != transcode.AudioModeSizeAACBed || p.workerVersion() != transcode.ModePolicyV5 {
 				t.Fatalf("audio %q worker version %s", p.Profile.Audio.Mode, p.workerVersion())
 			}
 			if b := p.Size.SizeBudget; b != nil && (b.Audio == nil || b.Audio.Modes[0] != p.Profile.Audio.Mode) {
@@ -73,8 +93,12 @@ func TestSizeGoalAudioLevelDigests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Digest != "sha256:805faf3a437219494d0ad06caacf5ed8e0a7e7ce5c128aec1a6d5ee774b41b89" {
+	if p.Digest != "sha256:c12b3cef75a61457581478f248e774e906163c9a2a27140920d07d56a52c6999" {
 		t.Fatalf("level 1 size snapshot digest changed: %s", p.Digest)
+	}
+	// Goals frozen at level 1 before the bed pair carry, and re-hash to, this.
+	if old := objectCopySizePolicy(t, p); old.Digest != "sha256:805faf3a437219494d0ad06caacf5ed8e0a7e7ce5c128aec1a6d5ee774b41b89" {
+		t.Fatalf("object-copy level 1 size snapshot digest changed: %s", old.Digest)
 	}
 	// The digest snapshots frozen before carry (and still re-hash to): see
 	// TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack.
@@ -149,10 +173,10 @@ func TestQualityLadderCarriesTheFrozenAudioLevel(t *testing.T) {
 	planRecipe(t, c)
 	plan := getPlan(c.ec.State["plan"])
 	rec := QualityLadderOf(c.ec.State)
-	if plan.AudioMode != transcode.AudioModeSizeAAC || plan.ModePolicyVersion != transcode.ModePolicyV5 || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+	if plan.AudioMode != transcode.AudioModeSizeAACBed || plan.ModePolicyVersion != transcode.ModePolicyV5 || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatalf("first rung audio %q version %s", plan.AudioMode, plan.ModePolicyVersion)
 	}
-	for _, mode := range []string{transcode.AudioModeCompactLossless, transcode.AudioModeSizeHEAAC, "copy"} {
+	for _, mode := range []string{transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAACBed, "copy"} {
 		other := *plan
 		other.AudioMode = mode
 		if qualityLadderPlanMatches(c.snapshot, c.ec.State, &other, rec) {

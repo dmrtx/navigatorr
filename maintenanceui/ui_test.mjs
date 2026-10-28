@@ -4150,6 +4150,7 @@ test("size goal discloses which audio becomes AAC", () => {
   assert.match(radio, /Same look, at least 15% smaller; lossless and high-bitrate audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
   assert.match(source, /AAC-LC · lossless tracks, and lossy tracks at least 1\.25× the target, become AAC-LC/);
+  assert.match(source, /"size_aac_bed" \? "AAC-LC · [^"]*Atmos keeps its 5\.1\/7\.1 bed, objects dropped"/);
 });
 
 test("compact goal says in plain language what it drops and still needs approval", () => {

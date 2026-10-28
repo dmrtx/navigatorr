@@ -273,9 +273,12 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 		if !caps.SizeModeV3 {
 			return nil, fmt.Errorf("worker does not support lossless audio compaction; upgrade the worker before encoding")
 		}
-	case transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC:
+	case transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC, transcode.AudioModeSizeAACBed, transcode.AudioModeSizeHEAACBed:
 		if !caps.SizeAudioLevels {
 			return nil, fmt.Errorf("worker does not support the size goal's audio levels; upgrade the worker before encoding")
+		}
+		if transcode.IsObjectBedAudioLevelMode(plan.AudioMode) && !caps.SizeAudioObjectBed {
+			return nil, fmt.Errorf("%s before encoding", errAudioObjectBedWorker)
 		}
 	}
 	if plan.Compact != nil && !caps.SupportsCompactTranscode() {

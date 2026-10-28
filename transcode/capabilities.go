@@ -115,6 +115,12 @@ type WorkerCapabilities struct {
 	// worker starts. Older workers get the coordinator's own hash. Like
 	// TrackSelection, it is not part of the pinned capability fingerprint.
 	LearnSourceDigest bool `json:"learn_source_digest,omitempty"`
+	// SizeAudioObjectBed reports a worker that runs the size goal's bed audio
+	// levels (AudioModeSizeAACBed, AudioModeSizeHEAACBed), which also convert
+	// lossy Atmos and DTS:X tracks to their channel bed. Older workers refuse
+	// those modes, so the coordinator checks this before it submits one. Like
+	// TrackSelection, it is not part of the pinned capability fingerprint.
+	SizeAudioObjectBed bool `json:"size_audio_object_bed,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.

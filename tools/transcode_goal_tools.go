@@ -13,7 +13,7 @@ import (
 
 type goalChangeInput struct {
 	ID               string   `json:"id" jsonschema:"required,description=Automatic transcode batch ID"`
-	Mode             string   `json:"mode,omitempty" jsonschema:"description=Omit for a read-only preview; size, quality, x265_preserve or compact (much smaller SDR 1080p; drops HDR, Dolby Vision and Atmos) requests another goal. size converts lossless Atmos/DTS:X (TrueHD, DTS-HD MA) to AAC on their channel bed and copies E-AC-3 Atmos"`
+	Mode             string   `json:"mode,omitempty" jsonschema:"description=Omit for a read-only preview; size, quality, x265_preserve or compact (much smaller SDR 1080p; drops HDR, Dolby Vision and Atmos) requests another goal. size converts Atmos/DTS:X (TrueHD, DTS-HD MA, and E-AC-3 Atmos at least 1.25 times its target) to AAC on their channel bed"`
 	Scope            string   `json:"scope,omitempty" jsonschema:"description=all or unfinished; defaults to all unreplaced files"`
 	SelectionVersion string   `json:"selection_version,omitempty" jsonschema:"description=Version from the read-only preview; required to change a goal"`
 	IdempotencyKey   string   `json:"idempotency_key,omitempty" jsonschema:"description=Unique command receipt; required to change a goal"`

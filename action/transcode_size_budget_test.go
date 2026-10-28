@@ -131,9 +131,14 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	// The frozen budget, its encode settings, floor and audio levels are part of
 	// the identity. The audio levels changed it on purpose: a new goal freezes
 	// them, so its digest is not the one a budget frozen before them carried.
-	const pinned = "sha256:7c02f9ea61de68d9187c9f5ee1cf6b28fd44a79f9ce2f9d8d56dd09cca2cc018"
+	// The bed pair changed it again.
+	const pinned = "sha256:cdf7804030fe8930be7c85c9d7768762bc231f00930acd302070a6079fbe3a40"
 	if with.Digest != pinned {
 		t.Fatalf("size budget policy digest changed: %s", with.Digest)
+	}
+	// A budget frozen with the pair that copies lossy Atmos keeps its digest.
+	if old := objectCopySizePolicy(t, with); old.Digest != "sha256:7c02f9ea61de68d9187c9f5ee1cf6b28fd44a79f9ce2f9d8d56dd09cca2cc018" {
+		t.Fatalf("object-copy size budget policy digest changed: %s", old.Digest)
 	}
 	// A budget frozen before the levels carries none, and its digest is the one
 	// it was frozen with, so it verifies and behaves as it did.
@@ -144,7 +149,7 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	if err != nil || legacy.Digest != pinnedBeforeLevels || legacy.workerVersion() != transcode.ModePolicyV3 || legacy.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
 		t.Fatalf("a budget frozen before the audio levels changed: %s worker %s (%v)", legacy.Digest, legacy.workerVersion(), err)
 	}
-	if with.Size.SizeBudget.Audio == nil || !slices.Equal(with.Size.SizeBudget.Audio.Modes, []string{transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC}) {
+	if with.Size.SizeBudget.Audio == nil || !slices.Equal(with.Size.SizeBudget.Audio.Modes, []string{transcode.AudioModeSizeAACBed, transcode.AudioModeSizeHEAACBed}) {
 		t.Fatalf("a new budget does not freeze the levels: %+v", with.Size.SizeBudget.Audio)
 	}
 	// A frozen budget is re-verified like the rest of the snapshot.

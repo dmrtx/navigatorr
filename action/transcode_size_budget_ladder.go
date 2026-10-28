@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -153,6 +154,9 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	}
 	if policy.Audio != nil && !caps.SizeAudioLevels {
 		return decline("size_budget_worker_unsupported", "The size budget needs a worker that converts audio per track to AAC and HE-AAC; upgrade the worker to use it.")
+	}
+	if policy.Audio != nil && slices.ContainsFunc(policy.Audio.Modes, transcode.IsObjectBedAudioLevelMode) && !caps.SizeAudioObjectBed {
+		return decline("size_budget_worker_unsupported", "The size budget converts Atmos audio to its channel bed, which needs an updated worker; upgrade the worker to use it.")
 	}
 	if snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
 		if audioMode, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {

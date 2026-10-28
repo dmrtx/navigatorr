@@ -28,6 +28,10 @@ import (
 // sent to a worker that predates the selection.
 const errTrackSelectionWorker = "worker does not support keeping only some audio and subtitle tracks; upgrade the worker"
 
+// errAudioObjectBedWorker is why a plan at one of the size goal's bed audio
+// levels is not sent to a worker that predates them.
+const errAudioObjectBedWorker = "worker does not support converting Atmos audio to its channel bed; upgrade the worker"
+
 const (
 	inputKeepLanguages       = "keep_languages"
 	inputKeepAudioStreams    = "keep_audio_streams"

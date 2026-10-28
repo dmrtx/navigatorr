@@ -104,8 +104,9 @@ type ModeSizePolicy struct {
 	// and proven bit-identical. The same minimum savings applies.
 	AudioOnlyFallback bool `json:"audio_only_fallback,omitempty"`
 	// LosslessObjectAudioToAAC converts lossless Atmos and DTS:X (TrueHD,
-	// DTS-HD MA) to AAC on their channel bed, like any lossless track; lossy
-	// object audio (E-AC-3 JOC) is still copied.
+	// DTS-HD MA) to AAC on their channel bed, like any lossless track. Lossy
+	// object audio (E-AC-3 JOC) follows the audio mode: the bed levels
+	// convert it to its bed too, every other mode copies it.
 	LosslessObjectAudioToAAC bool `json:"lossless_object_audio_to_aac"`
 	// SearchExtension lets the source search run past the base budget while
 	// work keeps finishing. It is absent from snapshots frozen before it
@@ -352,8 +353,10 @@ func modePolicyWithTracks(mode string, anime bool, maxHeight int, hardware *tran
 		// track well above its AAC-LC target is converted too, not only a
 		// lossless one. A budget picks its own level (modePolicyContent).
 		// Level 0, compact_lossless, stays in the snapshots frozen before
-		// this, which keep their content, digest and plan version (v3).
-		snapshot.Profile.Audio.Mode = transcode.AudioModeSizeAAC
+		// this, which keep their content, digest and plan version (v3). New
+		// goals freeze the bed pair's level 1, which converts lossy Atmos too;
+		// those frozen with size_aac keep it.
+		snapshot.Profile.Audio.Mode = transcode.AudioModeSizeAACBed
 	}
 	snapshot.Version = ModePolicyV4
 	// Nothing searches under v4, so nothing is reserved against an operation

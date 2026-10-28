@@ -47,7 +47,7 @@ func TestModePolicyFreezeAndDigest(t *testing.T) {
 	}
 }
 func modeTestCapabilities() transcode.WorkerCapabilities {
-	return transcode.WorkerCapabilities{AutomaticModesV2: true, SizeModeV3: true, SizeAudioLevels: true, TrackSelection: true, ExplicitMain10Benchmarks: true, ProtocolVersion: transcode.WorkerProtocolVersion, Encoders: map[string]bool{transcode.VideoCodecLibX265: true, transcode.VideoCodecHEVCVideoToolbox: true}, Filters: map[string]bool{"libvmaf": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10}}}}
+	return transcode.WorkerCapabilities{AutomaticModesV2: true, SizeModeV3: true, SizeAudioLevels: true, SizeAudioObjectBed: true, TrackSelection: true, ExplicitMain10Benchmarks: true, ProtocolVersion: transcode.WorkerProtocolVersion, Encoders: map[string]bool{transcode.VideoCodecLibX265: true, transcode.VideoCodecHEVCVideoToolbox: true}, Filters: map[string]bool{"libvmaf": true}, Quality: &transcode.QualityCapabilities{Native10Bit: true, CAMBIFullRef: true, Models: map[string]transcode.QualityModelCapability{"v1_1080p_3h": {Available: true, MeasurementBitDepth: 10}}}}
 }
 func TestModeFinalValidationRequestAcrossBitDepths(t *testing.T) {
 	for _, mode := range []string{"size", "quality", "x265_preserve"} {

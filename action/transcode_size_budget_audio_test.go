@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -55,18 +56,18 @@ func TestSizeBudgetAudioLevelForTheEightTrackEpisode(t *testing.T) {
 	if good < 1980 || good > 2000 {
 		t.Fatalf("good video bitrate for 1080p at 23.976 fps is %d kbps, want about 1990", good)
 	}
-	l1 := levelVideoKbps(policy, rep, 1_000_000_000, transcode.AudioModeSizeAAC)
-	l2 := levelVideoKbps(policy, rep, 1_000_000_000, transcode.AudioModeSizeHEAAC)
+	l1 := levelVideoKbps(policy, rep, 1_000_000_000, transcode.AudioModeSizeAACBed)
+	l2 := levelVideoKbps(policy, rep, 1_000_000_000, transcode.AudioModeSizeHEAACBed)
 	if l1 >= good || l2 < good || l1 < transcode.X265MinBitrateKbps {
 		t.Fatalf("level 1 leaves %d kbps and level 2 %d against a good %d", l1, l2, good)
 	}
 
 	enc := planSizeBudgetEncode(policy, rep, levelSourceBytes, 1_000_000_000)
-	if enc.Reason != "" || enc.AudioMode != transcode.AudioModeSizeHEAAC || enc.X265.BitrateKbps != l2 {
+	if enc.Reason != "" || enc.AudioMode != transcode.AudioModeSizeHEAACBed || enc.X265.BitrateKbps != l2 {
 		t.Fatalf("1.00 GB planned %+v", enc)
 	}
 	a := enc.Audio
-	if a == nil || a.Mode != transcode.AudioModeSizeHEAAC || a.Level != 2 || a.GoodVideoKbps != good || a.PreviousVideoKbps != l1 || len(a.Tracks) != 8 || a.converted() != 8 {
+	if a == nil || a.Mode != transcode.AudioModeSizeHEAACBed || a.Level != 2 || a.GoodVideoKbps != good || a.PreviousVideoKbps != l1 || len(a.Tracks) != 8 || a.converted() != 8 {
 		t.Fatalf("audio record %+v", a)
 	}
 	for i, tr := range a.Tracks {
@@ -87,7 +88,7 @@ func TestSizeBudgetAudioLevelOneIsTheMinimum(t *testing.T) {
 	rep := levelReport()
 	policy := levelPolicy(t, 2_500_000_000)
 	enc := planSizeBudgetEncode(policy, rep, levelSourceBytes, 2_500_000_000)
-	if enc.Reason != "" || enc.AudioMode != transcode.AudioModeSizeAAC || enc.Audio == nil || enc.Audio.Level != 1 || enc.Audio.PreviousVideoKbps != 0 {
+	if enc.Reason != "" || enc.AudioMode != transcode.AudioModeSizeAACBed || enc.Audio == nil || enc.Audio.Level != 1 || enc.Audio.PreviousVideoKbps != 0 {
 		t.Fatalf("2.5 GB planned %+v", enc)
 	}
 	if enc.X265.BitrateKbps < policy.Audio.goodVideoKbps(rep, levelSourceBytes) {
@@ -101,7 +102,7 @@ func TestSizeBudgetAudioLevelOneIsTheMinimum(t *testing.T) {
 	// Even a budget the original audio would fit in converts: no budget picks
 	// the level that only converts lossless audio.
 	huge := planSizeBudgetEncode(policy, rep, levelSourceBytes, sizeBudgetCeiling(levelSourceBytes))
-	if huge.AudioMode != transcode.AudioModeSizeAAC {
+	if huge.AudioMode != transcode.AudioModeSizeAACBed {
 		t.Fatalf("the largest budget planned %+v", huge)
 	}
 	if strings.Contains(sizeBudgetAudioSentence(enc.Audio), "Level 1 left") {
@@ -118,8 +119,8 @@ func TestSizeBudgetAudioLevelRule(t *testing.T) {
 	for budget := int64(300_000_000); budget <= 2_550_000_000; budget += 25_000_000 {
 		policy := levelPolicy(t, float64(budget))
 		good := policy.Audio.goodVideoKbps(rep, levelSourceBytes)
-		l1 := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, budget, transcode.AudioModeSizeAAC)
-		l2 := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, budget, transcode.AudioModeSizeHEAAC)
+		l1 := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, budget, transcode.AudioModeSizeAACBed)
+		l2 := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, budget, transcode.AudioModeSizeHEAACBed)
 		got := planSizeBudgetEncode(policy, rep, levelSourceBytes, budget)
 		// Level 2 is both the last usable level and the unreachable figures.
 		want := l2
@@ -138,7 +139,7 @@ func TestSizeBudgetAudioLevelRule(t *testing.T) {
 		}
 		seen[key]++
 	}
-	if seen[transcode.AudioModeSizeAAC] == 0 || seen[transcode.AudioModeSizeHEAAC] == 0 || seen["size_budget_unreachable"] == 0 {
+	if seen[transcode.AudioModeSizeAACBed] == 0 || seen[transcode.AudioModeSizeHEAACBed] == 0 || seen["size_budget_unreachable"] == 0 {
 		t.Fatalf("the sweep did not reach every outcome: %+v", seen)
 	}
 	// Level 0 is never chosen for a new snapshot.
@@ -153,10 +154,10 @@ func TestSizeBudgetAudioLevelUnreachable(t *testing.T) {
 	rep := levelReport()
 	policy := levelPolicy(t, 300_000_000)
 	enc := planSizeBudgetEncode(policy, rep, levelSourceBytes, 300_000_000)
-	if enc.Reason != "size_budget_unreachable" || enc.AudioMode != transcode.AudioModeSizeHEAAC {
+	if enc.Reason != "size_budget_unreachable" || enc.AudioMode != transcode.AudioModeSizeHEAACBed {
 		t.Fatalf("300 MB planned %+v", enc)
 	}
-	least := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, 300_000_000, transcode.AudioModeSizeHEAAC)
+	least := planSizeBudgetEncodeAt(policy, rep, levelSourceBytes, 300_000_000, transcode.AudioModeSizeHEAACBed)
 	if enc.NonVideoBytes != least.NonVideoBytes {
 		t.Fatalf("unreachable figures %d are not the most compressed level's %d", enc.NonVideoBytes, least.NonVideoBytes)
 	}
@@ -205,8 +206,12 @@ func TestSizeBudgetAudioRecordCopiesWhatIsWithinTarget(t *testing.T) {
 	}
 	// A level that converts nothing says so.
 	only := &mediainspect.DetailedReport{DurationSec: 1800, Audio: []mediainspect.DetailedStream{{Index: 1, Codec: "aac", Channels: 2, ChannelLayout: "stereo", BitRate: 128_000}}}
-	if s := sizeBudgetAudioSentence(sizeBudgetAudioRecord(only, transcode.AudioModeSizeAAC, 1, 1990, 0)); !strings.Contains(s, "already within 25% of their targets") {
+	if s := sizeBudgetAudioSentence(sizeBudgetAudioRecord(only, transcode.AudioModeSizeAACBed, 1, 1990, 0)); !strings.Contains(s, "all 1 tracks are copied, each already within 25% of its target") || strings.Contains(s, "Atmos") {
 		t.Errorf("sentence %q", s)
+	}
+	// A level frozen before the bed pair still says it copies lossy Atmos.
+	if s := sizeBudgetAudioSentence(sizeBudgetAudioRecord(only, transcode.AudioModeSizeAAC, 1, 1990, 0)); !strings.Contains(s, "lossy Atmos/DTS:X, which this goal copies") {
+		t.Errorf("object-copy sentence %q", s)
 	}
 }
 
@@ -287,7 +292,7 @@ func TestSizeBudgetPlanStepFreezesTheAudioLevel(t *testing.T) {
 			if rec == nil || plan == nil || rec.Outcome == SizeBudgetExceeded || getBool(c.ec.State, "skip_transcode") {
 				t.Fatalf("not planned: %+v plan %+v state %+v", rec, plan, c.ec.State)
 			}
-			if plan.ModePolicyVersion != transcode.ModePolicyV5 || plan.AudioMode != transcode.AudioModeSizeHEAAC || rec.Audio == nil || rec.Audio.Mode != plan.AudioMode || rec.Audio.Level != 2 || rec.Audio.converted() != 8 {
+			if plan.ModePolicyVersion != transcode.ModePolicyV5 || plan.AudioMode != transcode.AudioModeSizeHEAACBed || rec.Audio == nil || rec.Audio.Mode != plan.AudioMode || rec.Audio.Level != 2 || rec.Audio.converted() != 8 {
 				t.Fatalf("plan %s %s record %+v", plan.ModePolicyVersion, plan.AudioMode, rec.Audio)
 			}
 			if !strings.Contains(rec.Message, "Audio level 2 of 2") || !strings.Contains(rec.Message, "8 of 8 tracks") {
@@ -301,7 +306,7 @@ func TestSizeBudgetPlanStepFreezesTheAudioLevel(t *testing.T) {
 			}
 			// A plan with another level, or a record that disagrees with the
 			// plan's source, is not the frozen plan.
-			other, err := planWithAudioMode(plan, transcode.AudioModeSizeAAC)
+			other, err := planWithAudioMode(plan, transcode.AudioModeSizeAACBed)
 			if err != nil || sizeBudgetPlanMatches(c.snapshot, c.ec.State, other, rec) {
 				t.Fatalf("a plan with level 1 matched: %v", err)
 			}
@@ -339,11 +344,26 @@ func TestSizeBudgetPlanStepFreezesTheAudioLevel(t *testing.T) {
 // every level plan, so a plan frozen before a worker downgrade is refused here
 // and never reaches a worker that would reject it.
 func TestAudioLevelPlansNeedAWorkerWithAudioLevels(t *testing.T) {
-	for _, mode := range transcode.AudioLevelModes {
+	// A worker with the levels but not the bed pair runs the levels that copy
+	// lossy Atmos, which queued goals froze, and refuses the bed pair.
+	workers := map[string]transcode.WorkerCapabilities{
+		"old":    {ProtocolVersion: transcode.WorkerProtocolVersion},
+		"levels": {ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true},
+		"bed":    {ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, SizeAudioObjectBed: true},
+	}
+	for _, mode := range append(slices.Clone(transcode.ObjectCopyAudioLevelModes), transcode.AudioLevelModes...) {
+		bed := transcode.IsObjectBedAudioLevelMode(mode)
 		t.Run(mode, func(t *testing.T) {
-			for _, capable := range []bool{false, true} {
+			for name, worker := range workers {
+				want := ""
+				switch {
+				case name == "old":
+					want = "audio levels"
+				case name == "levels" && bed:
+					want = errAudioObjectBedWorker
+				}
 				mock := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
-					return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: capable}, nil
+					return worker, nil
 				}}
 				e := NewEngine(EngineDeps{Transcode: mock})
 				ec := testReconcileEC("job-levels")
@@ -354,9 +374,9 @@ func TestAudioLevelPlansNeedAWorkerWithAudioLevels(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				refused := res.Status == StepFailed && strings.Contains(res.Error, "audio levels")
-				if refused == capable {
-					t.Fatalf("capable=%v: status %s error %q", capable, res.Status, res.Error)
+				refused := res.Status == StepFailed && want != "" && strings.Contains(res.Error, want)
+				if refused != (want != "") || want == "" && res.Status == StepFailed {
+					t.Fatalf("%s worker: status %s error %q, want refusal %q", name, res.Status, res.Error, want)
 				}
 			}
 			ec := &ExecutionContext{InstanceID: "levels", Inputs: map[string]any{"mode": "size"}, State: map[string]any{"original_sha256": strings.Repeat("a", 64)}}
@@ -371,7 +391,29 @@ func TestAudioLevelPlansNeedAWorkerWithAudioLevels(t *testing.T) {
 			if _, err := finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, caps); err == nil || !strings.Contains(err.Error(), "audio levels") {
 				t.Fatalf("an old worker was given the final validation: %v", err)
 			}
+			caps.SizeAudioLevels, caps.SizeAudioObjectBed = true, false
+			_, err = finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, caps)
+			if refused := err != nil && strings.Contains(err.Error(), errAudioObjectBedWorker); refused != bed {
+				t.Fatalf("a worker without the bed pair, final validation: %v", err)
+			}
 		})
+	}
+}
+
+// A worker with the levels but not the bed pair would refuse a bed-pair plan:
+// the coordinator declines the budget before submitting.
+func TestSizeBudgetNeedsAWorkerWithTheObjectBed(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"size_budget_bytes": 1_000_000_000.0}, func(caps *transcode.WorkerCapabilities) { caps.SizeAudioObjectBed = false })
+	c.ec.State["source_report"], c.ec.State["original_size"] = levelReport(), levelSourceBytes
+	res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
+	if err != nil || res.Status != StepCompleted || !getBool(res.Outputs, "skipped") && !getBool(c.ec.State, "skip_transcode") {
+		t.Fatalf("a worker without the bed pair was given the plan: %+v %v", res, err)
+	}
+	if reason := getString(c.ec.State, "reason_code"); reason != "size_budget_worker_unsupported" {
+		t.Fatalf("reason %q", reason)
+	}
+	if c.executor.submitCalls != 0 {
+		t.Fatalf("submitted %d jobs", c.executor.submitCalls)
 	}
 }
 
@@ -435,12 +477,12 @@ func TestSizeBudgetAudioLevelSweep(t *testing.T) {
 		mode      string
 		videoKbps int
 	}{
-		{600_000_000, transcode.AudioModeSizeHEAAC, 648},
-		{800_000_000, transcode.AudioModeSizeHEAAC, 1511},
-		{1_000_000_000, transcode.AudioModeSizeHEAAC, 2373},
-		{1_200_000_000, transcode.AudioModeSizeHEAAC, 3235},
-		{1_500_000_000, transcode.AudioModeSizeAAC, 2736},
-		{2_000_000_000, transcode.AudioModeSizeAAC, 4892},
+		{600_000_000, transcode.AudioModeSizeHEAACBed, 648},
+		{800_000_000, transcode.AudioModeSizeHEAACBed, 1511},
+		{1_000_000_000, transcode.AudioModeSizeHEAACBed, 2373},
+		{1_200_000_000, transcode.AudioModeSizeHEAACBed, 3235},
+		{1_500_000_000, transcode.AudioModeSizeAACBed, 2736},
+		{2_000_000_000, transcode.AudioModeSizeAACBed, 4892},
 	} {
 		enc := planSizeBudgetEncode(levelPolicy(t, float64(tc.budget)), rep, levelSourceBytes, tc.budget)
 		if enc.Reason != "" || enc.AudioMode != tc.mode || enc.X265.BitrateKbps != tc.videoKbps {

@@ -297,16 +297,23 @@ the planner and the worker:
 
 | Level | Mode | What it does to a track |
 | --- | --- | --- |
-| 1 | `size_aac` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
-| 2 | `size_he_aac` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
+| 1 | `size_aac_bed` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
+| 2 | `size_he_aac_bed` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
 
 The 1.25 factor is a minimum gain: AC-3 5.1 at 448 kbps is copied at level 1
 (it would save 14% for a second lossy generation) while E-AC-3 5.1 at 640 kbps
 is converted, and AAC 5.1 at 384 kbps becomes HE-AAC at 160 at level 2. At both
 levels any other track is copied: one under the factor, lossless included when
 it states its bitrate (a quiet or mono FLAC can already be smaller than the
-target), E-AC-3 Atmos (JOC), a layout AAC cannot keep, more than 8 channels, and
-a lossy track whose bitrate the probe could not read. A lossless track that
+target), a layout AAC cannot keep, more than 8 channels, and a lossy track whose
+bitrate the probe could not read. Atmos and DTS:X are converted like any other
+track, lossless or lossy (E-AC-3 JOC): FFmpeg decodes the 5.1 or 7.1 channel
+bed, the objects and height channels are dropped, and the result is not a
+stereo downmix. Goals frozen before 2026-10-28 carry the first pair, `size_aac`
+and `size_he_aac`, which is identical except that it copies lossy Atmos and
+DTS:X; workers keep running it, and the bed pair needs a worker that reports
+`size_audio_object_bed` (the coordinator declines a budget or refuses the plan
+otherwise). A lossless track that
 states no bitrate is converted. Track count, order, languages, titles,
 dispositions and channel layout never change, and subtitles and attachments are
 never touched. Level 1 is the minimum for a new goal: lossy tracks over the
