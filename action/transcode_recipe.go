@@ -185,9 +185,11 @@ func (p *ModePolicySnapshot) workerVersion() string {
 		return p.Version
 	}
 	if p.Mode == "size" {
-		// A size budget that froze audio levels is policy v5; every other size
-		// goal, and budgets frozen before the levels, stay v3.
-		if p.Size != nil && p.Size.SizeBudget != nil && p.Size.SizeBudget.Audio != nil {
+		// A size goal whose audio is one of the levels is policy v5: every
+		// budget that froze them, and every goal frozen once level 1 became
+		// the default. Snapshots frozen before either keep compact_lossless
+		// and stay v3.
+		if transcode.IsAudioLevelMode(p.Profile.Audio.Mode) {
 			return transcode.ModePolicyV5
 		}
 		return SizeModePolicyVersion
@@ -623,8 +625,9 @@ func (e *Engine) rewindQualityLadder(ec *ExecutionContext, rec *QualityLadderRec
 }
 
 // endQualityLadder ends a ladder with no candidate. A size goal whose policy
-// allows it still tries to compact the lossless audio alone, with the video
-// copied, as it did after a search without a winner.
+// allows it still tries to convert the audio alone (the lossless audio, or
+// under a level every track above its target), with the video copied, as it
+// did after a search without a winner.
 func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, snapshot *ModePolicySnapshot, st transcode.JobStatus, rec *QualityLadderRecord, reason, message string) StepResult {
 	rec.Outcome, rec.Message = reason, message
 	// Every VideoToolbox rung missed: x265 at the same goal usually keeps
@@ -640,6 +643,9 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 			if res.Status == StepCompleted && getString(ec.State, "plan_source") == "audio_only" {
 				plan := getPlan(ec.State["plan"])
 				rec.Message = message + " The video is copied unchanged and only the lossless audio is compacted instead."
+				if transcode.IsAudioLevelMode(plan.AudioMode) {
+					rec.Message = message + " The video is copied unchanged and only the audio is re-encoded instead."
+				}
 				out := e.rewindQualityLadder(ec, rec, plan, fmt.Sprintf("job-%s-recipe-audio", ec.InstanceID))
 				ec.State["plan_source"] = "audio_only"
 				mergeMap(out.Outputs, map[string]any{"plan": plan, "plan_source": "audio_only", "plan_digest": plan.PlanDigest})
@@ -679,6 +685,10 @@ func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any
 		return false
 	}
 	if plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != 0 || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != getString(state, "benchmark_request_digest") {
+		return false
+	}
+	// Every rung carries the audio the goal froze.
+	if plan.AudioMode != snapshot.Profile.Audio.Mode {
 		return false
 	}
 	want, err := qualityLadderVideo(r, snapshotHardware(snapshot), max(sourceVideoBitDepth(getSourceReport(state["source_report"])), plan.ExpectedBitDepth), rec.Rung)

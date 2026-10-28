@@ -10,10 +10,12 @@ const ModePolicyV2 = "transcode-modes-v2"
 // long sources. Only mode=size is frozen under it; its quality floor is v2's.
 const ModePolicyV3 = "transcode-modes-v3"
 
-// ModePolicyV5 is size policy v3 plus the audio levels of a size budget goal
+// ModePolicyV5 is size policy v3 plus the size goal's audio levels
 // (AudioModeSizeAAC and AudioModeSizeHEAAC, see audio.go): the plan carries one
-// of them instead of compact_lossless. Only mode=size with a byte budget is
-// frozen under it; the worker applies v3's rules to everything else in the plan.
+// of them instead of compact_lossless. A size budget plans the level it chose
+// for the source; a size goal without a budget, frozen once level 1 became the
+// default, plans level 1. Only mode=size plans under it; the worker applies
+// v3's rules to everything else in the plan.
 const ModePolicyV5 = "transcode-modes-v5"
 
 // ModePolicyV6 is the plan version of a size or compact plan that keeps only

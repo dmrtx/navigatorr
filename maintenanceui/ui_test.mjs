@@ -4145,10 +4145,11 @@ test("podcast cleaning is not launched from the main UI, but a podcast job in th
   assert.ok(flatten(controls).some((c) => c.textContent === "Review cuts"));
 });
 
-test("size goal discloses that lossless Atmos and DTS:X become AAC", () => {
+test("size goal discloses which audio becomes AAC", () => {
   const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /Same look, at least 15% smaller; lossless audio becomes AAC\./);
+  assert.match(radio, /Same look, at least 15% smaller; lossless and high-bitrate audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
+  assert.match(source, /AAC-LC · lossless tracks, and lossy tracks at least 1\.25× the target, become AAC-LC/);
 });
 
 test("compact goal says in plain language what it drops and still needs approval", () => {

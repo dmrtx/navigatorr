@@ -105,10 +105,18 @@ func TestSizeNeedsUpdatedWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rep := &mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 24, BitRate: 5000000}}}
+	// A new size goal plans audio level 1, which needs the audio levels.
 	ec.State["plan"] = &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, AudioMode: policy.Profile.Audio.Mode}
 	caps := modeTestCapabilities()
+	caps.SizeAudioLevels = false
+	if _, err := finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, caps); err == nil || !strings.Contains(err.Error(), "audio levels") {
+		t.Fatalf("old worker admitted the size goal: %v", err)
+	}
+	// One frozen before plans compact_lossless, which needs size v3.
+	ec.State["plan"] = &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, AudioMode: transcode.AudioModeCompactLossless}
+	caps = modeTestCapabilities()
 	caps.SizeModeV3 = false
-	rep := &mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 24, BitRate: 5000000}}}
 	if _, err := finalRequestForPlan(ec, "/media/source.mkv", rep, policy.Profile.Optimization, caps); err == nil || !strings.Contains(err.Error(), "lossless audio compaction") {
 		t.Fatalf("old worker admitted the size goal: %v", err)
 	}
