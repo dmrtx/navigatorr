@@ -197,12 +197,12 @@ func sizeBudgetAudioRecordJSON(r *SizeBudgetAudioRecord) string {
 }
 
 // sizeAudioOnlyLevelMatches reports whether an audio-only plan carries the level
-// the frozen policy would choose for this source and budget. A budget without
-// levels (frozen before them) has the one legacy level, which the worker's plan
-// check already pins.
+// the frozen policy would choose for this source and budget. A goal without a
+// budget, or a budget without levels (frozen before them), has the one audio
+// mode its snapshot froze.
 func sizeAudioOnlyLevelMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan) bool {
 	if snapshot.Size == nil || snapshot.Size.SizeBudget == nil || snapshot.Size.SizeBudget.Audio == nil {
-		return true
+		return plan.AudioMode == snapshot.Profile.Audio.Mode
 	}
 	policy := snapshot.Size.SizeBudget
 	original := getInt64(state, "original_size")

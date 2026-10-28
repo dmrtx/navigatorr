@@ -183,6 +183,10 @@ func TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.mode == "size" && tc.budget == nil {
+				// Frozen before level 1 became the default too.
+				old = preLevelSizePolicy(t, old)
+			}
 			if old.Digest != tc.digest || old.Tracks != nil {
 				t.Fatalf("digest %s tracks %+v, want %s", old.Digest, old.Tracks, tc.digest)
 			}

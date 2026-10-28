@@ -15,9 +15,10 @@ import (
 const AudioModeCompactLossless = "compact_lossless"
 
 // The size goal's audio levels, least compressed first. A size goal with a
-// byte budget freezes both and picks one per source (see AudioLevelModes).
-// Level 0, AudioModeCompactLossless, is what size operations froze before the
-// levels existed and is never chosen for a new one.
+// byte budget freezes both and picks one per source (see AudioLevelModes); one
+// without a budget plans level 1. Level 0, AudioModeCompactLossless, is what
+// size operations froze before the levels existed and is never chosen for a
+// new one.
 //
 //	level 1  AudioModeSizeAAC    a track at least 1.25 times its AAC-LC target
 //	                             (stereo 192, mono 128, 5.1 384, 7.1 512 kbps)

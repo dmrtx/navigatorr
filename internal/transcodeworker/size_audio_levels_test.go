@@ -345,6 +345,53 @@ func TestSizeAudioLevelsBitrateIsMeasuredByPacket(t *testing.T) {
 	if needsAudioPacketValidation(sizeV5TestPlan(transcode.AudioModeSizeAAC), SourceProbe{Streams: levelSource()[:1]}) {
 		t.Error("a source without audio asks for the packet check")
 	}
+}
+
+// A size goal without a budget plans level 1 under v5 too: an x265 ladder rung
+// with no byte ceiling. Lossy surround well above the AAC-LC target becomes
+// AAC-LC, a track under 1.25 times it is copied. A v3 plan (frozen before)
+// still copies every lossy track.
+func TestSizeGoalWithoutBudgetPlansLevelOne(t *testing.T) {
+	src := []SourceStream{
+		{Kind: "video", Index: 0, Codec: "h264", Width: 1920, Height: 1080},
+		{Kind: "audio", Index: 1, TypeIndex: 0, Codec: "dts", Profile: "DTS", Channels: 6, Layout: "5.1(side)", Language: "eng", BitrateKbps: 1536},
+		{Kind: "audio", Index: 2, TypeIndex: 1, Codec: "ac3", Channels: 6, Layout: "5.1(side)", Language: "spa", BitrateKbps: 640},
+		{Kind: "audio", Index: 3, TypeIndex: 2, Codec: "ac3", Channels: 6, Layout: "5.1(side)", Language: "jpn", BitrateKbps: 448},
+	}
+	level1 := sizeV5TestPlan(transcode.AudioModeSizeAAC)
+	level1.Quality = 22
+	level1.PlanDigest, _ = transcode.DigestPlan(level1)
+	for name, tc := range map[string]struct {
+		plan *transcode.Plan
+		want []string
+	}{
+		"level 1": {level1, []string{"aac", "aac", "copy"}},
+		"v3":      {sizeV3TestPlan(true), []string{"copy", "copy", "copy"}},
+	} {
+		if tc.plan.SizePolicy.MaxCandidateBytes != 0 {
+			t.Fatalf("%s: the test plan carries a byte ceiling", name)
+		}
+		if err := ValidatePlan(tc.plan); err != nil {
+			t.Fatalf("%s plan rejected: %v", name, err)
+		}
+		ep, err := BuildExecutionPlan(tc.plan, src, 6000)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		i := 0
+		for _, s := range ep.Streams {
+			if s.Kind != "audio" {
+				continue
+			}
+			if s.TargetCodec != tc.want[i] || s.TargetCodec == "aac" && (s.BitrateKbps != 384 || s.HEAAC) {
+				t.Errorf("%s track %d: %+v, want %s", name, i, s, tc.want[i])
+			}
+			i++
+		}
+		if i != len(tc.want) {
+			t.Fatalf("%s: %d audio actions", name, i)
+		}
+	}
 	if ceiling := transcode.AudioBitrateCeilingBps(160); ceiling < 200_000 || ceiling >= 384_000 {
 		t.Errorf("ceiling for a 160 kbps track is %d bps", ceiling)
 	}

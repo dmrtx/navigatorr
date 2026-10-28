@@ -59,9 +59,9 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 		values  []int
 		workerV string
 	}{
-		"size with the media engine": {map[string]any{"mode": "size"}, RecipeQualityLadder, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}, transcode.ModePolicyV3},
-		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}, transcode.ModePolicyV3},
-		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV3},
+		"size with the media engine": {map[string]any{"mode": "size"}, RecipeQualityLadder, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}, transcode.ModePolicyV5},
+		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}, transcode.ModePolicyV5},
+		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV5},
 		"quality":                    {map[string]any{"mode": "quality"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}, ModePolicyVersion},
 		"x265_preserve":              {map[string]any{"mode": "x265_preserve"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}, ModePolicyVersion},
 		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, ModePolicyVersion},
