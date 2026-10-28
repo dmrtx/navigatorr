@@ -142,9 +142,10 @@ func IsPostEncodeFinalizationPending(job *JobRecord) bool {
 }
 
 // deferredPublication reports whether the job's candidate is kept on the
-// worker until a publish is requested.
+// worker until a publish is requested: it asked for on_approval and did not
+// fall back to publish on encode when it started.
 func (j *JobRecord) deferredPublication() bool {
-	return j != nil && strings.TrimSpace(j.PublishPolicy) == transcode.PublishPolicyOnApproval
+	return j != nil && strings.TrimSpace(j.PublishPolicy) == transcode.PublishPolicyOnApproval && j.PublishFallback == ""
 }
 
 // Destination returns the intended semantic destination, falling back to the

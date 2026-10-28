@@ -185,7 +185,7 @@ var transcodeAttemptKeys = []string{
 	"validation", "result", "original_intact", "original_integrity", "original_integrity_check", originalDigestConflictKey, "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at",
 	"failure_classification", "error_class", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms",
 	"worker_wall_duration_ms", "quality_evidence", "conversions", "applied_fallbacks", "phase", "progress_is_stale",
-	candidateLocationKey, publishPolicyKey, publishPolicyFallbackKey, candidateRetainedAtKey, candidateRetainedUntilKey,
+	candidateLocationKey, publishPolicyKey, publishPolicyFallbackKey, publishRetentionWaitKey, candidateRetainedAtKey, candidateRetainedUntilKey,
 }
 
 func continuationNote(c *HardwareContinuation) string {

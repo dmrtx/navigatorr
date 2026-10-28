@@ -10,6 +10,7 @@ import (
 func (e *Engine) observeTranscodeStatus(ec *ExecutionContext, st transcode.JobStatus) {
 	mirrorWorkerPhaseCosts(ec, "worker_", st.PhaseCosts)
 	mirrorTranscodeWorkerMetadata(ec, st)
+	recordPublishFallback(ec, st)
 	if st.QualityEvidence != nil {
 		ec.State["quality_evidence"] = st.QualityEvidence
 		ec.Outputs["quality_evidence"] = st.QualityEvidence

@@ -739,75 +739,161 @@ func TestRetained_RepeatedSubmitAnswersTheRetainedJob(t *testing.T) {
 func TestRetained_AdmissionLimits(t *testing.T) {
 	ctx := context.Background()
 	srcSize := int64(len("dummy-media"))
-	busy := func(t *testing.T, err error) {
-		t.Helper()
-		if err == nil {
-			t.Fatal("want worker busy, got nil")
-		}
+	t.Run("the refusal keeps its worker busy wording", func(t *testing.T) {
+		// Older coordinators tell "the retention budget is full" from "no free
+		// slot" by the message; a free-disk refusal is only busy.
+		f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = srcSize - 1 })
+		err := f.w.admitDeferredLocked(srcSize)
 		if status, code := classifySubmitError(err); status != http.StatusTooManyRequests || code != transcode.WorkerErrorBusy {
 			t.Fatalf("classify = %d %q (%v), want 429 worker_busy", status, code, err)
 		}
-	}
-	// The coordinator tells "the retention budget is full" from "no free slot"
-	// by the message (a batch child publishes on encode instead of waiting). A
-	// free-disk refusal is only busy: an on_encode job needs that disk too.
-	budget := func(t *testing.T, err error, want bool) {
-		t.Helper()
-		if got := transcode.IsRetentionRefusal(err); got != want {
-			t.Fatalf("IsRetentionRefusal(%v) = %v, want %v", err, got, want)
+		if !transcode.IsRetentionRefusal(err) {
+			t.Fatalf("IsRetentionRefusal(%v) = false, want true", err)
 		}
-	}
+		f = newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 95 })
+		f.w.freeDisk = func(string) (int64, error) { return 100, nil }
+		err = f.w.admitDeferredLocked(srcSize)
+		if status, code := classifySubmitError(err); status != http.StatusTooManyRequests || code != transcode.WorkerErrorBusy || transcode.IsRetentionRefusal(err) {
+			t.Fatalf("classify = %d %q, retention refusal %v (%v); want 429 worker_busy, not a retention refusal", status, code, transcode.IsRetentionRefusal(err), err)
+		}
+	})
 	t.Run("retained bytes", func(t *testing.T) {
 		f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = srcSize + srcSize/2 })
-		f.submit("job-limit-1", "on_approval") // reserves its expected output
-		// A burst: the first job is still encoding, its reservation counts.
-		_, err := f.w.Submit(ctx, f.request("job-limit-2", "on_approval"), "test-exe", "")
-		busy(t, err)
-		budget(t, err, true)
-		if _, serr := f.w.Submit(ctx, f.request("job-limit-3", ""), "test-exe", ""); serr != nil {
-			t.Fatalf("an on_encode submit is not subject to the retention limit: %v", serr)
+		f.submit("job-limit-1", "on_approval") // starts and reserves its expected output
+		// Queued behind it, the next ones are accepted and hold nothing yet.
+		f.submit("job-limit-2", "on_approval")
+		f.submitWaiting("job-limit-3")
+		if held, _, err := f.w.retainedBytesLocked(); err != nil || held != srcSize {
+			t.Fatalf("retained bytes = %d (%v), want only the started job's %d", held, err, srcSize)
 		}
-		// Once encoded it counts by its attested size; releasing frees the room.
+		// Once encoded job-limit-1 counts by its attested size and frees its
+		// slot. job-limit-2 finds the budget full and publishes on encode.
 		if err := f.w.InternalRun(ctx, "job-limit-1"); err != nil {
 			t.Fatal(err)
 		}
-		_, err = f.w.Submit(ctx, f.request("job-limit-2", "on_approval"), "test-exe", "")
-		busy(t, err)
-		budget(t, err, true)
+		f.schedule()
+		job2 := f.loadQueued("job-limit-2")
+		if job2.PID == 0 || job2.PublishFallback != transcode.PublishFallbackRetentionFull || job2.deferredPublication() || job2.PublishPolicy != transcode.PublishPolicyOnApproval {
+			t.Fatalf("job-limit-2 = pid %d fallback %q policy %q, want started, retention_full, policy kept", job2.PID, job2.PublishFallback, job2.PublishPolicy)
+		}
+		st, err := f.w.Status(ctx, "job-limit-2")
+		if err != nil || st.PublishFallback != transcode.PublishFallbackRetentionFull || st.PublishPolicy != transcode.PublishPolicyOnApproval {
+			t.Fatalf("status = %+v (%v), want publish_fallback retention_full", st, err)
+		}
+		before := atomic.LoadInt32(f.finalized)
+		if err := f.w.InternalRun(ctx, "job-limit-2"); err != nil {
+			t.Fatal(err)
+		}
+		if atomic.LoadInt32(f.finalized) != before+1 {
+			t.Fatal("a job that fell back must publish on encode")
+		}
+		if _, err := os.Stat(f.hiddenDir("job-limit-2")); !os.IsNotExist(err) {
+			t.Fatalf("a job that fell back must not be retained: %v", err)
+		}
+		// job-limit-3 asked to wait: it stays queued, and a job behind it
+		// that needs no retention still starts.
+		f.schedule()
+		job3 := f.loadQueued("job-limit-3")
+		if job3.PID != 0 || job3.RetentionBlocked != retentionBlockedBudget || job3.PublishFallback != "" {
+			t.Fatalf("job-limit-3 = pid %d blocked %q fallback %q, want waiting on the budget", job3.PID, job3.RetentionBlocked, job3.PublishFallback)
+		}
+		if st, err := f.w.Status(ctx, "job-limit-3"); err != nil || st.Status != "queued" || st.RetentionBlocked != retentionBlockedBudget {
+			t.Fatalf("status = %+v (%v), want queued, retention_blocked retention_budget", st, err)
+		}
+		f.submit("job-limit-4", "")
+		if job4 := f.loadQueued("job-limit-4"); job4.PID == 0 {
+			t.Fatal("an on_encode job must not wait behind one waiting for retention room")
+		}
+		if err := f.w.InternalRun(ctx, "job-limit-4"); err != nil {
+			t.Fatal(err)
+		}
+		// Releasing the retained candidate makes room: job-limit-3 starts and
+		// keeps its candidate.
 		if _, err := f.w.Cancel(ctx, "job-limit-1"); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.w.Submit(ctx, f.request("job-limit-2", "on_approval"), "test-exe", ""); err != nil {
-			t.Fatalf("after the release there is room again: %v", err)
+		f.schedule()
+		job3 = f.loadQueued("job-limit-3")
+		if job3.PID == 0 || job3.RetentionBlocked != "" || !job3.deferredPublication() {
+			t.Fatalf("job-limit-3 = pid %d blocked %q deferred %v, want started and deferred", job3.PID, job3.RetentionBlocked, job3.deferredPublication())
 		}
+		if err := f.w.InternalRun(ctx, "job-limit-3"); err != nil {
+			t.Fatal(err)
+		}
+		f.assertRetained("job-limit-3")
 	})
 	t.Run("free disk", func(t *testing.T) {
 		free := int64(100)
 		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 95 })
 		f.w.freeDisk = func(string) (int64, error) { return free, nil }
-		_, err := f.w.Submit(ctx, f.request("job-disk-1", "on_approval"), "test-exe", "")
-		busy(t, err)
-		budget(t, err, false)
-		if _, serr := f.w.Submit(ctx, f.request("job-disk-2", ""), "test-exe", ""); serr != nil {
-			t.Fatalf("an on_encode submit is not subject to the free-disk floor: %v", serr)
+		// Below the floor even a job that did not ask to wait waits: a job
+		// that publishes on encode needs that disk too.
+		f.submit("job-disk-1", "on_approval")
+		if job := f.loadQueued("job-disk-1"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk || job.PublishFallback != "" {
+			t.Fatalf("job-disk-1 = pid %d blocked %q fallback %q, want waiting on the disk floor", job.PID, job.RetentionBlocked, job.PublishFallback)
+		}
+		f.submit("job-disk-2", "")
+		if job := f.loadQueued("job-disk-2"); job.PID == 0 {
+			t.Fatal("an on_encode job is not subject to the free-disk floor")
+		}
+		if err := f.w.InternalRun(ctx, "job-disk-2"); err != nil {
+			t.Fatal(err)
 		}
 		free = 1000
-		if _, err := f.w.Submit(ctx, f.request("job-disk-1", "on_approval"), "test-exe", ""); err != nil {
-			t.Fatalf("with room on the disk: %v", err)
+		f.schedule()
+		if job := f.loadQueued("job-disk-1"); job.PID == 0 || job.RetentionBlocked != "" || !job.deferredPublication() {
+			t.Fatalf("job-disk-1 = pid %d blocked %q deferred %v, want started with room on the disk", job.PID, job.RetentionBlocked, job.deferredPublication())
 		}
 	})
-	t.Run("an unmeasurable disk refuses rather than guesses", func(t *testing.T) {
+	t.Run("an unmeasurable disk holds the job rather than guesses", func(t *testing.T) {
 		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 1 })
 		f.w.freeDisk = func(string) (int64, error) { return 0, errors.New("statfs failed") }
-		if _, err := f.w.Submit(ctx, f.request("job-disk-3", "on_approval"), "test-exe", ""); err == nil {
-			t.Fatal("an unknown free space must refuse the job")
+		f.submit("job-disk-3", "on_approval")
+		if _, err := f.w.ScheduleQueued(ctx, "test-exe", ""); err == nil {
+			t.Fatal("an unknown free space must be reported")
+		}
+		if job := f.loadQueued("job-disk-3"); job.PID != 0 {
+			t.Fatal("an unknown free space must not start the job")
 		}
 	})
 	t.Run("no limits configured", func(t *testing.T) {
-		f := newRetainedFixture(t, nil)
+		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MaxParallelJobs = 2 })
 		f.submit("job-free-1", "on_approval")
 		f.submit("job-free-2", "on_approval")
+		for _, id := range []string{"job-free-1", "job-free-2"} {
+			if job := f.loadQueued(id); job.PID == 0 || !job.deferredPublication() {
+				t.Fatalf("%s = pid %d deferred %v, want started and deferred", id, job.PID, job.deferredPublication())
+			}
+		}
 	})
+}
+
+// submitWaiting submits an on_approval job that waits for retention room.
+func (f *retainedFixture) submitWaiting(id string) {
+	f.t.Helper()
+	req := f.request(id, "on_approval")
+	req.RetentionWait = true
+	if _, err := f.w.Submit(context.Background(), req, "test-exe", ""); err != nil {
+		f.t.Fatalf("Submit(%s, wait): %v", id, err)
+	}
+}
+
+// schedule runs one scheduler pass, as the periodic sweep does.
+func (f *retainedFixture) schedule() {
+	f.t.Helper()
+	if _, err := f.w.ScheduleQueued(context.Background(), "test-exe", ""); err != nil {
+		f.t.Fatalf("ScheduleQueued: %v", err)
+	}
+}
+
+// loadQueued loads a job from its regular directory.
+func (f *retainedFixture) loadQueued(id string) *JobRecord {
+	f.t.Helper()
+	job, err := LoadJob(filepath.Join(f.cfg.StateDir, id, "job.json"))
+	if err != nil {
+		f.t.Fatalf("loading job %s: %v", id, err)
+	}
+	return job
 }
 
 func TestRetained_ConfigValidation(t *testing.T) {
@@ -1088,13 +1174,19 @@ func TestRetained_CollectorLeavesWorkAndScratchDirectories(t *testing.T) {
 }
 
 func TestRetained_FreeDiskFloorCountsEncodesNotYetWritten(t *testing.T) {
-	ctx := context.Background()
 	srcSize := int64(len("dummy-media"))
-	// Room for exactly one more candidate above the floor.
-	f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 1000 - srcSize - srcSize/2 })
+	// Room for exactly one more candidate above the floor, and two slots.
+	f := newRetainedFixture(t, func(c *WorkerConfig) {
+		c.MinFreeDiskBytes = 1000 - srcSize - srcSize/2
+		c.MaxParallelJobs = 2
+	})
 	f.w.freeDisk = func(string) (int64, error) { return 1000, nil }
 	f.submit("job-burst-1", "on_approval")
-	if _, err := f.w.Submit(ctx, f.request("job-burst-2", "on_approval"), "test-exe", ""); err == nil {
-		t.Fatal("a second burst submit must see the first one's reservation")
+	f.submit("job-burst-2", "on_approval")
+	if job := f.loadQueued("job-burst-1"); job.PID == 0 {
+		t.Fatal("the first burst job must start")
+	}
+	if job := f.loadQueued("job-burst-2"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
+		t.Fatalf("job-burst-2 = pid %d blocked %q: a second burst start must see the first one's reservation", job.PID, job.RetentionBlocked)
 	}
 }

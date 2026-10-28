@@ -286,6 +286,11 @@ type Request struct {
 	// it. Empty means PublishPolicyOnEncode and is never sent: a worker that
 	// predates the field rejects unknown request fields.
 	PublishPolicy string `json:"publish_policy,omitempty"`
+	// RetentionWait (with PublishPolicyOnApproval) asks the worker to keep the
+	// job queued while its retention budget is full instead of starting it to
+	// publish on encode. Sent only when true, to a worker advertising
+	// StartRetentionAdmission. Not part of the execution-spec digest.
+	RetentionWait bool `json:"retention_wait,omitempty"`
 }
 type Job struct {
 	ID string `json:"id"`
@@ -416,6 +421,13 @@ type JobStatus struct {
 	RetainedAt        time.Time `json:"retained_at,omitzero"`
 	RetainedExpiresAt time.Time `json:"retained_expires_at,omitzero"`
 	FinalizationState string    `json:"finalization_state,omitempty"`
+	// PublishFallback is PublishFallbackRetentionFull for an on_approval job
+	// the worker started to publish on encode because its retention budget was
+	// full; PublishPolicy still reports what was asked.
+	PublishFallback string `json:"publish_fallback,omitempty"`
+	// RetentionBlocked says why a queued on_approval job is waiting for room
+	// to retain its candidate ("retention_budget" or "free_disk").
+	RetentionBlocked string `json:"retention_blocked,omitempty"`
 }
 
 type PathMapping struct {

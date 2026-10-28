@@ -17,6 +17,7 @@ func (w *Worker) Capabilities(ctx context.Context) (transcode.WorkerCapabilities
 	// Advertised only when the operator enabled retention: until then a worker
 	// must look, and fingerprint, exactly as it did before the capability.
 	caps.DeferredPublication = w.cfg.DeferredPublication
+	caps.StartRetentionAdmission = w.cfg.DeferredPublication
 	caps.CapabilityFingerprint, err = transcode.ComputeCapabilityFingerprint(caps)
 	return caps, err
 }

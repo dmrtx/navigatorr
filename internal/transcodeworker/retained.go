@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -715,8 +716,10 @@ func (w *Worker) findRetainedLocked(jobID, key string) (*JobRecord, error) {
 }
 
 // retainedBytesLocked sums the disk held or reserved by deferred jobs that have
-// not finished: encoding ones by their admission reservation, finished ones by
-// their attested size. Callers hold the capacity lock.
+// started and not finished: encoding ones by their admission reservation,
+// finished ones by their attested size. A queued job that has not been spawned
+// holds nothing yet; it is admitted when its slot comes up. Callers hold the
+// capacity lock.
 //
 // unwritten is the part of that total still only promised: reservations of
 // encodes that have not produced their candidate, which free disk space does
@@ -751,6 +754,9 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 			return 0, 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
 		}
 		if job == nil || job.ID != id || !job.deferredPublication() || (job.Status != "queued" && job.Status != "running") {
+			continue
+		}
+		if job.Status == "queued" && job.PID == 0 {
 			continue
 		}
 		if job.CandidateSizeBytes > 0 {
@@ -788,11 +794,26 @@ func (w *Worker) freeDiskBytes() (int64, error) {
 	return int64(avail), nil
 }
 
-// admitDeferredLocked applies the retention limits to a new on_approval job
+// Why a queued on_approval job is not starting (JobRecord.RetentionBlocked).
+const (
+	retentionBlockedBudget = "retention_budget"
+	retentionBlockedDisk   = "free_disk"
+)
+
+// retentionRefusal is a retention limit admitDeferredLocked enforced; reason
+// is retentionBlockedBudget or retentionBlockedDisk.
+type retentionRefusal struct {
+	reason string
+	msg    string
+}
+
+func (e *retentionRefusal) Error() string { return e.msg }
+
+// admitDeferredLocked applies the retention limits to an on_approval job
 // whose output is expected to take at most expected bytes. Past a limit it
-// answers the existing "worker busy" error, which the API maps to 429
-// worker_busy; a measurement that fails refuses the job rather than guessing.
-// Callers hold the capacity lock.
+// answers a *retentionRefusal worded as the "worker busy" error the API maps
+// to 429 worker_busy; a measurement that fails refuses the job rather than
+// guessing. Callers hold the capacity lock.
 func (w *Worker) admitDeferredLocked(expected int64) error {
 	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
 		return nil // nothing to enforce: do not read every record to say so
@@ -803,7 +824,7 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 	}
 	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
 		if held+expected > limit {
-			return fmt.Errorf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)
+			return &retentionRefusal{reason: retentionBlockedBudget, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
 		}
 	}
 	if floor := w.cfg.MinFreeDiskBytes; floor > 0 {
@@ -813,8 +834,63 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		}
 		// Encodes admitted earlier have not written their candidates yet.
 		if left := free - unwritten - expected; left < floor {
-			return fmt.Errorf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)
+			return &retentionRefusal{reason: retentionBlockedDisk, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
 		}
 	}
 	return nil
+}
+
+// admitAtStartLocked applies the retention limits to a queued job whose slot
+// has come up, just before it is spawned. Only then does an on_approval job
+// take disk: its source is staged and its candidate written as it runs, and a
+// job still queued behind others must not hold the budget a running one needs.
+//
+// It reports whether the job may start now. The outcomes, for an on_approval
+// job:
+//   - within the limits: it starts and keeps its candidate.
+//   - the retention budget is full and the job did not ask to wait: it starts
+//     and publishes on encode (PublishFallback). A batch child must not wait:
+//     nothing in its batch can be approved until every child has encoded.
+//   - the retention budget is full and the job asked to wait, or the free-disk
+//     floor would be crossed: it stays queued and the scheduler moves on to
+//     the next job. A job that publishes on encode needs that disk too, so
+//     the floor never falls back. The slot is checked again on every pass.
+//   - the limits cannot be measured: it stays queued and err says why.
+//
+// The job record is saved only when what it says changes, so a job that keeps
+// waiting does not rewrite its record (or the log) on every pass. Callers hold
+// the capacity lock and the job's lock.
+func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error) {
+	if !job.deferredPublication() {
+		return true, nil
+	}
+	err := w.admitDeferredLocked(job.RetainReserveBytes)
+	var refusal *retentionRefusal
+	switch {
+	case err == nil:
+		if job.RetentionBlocked != "" {
+			// The spawn saves the record with its process identity.
+			job.RetentionBlocked = ""
+			log.Printf("job %s: there is room to retain its candidate now; starting", job.ID)
+		}
+		return true, nil
+	case !errors.As(err, &refusal):
+		return false, err
+	case refusal.reason == retentionBlockedBudget && !job.RetentionWait:
+		// Saved before the spawn: the runner reads the policy it executes.
+		job.PublishFallback = transcode.PublishFallbackRetentionFull
+		job.RetentionBlocked = ""
+		if serr := SaveJobAtomic(jobFile, job); serr != nil {
+			return false, serr
+		}
+		log.Printf("job %s: %v; starting it to publish on encode", job.ID, err)
+		return true, nil
+	default:
+		if job.RetentionBlocked == refusal.reason {
+			return false, nil
+		}
+		job.RetentionBlocked = refusal.reason
+		log.Printf("job %s: %v; it waits in the queue for room", job.ID, err)
+		return false, SaveJobAtomic(jobFile, job)
+	}
 }

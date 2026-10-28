@@ -16,6 +16,11 @@ const (
 	// local disk until the coordinator asks for it to be published (see
 	// docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md).
 	PublishPolicyOnApproval = "on_approval"
+
+	// PublishFallbackRetentionFull is the publish fallback of an on_approval
+	// job that publishes on encode because the worker had no room left in its
+	// retention budget.
+	PublishFallbackRetentionFull = "retention_full"
 )
 
 // NormalizePublishPolicy returns the canonical policy a job carries: empty for

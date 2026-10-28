@@ -563,6 +563,11 @@ type SubmitRequest struct {
 	// worker until POST /v1/jobs/{id}/publish. Omitted (or "on_encode") keeps the
 	// historical behaviour: publish as soon as the candidate validates.
 	PublishPolicy string `json:"publish_policy,omitempty"`
+	// RetentionWait (with on_approval) keeps the job queued while the
+	// retention budget is full when its slot comes up. Without it such a job
+	// starts and publishes on encode. Sent only to a worker advertising
+	// start_retention_admission.
+	RetentionWait bool `json:"retention_wait,omitempty"`
 }
 
 // SubmitResponse defines the JSON output for the submit command.
@@ -1153,12 +1158,8 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			err := errors.New("publish_policy on_approval requires an external destination: this candidate is written in place")
 			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
 		}
-		// The new job's output is bounded by its source for admission: a
-		// candidate the size policy accepts is smaller, and the average is far
-		// below that.
-		if err := w.admitDeferredLocked(fi.Size()); err != nil {
-			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
-		}
+		// The retention limits are applied when the job's slot comes up
+		// (admitAtStartLocked), not here: a queued job holds no disk yet.
 	}
 
 	// Phase 6 is local-output-first: an external destination must not require
@@ -1196,7 +1197,10 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		PublishPolicy:       publishPolicy,
 	}
 	if publishPolicy != "" {
+		// The output is bounded by its source for admission: a candidate the
+		// size policy accepts is smaller, and the average is far below that.
 		job.RetainReserveBytes = fi.Size()
+		job.RetentionWait = req.RetentionWait
 	}
 	job.Phase = "queued"
 	w.initializeStorageTelemetry(job)
@@ -1482,6 +1486,15 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 					if err == nil {
 						use = cur
 					}
+					return
+				}
+				// A deferred job takes its retention room only now; one that
+				// must wait for it stays queued and the next job may start.
+				admitted, err := w.admitAtStartLocked(jobFile, latest)
+				if err != nil {
+					errs = append(errs, err)
+				}
+				if !admitted {
 					return
 				}
 				pid, lstart, err := w.spawnTranscodeProcess(selfExe, configPath, latest.ID)
@@ -2033,6 +2046,12 @@ type JobStatusResponse struct {
 	Retained          bool      `json:"retained,omitempty"`
 	RetainedAt        time.Time `json:"retained_at,omitzero"`
 	RetainedExpiresAt time.Time `json:"retained_expires_at,omitzero"`
+	// PublishFallback is "retention_full" for an on_approval job that started
+	// to publish on encode because the retention budget was full.
+	PublishFallback string `json:"publish_fallback,omitempty"`
+	// RetentionBlocked says why a queued on_approval job is waiting for
+	// retention room ("retention_budget" or "free_disk").
+	RetentionBlocked string `json:"retention_blocked,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -2124,9 +2143,11 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		FinalizationState:   job.FinalizationState,
 		PartialPath:         job.PartialPath,
 
-		PublishPolicy: job.PublishPolicy,
-		Retained:      job.deferredPublication() && FinalizationState(job.FinalizationState) == FinalizationStateRetained,
-		RetainedAt:    job.RetainedAt,
+		PublishPolicy:    job.PublishPolicy,
+		PublishFallback:  job.PublishFallback,
+		RetentionBlocked: job.RetentionBlocked,
+		Retained:         job.deferredPublication() && FinalizationState(job.FinalizationState) == FinalizationStateRetained,
+		RetainedAt:       job.RetainedAt,
 		RetainedExpiresAt: func() time.Time {
 			if job.RetainedAt.IsZero() || FinalizationState(job.FinalizationState) != FinalizationStateRetained {
 				return time.Time{}
