@@ -71,18 +71,6 @@ func IsHEAACAudioLevelMode(mode string) bool {
 	return mode == AudioModeSizeHEAAC || mode == AudioModeSizeHEAACBed
 }
 
-// AudioLevelModesOf returns the pair a level mode belongs to, nil for any other
-// mode.
-func AudioLevelModesOf(mode string) []string {
-	switch {
-	case IsObjectBedAudioLevelMode(mode):
-		return AudioLevelModes
-	case IsAudioLevelMode(mode):
-		return ObjectCopyAudioLevelModes
-	}
-	return nil
-}
-
 // AudioTrack is what the audio policy reads from a source track. Title and
 // Handler (the stream's handler_name tag) are free text that may name object
 // audio when the probed profile does not. BitrateKbps is the source track's
