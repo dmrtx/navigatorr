@@ -114,6 +114,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if !caps.SizeAudioLevels {
 			return StepResult{Status: StepFailed, Error: "worker does not support the size goal's audio levels; upgrade the worker before encoding"}, nil
 		}
+		if transcode.IsObjectBedAudioLevelMode(plan.AudioMode) && !caps.SizeAudioObjectBed {
+			return StepResult{Status: StepFailed, Error: errAudioObjectBedWorker + " before encoding"}, nil
+		}
 	}
 	if plan.Tracks != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)

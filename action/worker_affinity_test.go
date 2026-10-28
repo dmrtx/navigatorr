@@ -468,7 +468,7 @@ func TestAnOfflineWorkerDoesNotDecideCoverArt(t *testing.T) {
 func TestTrackSelectionGateReadsTheAssignedWorker(t *testing.T) {
 	withTracks := func(capable bool) *mockTranscodeExecutor {
 		return &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
-			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, TrackSelection: capable}, nil
+			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, SizeAudioObjectBed: true, TrackSelection: capable}, nil
 		}}
 	}
 	for _, tc := range []struct {

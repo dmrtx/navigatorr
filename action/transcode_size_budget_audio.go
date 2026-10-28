@@ -11,7 +11,8 @@ import (
 )
 
 // A size budget's audio is a level, chosen once per source from the frozen
-// levels (transcode.AudioLevelModes, least compressed first) by one rule:
+// levels (least compressed first: transcode.AudioLevelModes for budgets frozen
+// now, transcode.ObjectCopyAudioLevelModes for earlier ones) by one rule:
 //
 //   - the first level that leaves the video at least a "good" bitrate wins;
 //   - when none does, the most compressed level that leaves a usable video
@@ -51,7 +52,8 @@ func (a *SizeBudgetAudio) validate() error {
 	if a == nil {
 		return nil
 	}
-	if !slices.Equal(a.Modes, transcode.AudioLevelModes) || !(a.GoodBitsPerPixel > 0 && a.GoodBitsPerPixel <= 1) {
+	pair := slices.Equal(a.Modes, transcode.AudioLevelModes) || slices.Equal(a.Modes, transcode.ObjectCopyAudioLevelModes)
+	if !pair || !(a.GoodBitsPerPixel > 0 && a.GoodBitsPerPixel <= 1) {
 		return fmt.Errorf("invalid size budget audio levels")
 	}
 	return nil
@@ -157,10 +159,15 @@ func sizeBudgetAudioSentence(r *SizeBudgetAudioRecord) string {
 		return ""
 	}
 	if r.converted() == 0 {
-		return fmt.Sprintf(" Audio level %d of %d: all %d tracks are already within 25%% of their targets and are copied.", r.Level, len(transcode.AudioLevelModes), len(r.Tracks))
+		why := "already within 25% of its target or of unknown bitrate"
+		if !transcode.IsObjectBedAudioLevelMode(r.Mode) {
+			// The level was frozen before lossy Atmos was converted.
+			why = "already within 25% of its target, of unknown bitrate, or lossy Atmos/DTS:X, which this goal copies"
+		}
+		return fmt.Sprintf(" Audio level %d of %d: all %d tracks are copied, each %s.", r.Level, len(transcode.AudioLevelModes), len(r.Tracks), why)
 	}
 	what := "AAC-LC (stereo 192 kbps, 5.1 384 kbps)"
-	if r.Mode == transcode.AudioModeSizeHEAAC {
+	if transcode.IsHEAACAudioLevelMode(r.Mode) {
 		what = "HE-AAC (stereo 64 kbps, 5.1 160 kbps)"
 		he := 0
 		for _, t := range r.Tracks {
@@ -183,9 +190,9 @@ func sizeBudgetAudioSentence(r *SizeBudgetAudioRecord) string {
 // sizeBudgetAudioOnlyNote says why a budget copies the video.
 func sizeBudgetAudioOnlyNote(plan *transcode.Plan) string {
 	switch plan.AudioMode {
-	case transcode.AudioModeSizeAAC:
+	case transcode.AudioModeSizeAAC, transcode.AudioModeSizeAACBed:
 		return "Copying the video and re-encoding the audio as AAC-LC alone fits the budget, so the video is copied unchanged."
-	case transcode.AudioModeSizeHEAAC:
+	case transcode.AudioModeSizeHEAAC, transcode.AudioModeSizeHEAACBed:
 		return "Copying the video and re-encoding the audio as HE-AAC alone fits the budget, so the video is copied unchanged."
 	}
 	return "Copying the video and compacting the lossless audio alone fits the budget, so the video is copied unchanged and only the lossless audio is compacted."
