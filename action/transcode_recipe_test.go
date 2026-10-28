@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -291,6 +292,23 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 			t.Fatalf("message %q", rec.Message)
 		}
 	}
+	// A refusal the worker made while encoding, before any validation, reports
+	// a projected size: the message never says the file came out at it.
+	for name, tc := range map[string]struct {
+		st   transcode.JobStatus
+		want string
+	}{
+		"finished file": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now(), ValidationStartedAt: time.Now()}}, "came out at 9.00 GB"},
+		"stopped early": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now()}}, "was stopped partway through the encode, on course for at least 9.00 GB"},
+	} {
+		c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
+		planRecipe(t, c)
+		tc.st.Status, tc.st.ReasonCode, tc.st.CandidateSizeBytes = transcode.StatusFailed, "insufficient_savings", 9_000_000_000
+		advanceRung(t, c, tc.st)
+		if rec := QualityLadderOf(c.ec.State); rec.Outcome != "insufficient_savings" || !strings.Contains(rec.Message, tc.want) {
+			t.Fatalf("%s: message %q", name, rec.Message)
+		}
+	}
 	// A quality miss without scores ends the goal rather than guessing.
 	c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
 	planRecipe(t, c)
@@ -489,7 +507,7 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	if !strings.Contains(rec.Choice.Message, "allow_hardware=false") {
 		t.Fatalf("choice %q", rec.Choice.Message)
 	}
-	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, 4_100_000_000); handled {
+	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, 4_100_000_000, false); handled {
 		t.Fatal("a one-encode budget advanced to another rung")
 	}
 	if _, fits := finishSizeBudget(c.ec, 4_100_000_000); fits {

@@ -735,7 +735,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 					// The worker refused a ladder rung's file for its size;
 					// every budget sits under the minimum saving, so the file
 					// is over the budget and the next rung encodes it again.
-					if res, handled := e.advanceSizeBudgetRung(ec, st.CandidateSizeBytes); handled {
+					if res, handled := e.advanceSizeBudgetRung(ec, st.CandidateSizeBytes, sizeRefusedWhileEncoding(st)); handled {
 						return res, nil
 					}
 				}
@@ -752,7 +752,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if (st.ReasonCode == "insufficient_savings" || st.ReasonCode == "size_growth" || st.ReasonCode == "size_growth_exceeded" || st.ReasonCode == sizeBudgetExceededReason) && sizeBudgetActive(ec.State) {
 					// The two-pass encode overshot past the worker's minimum
 					// saving, which is past the budget too.
-					out[sizeBudgetKey] = overshotSizeBudget(ec, st.CandidateSizeBytes)
+					out[sizeBudgetKey] = overshotSizeBudget(ec, st.CandidateSizeBytes, sizeRefusedWhileEncoding(st))
 					ec.State["reason_code"], out["reason_code"] = SizeBudgetExceeded, SizeBudgetExceeded
 				}
 				return StepResult{Status: StepCompleted, Outputs: out}, nil

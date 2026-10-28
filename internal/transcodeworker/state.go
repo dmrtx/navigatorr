@@ -375,6 +375,9 @@ type ProgressMetrics struct {
 	Speed     float64
 	Valid     bool
 	UpdatedAt time.Time
+	// OutTimeSec is how much of the output timeline the last complete record
+	// reports encoded (out_time), 0 when unknown.
+	OutTimeSec float64
 }
 
 // ParseProgress parses FFmpeg's key=value progress output.
@@ -459,11 +462,12 @@ func ParseProgress(progressPath string, durationSec float64) ProgressMetrics {
 	}
 
 	return ProgressMetrics{
-		Progress:  math.Round(pct*10) / 10,
-		FPS:       lastFPS,
-		Speed:     lastSpeed,
-		Valid:     valid,
-		UpdatedAt: info.ModTime().UTC(),
+		Progress:   math.Round(pct*10) / 10,
+		FPS:        lastFPS,
+		Speed:      lastSpeed,
+		Valid:      valid,
+		UpdatedAt:  info.ModTime().UTC(),
+		OutTimeSec: lastOutTimeSec,
 	}
 }
 

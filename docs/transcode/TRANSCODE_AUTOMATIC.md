@@ -252,6 +252,30 @@ The over-budget steps stay in the job's size and quality points. Validation
 rebuilds the step from the frozen policy, the source and the step number kept
 in the record and accepts only a plan that matches it and the ceiling exactly.
 
+**Stopping an encode early.** The worker does not wait for the whole file to
+refuse it for its size. While any encode with a size policy runs (the real
+pass of a two-pass x265 encode; copied video is not watched), it reads the
+output's size and ffmpeg's progress every few seconds and stops the encode
+when more bytes are already written than the policy accepts (the lowest of
+the budget, the minimum saving's ceiling and the growth limit), or when the
+projected final size is too far over it. The projection adds the rest of the
+duration, at the rate the file grew since the first progress the watch read,
+to what is written; bytes written before the first frame (Matroska writes
+attachments such as fonts there) are not scaled up with the encoded part. A
+plan with an average bitrate target is projected from 25% of the duration on
+and stopped more than 25% over; a plan at a constant quality (CRF,
+VideoToolbox `-q:v`), whose bitrate follows the content, is projected from
+50% on and stopped more than 50% over. The margins are deliberately wide:
+content varies along a file and credits are cheap, and a false stop throws
+away a candidate that would have passed. The job ends exactly as a refusal
+after the encode does (same reason code, `policy_rejected`, partial candidate
+removed) and reports as the candidate size the projected size, or the bytes
+written when the encode stopped before it could be projected; its error says
+how far the encode got. Such a job never started validating, so the
+coordinator says the step was stopped partway, on course for at least that
+size, instead of that it came out at it, and records the point as not
+measured.
+
 **The x265 budget encode.** With the media engine off (`allow_hardware=false`),
 or on a worker without it, one two-pass x265 average-bitrate encode (preset
 medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,

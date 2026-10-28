@@ -263,6 +263,11 @@ func runFFmpegPaths(ctx context.Context, ffmpegPath string, execPlan *ExecutionP
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		var refused *encodeSizeRefusal
+		if errors.As(err, &refused) {
+			// Stopped by the size watch: a policy refusal, not an ffmpeg failure.
+			return err
+		}
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) {
 			return fmt.Errorf("starting encoder process: %w", err)
