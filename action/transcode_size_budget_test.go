@@ -447,10 +447,10 @@ func TestSizeBudgetBitrateCeiling(t *testing.T) {
 
 func TestOvershotSizeBudget(t *testing.T) {
 	c := x265BudgetCase(t, nil)
-	if rec := overshotSizeBudget(c.ec, 0); rec == nil || rec.Outcome != SizeBudgetExceeded || !strings.Contains(rec.Message, "over the") {
+	if rec := overshotSizeBudget(c.ec, 0, false); rec == nil || rec.Outcome != SizeBudgetExceeded || !strings.Contains(rec.Message, "over the") {
 		t.Fatalf("record without a size %+v", rec)
 	}
-	if rec := overshotSizeBudget(c.ec, 9_000_000_000); rec.Outcome != SizeBudgetExceeded || rec.CandidateBytes != 9_000_000_000 {
+	if rec := overshotSizeBudget(c.ec, 9_000_000_000, false); rec.Outcome != SizeBudgetExceeded || rec.CandidateBytes != 9_000_000_000 {
 		t.Fatalf("record with a size %+v", rec)
 	}
 }

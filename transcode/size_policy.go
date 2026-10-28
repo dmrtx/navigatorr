@@ -23,10 +23,7 @@ func ValidateFinalSize(source, candidate int64, policy *SizePolicy) error {
 	if source <= 0 || candidate <= 0 {
 		return fmt.Errorf("size_evidence_missing: positive source and candidate byte measurements required")
 	}
-	if math.IsNaN(policy.MinSavingsPercent) || math.IsInf(policy.MinSavingsPercent, 0) || policy.MinSavingsPercent < 0 || policy.MinSavingsPercent > 100 || math.IsNaN(policy.MaxSizeIncreasePercent) || math.IsInf(policy.MaxSizeIncreasePercent, 0) || policy.MaxSizeIncreasePercent < 0 {
-		return fmt.Errorf("size_policy_invalid: invalid frozen size policy")
-	}
-	if policy.MaxCandidateBytes < 0 {
+	if !sizePolicyValid(policy) {
 		return fmt.Errorf("size_policy_invalid: invalid frozen size policy")
 	}
 	// The absolute ceiling is checked first: a size budget sits under the
@@ -35,19 +32,56 @@ func ValidateFinalSize(source, candidate int64, policy *SizePolicy) error {
 	if policy.MaxCandidateBytes > 0 && candidate > policy.MaxCandidateBytes {
 		return &PolicyRejectionError{ReasonCode: "size_budget_exceeded", Message: fmt.Sprintf("candidate is %d bytes, over the %d byte size budget", candidate, policy.MaxCandidateBytes)}
 	}
-	percent := func(v float64) *big.Rat {
-		r, _ := new(big.Rat).SetString(strconv.FormatFloat(v, 'f', -1, 64))
-		return r
-	}
 	src := new(big.Rat).SetInt64(source)
 	cand := new(big.Rat).SetInt64(candidate)
 	saving := new(big.Rat).Mul(new(big.Rat).Sub(src, cand), big.NewRat(100, 1))
-	if saving.Cmp(new(big.Rat).Mul(src, percent(policy.MinSavingsPercent))) < 0 {
+	if saving.Cmp(new(big.Rat).Mul(src, policyPercent(policy.MinSavingsPercent))) < 0 {
 		return &PolicyRejectionError{ReasonCode: "insufficient_savings", Message: "candidate violates frozen minimum savings policy"}
 	}
 	growth := new(big.Rat).Mul(new(big.Rat).Sub(cand, src), big.NewRat(100, 1))
-	if growth.Cmp(new(big.Rat).Mul(src, percent(policy.MaxSizeIncreasePercent))) > 0 {
+	if growth.Cmp(new(big.Rat).Mul(src, policyPercent(policy.MaxSizeIncreasePercent))) > 0 {
 		return &PolicyRejectionError{ReasonCode: "size_growth_exceeded", Message: "candidate violates frozen maximum growth policy"}
 	}
 	return nil
+}
+
+// MaxAcceptedCandidateBytes is the largest candidate ValidateFinalSize accepts
+// for source under policy: the lowest of the size budget, the minimum saving's
+// ceiling and the maximum growth's. ok is false when the policy cannot judge a
+// size (no policy, no source size, or an invalid policy). A result of zero
+// means no candidate can pass.
+func MaxAcceptedCandidateBytes(source int64, policy *SizePolicy) (limit int64, ok bool) {
+	if policy == nil || source <= 0 || !sizePolicyValid(policy) {
+		return 0, false
+	}
+	src := new(big.Rat).SetInt64(source)
+	// floor(source*(100+delta)/100), exactly as ValidateFinalSize compares.
+	ceiling := func(delta *big.Rat) int64 {
+		r := new(big.Rat).Mul(src, new(big.Rat).Add(big.NewRat(100, 1), delta))
+		r.Quo(r, big.NewRat(100, 1))
+		n := new(big.Int).Quo(r.Num(), r.Denom())
+		if !n.IsInt64() {
+			return math.MaxInt64
+		}
+		return n.Int64()
+	}
+	limit = min(ceiling(new(big.Rat).Neg(policyPercent(policy.MinSavingsPercent))), ceiling(policyPercent(policy.MaxSizeIncreasePercent)))
+	if policy.MaxCandidateBytes > 0 {
+		limit = min(limit, policy.MaxCandidateBytes)
+	}
+	return max(limit, 0), true
+}
+
+func sizePolicyValid(policy *SizePolicy) bool {
+	if math.IsNaN(policy.MinSavingsPercent) || math.IsInf(policy.MinSavingsPercent, 0) || policy.MinSavingsPercent < 0 || policy.MinSavingsPercent > 100 || math.IsNaN(policy.MaxSizeIncreasePercent) || math.IsInf(policy.MaxSizeIncreasePercent, 0) || policy.MaxSizeIncreasePercent < 0 {
+		return false
+	}
+	return policy.MaxCandidateBytes >= 0
+}
+
+// policyPercent is a policy percentage as the exact decimal it was written as,
+// so a byte comparison never inherits binary floating-point error.
+func policyPercent(v float64) *big.Rat {
+	r, _ := new(big.Rat).SetString(strconv.FormatFloat(v, 'f', -1, 64))
+	return r
 }

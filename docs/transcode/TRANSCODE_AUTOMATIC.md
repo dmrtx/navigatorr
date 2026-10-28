@@ -252,6 +252,22 @@ The over-budget steps stay in the job's size and quality points. Validation
 rebuilds the step from the frozen policy, the source and the step number kept
 in the record and accepts only a plan that matches it and the ceiling exactly.
 
+**Stopping an encode early.** The worker does not wait for the whole file to
+refuse it for its size. While any encode with a size policy runs (the real
+pass of a two-pass x265 encode; copied video is not watched), it reads the
+output's size and ffmpeg's progress every few seconds and stops the encode
+when more bytes are already written than the policy accepts (the lowest of
+the budget, the minimum saving's ceiling and the growth limit), or, from 25%
+of the duration on, when the projected final size (bytes written divided by
+the share encoded) is more than 25% over it. The margin is deliberately wide:
+content varies along a file and credits are cheap, and a false stop throws
+away a candidate that would have passed. The job ends exactly as a refusal
+after the encode does (same reason code, `policy_rejected`, partial candidate
+removed) and reports the projected size as the candidate size; its error says
+how far the encode got. Such a job never started validating, so the
+coordinator says the step was stopped partway, on course for that size,
+instead of that it came out at it, and records the point as not measured.
+
 **The x265 budget encode.** With the media engine off (`allow_hardware=false`),
 or on a worker without it, one two-pass x265 average-bitrate encode (preset
 medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,

@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -97,7 +98,7 @@ func TestSizeBudgetLadderStartsFromTheBudget(t *testing.T) {
 // budget and returns the engine's reply.
 func refuseRung(t *testing.T, c *budgetCase, bytes int64) StepResult {
 	t.Helper()
-	res, handled := c.engine.advanceSizeBudgetRung(c.ec, bytes)
+	res, handled := c.engine.advanceSizeBudgetRung(c.ec, bytes, false)
 	if !handled {
 		t.Fatal("rung not advanced")
 	}
@@ -140,7 +141,7 @@ func TestSizeBudgetLadderAdvancesRungByRung(t *testing.T) {
 	}
 	rec.Rung = 3
 	// Past the bitrate rung there is nowhere left to go.
-	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, budget+1); handled {
+	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, budget+1, false); handled {
 		t.Fatal("the ladder advanced past its last rung")
 	}
 }
@@ -212,8 +213,57 @@ func TestSizeBudgetLadderWorkerRefusals(t *testing.T) {
 	// A last refusal without a size still offers x265.
 	rec.RetryWithoutHardware, rec.Outcome = false, ""
 	c.ec.State[sizeBudgetKey] = rec
-	if rec = overshotSizeBudget(c.ec, 0); rec.Outcome != SizeBudgetExceeded || !rec.RetryWithoutHardware || !strings.Contains(rec.Message, "Try again with x265") {
+	if rec = overshotSizeBudget(c.ec, 0, false); rec.Outcome != SizeBudgetExceeded || !rec.RetryWithoutHardware || !strings.Contains(rec.Message, "Try again with x265") {
 		t.Fatalf("sizeless refusal %+v", rec)
+	}
+}
+
+// A rung the worker stopped while encoding (its encode finished, its file never
+// validated) advances the ladder like a finished one, but its size is the
+// worker's projection: no point records it as measured and no message says
+// the file came out at it.
+func TestSizeBudgetLadderRefusalsWhileEncoding(t *testing.T) {
+	c := newLadderCase(t, nil, nil)
+	res, _ := c.engine.stepPlanEncode(context.Background(), c.ec)
+	mergeMap(c.ec.State, res.Outputs)
+	budget := sizeBudgetLadderOf(c.ec.State).BudgetBytes
+	c.ec.State["job_id"], c.ec.State["transcode_submitted"] = "job-first", true
+	c.executor.statusFunc = func(_ context.Context, id string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: id, Status: transcode.StatusFailed, ReasonCode: sizeBudgetExceededReason, FailureClassification: "policy_rejected", CandidateSizeBytes: budget + 123, JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now()}}, nil
+	}
+	lastOver := func(curve []SizeBudgetPoint) SizeBudgetPoint {
+		for i := len(curve) - 1; i >= 0; i-- {
+			if curve[i].Kind != "budget_fallback" {
+				return curve[i]
+			}
+		}
+		t.Fatalf("no encoded point in %+v", curve)
+		return SizeBudgetPoint{}
+	}
+	for rung := 1; rung <= 3; rung++ {
+		step, err := c.engine.stepTranscodeWait(context.Background(), c.ec)
+		if err != nil || step.RewindTo != "submit_transcode" {
+			t.Fatalf("refusal %d: %+v %v", rung, step, err)
+		}
+		mergeMap(c.ec.State, step.Outputs)
+		rec := sizeBudgetLadderOf(c.ec.State)
+		if rec.Rung != rung || !strings.Contains(rec.Message, "was stopped partway through the encode, on course for") || strings.Contains(rec.Message, "came out") {
+			t.Fatalf("refusal %d: %q", rung, rec.Message)
+		}
+		if p := lastOver(rec.Curve); p.Kind != sizeBudgetRungOverKind || p.Measured || p.Bytes != budget+123 {
+			t.Fatalf("refusal %d: projected point %+v", rung, p)
+		}
+	}
+	if step, err := c.engine.stepTranscodeWait(context.Background(), c.ec); err != nil || step.Status != StepCompleted || step.RewindTo != "" {
+		t.Fatalf("last refusal: %+v %v", step, err)
+	}
+	rec := sizeBudgetOf(c.ec.State)
+	if rec.Outcome != SizeBudgetExceeded || !rec.RetryWithoutHardware || !strings.Contains(rec.Message, "was stopped partway through the encode, on course for") {
+		t.Fatalf("record %+v", rec)
+	}
+	// The last rung's own point is the record's last.
+	if p := rec.Curve[len(rec.Curve)-1]; p.Measured || p.Bytes != budget+123 {
+		t.Fatalf("projected point %+v", p)
 	}
 }
 

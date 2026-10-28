@@ -473,15 +473,15 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 	}
 	was := recipeRungName(rec.VideoCodec, tried.Quality)
 	if reason != reasonQualityNotMet {
-		size := ""
+		size := "came out"
 		if st.CandidateSizeBytes > 0 {
-			size = fmt.Sprintf(" at %s", formatBudgetBytes(st.CandidateSizeBytes))
+			size = cameOutAt(st.CandidateSizeBytes, sizeRefusedWhileEncoding(st))
 		}
 		why := fmt.Sprintf("does not save the %.0f%% this goal needs", snapshot.MinSavingsPercent)
 		if reason == "size_growth" || snapshot.MinSavingsPercent <= 0 {
 			why = "is larger than the original"
 		}
-		msg := fmt.Sprintf("%s came out%s, which %s. A better setting would only make it larger, so the goal stops here. Original preserved.", was, size, why)
+		msg := fmt.Sprintf("%s %s, which %s. A better setting would only make it larger, so the goal stops here. Original preserved.", was, size, why)
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reason, msg), true
 	}
 	if st.QualityEvidence == nil || rec.Rung+1 >= len(rec.Values) {

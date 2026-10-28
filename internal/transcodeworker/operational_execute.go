@@ -248,6 +248,18 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		// A failed encode still spent its CPU time, so it is recorded too.
 		w.persistPhaseCost(jobDir, jobFile, job, "encode", encodeStart, encodeCost)
 	}
+	var refused *encodeSizeRefusal
+	if errors.As(ffmpegErr, &refused) {
+		// The size watch stopped an encode the policy would refuse: the job
+		// ends as the post-encode size check below ends it, reporting the
+		// projected size. It never starts validating (ValidationStartedAt
+		// stays zero), which is how the coordinator tells the two apart.
+		job.ReasonCode = refused.Rejection.ReasonCode
+		job.FailureClassification = "policy_rejected"
+		job.CandidateSizeBytes = refused.CandidateBytes
+		w.removeRefusedCandidate(job, r)
+		return w.failJobTerminal(jobDir, jobFile, job, ffmpegErr)
+	}
 	if ffmpegErr != nil {
 		job.FailureClassification = string(resilience.ClassifyError(ffmpegErr))
 		var classified interface{ FailureClass() string }
@@ -338,15 +350,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			job.ReasonCode = "preservation_not_met"
 			job.FailureClassification = "policy_rejected"
 		}
-		// A bad local candidate must never be published. Remove only the
-		// worker-owned local candidate; the semantic source and the shared
-		// source cache are never touched. For local-only jobs the local
-		// candidate IS the candidate path, and the bad file is still removed
-		// because the job never completed (it is incomplete output, not a
-		// finalized destination).
-		if c := strings.TrimSpace(r.localCandidate); c != "" && !w.isCachePath(c) && c != job.Source {
-			_ = os.Remove(c)
-		}
+		w.removeRefusedCandidate(job, r)
 		return w.failJobTerminal(jobDir, jobFile, job, verr)
 	}
 
@@ -880,6 +884,18 @@ func (w *Worker) recordFinalizationFailure(jobDir, jobFile string, job *JobRecor
 		return nil
 	}
 	return fmt.Errorf("finalization failed for job %s: %w", job.ID, cause)
+}
+
+// removeRefusedCandidate deletes the local candidate of a job refused before
+// its checkpoint. A bad local candidate must never be published. Remove only
+// the worker-owned local candidate; the semantic source and the shared source
+// cache are never touched. For local-only jobs the local candidate IS the
+// candidate path, and the bad file is still removed because the job never
+// completed (it is incomplete output, not a finalized destination).
+func (w *Worker) removeRefusedCandidate(job *JobRecord, r *resolvedOperational) {
+	if c := strings.TrimSpace(r.localCandidate); c != "" && !w.isCachePath(c) && c != job.Source {
+		_ = os.Remove(c)
+	}
 }
 
 // failJobTerminal persists a terminal failed transition (cancellation still
@@ -1428,8 +1444,10 @@ func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (Sou
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the
-// production path with explicit operational input/output.
+// production path with explicit operational input/output. Either way ctx
+// carries the encode's size watch when its plan can be judged.
 func (w *Worker) runOperationalFFmpeg(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error {
+	ctx = withEncodeSizeWatch(ctx, job, outputPath, progressPath)
 	if w.runFFmpeg != nil {
 		return w.runFFmpeg(ctx, execPlan, job, inputPath, outputPath, progressPath, logPath)
 	}
