@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -107,5 +108,24 @@ func TestSampleWindowsHoldTheSamePicturesAcrossTimeBases(t *testing.T) {
 		if refHashes, candHashes := frameHashes(t, ctx, ffmpeg, ref), frameHashes(t, ctx, ffmpeg, cand); !slices.Equal(refHashes, candHashes) {
 			t.Fatalf("window at %.2f s: source and encode extracts hold different pictures", start)
 		}
+	}
+}
+
+// A file cut mid-GOP decodes no picture in the first packets; the probe then
+// reads further instead of failing the gate.
+func TestProbeFirstFrameTimeReadsOnWhenTheFirstPacketsDecodeNothing(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "ffprobe")
+	script := `#!/bin/sh
+case "$*" in
+*'%+#32'*) echo '{"frames":[]}' ;;
+*) echo '{"frames":[{"best_effort_timestamp_time":"9.480000"},{"best_effort_timestamp_time":"9.440000"}]}' ;;
+esac
+`
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first, err := probeFirstFrameTime(context.Background(), fake, "capture.ts", 0)
+	if err != nil || first != 9.44 {
+		t.Fatalf("first frame = %v, %v; want 9.44 from the longer read", first, err)
 	}
 }

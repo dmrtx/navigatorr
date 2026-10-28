@@ -37,8 +37,9 @@ import (
 //     `-noaccurate_seek` only seeks to the keyframe at or before it.
 //  2. Exact selection: `settb=AVTB,trim` keeps the pictures between the bounds,
 //     compared in microseconds, and ends the decode at the end bound. The
-//     bounds lie halfway between frames, so a picture cannot fall on either
-//     side of one depending on the file's time base.
+//     bounds lie halfway between frames of a constant-rate source, so there
+//     a picture cannot fall on either side of one depending on the file's
+//     time base (see sampleFrameBounds for the sources where they may not).
 //  3. PTS normalization: `-avoid_negative_ts make_zero` makes the extracted
 //     sample start at PTS 0.
 //  4. Lossless master: `-c:v ffv1` encodes losslessly, preserving raw decoded pixel format,
@@ -72,8 +73,13 @@ func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, fi
 // sampleFrameBounds places a sample window on the frame grid: it starts at
 // the first frame at or after startSec and holds round(durationSec×fps)
 // frames. Both bounds are measured from the first picture and lie halfway
-// between frames, half a frame clear of any picture of a constant-rate
-// source or of its encode, whatever their time bases round to.
+// between frames of the grid fps describes. For a constant-rate source whose
+// fps is its exact frame rate that is half a frame clear of any picture of
+// the source or of its encode, whatever their time bases round to. A grid
+// from an inexact average rate drifts from the pictures along the file, and
+// a variable-rate source has no grid, so there a bound can land within a
+// time base's rounding of a picture; the alignment checks then refuse the
+// window rather than measure a misaligned one.
 func sampleFrameBounds(startSec, durationSec, fps float64) (from, to float64) {
 	first := math.Ceil(startSec * fps)
 	frames := max(1, math.Round(durationSec*fps))

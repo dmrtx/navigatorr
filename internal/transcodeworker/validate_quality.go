@@ -529,42 +529,47 @@ func probeSamplePTS(ctx context.Context, ffprobePath, samplePath string) ([]floa
 	return pts, nil
 }
 
-// firstFrameProbePackets is how many leading packets probeFirstFrameTime
-// decodes: enough for a decoder that holds pictures back for reordering to
-// return its first one.
-const firstFrameProbePackets = 32
+// firstFrameProbeIntervals are the stretches of the file probeFirstFrameTime
+// decodes, the cheapest first: 32 packets return the first picture of any
+// file that starts on a keyframe, even past a decoder that holds pictures
+// back for reordering. A capture cut mid-GOP decodes nothing until its first
+// keyframe, which can be many packets in, so the probe then reads 30 s.
+var firstFrameProbeIntervals = []string{"%+#32", "%+30"}
 
 // probeFirstFrameTime is the timestamp of the first picture a video stream
 // decodes to. It is not the stream's start time: packed MPEG-4 B-frames in AVI
 // hold every picture back one packet, so the first picture is stamped a frame
 // after the stream starts, while its encode starts on that picture.
 func probeFirstFrameTime(ctx context.Context, ffprobePath, path string, videoIndex int) (float64, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(videoIndex), "-read_intervals", fmt.Sprintf("%%+#%d", firstFrameProbePackets), "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path)
-	output, err := cmd.Output()
-	chargeCPU(ctx, cmd)
-	if err != nil {
-		return 0, fmt.Errorf("ffprobe first frame timestamp: %w", err)
-	}
-	var log struct {
-		Frames []struct {
-			PTS string `json:"best_effort_timestamp_time"`
-		} `json:"frames"`
-	}
-	if err := json.Unmarshal(output, &log); err != nil {
-		return 0, err
-	}
-	// The decoder flush at the end of the interval may return a picture out
-	// of order or without a timestamp; the first picture is the earliest.
-	first := math.Inf(1)
-	for _, frame := range log.Frames {
-		if v, err := strconv.ParseFloat(frame.PTS, 64); err == nil && isFiniteQuality(v) {
-			first = math.Min(first, v)
+	for _, interval := range firstFrameProbeIntervals {
+		cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(videoIndex), "-read_intervals", interval, "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", path)
+		output, err := cmd.Output()
+		chargeCPU(ctx, cmd)
+		if err != nil {
+			return 0, fmt.Errorf("ffprobe first frame timestamp: %w", err)
+		}
+		var log struct {
+			Frames []struct {
+				PTS string `json:"best_effort_timestamp_time"`
+			} `json:"frames"`
+		}
+		if err := json.Unmarshal(output, &log); err != nil {
+			return 0, err
+		}
+		// The decoder flush at the end of the interval may return a picture
+		// out of order or without a timestamp; the first picture is the
+		// earliest.
+		first := math.Inf(1)
+		for _, frame := range log.Frames {
+			if v, err := strconv.ParseFloat(frame.PTS, 64); err == nil && isFiniteQuality(v) {
+				first = math.Min(first, v)
+			}
+		}
+		if !math.IsInf(first, 1) {
+			return first, nil
 		}
 	}
-	if math.IsInf(first, 1) {
-		return 0, fmt.Errorf("no timestamped video frame at the start of the file")
-	}
-	return first, nil
+	return 0, fmt.Errorf("no timestamped video frame at the start of the file")
 }
 
 func verifySampleAlignment(ref, cand []float64, fps float64) error {
