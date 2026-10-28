@@ -1190,3 +1190,68 @@ func TestRetained_FreeDiskFloorCountsEncodesNotYetWritten(t *testing.T) {
 		t.Fatalf("job-burst-2 = pid %d blocked %q: a second burst start must see the first one's reservation", job.PID, job.RetentionBlocked)
 	}
 }
+
+// An approved publication only copies a finished file. It must not wait for
+// the encode slot (a long encode would hold an approved replacement for an
+// hour), and it must not take that slot from the next encode either; its own
+// lane bounds how many copies hit the share at once.
+func TestRetained_ApprovedPublicationsUseTheirOwnLane(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"default lane of one", 0, 1},
+		{"configured lane of two", 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetainedFixture(t, func(c *WorkerConfig) {
+				c.MaxParallelJobs = 1
+				c.MaxParallelPublications = tc.limit
+			})
+			ctx := context.Background()
+			ids := []string{"job-lane-1", "job-lane-2", "job-lane-3"}
+			for _, id := range ids {
+				f.retain(id)
+			}
+			// The only encode slot is busy with a long encode.
+			seedEncoderJob(t, f.w, f.stub, "job-lane-encode", "running", "libx265", true, time.Hour)
+			for _, id := range ids {
+				if _, err := f.w.PublishRetained(ctx, id); err != nil {
+					t.Fatalf("PublishRetained(%s): %v", id, err)
+				}
+			}
+
+			started, err := f.w.ResumePostEncode(ctx, "test-exe", "")
+			if err != nil || started != tc.want {
+				t.Fatalf("ResumePostEncode started %d, err=%v; want %d beside a full encode slot", started, err, tc.want)
+			}
+			copying := 0
+			for _, id := range ids {
+				if jobStarted(t, f.w, id) {
+					copying++
+				}
+			}
+			if copying != tc.want {
+				t.Fatalf("%d publications running, want %d", copying, tc.want)
+			}
+			// The lane is full: the next sweep waits for a copy to finish.
+			if started, err := f.w.ResumePostEncode(ctx, "test-exe", ""); err != nil || started != 0 {
+				t.Fatalf("second sweep started %d, err=%v; the lane must bound the copies", started, err)
+			}
+			if !jobStarted(t, f.w, "job-lane-encode") {
+				t.Fatal("the running encode must be left alone")
+			}
+
+			// The encode ends while copies still run: the next encode starts at once.
+			done := pr6b1LoadJob(t, f.cfg.StateDir, "job-lane-encode")
+			done.Status, done.PID = "completed", 0
+			pr6b2Seed(t, f.cfg.StateDir, done)
+			f.stub.kill("job-lane-encode")
+			f.submit("job-lane-next", "")
+			if !jobStarted(t, f.w, "job-lane-next") {
+				t.Fatal("a running publication must not hold the encode slot")
+			}
+		})
+	}
+}

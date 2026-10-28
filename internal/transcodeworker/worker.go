@@ -94,6 +94,10 @@ type WorkerConfig struct {
 	RetainedTTLHours           int   `json:"retained_ttl_hours" yaml:"retained_ttl_hours"`
 	RetainedCandidatesMaxBytes int64 `json:"retained_candidates_max_bytes" yaml:"retained_candidates_max_bytes"`
 	MinFreeDiskBytes           int64 `json:"min_free_disk_bytes" yaml:"min_free_disk_bytes"`
+	// MaxParallelPublications bounds how many approved retained candidates copy
+	// to the share at once. They run beside encodes, outside max_parallel_jobs,
+	// so this keeps them from flooding the NAS. Zero means 1.
+	MaxParallelPublications int `json:"max_parallel_publications" yaml:"max_parallel_publications"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -222,6 +226,9 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	}
 	if cfg.MinFreeDiskBytes < 0 {
 		return fmt.Errorf("min_free_disk_bytes must not be negative (fail closed)")
+	}
+	if cfg.MaxParallelPublications < 0 {
+		return fmt.Errorf("max_parallel_publications must not be negative (fail closed)")
 	}
 	if err := cfg.SMBDirect.Normalize(cfg.AllowedRoots); err != nil {
 		return err

@@ -317,8 +317,9 @@ func (w *Worker) restoreRetainedLocked(hiddenDir string, job *JobRecord) (string
 // into an ordinary post-encode job awaiting finalization: it verifies the local
 // file against the checkpoint, persists "finalizing" while the job is still
 // hidden, moves the directory back and leaves the rest to the post-encode sweep,
-// which publishes it like any other finished encode (under the video slot
-// limit, with the retry budget reset). Idempotent: a job already finalizing or
+// which publishes it like any other finished encode, with the retry budget
+// reset. The copy runs in the publication lane (max_parallel_publications),
+// beside encodes rather than after them. Idempotent: a job already finalizing or
 // completed answers its status.
 func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusResponse, error) {
 	if err := ctx.Err(); err != nil {

@@ -294,7 +294,7 @@ What the worker PR does where this document left a choice, or differs from it.
 - **Settings** (worker config, all optional, `deferred_publication` defaults to
   off and the others to "no limit" except the TTL): `deferred_publication`,
   `retained_ttl_hours` (default 720, so 30 days), `retained_candidates_max_bytes`,
-  `min_free_disk_bytes`. The capability is advertised only when
+  `min_free_disk_bytes`, `max_parallel_publications` (default 1). The capability is advertised only when
   `deferred_publication` is on, and a worker that does not advertise it also
   refuses `publish_policy: on_approval`.
 - **State.** `FinalizationState` gains `retained` and `expired`, which only ever
@@ -310,8 +310,8 @@ What the worker PR does where this document left a choice, or differs from it.
 - **Publish.** `POST /v1/jobs/{id}/publish` verifies the local file against the
   checkpoint (size and SHA-256), saves `finalizing` while the directory is still
   hidden, moves it back and returns. The existing post-encode sweep starts the
-  runner, so a publish **uses a video slot** and waits when every slot is busy
-  (the open question below stays open: a lane of its own was not built). The
+  runner. Revision 6 below: the copy runs in a **publication lane** of its own,
+  not in a video slot. The
   retry budget is reset, so the usual automatic retries and `retry-publication`
   apply afterwards. Answers: `not_retained` (409), `candidate_changed` (409),
   `worker_held` (503, retryable) while the drain freeze is on.
@@ -554,6 +554,19 @@ since their candidates are not the batch's to release. This is the same
 trade-off as before the change (a batch occupying the worker's slots) and is a
 reason to give a very large batch its own worker.
 
+**Revision 6: approved publications have a lane of their own.** Until now a
+publish request waited for a free video slot, like any finished encode. The
+workers run one encode at a time and the coordinator keeps them busy, so an
+approved replacement could wait for a whole encode (about an hour) at "verify
+original and candidate". Copying a retained candidate never runs ffmpeg. An
+approved publication (`on_approval`, encode complete, `finalizing`) now draws on
+a publication lane bounded by `max_parallel_publications` (default 1). It does
+not count against `max_parallel_jobs`, the slot split or the x265 cap, so it
+runs beside an encode, and a running copy never holds the next encode back. The
+limit keeps a series approved at once from flooding the share: the copies go
+through it in turn. Any other post-encode publication (publish on encode,
+including a fallback) still uses its video slot, as before.
+
 **Every end of a retained child goes through the one hook.**
 
 | Event | Path |
@@ -623,8 +636,8 @@ checks.
 - `retained_ttl`: batches have waited weeks. Resolved: expiry is lazy (see "Server
   implementation notes"); nothing polls completed actions.
 - The batch admission rule: resolved, see "Batches": batch children defer, and a child the worker has no room to retain publishes on encode.
-- Should publishing use an encode slot or a lane of its own? With every slot
-  encoding, an approval can wait hours.
+- Should publishing use an encode slot or a lane of its own? Resolved by
+  revision 6: a lane of its own, `max_parallel_publications` wide.
 - Support for workers without direct SMB (a local mount): the filesystem path
   publishes by copy and should work but is untested.
 - Publish concurrency for approving a whole series, given one worker's upload

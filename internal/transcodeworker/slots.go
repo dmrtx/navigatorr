@@ -58,25 +58,29 @@ func jobIsX265(job *JobRecord) bool {
 	return jobSlotKind(job) == slotKindVideo && job != nil && !job.EncodeComplete && job.Plan != nil && norm(job.Plan.VideoCodec) == transcode.VideoCodecLibX265
 }
 
-// jobSlot is the pools a job draws on: its kind, and whether it also counts
-// against the x265 cap.
+// jobSlot is the pools a job draws on: its kind, whether it also counts
+// against the x265 cap, and whether it is an approved publication.
 type jobSlot struct {
-	kind slotKind
-	x265 bool
+	kind        slotKind
+	x265        bool
+	publication bool
 }
 
 func jobSlotOf(job *JobRecord) jobSlot {
-	return jobSlot{kind: jobSlotKind(job), x265: jobIsX265(job)}
+	return jobSlot{kind: jobSlotKind(job), x265: jobIsX265(job), publication: isApprovedPublication(job)}
 }
 
-// slotCounts is the slots in use: video and podcast jobs, and how many of the
-// video jobs are x265 encodes.
+// slotCounts is the slots in use: video and podcast jobs, how many of the
+// video jobs are x265 encodes, and the approved publications copying a
+// retained candidate to the share.
 type slotCounts struct {
-	Video, Podcast, X265 int
+	Video, Podcast, X265, Publication int
 }
 
 func (c *slotCounts) add(s jobSlot) {
 	switch {
+	case s.publication:
+		c.Publication++
 	case s.kind == slotKindPodcast:
 		c.Podcast++
 	case s.x265:
@@ -105,13 +109,21 @@ type slotLimits struct {
 	Podcast int // pool size for podcast work; the ceiling when !Split
 	Split   bool
 	X265    int // most x265 encodes at once inside the video pool; 0 is no cap
+	// Publication is how many approved publications may copy at once; below 1
+	// it is 1.
+	Publication int
 }
 
 // hasRoom reports whether one more job of the given class may start given the
 // jobs already running. The ceiling caps both kinds together in every mode: a
 // split saved while jobs of the other kind run (or one that lowers a pool
-// under running jobs) must not let the worker exceed it.
+// under running jobs) must not let the worker exceed it. An approved
+// publication only copies a finished file, so it has its own lane outside the
+// ceiling: the operator approved it and should not wait for an encode to end.
 func (l slotLimits) hasRoom(s jobSlot, use slotCounts) bool {
+	if s.publication {
+		return use.Publication < max(l.Publication, 1)
+	}
 	if use.Video+use.Podcast >= l.Ceiling {
 		return false
 	}
@@ -235,12 +247,12 @@ func (w *Worker) storedSlots() (slotSplitRecord, bool) {
 func (w *Worker) slotLimits() slotLimits {
 	rec, ok := w.storedSlots()
 	ceiling, _ := w.ceilingFrom(rec, ok)
-	limits := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling}
+	limits := slotLimits{Ceiling: ceiling, Video: ceiling, Podcast: ceiling, Publication: w.cfg.MaxParallelPublications}
 	if !ok {
 		return limits
 	}
 	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: rec.VideoSlots, PodcastSlots: rec.PodcastSlots}, ceiling, 0); err == nil && (rec.VideoSlots != 0 || rec.PodcastSlots != 0) {
-		limits = slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true}
+		limits = slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true, Publication: w.cfg.MaxParallelPublications}
 	}
 	// A cap larger than the video pool that is in force (the ceiling or the
 	// split was lowered since) is ignored rather than clamped, as a split that
