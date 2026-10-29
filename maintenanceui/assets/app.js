@@ -7269,10 +7269,12 @@ function replacementQuality(facts) {
 }
 // One file as a person decides on it. The paths stay behind a disclosure.
 function replacementCard({name, facts, originalPath, newPath, check, onView}) {
-  const card = node("div", "", "candidate-review-row replacement-row");
+  const card = node("div", "", `candidate-review-row replacement-row${check ? " selectable" : ""}`);
+  // The label already carries the name's weight: a <strong> inside it would
+  // render bolder than 600, i.e. the font's heaviest face.
   if (check) {
     const label = node("label", "", "check replacement-name");
-    label.append(check, node("strong", name));
+    label.append(check, node("span", name));
     card.append(label);
   } else card.append(node("strong", name, "replacement-name"));
   for (const line of [replacementSizes(facts), replacementQuality(facts), belowTargetNotice(facts?.size_budget_outcome)]) if (line) card.append(line);

@@ -6016,6 +6016,8 @@ test("only the checked files are prepared and the button and total follow the ch
   const h = batchReviewHarness({ planReads: [{ prepared: false }, { prepared: false }, prepared] });
   await h.run('reviewBatchReplacement("batch-a")');
   const rows = h.elements.get("batch-review-data").children;
+  // A checkable file hangs its box in the margin so its facts line up under the name.
+  assert.ok(String(rows[1].className).split(" ").includes("selectable"));
   const input = flatten(rows[2]).find((e) => e.listeners?.has("change"));
   input.checked = false;
   input.listeners.get("change")();
