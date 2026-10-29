@@ -2888,7 +2888,12 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 #batch-review-data, #file-review-data { margin: 8px 0; }
 .replacement-row { display: grid; gap: 4px; }
 .replacement-row p { margin: 0; }
-.replacement-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.replacement-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+/* A selectable file hangs its checkbox in the margin, so the name and its
+   facts share one left edge and a long name wraps under itself. */
+.replacement-row.selectable { padding-left: 24px; }
+.replacement-row.selectable > .check { margin-left: -24px; gap: 8px; align-items: flex-start; min-height: 0; }
+.replacement-row.selectable > .check > input { flex: none; margin-top: 2px; }
 .replacement-sizes { font-size: 13px; font-variant-numeric: tabular-nums; }
 .replacement-quality, .replacement-tracks { overflow-wrap: anywhere; }
 .replacement-row .size-budget-warning { margin: 2px 0; }
