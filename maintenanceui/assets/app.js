@@ -4305,7 +4305,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-limits").hidden = Boolean(plan.mode);
 
     $("reconfigure-profile-info").hidden = true;
-    $("reconfigure-note").textContent = "Same task · Originals kept · Replaced candidates removed";
+    $("reconfigure-note").textContent = savedPlan?.ready_candidate ? "Same task · Original kept · Its ready candidate is removed" : "Same task · Originals kept · Replaced candidates removed";
     $("reconfigure-title").textContent = plan.mode ? "Change goal" : plan.requires_explicit_profile ? "Try another profile" : "Change settings";
     $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
@@ -4818,8 +4818,8 @@ function jobControls(job, detail = false) {
   // An encode that finished but could not be saved is tried again as it is;
   // a new goal would encode the file again.
   const savingFailed = job.waiting_options?.some(option => option.decision === "recheck");
-  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
-    add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
+  if (job.parent_item_key && job.parent_action_id && !job.replacement_plan && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
+    add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key, ready_candidate:Boolean(job.candidate_ready)}));
   if (reconfigurable && !(job.mode && onlyUnsupportedSources(job))) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable && !job.parent_item_key && !declinedReplacement(job)) {
     if (rejectedCandidate(job)) {
@@ -6889,7 +6889,9 @@ function batchFileRow(item, id) {
     }
   } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
   const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
-  if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+  // A ready candidate can also be encoded again under a new goal; the dialog
+  // says that candidate is removed, and Replace file stays the primary action.
+  if (item.can_reconfigure && !unsupportedSource && (["skip","review","failed","cancelled","waiting_decision"].includes(item.status) || item.candidate_ready && !item.replacement_plan)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key, ready_candidate:Boolean(item.candidate_ready)}));
   // A cancelled or failed file can be encoded again as it was set up, without
   // reopening the goal dialog.
   if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))

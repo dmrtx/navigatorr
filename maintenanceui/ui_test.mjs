@@ -3652,6 +3652,38 @@ test("file recovery freezes one item across review and submission and never fall
   assert.equal(calls[1][1].mode,"size");
 });
 
+test("a ready candidate can change its goal from its row and its job, and the dialog says the candidate is removed",async()=>{
+  const h=harness(), calls=[];
+  h.context.record=(...args)=>calls.push(args);
+  const ready={item_key:"ready",child_action_id:"ready-child",display_label:"Ready",status:"completed",candidate_ready:true,can_reconfigure:true,mode:"size",file_path:"/media/tv/Ready.mkv"};
+  h.context.items=[ready,{...ready,item_key:"planned",replacement_plan:"review"},{...ready,item_key:"locked",can_reconfigure:false}];
+  h.run('state.info={allow_destructive:true};state.detail="batch";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:3});reconfigureBatch=async(id,candidate,selection)=>record(id,candidate,selection);');
+  await h.run('loadBatchItems("batch",2)');
+  const rows=h.elements.get("batch-items-list").children;
+  const all=row=>[row,...row.children.flatMap(all)];
+  const labels=row=>all(row.children[1]).filter(e=>e.dataset?.jobControl).map(e=>e.textContent);
+  assert.deepEqual(labels(rows[0]),["Replace file","Change goal","Open job"]);
+  assert.deepEqual(all(rows[0]).filter(e=>e.dataset?.jobControl&&String(e.className).includes("jd-primary")).map(e=>e.textContent),["Replace file"]);
+  // A candidate already in a replacement plan, or a file the server locked, keeps no goal change.
+  assert.ok(!labels(rows[1]).includes("Change goal"));
+  assert.ok(!labels(rows[2]).includes("Change goal"));
+  await all(rows[0]).find(e=>e.textContent==="Change goal").listeners.get("click")();
+  assert.equal(JSON.stringify(calls),JSON.stringify([["batch",false,{item_key:"ready",ready_candidate:true}]]));
+  const child={id:"ready-child",action_name:"transcode_media",status:"completed",candidate_ready:true,mode:"size",parent_action_id:"batch",parent_item_key:"ready"};
+  const jobLabels=job=>h.run(`jobControls(${JSON.stringify(job)}).children.map(b=>b.textContent)`);
+  assert.ok(jobLabels(child).includes("Change goal"));
+  assert.ok(!jobLabels({...child,replacement_plan:"queued"}).includes("Change goal"));
+  assert.ok(!jobLabels({...child,replacement_action_id:"r"}).includes("Change goal"));
+  // The dialog names what happens to the ready candidate; other file revisions keep the batch wording.
+  const dialog=harness();
+  dialog.context.plan={id:"batch",scope:"file",item_key:"ready",selection_version:"v",selected:1,kept:0,files:["Ready"],settings:{},mode:"size"};
+  dialog.run('api=async()=>plan;');
+  await dialog.run('reconfigureBatch("batch",false,{item_key:"ready",ready_candidate:true})');
+  assert.equal(dialog.elements.get("reconfigure-note").textContent,"Same task · Original kept · Its ready candidate is removed");
+  await dialog.run('reconfigureBatch("batch",false,{item_key:"ready"})');
+  assert.equal(dialog.elements.get("reconfigure-note").textContent,"Same task · Originals kept · Replaced candidates removed");
+});
+
 test("file details offer goal changes and keep-original decisions without duplicate cancellation",()=>{
   const h=harness();
   const labels=h.run('jobControls({id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",mode:"size",parent_action_id:"batch",parent_item_key:"one",waiting_options:[{decision:"cancel"}]}).children.map(b=>b.textContent)');
@@ -7354,7 +7386,7 @@ test("a batch file is one collapsed line: its name, its state and saving; the ac
   assert.equal(classed(rows[1], "jd-file-saved"), undefined);
   // Inside: Replace file is the one primary action; the rest are plain secondary buttons.
   const labels = (row) => flat(row.children[1]).filter((e) => e.dataset?.jobControl).map((e) => e.textContent);
-  assert.deepEqual(labels(rows[0]), ["Replace file", "Show in Files", "Open job"]);
+  assert.deepEqual(labels(rows[0]), ["Replace file", "Change goal", "Show in Files", "Open job"]);
   assert.deepEqual(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl && String(e.className).includes("jd-primary")).map((e) => e.textContent), ["Replace file"]);
   assert.ok(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl).every((e) => e.dataset.batchItemKey === "k-c"));
   // The primary action of a cancelled file is Encode again.
