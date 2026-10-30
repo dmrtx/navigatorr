@@ -1027,6 +1027,7 @@ function renderWorkers() {
   if (serverReachable && info && !scheduler.startsWith("Scheduler · Normal")) $("worker-status").textContent += ` · ${scheduler.replace("Scheduler · ", "Scheduler ")}`;
   const paused = serverReachable ? drainSummary(info?.drain) : null;
   if (paused) $("worker-status").textContent += ` · ${paused.label}`;
+  $("worker-status").title = $("worker-status").textContent;
   $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
 }
 async function refreshWorkers() {
@@ -7268,11 +7269,14 @@ function replacementQuality(facts) {
 // One file as a person decides on it. The paths stay behind a disclosure.
 function replacementCard({name, facts, originalPath, newPath, check, onView}) {
   const card = node("div", "", "candidate-review-row replacement-row");
+  // The name is cut at two lines in a narrow list; its full text is the title.
+  const nameLine = node("strong", name, check ? "" : "replacement-name");
+  nameLine.title = name;
   if (check) {
     const label = node("label", "", "check replacement-name");
-    label.append(check, node("strong", name));
+    label.append(check, nameLine);
     card.append(label);
-  } else card.append(node("strong", name, "replacement-name"));
+  } else card.append(nameLine);
   for (const line of [replacementSizes(facts), replacementQuality(facts), belowTargetNotice(facts?.size_budget_outcome)]) if (line) card.append(line);
   const tracks = facts?.tracks_message || facts?.audio_summary;
   if (tracks) card.append(node("p", tracks, "metadata replacement-tracks"));

@@ -7978,7 +7978,10 @@ test("the masthead and the tab bar stay pinned while the page scrolls, except on
   const wide = /@media \(min-width: 601px\) \{([\s\S]*?)\n\}\n/.exec(css.slice(css.indexOf(".tabs {")))[1];
   assert.match(wide, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;\s*height: var\(--masthead-h\);\s*background: var\(--paper\);/);
   assert.match(wide, /\.tabs \{\s*position: sticky;\s*top: var\(--masthead-h\);/);
-  assert.match(css, /#worker-status \{ max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  // A long worker status is cut with an ellipsis at every width (a button label is one line).
+  assert.match(css, /#worker-status \{ min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; \}/);
+  assert.match(css, /@media \(min-width: 601px\) \{[\s\S]*?#worker-status \{ max-width: 46vw; \}/);
+  assert.match(css, /button \{[^}]*white-space: nowrap;/);
   // On phones the tab bar is the fixed bottom bar and the masthead scrolls away.
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
   assert.doesNotMatch(css.slice(css.indexOf("@media (max-width: 600px) {")), /\.masthead \{[^}]*position: sticky/);

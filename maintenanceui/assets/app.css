@@ -192,6 +192,12 @@ body {
   color: var(--ink);
   font: 400 13px/1.4 var(--body);
 }
+/* The browser's `bolder` lands on Avenir Next's Bold from 400 and its Heavy from
+   600. One emphasis weight for every <strong>, so no label turns near-black. */
+strong,
+b {
+  font-weight: 600;
+}
 a {
   color: inherit;
 }
@@ -210,7 +216,9 @@ button {
   background: transparent;
   color: var(--ink);
   cursor: pointer;
-  overflow-wrap: anywhere;
+  /* A label is one line. A button that is too narrow for it is a layout
+     problem to fix, not a reason to grow a second line. */
+  white-space: nowrap;
   transition:
     background 0.15s,
     border-color 0.15s;
@@ -513,12 +521,13 @@ p {
   color: var(--muted);
   font-size: 12px;
 }
-/* The masthead has a fixed height, so a long worker status is cut short
-   rather than wrapping into the tab bar. Phones let it grow instead. */
+/* The masthead has a fixed height, so a long worker status is cut short with
+   an ellipsis (its full text is the button's title) instead of wrapping. */
+.masthead-right { min-width: 0; }
+#worker-status { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 @media (min-width: 601px) {
   .brand { white-space: nowrap; }
-  .masthead-right { min-width: 0; }
-  #worker-status { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #worker-status { max-width: 46vw; }
 }
 main {
   max-width: 1580px;
@@ -2619,7 +2628,7 @@ pre {
 .goal-head { display: flex; align-items: flex-start; gap: .7rem; padding: .8rem .85rem; cursor: pointer; }
 .goal-head input { width: auto; margin: .2rem 0 0; accent-color: var(--select); }
 .goal-text { display: grid; gap: .2rem; min-width: 0; }
-.goal-title { font-size: 1rem; font-weight: 700; line-height: 1.3; color: var(--ink); }
+.goal-title { font-size: 1rem; font-weight: 600; line-height: 1.3; color: var(--ink); }
 .goal-desc { display: block; font-size: .82rem; line-height: 1.5; color: var(--muted); }
 .goal-body { display: grid; gap: .85rem; padding: .1rem .85rem .85rem 2.4rem; }
 .goal-body[hidden], .goal-option[hidden], .goal-body:not(:has(.goal-option:not([hidden]))) { display: none; }
@@ -2883,19 +2892,49 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .size-budget-points, .size-budget-siblings ul { margin: 4px 0 0; padding-left: 1.2rem; }
 .size-budget-warning { color: var(--warning-strong); background: var(--warning-wash); border: 1px solid var(--warning-line); border-radius: 6px; padding: 6px 8px; }
 
-/* Replacement review: one dialog lists the files with what each saves, then one button. */
-#batch-review { max-width: 560px; }
-#batch-review-data, #file-review-data { margin: 8px 0; }
-.replacement-row { display: grid; gap: 4px; }
+/* Replacement review: one dialog lists the files with what each saves, then one button.
+   The heading and the decision stay in view; only the file list scrolls, so the
+   buttons never sit below a long list. On a phone it is a full-screen sheet. */
+#batch-review, #file-review { max-width: 560px; }
+#batch-review[open], #file-review[open] { display: flex; flex-direction: column; overflow: hidden; }
+#batch-review[open] > *, #file-review[open] > * { flex: 0 0 auto; min-width: 0; }
+#batch-review[open] > [hidden], #file-review[open] > [hidden] { display: none; }
+#batch-review-notice { max-height: 30dvh; overflow-y: auto; }
+#batch-review[open] > #batch-review-data, #file-review[open] > #file-review-data { flex: 1 1 auto; min-height: 0; margin: 6px 0; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid var(--line); }
+#batch-review-data > .check { padding: 4px 0; border-bottom: 1px solid var(--line); }
+#batch-review-data > :last-child, #file-review-data > :last-child { border-bottom: 0; }
+#batch-review > p.muted, #file-review > p.muted { margin: 4px 0; font-size: 12px; }
+#batch-review .dialog-heading, #file-review .dialog-heading { position: static; }
+/* One file is a name and one line of numbers; the paths are a link on that line. */
+.replacement-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; padding: 4px 0; }
 .replacement-row p { margin: 0; }
-.replacement-name { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.replacement-row > .replacement-name { flex: 1 1 100%; }
+.replacement-name { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.replacement-name strong, strong.replacement-name { font-weight: inherit; }
+.replacement-name strong, strong.replacement-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-width: 0; }
 .replacement-sizes { font-size: 13px; font-variant-numeric: tabular-nums; }
-.replacement-quality, .replacement-tracks { overflow-wrap: anywhere; }
+.replacement-quality, .replacement-tracks { font-size: 12px; overflow-wrap: anywhere; }
+.replacement-row > .replacement-tracks, .replacement-row > .size-budget-warning { flex: 1 1 100%; }
 .replacement-row .size-budget-warning { margin: 2px 0; }
-.replacement-paths { font-size: 12px; }
+.replacement-paths { margin: -6px 0 -6px auto; font-size: 12px; }
+.replacement-paths[open] { flex: 1 1 100%; margin: 0; }
 .replacement-paths > summary { cursor: pointer; min-height: var(--action-height); display: flex; align-items: center; color: var(--muted); }
 .replacement-paths > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.review-total { margin: 10px 0 4px; font-size: 15px; font-weight: 600; color: var(--forest); font-variant-numeric: tabular-nums; }
+/* A finger gets thumb-sized controls whatever the screen width: a visible disc
+   to close, and one row of equal-height buttons with the action filling the
+   rest. If the row cannot fit, a button moves to the next row; it never
+   overflows and never grows a second line. */
+@media (pointer: coarse) {
+  #batch-review .dialog-heading button { flex-basis: 40px; width: 40px; height: 40px; border-radius: 50%; background: var(--hover); }
+  #batch-review .submit-actions { flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  #batch-review .submit-actions button { flex: 0 0 auto; min-height: 44px; padding: 4px 12px; font-size: 14px; border-radius: 10px; }
+  #batch-review .submit-actions button.primary { flex: 1 1 auto; min-width: max-content; font-size: 15px; font-weight: 600; }
+}
+/* A phone shows the review as a full-screen sheet. */
+@media (max-width: 640px) {
+  #batch-review { inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; padding: calc(8px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom)); }
+}
+.review-total { margin: 4px 0 2px; font-size: 15px; font-weight: 600; color: var(--forest); font-variant-numeric: tabular-nums; }
 .review-total:empty { display: none; }
 .review-difference { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warning-line); border-radius: 3px; background: var(--warning-wash); color: var(--warning-strong); }
 .review-difference p { margin: 4px 0 0; }

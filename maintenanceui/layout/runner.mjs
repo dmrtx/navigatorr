@@ -12,6 +12,7 @@ import { startServer } from "./server.mjs";
 import { scenarios, world, nameVariants, sizeVariants } from "./fixtures.mjs";
 import { budgets, install } from "./invariants.mjs";
 import { listBudgets, installList } from "./list_invariants.mjs";
+import { buttonHeightTolerance, installButtonHeights } from "./button_rules.mjs";
 
 export const out = fileURLToPath(new URL("./out/", import.meta.url));
 
@@ -121,6 +122,7 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
   const browser = await chromium.launch(process.env.LAYOUT_BROWSER ? { channel: process.env.LAYOUT_BROWSER } : {});
   const rules = install();
   const listRules = installList();
+  const sameHeight = installButtonHeights();
   const report = { profile, cells: all.length, failed: 0, retried: 0, acts: {}, violations: [], errors: [] };
   // One context per screen shape: the viewport, touch and theme are fixed for
   // the context, the scenarios swap inside it.
@@ -174,6 +176,8 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
               await page.evaluate(() => new Promise(r => requestAnimationFrame(r)));
               const listFound = await page.evaluate(`(${listRules.toString()})(${JSON.stringify(rowSelector)}, ${JSON.stringify(listBudgets)})`);
               for (const v of listFound) if (!found.some(f => f.rule === v.rule && f.where === v.where && f.message === v.message)) found.push({ ...v, scroll: "list" });
+              const rowHeights = await page.evaluate(`(${sameHeight.toString()})(${JSON.stringify(rowSelector)}, ${buttonHeightTolerance})`);
+              for (const v of rowHeights) if (!found.some(f => f.rule === v.rule && f.where === v.where && f.message === v.message)) { found.push({ ...v, scroll: "list" }); listFound.push(v); }
               if (listFound.length) await page.locator(rowSelector).screenshot({ path: `${out}${cellName(cell)}__row.png` }).catch(() => {});
             }
             await open(page, w.id);
@@ -182,6 +186,7 @@ export async function runMatrix({ profile = process.env.LAYOUT_PROFILE || "quick
               await page.evaluate(position => { const d = document.querySelector("#job-detail"); d.scrollTop = position === "top" ? 0 : d.scrollHeight; }, where);
               await page.evaluate(() => new Promise(r => requestAnimationFrame(r)));
               const found_ = await page.evaluate(`(${rules.toString()})("#job-detail", ${JSON.stringify(budgets)})`);
+              found_.push(...await page.evaluate(`(${sameHeight.toString()})("#job-detail", ${buttonHeightTolerance})`));
               for (const v of found_) if (!found.some(f => f.rule === v.rule && f.where === v.where && f.message === v.message)) found.push({ ...v, scroll: where });
             }
           } catch (error) {

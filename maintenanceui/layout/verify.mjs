@@ -3,6 +3,7 @@
 import { runMatrix, out } from "./runner.mjs";
 import { runTransitions } from "./transitions.mjs";
 import { runStorage } from "./storage.mjs";
+import { runReview } from "./review.mjs";
 const started = Date.now();
 let done = 0;
 const report = await runMatrix({ onCell: () => { if (++done % 25 === 0) process.stdout.write(`\r${done} cells`); } });
@@ -37,5 +38,17 @@ if (report.failed) {
   for (const v of report.violations) byRule.set(v.rule, (byRule.get(v.rule) || 0) + 1);
   for (const [rule, n] of [...byRule].sort((a, b) => b[1] - a[1])) console.log(`  ${String(n).padStart(5)}  ${rule}`);
 }
-if (report.failed || moves.length || stats.length) process.exit(1);
+// The replacement review dialog, opened the way a person opens it.
+const reviews = await runReview();
+if (reviews.length) {
+  console.log(`\n${reviews.length} findings in the replacement review dialog:`);
+  const seen = new Set();
+  for (const v of reviews) {
+    const key = `${v.scenario}|${v.rule}|${v.message}|${v.where}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    console.log(`  ${v.rule}  ${v.scenario}  (${v.screen}, ${v.theme}, x${v.zoom})  ${v.message}  ${v.where}`);
+  }
+}
+if (report.failed || moves.length || stats.length || reviews.length) process.exit(1);
 console.log("All cells pass.");
