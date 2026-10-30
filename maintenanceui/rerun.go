@@ -11,8 +11,10 @@ import (
 // A goal that ends without a usable setting is a finished result, not a
 // failure. Only these outcomes, or a cancellation, offer "Run again".
 // search_budget_exhausted is what operations that used the removed search ended
-// with.
-var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_not_met": true, "search_budget_exhausted": true, "size_budget_exceeded": true}
+// with. A full encode that missed the goal's size limit (insufficient_savings,
+// size_growth) is one too: the person may want another round, for instance once
+// a worker change makes the same goal reach the limit.
+var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_not_met": true, "search_budget_exhausted": true, "size_budget_exceeded": true, "insufficient_savings": true, "size_growth": true, "size_growth_exceeded": true}
 
 // A standalone file the goal could not handle ends with a reason that names the
 // goal that can. The server decides the remedy; the client only asks for it.

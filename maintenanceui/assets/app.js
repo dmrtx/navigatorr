@@ -4852,10 +4852,9 @@ function jobControls(job, detail = false) {
     if (choose) choose.title = job.rerun_refused;
   }
   // A file that missed its goal's size limit has no candidate to review and no
-  // one goal the server can name (the same encode would miss it again), but its
-  // result already tells the person to choose another goal: the goal form is
-  // that step.
-  if (job.status === "completed" && job.benchmark?.outcome === "size_rejected" && job.source_path && !job.rerun && !job.rerun_refused && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id)
+  // one goal the server can name, but its result tells the person to choose
+  // another goal: the goal form is that step, next to Run again.
+  if (job.status === "completed" && job.benchmark?.outcome === "size_rejected" && job.source_path && !job.rerun_refused && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id)
     add("Choose a goal", () => openGoalForm(job.source_path));
   // A file skipped because its goal is wrong for it: one button starts a new job
   // under the goal the server named. Running it again would skip it again.
