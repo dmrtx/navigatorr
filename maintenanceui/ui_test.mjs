@@ -7999,7 +7999,10 @@ test("the dialog's primary button keeps a readable hover and its bar is as compa
 
 test("every button takes the compact size, with a mouse or a finger", () => {
   const block = css.slice(css.lastIndexOf("/* One button size everywhere"));
-  assert.match(block, /^:root \{ --control-size: 30px; \}/m);
+  assert.match(block, /^:root \{ --control-size: 30px; --control-radius: 5px;/m);
+  // Fields share the buttons' corner and height, and a 16px touch field is as tall as a 13px one.
+  assert.match(block, /input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), select, textarea \{ border-radius: var\(--control-radius\); \}/);
+  assert.match(block, /select \{ line-height: 18px; \}/);
   assert.match(block, /^button, \.jd-primary, \.jd-secondary, \.jd-menu-item,/m);
   assert.match(block, /min-height: var\(--control-size\);\s*padding-block: 2px;\s*font-size: 13px;\s*border-radius: 5px;/);
   // Nothing below it is conditional on the pointer, so a touch screen is not left out.

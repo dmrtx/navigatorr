@@ -458,7 +458,6 @@ p {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  font-size: 12px;
 }
 .job-actions button svg {
   width: 14px;
@@ -2091,7 +2090,6 @@ dialog .submit-actions button {
   width: auto;
   min-height: var(--control-size);
   padding: 4px 8px;
-  font-size: 12px;
 }
 pre {
   max-width: 100%;
@@ -2695,7 +2693,6 @@ pre {
 .advanced-state[data-on="true"] { border-color: var(--accent); color: var(--accent); }
 .advanced-profiles[open] { padding-bottom: .5rem; }
 .advanced-explain { margin: 0 0 .25rem; }
-#recipe-description { border: 1px solid var(--line); padding: .65rem; min-height: 42px; }
 #recipe-dirty[data-dirty="true"] { font-weight: 600; }
 #settings-worker { margin-bottom: 1.25rem; }
 .profile-action-bar .action-control { width: auto; min-width: 90px; gap: .5rem; }
@@ -3085,7 +3082,7 @@ html { scrollbar-gutter: stable; }
   background: var(--surface);
 }
 .jd-header h2 { flex: 1 1 auto; margin: 0; font-size: 16px; line-height: 1.3; }
-.jd-header .icon-button { flex: 0 0 44px; display: inline-grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; color: var(--icon); font-size: 24px; line-height: 1; }
+.jd-header .icon-button { flex: 0 0 44px; display: inline-grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; color: var(--icon); font-size: 22px; line-height: 1; }
 .jd-header .icon-button svg { width: 18px; height: 18px; }
 .jd-status { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 16px 12px; }
 .detail-status { display: flex; }
@@ -3271,7 +3268,16 @@ html { scrollbar-gutter: stable; }
    dialog's and the rest, takes the same compact height, type and corner. Last in
    the file so it wins over the sizes each component, and the touch rules above,
    gave their own buttons. */
-:root { --control-size: 30px; }
+:root { --control-size: 30px; --control-radius: 5px; --action-height: var(--control-size); }
+/* One corner and one height for every control: buttons and fields alike, in a
+   dialog or out of it. A field's text sits on its own line so a 16px field
+   (kept for iOS) is as tall as a 13px one. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea { border-radius: var(--control-radius); }
+input:not([type="checkbox"]):not([type="radio"]), select { line-height: 18px; }
+.queue-tool, .theme-switch button, .profile-action-bar .action-control, .job-row .job-actions .action-icon { border-radius: var(--control-radius); }
+.theme-switch { border-radius: calc(var(--control-radius) + 2px); }
+.theme-switch button { padding-block: 2px; }
+.profile-action-bar .action-control { padding-block: 2px; }
 button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
   min-height: var(--control-size);
   padding-block: 2px;
