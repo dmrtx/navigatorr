@@ -1093,9 +1093,17 @@ async function initialize() {
   $("enqueue").disabled = !info.transcode_enabled;
   if (!info.transcode_enabled)
     notify("Transcoding is disabled. You can still browse files and jobs.");
-  if (info.tools.includes("recipe_list")) await loadRecipes(true);
+  // Profiles fill a menu and the Profiles tab; the first screen is the queue or a
+  // folder and does not wait for them. They load beside it, and only a link
+  // straight into the Profiles tab waits.
+  const route = navigationRoute(typeof window !== "undefined" ? window.location.search : "");
+  const recipesLoaded = info.tools.includes("recipe_list") ? loadRecipes(true) : null;
+  if (recipesLoaded && route.tab === "recipes") await recipesLoaded;
+  else recipesLoaded?.catch((e) => {
+    if (serverReachable && e.message !== "sign in to Navigatorr") notify(e.message);
+  });
   try {
-    await applyNavigation(navigationRoute(typeof window !== "undefined" ? window.location.search : ""));
+    await applyNavigation(route);
   } finally {
     if (!$("workspace").hidden) {
       state.routeReady=true;
