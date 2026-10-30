@@ -5292,14 +5292,14 @@ function compactQueueActions(actions) {
     }
   actions.replaceChildren(...[main, ...slotted].filter(Boolean));
 }
-// Touch screens keep a job's actions behind a swipe to the right, as iOS lists
-// do: the row slides over and a tray of actions waits where it was. A long
+// Touch screens keep a job's actions behind a swipe to the left, where a thumb
+// reaches: the row slides over and a tray of actions waits at its right edge. A long
 // swipe past most of the row archives the job without a second step.
 const swipeQuery = "(hover: none) and (pointer: coarse)";
 function swipeActions() {
   return typeof matchMedia === "function" && matchMedia(swipeQuery).matches;
 }
-const swipeSlop = 10, swipeEdge = 24, swipeArmed = 0.6, swipeSeenKey = "navigatorr_swipe_seen";
+const swipeSlop = 10, swipeArmed = 0.6, swipeSeenKey = "navigatorr_swipe_seen";
 let swipe = null;
 // Resistance past the tray, so a long drag still feels attached to the finger.
 function swipeOffset(dx, tray) {
@@ -5339,7 +5339,7 @@ function swipeHintVisible() {
   try { return localStorage.getItem(swipeSeenKey) !== "1"; } catch { return false; }
 }
 function swipeStart(e) {
-  if (e.pointerType !== "touch" || !e.isPrimary || e.clientX < swipeEdge) return;
+  if (e.pointerType !== "touch" || !e.isPrimary) return;
   const row = swipeRow(e.target);
   if (!row) return;
   // A press on a row other than the open one shuts the open one.
@@ -5348,9 +5348,12 @@ function swipeStart(e) {
 }
 function swipeMove(e) {
   if (!swipe || e.pointerId !== swipe.id) return;
-  const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+  // Leftward travel is positive: it is the way the tray opens.
+  const dx = swipe.x - e.clientX, dy = e.clientY - swipe.y;
   if (!swipe.locked) {
     if (Math.abs(dy) > swipeSlop && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
+    // A shut row has nothing to the left of it to reveal.
+    if (!swipe.open && dx < -swipeSlop) { swipe = null; return; }
     if (Math.abs(dx) < swipeSlop || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     // The page is scrolled by the browser; once a swipe starts the finger is ours.
     swipe.locked = true;

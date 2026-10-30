@@ -3217,8 +3217,8 @@ html { scrollbar-gutter: stable; }
 /* Focus lands here only from code (a job opened from a cleared row); the heading is not a control. */
 #job-detail-title:focus { outline: none; }
 
-/* Touch screens: a job's actions wait behind a swipe to the right. The row
-   slides over and a tray of tiles waits where it was; the buttons are the same
+/* Touch screens: a job's actions wait behind a swipe to the left. The row
+   slides over and a tray of tiles waits at its right edge; the buttons are the same
    ones the corner shows with a pointer. */
 .swipe-hint { margin: 0 0 4px; }
 @media (hover: none) and (pointer: coarse) {
@@ -3226,12 +3226,12 @@ html { scrollbar-gutter: stable; }
   .job-row.has-menu > .job-heading { padding-right: 0; }
   .job-row.has-menu > :not(.job-actions) { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
   .job-row.swiping > :not(.job-actions),
-  .job-row.swipe-open > :not(.job-actions) { transform: translateX(var(--swipe)); }
+  .job-row.swipe-open > :not(.job-actions) { transform: translateX(calc(var(--swipe) * -1)); }
   .job-row.swiping > :not(.job-actions),
   .job-row.swipe-restored > :not(.job-actions) { transition: none; }
   .job-row.has-menu > .job-actions {
     position: absolute;
-    inset: 4px auto 4px 0;
+    inset: 4px 0 4px auto;
     display: flex;
     align-items: stretch;
     gap: 6px;

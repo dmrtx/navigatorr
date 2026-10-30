@@ -1,9 +1,9 @@
 // The swipe-to-reveal actions on the queue, driven with real touch events
 // (Chrome DevTools Protocol), on every touch screen in both themes. Hard rules:
 //   - at rest the actions are hidden and the row sits where it always did
-//   - a swipe to the right opens a tray of actions beside the row, on screen,
+//   - a swipe to the left opens a tray of actions at the row's right edge, on screen,
 //     clear of the row's own content, each tile one line and equal in height
-//   - a swipe to the left, a tap on the row, or a swipe on another row shuts it
+//   - a swipe to the right, a tap on the row, or a swipe on another row shuts it
 //   - a long swipe archives, a short one never does, and neither opens the job
 //   - the page never scrolls sideways, and the corner buttons are gone only
 //     where the tray replaces them (desktop keeps them)
@@ -57,7 +57,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             return [...document.querySelectorAll(".job-row.has-menu")].map(row => {
               const tray = row.querySelector(".job-actions"), content = row.querySelector(".job-heading");
               const ts = getComputedStyle(tray);
-              return { id: row.dataset.operationId, open: row.classList.contains("swipe-open"), trayVisible: ts.visibility !== "hidden", trayRight: r(tray).right, contentLeft: r(content).left, scrollX: document.documentElement.scrollWidth - document.documentElement.clientWidth, tiles: tray.children.length };
+              return { id: row.dataset.operationId, open: row.classList.contains("swipe-open"), trayVisible: ts.visibility !== "hidden", trayLeft: r(tray).left, contentRight: r(content).right, scrollX: document.documentElement.scrollWidth - document.documentElement.clientWidth, tiles: tray.children.length };
             });
           });
           const hint = () => page.evaluate(() => { const h = document.getElementById("swipe-hint"); return h && !h.hidden && getComputedStyle(h).display !== "none"; });
@@ -71,7 +71,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             if (!row) return null;
             row.scrollIntoView({ block: "center", behavior: "instant" });
             const r = row.getBoundingClientRect(), h = row.querySelector(".job-heading").getBoundingClientRect();
-            return { id: row.dataset.operationId, x: 40, y: Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)), width: r.width };
+            return { id: row.dataset.operationId, x: innerWidth - 40, y: Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)), width: r.width };
           }, n); await page.waitForTimeout(60); return found; };
           const count = (await state0()).length;
           for (let n = 0; n < count; n++) {
@@ -79,42 +79,42 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             if (!row) continue;
             const where = `row ${n + 1}`;
             // 1. A short swipe, below half the tray, springs back.
-            await drag(cdp, row.x, row.y, 20);
+            await drag(cdp, row.x, row.y, -20);
             await page.waitForTimeout(60);
             if ((await state0())[n].open) mark("short-swipe", "a 20px swipe left the tray open", where);
-            // 2. A swipe to the right opens it.
-            await drag(cdp, row.x, row.y, Math.min(row.width * 0.45, 190));
+            // 2. A swipe to the left opens it.
+            await drag(cdp, row.x, row.y, -Math.min(row.width * 0.45, 190));
             await page.waitForTimeout(120);
             const open = (await state0())[n];
-            if (!open.open) { mark("swipe-open", "a swipe to the right did not open the tray", where); continue; }
+            if (!open.open) { mark("swipe-open", "a swipe to the left did not open the tray", where); continue; }
             if (!open.trayVisible) mark("tray-hidden", "the tray is open but not visible", where);
-            if (open.trayRight > innerWidthOf(screen, 1) - 16) mark("tray-wide", `the tray ends at ${Math.round(open.trayRight)}px of ${screen.width}; the row should still peek`, where);
-            if (open.contentLeft < open.trayRight - 0.5) mark("tray-overlap", `the row content starts at ${Math.round(open.contentLeft)}px, under the tray that ends at ${Math.round(open.trayRight)}`, where);
+            if (open.trayLeft < 16) mark("tray-wide", `the tray starts at ${Math.round(open.trayLeft)}px of ${screen.width}; the row should still peek`, where);
+            if (open.contentRight > open.trayLeft + 0.5) mark("tray-overlap", `the row content ends at ${Math.round(open.contentRight)}px, under the tray that starts at ${Math.round(open.trayLeft)}`, where);
             if (open.scrollX > 1) mark("overflow-x", `the page scrolls sideways by ${open.scrollX}px`, where);
             for (const v of await page.evaluate(`(${sameHeight.toString()})(".job-row.swipe-open .job-actions", ${buttonHeightTolerance})`)) mark(v.rule, v.message, where);
-            const tiles = await page.evaluate(() => [...document.querySelectorAll(".job-row.swipe-open .job-actions > button")].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute("aria-label"), w: r.width, h: r.height, right: r.right, shown: getComputedStyle(b).display !== "none" }; }));
+            const tiles = await page.evaluate(() => [...document.querySelectorAll(".job-row.swipe-open .job-actions > button")].map(b => { const r = b.getBoundingClientRect(); return { label: b.getAttribute("aria-label"), w: r.width, h: r.height, left: r.left, right: r.right, shown: getComputedStyle(b).display !== "none" }; }));
             for (const t of tiles) {
               if (!t.shown) mark("tile-missing", `“${t.label}” is not shown in the tray`, where);
               if (t.w < 44 || t.h < 44) mark("target-small", `“${t.label}” tile is ${Math.round(t.w)}×${Math.round(t.h)}px (min 44)`, where);
-              if (t.right > screen.width + 0.5) mark("tile-offscreen", `“${t.label}” tile ends at ${Math.round(t.right)} of ${screen.width}`, where);
+              if (t.right > screen.width + 0.5 || t.left < -0.5) mark("tile-offscreen", `“${t.label}” tile spans ${Math.round(t.left)}–${Math.round(t.right)} of ${screen.width}`, where);
             }
             if (!tiles.length) mark("tray-empty", "the open tray holds no actions", where);
             if (gallery && n === 0) await page.screenshot({ path: `${out}${cell}__open.png` }).catch(() => {});
             if (await hint()) mark("hint", "the swipe hint stays after the first swipe", "#swipe-hint");
             // 3. A tap on the open row shuts it and does not open the job.
             const before = page.url();
-            const tapX = Math.min(Math.round(open.trayRight) + 24, screen.width - 8);
+            const tapX = Math.max(Math.round(open.trayLeft) - 24, 8);
             await page.touchscreen.tap(tapX, row.y);
             await page.waitForTimeout(120);
             if ((await state0())[n].open) mark("tap-closes", "a tap on the open row left the tray open", where);
             if (page.url() !== before) mark("tap-navigates", "the tap that shuts the tray opened the job", where);
-            // 4. Swipe open, then swipe left to shut.
-            await drag(cdp, row.x, row.y, Math.min(row.width * 0.45, 190));
+            // 4. Swipe open, then swipe right to shut.
+            await drag(cdp, row.x, row.y, -Math.min(row.width * 0.45, 190));
             await page.waitForTimeout(120);
-            const trayPx = (await state0())[n].trayRight;
-            await drag(cdp, Math.max(trayPx + 20, 120), row.y, -140);
+            const trayPx = (await state0())[n].trayLeft;
+            await drag(cdp, Math.min(trayPx + 20, screen.width - 40), row.y, 140);
             await page.waitForTimeout(120);
-            if ((await state0())[n].open) mark("swipe-left", "a swipe to the left did not shut the tray", where);
+            if ((await state0())[n].open) mark("swipe-left", "a swipe to the right did not shut the tray", where);
           }
           // 5. A long swipe on a row that can be archived asks to archive it; the job does not open.
           const archivable = await page.evaluate(() => [...document.querySelectorAll(".job-row.has-menu")].findIndex(r => r.querySelector('.job-actions [aria-label="Archive"]')));
@@ -122,7 +122,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
           else {
             const row = await pick(archivable);
             const url = page.url();
-            await drag(cdp, row.x, row.y, row.width * 0.8);
+            await drag(cdp, row.x, row.y, -row.width * 0.8);
             await page.waitForFunction(() => [...document.querySelectorAll("dialog[open]")].some(d => /Archive/.test(d.textContent)), null, { timeout: 2500 }).catch(() => {});
             const asked = await page.evaluate(() => [...document.querySelectorAll("dialog[open]")].some(d => /Archive/.test(d.textContent)));
             if (!asked && !calls.length) mark("long-swipe", "a long swipe did not archive the job", `row ${archivable + 1}`);
@@ -134,7 +134,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
           await page.evaluate(() => scrollTo(0, 0));
           const row = await pick(0);
           await touch(cdp, "touchStart", [[row.x, row.y]]);
-          for (let i = 1; i <= 6; i++) await touch(cdp, "touchMove", [[row.x + i, row.y + i * 8]]);
+          for (let i = 1; i <= 6; i++) await touch(cdp, "touchMove", [[row.x - i, row.y + i * 8]]);
           await touch(cdp, "touchEnd", []);
           await page.waitForTimeout(80);
           if ((await state0()).some(s => s.open)) mark("scroll-opens", "a vertical scroll opened a tray", "");

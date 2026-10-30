@@ -16,7 +16,7 @@ import { buttonHeightTolerance, installButtonHeights } from "./button_rules.mjs"
 const GB = 1e9;
 const members = (n, long = false) => Array.from({ length: n }, (_, i) => ({
   item_key: `item-${i + 1}`, transcode_action_id: `act-${i + 1}`, episode: long ? `Trailer.Park.Boys.S11E${String(i + 1).padStart(2, "0")}.${"1080p.WEBRip.x264-".repeat(4)}MOROSE` : `Trailer.Park.Boys.S11E${String(i + 1).padStart(2, "0")}.1080p.WEBRip.x264-MOROSE`,
-  original_path: `/volume1/Media/TvSeries/Trailer Park Boys/Season 11/Trailer.Park.Boys.S11E${String(i + 1).padStart(2, "0")}.mkv`, candidate_path: `/volume1/Media/.navigatorr/c${i + 1}.mkv`,
+  original_path: `/media/TV/Trailer Park Boys/Season 11/Trailer.Park.Boys.S11E${String(i + 1).padStart(2, "0")}.mkv`, candidate_path: `/media/.navigatorr/c${i + 1}.mkv`,
 }));
 const facts = (list) => Object.fromEntries(list.map((m, i) => [m.transcode_action_id, { source_bytes: (2.1 + (i % 5) * 0.17) * GB, candidate_bytes: (1.0 + (i % 4) * 0.08) * GB, vmaf_mean: 98 + (i % 2), vmaf_worst_window: 95 + (i % 3), tracks_message: i % 3 === 0 ? "Kept 2 audio tracks and 2 of 3 subtitles" : undefined }]));
 
