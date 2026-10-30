@@ -5209,6 +5209,7 @@ const mainQueueActions = ["Replace file", "Review replacements", "Review replace
 // Icon actions a row keeps in view when it cannot show them all, most useful first.
 const keptQueueIcons = ["Pause batch", "Resume batch", "Cancel", "Archive", "Stop batch · keep originals"];
 const visibleQueueIcons = 3;
+const trayLabels = {"Pause batch":"Pause","Resume batch":"Resume","Stop batch · keep originals":"Stop","Show in Files":"Files","Change settings":"Settings","View batch":"Batch","View replacement":"Result","View preview":"Preview","View transcript":"Text","Choose tracks":"Tracks","Revise labels":"Labels","Ad library":"Ads","Try with x265":"x265","Run again":"Again"};
 // The "..." menu: the same buttons, with their handlers and state, listed in a
 // popup that closes on a choice and returns focus to its toggle.
 function moreActionsMenu(items, menuFor, {toggleClass = "more-toggle", icon = null} = {}) {
@@ -5258,7 +5259,9 @@ function compactQueueActions(actions) {
     icons.push(b);
   }
   let overflow = [];
-  if (icons.length > visibleQueueIcons) {
+  // On a touch screen the actions wait behind a swipe, in a tray that has room
+  // for all of them, so none goes into a menu.
+  if (!swipeActions() && icons.length > visibleQueueIcons) {
     const rank = (b) => { const i = keptQueueIcons.indexOf(labelOf(b)); return i < 0 ? keptQueueIcons.length : i; };
     const kept = new Set([...icons].sort((a, b) => rank(a) - rank(b)).slice(0, visibleQueueIcons - 1));
     overflow = icons.filter((b) => !kept.has(b));
@@ -5280,7 +5283,149 @@ function compactQueueActions(actions) {
     slot = Math.min(Math.max(Math.min(place(b), 3), slot + 1), 3 - (slotted.length - 1 - i));
     b.dataset.slot = String(slot);
   });
+  // A tile in the swipe tray has room for one short word; the full label stays
+  // its accessible name and its tooltip.
+  if (swipeActions())
+    for (const b of slotted) {
+      const label = b.querySelector?.(".action-label"), full = b.getAttribute("aria-label");
+      if (label && trayLabels[full]) label.textContent = trayLabels[full];
+    }
   actions.replaceChildren(...[main, ...slotted].filter(Boolean));
+}
+// Touch screens keep a job's actions behind a swipe to the right, as iOS lists
+// do: the row slides over and a tray of actions waits where it was. A long
+// swipe past most of the row archives the job without a second step.
+const swipeQuery = "(hover: none) and (pointer: coarse)";
+function swipeActions() {
+  return typeof matchMedia === "function" && matchMedia(swipeQuery).matches;
+}
+const swipeSlop = 10, swipeEdge = 24, swipeArmed = 0.6, swipeSeenKey = "navigatorr_swipe_seen";
+let swipe = null;
+// Resistance past the tray, so a long drag still feels attached to the finger.
+function swipeOffset(dx, tray) {
+  return dx <= tray ? Math.max(dx, 0) : tray + (dx - tray) * 0.5;
+}
+// Where a released swipe settles: "archive" past most of the row, "open" past
+// half the tray, otherwise shut. A row already open settles by the same rule.
+function swipeSettle(dx, tray, width, canArchive) {
+  if (canArchive && dx >= width * swipeArmed) return "archive";
+  return dx >= tray / 2 ? "open" : "closed";
+}
+function swipeRow(target) {
+  const row = target?.closest?.(".job-row.has-menu");
+  return row && row.parentNode ? row : null;
+}
+function swipeTrayWidth(row) {
+  const tray = row.querySelector?.(".job-actions");
+  return tray ? tray.offsetWidth + 8 : 0;
+}
+function setSwipe(row, offset) {
+  row.style.setProperty("--swipe", `${offset}px`);
+}
+function closeSwipe(except) {
+  for (const row of document.querySelectorAll?.(".job-row.swipe-open, .job-row.swiping") || []) {
+    if (row === except) continue;
+    row.classList.remove("swipe-open", "swiping", "swipe-armed");
+    row.style.removeProperty("--swipe");
+  }
+  if (!except || state.swipeOpenId !== except.dataset.operationId) state.swipeOpenId = null;
+}
+function markSwipeSeen() {
+  try { localStorage.setItem(swipeSeenKey, "1"); } catch {}
+  if ($("swipe-hint")) $("swipe-hint").hidden = true;
+}
+function swipeHintVisible() {
+  if (!swipeActions()) return false;
+  try { return localStorage.getItem(swipeSeenKey) !== "1"; } catch { return false; }
+}
+function swipeStart(e) {
+  if (e.pointerType !== "touch" || !e.isPrimary || e.clientX < swipeEdge) return;
+  const row = swipeRow(e.target);
+  if (!row) return;
+  // A press on a row other than the open one shuts the open one.
+  closeSwipe(row);
+  swipe = {row, id: e.pointerId, x: e.clientX, y: e.clientY, open: row.classList.contains("swipe-open"), tray: swipeTrayWidth(row), width: row.offsetWidth, locked: false, dx: 0};
+}
+function swipeMove(e) {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y;
+  if (!swipe.locked) {
+    if (Math.abs(dy) > swipeSlop && Math.abs(dy) > Math.abs(dx)) { swipe = null; return; }
+    if (Math.abs(dx) < swipeSlop || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    // The page is scrolled by the browser; once a swipe starts the finger is ours.
+    swipe.locked = true;
+    swipe.row.classList.add("swiping");
+    try { swipe.row.setPointerCapture(e.pointerId); } catch {}
+  }
+  swipe.dx = (swipe.open ? swipe.tray : 0) + dx;
+  setSwipe(swipe.row, swipeOffset(swipe.dx, swipe.tray));
+  swipe.row.classList.toggle("swipe-armed", swipeArchive(swipe.row) !== null && swipe.dx >= swipe.width * swipeArmed);
+  e.preventDefault?.();
+}
+function swipeArchive(row) {
+  return [...row.querySelectorAll?.(".job-actions button") || []].find(b => b.getAttribute("aria-label") === "Archive") || null;
+}
+function swipeEnd(e) {
+  if (!swipe || e.pointerId !== swipe.id) return;
+  const {row, locked, dx, tray, width} = swipe;
+  swipe = null;
+  if (!locked) return;
+  // The tap a swipe ends with must not open the job underneath.
+  swipeMoved = performance.now();
+  row.classList.remove("swiping", "swipe-armed");
+  const archive = swipeArchive(row);
+  const outcome = e.type === "pointercancel" ? (row.dataset.operationId === state.swipeOpenId ? "open" : "closed") : swipeSettle(dx, tray, width, archive !== null);
+  if (outcome === "open") {
+    row.classList.add("swipe-open");
+    setSwipe(row, tray);
+    state.swipeOpenId = row.dataset.operationId;
+    markSwipeSeen();
+    return;
+  }
+  row.classList.remove("swipe-open");
+  row.style.removeProperty("--swipe");
+  if (state.swipeOpenId === row.dataset.operationId) state.swipeOpenId = null;
+  if (outcome === "archive") {
+    markSwipeSeen();
+    // The click is ours, not the tail of the swipe, so the guard lets it by.
+    swipeMoved = -1000;
+    archive.click();
+    swipeMoved = performance.now();
+  }
+}
+let swipeMoved = -1000;
+function swipeClick(e) {
+  // A swipe that ended on a link, and a tap on an open row, only shut the tray.
+  const row = swipeRow(e.target);
+  if (performance.now() - swipeMoved < 60) { e.preventDefault(); e.stopPropagation(); return; }
+  if (!row || !row.classList.contains("swipe-open")) return;
+  if (e.target.closest(".job-actions")) {
+    // A choice from the tray: its own handler runs, and the tray shuts behind it.
+    queueMicrotask(() => closeSwipe());
+    return;
+  }
+  e.preventDefault();
+  e.stopPropagation();
+  closeSwipe();
+}
+// The queue redraws every few seconds; an open tray stays open across it.
+function restoreSwipe(container) {
+  if (!state.swipeOpenId) return;
+  const row = [...container.querySelectorAll?.(".job-row.has-menu") || []].find(r => r.dataset.operationId === state.swipeOpenId);
+  if (!row || !swipeActions()) { state.swipeOpenId = null; return; }
+  row.classList.add("swipe-open", "swipe-restored");
+  setSwipe(row, swipeTrayWidth(row));
+  requestAnimationFrame?.(() => row.classList.remove("swipe-restored"));
+}
+if (typeof window !== "undefined" && typeof matchMedia === "function") {
+  const list = $("jobs-list");
+  list.addEventListener("pointerdown", swipeStart);
+  list.addEventListener("pointermove", swipeMove);
+  list.addEventListener("pointerup", swipeEnd);
+  list.addEventListener("pointercancel", swipeEnd);
+  list.addEventListener("click", swipeClick, true);
+  document.addEventListener("pointerdown", e => { if (!e.target?.closest?.(".job-row.swipe-open")) closeSwipe(); });
+  matchMedia(swipeQuery).addEventListener?.("change", () => { closeSwipe(); if (!state.jobsLoading) void loadJobs(); });
 }
 // More actions menus close on Escape and on a press anywhere outside them.
 function closeActionMenus(except) {
@@ -5726,6 +5871,8 @@ async function loadJobs(more = false) {
     for (const job of page) state.operationJobs.set(job.workflow_id || job.id, job);
     state.jobsLoaded = offset + page.length;
     state.jobsHasMore = data.has_more;
+    // A row under a finger is not rebuilt; the next refresh draws it.
+    if (swipe?.locked) return;
     const focus = focusedControl($("jobs-list"));
     const menu = openActionMenu($("jobs-list"));
     const commandFocused = commandFocus();
@@ -5829,6 +5976,8 @@ async function loadJobs(more = false) {
     restoreCommandFocus(commandFocused);
     restoreActionMenu($("jobs-list"), menu);
     restoreControl($("jobs-list"), focus);
+    restoreSwipe($("jobs-list"));
+    $("swipe-hint").hidden = !swipeHintVisible() || !document.querySelector(".job-row.has-menu");
     // The list is rebuilt on return, so the place it was left at is restored
     // once it is as long as it was.
     if (state.jobsRestore != null && state.tab === "jobs" && typeof window !== "undefined") {

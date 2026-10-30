@@ -8005,3 +8005,31 @@ test("every button takes the compact size, with a mouse or a finger", () => {
   // Nothing below it is conditional on the pointer, so a touch screen is not left out.
   assert.doesNotMatch(block, /@media/);
 });
+
+test("a swipe settles open past half the tray, archives past most of the row, and springs back otherwise", () => {
+  const h = harness();
+  const settle = (dx, tray, width, canArchive) => h.run(`swipeSettle(${dx}, ${tray}, ${width}, ${canArchive})`);
+  assert.equal(settle(20, 142, 352, true), "closed");
+  assert.equal(settle(80, 142, 352, true), "open");
+  assert.equal(settle(142, 142, 352, false), "open");
+  assert.equal(settle(220, 142, 352, true), "archive");
+  // A row that cannot be archived never archives, however far the finger goes.
+  assert.equal(settle(300, 142, 352, false), "open");
+  // The tray resists past its own width and never follows a drag to the left.
+  assert.equal(h.run("swipeOffset(100, 142)"), 100);
+  assert.equal(h.run("swipeOffset(242, 142)"), 192);
+  assert.equal(h.run("swipeOffset(-30, 142)"), 0);
+});
+
+test("the swipe tray is only for touch screens and every shortened label names a real action", () => {
+  const block = css.slice(css.indexOf("/* Touch screens: a job's actions wait behind a swipe"));
+  assert.match(block, /@media \(hover: none\) and \(pointer: coarse\) \{\s*\.job-row\.has-menu \{ --swipe: 0px; overflow-x: clip; touch-action: pan-y;/);
+  // Nothing that reaches the desktop rail is changed outside that query.
+  assert.doesNotMatch(block.slice(0, block.indexOf("@media")), /\.job-actions/);
+  // A tray tile is one line and as tall as the row, like every button beside it.
+  assert.match(block, /\.job-row\.has-menu > \.job-actions > \.action-icon \{[^}]*min-height: 44px;[^}]*\}/);
+  const labels = source.match(/const trayLabels = (\{[^}]*\});/)?.[1];
+  assert.ok(labels, "trayLabels is declared");
+  for (const full of Object.keys(JSON.parse(labels)))
+    assert.ok(source.includes(`"${full}"`), `${full} is a label the app uses`);
+});

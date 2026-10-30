@@ -3217,6 +3217,51 @@ html { scrollbar-gutter: stable; }
 /* Focus lands here only from code (a job opened from a cleared row); the heading is not a control. */
 #job-detail-title:focus { outline: none; }
 
+/* Touch screens: a job's actions wait behind a swipe to the right. The row
+   slides over and a tray of tiles waits where it was; the buttons are the same
+   ones the corner shows with a pointer. */
+.swipe-hint { margin: 0 0 4px; }
+@media (hover: none) and (pointer: coarse) {
+  .job-row.has-menu { --swipe: 0px; overflow-x: clip; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .job-row.has-menu > .job-heading { padding-right: 0; }
+  .job-row.has-menu > :not(.job-actions) { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
+  .job-row.swiping > :not(.job-actions),
+  .job-row.swipe-open > :not(.job-actions) { transform: translateX(var(--swipe)); }
+  .job-row.swiping > :not(.job-actions),
+  .job-row.swipe-restored > :not(.job-actions) { transition: none; }
+  .job-row.has-menu > .job-actions {
+    position: absolute;
+    inset: 4px auto 4px 0;
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    visibility: hidden;
+    transition: visibility 0s linear .22s;
+  }
+  .job-row.swiping > .job-actions,
+  .job-row.swipe-open > .job-actions { visibility: visible; transition-delay: 0s; }
+  .job-row.has-menu > .job-actions > .action-icon {
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 4px;
+    width: auto;
+    min-width: 64px;
+    height: auto;
+    min-height: 44px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--hover);
+    color: var(--ink);
+    font-size: 11px;
+  }
+  .job-row.has-menu > .job-actions > .action-icon.danger { background: var(--danger-wash); color: var(--danger); }
+  .job-row.has-menu > .job-actions > .action-icon .action-label { display: block; }
+  .job-row.has-menu > .job-actions > .action-icon svg { width: 20px; height: 20px; }
+  .job-row.has-menu > .job-actions > .action-icon::after { display: none; }
+  .job-row.swipe-armed > .job-actions > [aria-label="Archive"] { background: var(--forest); color: var(--on-forest); }
+}
+
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
    the file so it wins over the sizes each component, and the touch rules above,

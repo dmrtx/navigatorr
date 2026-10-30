@@ -4,6 +4,7 @@ import { runMatrix, out } from "./runner.mjs";
 import { runTransitions } from "./transitions.mjs";
 import { runStorage } from "./storage.mjs";
 import { runReview } from "./review.mjs";
+import { runSwipe } from "./swipe.mjs";
 const started = Date.now();
 let done = 0;
 const report = await runMatrix({ onCell: () => { if (++done % 25 === 0) process.stdout.write(`\r${done} cells`); } });
@@ -50,5 +51,17 @@ if (reviews.length) {
     console.log(`  ${v.rule}  ${v.scenario}  (${v.screen}, ${v.theme}, x${v.zoom})  ${v.message}  ${v.where}`);
   }
 }
-if (report.failed || moves.length || stats.length || reviews.length) process.exit(1);
+// The queue's swipe-to-reveal actions, driven with real touches on every touch screen.
+const swipes = await runSwipe();
+if (swipes.length) {
+  console.log(`\n${swipes.length} findings in the queue's swipe actions:`);
+  const seen = new Set();
+  for (const v of swipes) {
+    const key = `${v.rule}|${v.message}|${v.where}|${v.screen}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    console.log(`  ${v.rule}  (${v.screen}, ${v.theme})  ${v.message}  ${v.where}`);
+  }
+}
+if (report.failed || moves.length || stats.length || reviews.length || swipes.length) process.exit(1);
 console.log("All cells pass.");
