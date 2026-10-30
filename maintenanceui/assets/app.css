@@ -2062,6 +2062,11 @@ body:has(dialog[open]) {
   padding: 3px 0;
   background: var(--surface);
 }
+/* A drag on the heading moves the sheet, so the browser must not scroll under it. */
+.dialog-heading,
+.jd-header {
+  touch-action: none;
+}
 .dialog-heading h2 {
   min-width: 0;
   margin: 0;

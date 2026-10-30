@@ -8033,3 +8033,27 @@ test("the swipe tray is only for touch screens and every shortened label names a
   for (const full of Object.keys(JSON.parse(labels)))
     assert.ok(source.includes(`"${full}"`), `${full} is a label the app uses`);
 });
+
+test("a sheet closes past a quarter of its height or a quick flick, and springs back otherwise", () => {
+  const h = harness();
+  const settle = (dy, height, velocity) => h.run(`sheetSettle(${dy}, ${height}, ${velocity})`);
+  assert.equal(settle(20, 800, 0), "back");
+  assert.equal(settle(100, 800, 0.1), "back");
+  assert.equal(settle(140, 800, 0), "close");
+  // A short sheet closes at a quarter of itself, not at the full distance.
+  assert.equal(settle(60, 200, 0), "close");
+  // A quick flick closes early, but a tiny nudge never does.
+  assert.equal(settle(60, 800, 1), "close");
+  assert.equal(settle(30, 800, 2), "back");
+});
+
+test("the sheet drag moves the sheet and leaves closing to each dialog's own close button", () => {
+  const body = source.slice(source.indexOf("function sheetCloseButton"), source.indexOf("// More actions menus close"));
+  // Closing is the dialog's own button, so confirmations and clean-up still run.
+  assert.match(body, /button\.click\(\)/);
+  assert.doesNotMatch(body, /\.close\(\)|\.requestClose\(/);
+  assert.match(css, /\.dialog-heading,\s*\.jd-header \{\s*touch-action: none;/);
+  // Every dialog has a close button the drag can use.
+  for (const dialog of markup.match(/<dialog[\s\S]*?<\/dialog>/g))
+    assert.match(dialog, /<button[^>]*aria-label="Close/, dialog.slice(0, 60));
+});

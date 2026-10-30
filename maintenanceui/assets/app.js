@@ -5430,6 +5430,72 @@ if (typeof window !== "undefined" && typeof matchMedia === "function") {
   document.addEventListener("pointerdown", e => { if (!e.target?.closest?.(".job-row.swipe-open")) closeSwipe(); });
   matchMedia(swipeQuery).addEventListener?.("change", () => { closeSwipe(); if (!state.jobsLoading) void loadJobs(); });
 }
+// A sheet closes with a drag down, as on any phone: from its heading, or from its
+// body when that is scrolled to the top. The drag only moves the sheet; its own
+// close button does the closing, so every dialog keeps its own way out.
+const sheetSlop = 10;
+let sheet = null;
+// Where a released drag settles: "close" past a quarter of the sheet, or a short
+// quick flick; otherwise it springs back.
+function sheetSettle(dy, height, velocity) {
+  return dy >= Math.min(140, height * 0.25) || (dy > 40 && velocity > 0.6) ? "close" : "back";
+}
+function sheetCloseButton(dialog) {
+  return dialog.querySelector?.('.dialog-heading button[aria-label^="Close"], .jd-header button[aria-label^="Close"]') || null;
+}
+// Anything between the finger and the sheet that is scrolled down takes the drag as a scroll.
+function sheetScrolled(target, dialog) {
+  for (let el = target; el; el = el.parentElement) {
+    if (el.scrollTop > 0) return true;
+    if (el === dialog) break;
+  }
+  return false;
+}
+function sheetStart(e) {
+  sheet = null;
+  if (e.touches?.length !== 1 || !matchMedia("(pointer: coarse)").matches) return;
+  const dialog = e.target?.closest?.("dialog[open]");
+  if (!dialog || !sheetCloseButton(dialog) || e.target.closest("input, textarea, select")) return;
+  const t = e.touches[0], header = !!e.target.closest(".dialog-heading, .jd-header");
+  sheet = {dialog, x: t.clientX, y: t.clientY, at: performance.now(), dy: 0, velocity: 0, locked: false, ours: header || !sheetScrolled(e.target, dialog)};
+}
+function sheetMove(e) {
+  if (!sheet || e.touches?.length !== 1) return;
+  const t = e.touches[0], dx = t.clientX - sheet.x, dy = t.clientY - sheet.y;
+  if (!sheet.locked) {
+    // Up, sideways, or on a scrolled body: not ours.
+    if (!sheet.ours || dy < -sheetSlop || Math.abs(dx) > sheetSlop && Math.abs(dx) > Math.abs(dy)) { sheet = null; return; }
+    if (dy < sheetSlop || dy < Math.abs(dx) * 1.5) return;
+    sheet.locked = true;
+    sheet.dialog.style.transition = "none";
+  }
+  const now = performance.now(), next = Math.max(dy - sheetSlop, 0);
+  if (now > sheet.at) sheet.velocity = (next - sheet.dy) / (now - sheet.at);
+  sheet.at = now;
+  sheet.dy = next;
+  sheet.dialog.style.transform = `translateY(${next}px)`;
+  e.preventDefault?.();
+}
+function sheetEnd(e) {
+  if (!sheet) return;
+  const {dialog, locked, dy, velocity} = sheet;
+  sheet = null;
+  if (!locked) return;
+  const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const button = sheetCloseButton(dialog);
+  const settle = () => { dialog.style.transition = still ? "none" : "transform .2s cubic-bezier(.2, .8, .2, 1)"; dialog.style.transform = ""; setTimeout(() => dialog.style.removeProperty("transition"), 250); };
+  if (e.type === "touchcancel" || !button || button.disabled || sheetSettle(dy, dialog.offsetHeight, velocity) !== "close") return settle();
+  dialog.style.transition = still ? "none" : "transform .2s cubic-bezier(.2, .8, .2, 1)";
+  dialog.style.transform = `translateY(${innerHeight}px)`;
+  // A dialog that stays open after its close button (it asked first) comes back.
+  setTimeout(() => { button.click(); if (dialog.open) settle(); else { dialog.style.removeProperty("transform"); dialog.style.removeProperty("transition"); } }, still ? 0 : 200);
+}
+if (typeof window !== "undefined" && typeof matchMedia === "function") {
+  document.addEventListener("touchstart", sheetStart, {passive: true});
+  document.addEventListener("touchmove", sheetMove, {passive: false});
+  document.addEventListener("touchend", sheetEnd);
+  document.addEventListener("touchcancel", sheetEnd);
+}
 // More actions menus close on Escape and on a press anywhere outside them.
 function closeActionMenus(except) {
   for (const menu of document.querySelectorAll(".more-actions[open]"))

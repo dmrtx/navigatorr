@@ -5,6 +5,7 @@ import { runTransitions } from "./transitions.mjs";
 import { runStorage } from "./storage.mjs";
 import { runReview } from "./review.mjs";
 import { runSwipe } from "./swipe.mjs";
+import { runSheet } from "./sheet.mjs";
 const started = Date.now();
 let done = 0;
 const report = await runMatrix({ onCell: () => { if (++done % 25 === 0) process.stdout.write(`\r${done} cells`); } });
@@ -63,5 +64,17 @@ if (swipes.length) {
     console.log(`  ${v.rule}  (${v.screen}, ${v.theme})  ${v.message}  ${v.where}`);
   }
 }
-if (report.failed || moves.length || stats.length || reviews.length || swipes.length) process.exit(1);
+// Sheets close with a drag down, driven with real touches on every touch screen.
+const sheets = await runSheet();
+if (sheets.length) {
+  console.log(`\n${sheets.length} findings in the sheets' drag to close:`);
+  const seen = new Set();
+  for (const v of sheets) {
+    const key = `${v.rule}|${v.message}|${v.where}|${v.screen}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    console.log(`  ${v.rule}  (${v.screen}, ${v.theme})  ${v.message}  ${v.where}`);
+  }
+}
+if (report.failed || moves.length || stats.length || reviews.length || swipes.length || sheets.length) process.exit(1);
 console.log("All cells pass.");
