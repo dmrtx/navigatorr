@@ -8014,7 +8014,10 @@ test("the masthead and the tab bar stay pinned while the page scrolls, except on
   const wide = /@media \(min-width: 601px\) \{([\s\S]*?)\n\}\n/.exec(css.slice(css.indexOf(".tabs {")))[1];
   assert.match(wide, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;\s*height: var\(--masthead-h\);\s*background: var\(--paper\);/);
   assert.match(wide, /\.tabs \{\s*position: sticky;\s*top: var\(--masthead-h\);/);
-  assert.match(css, /#worker-status \{ max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  // A long worker status is cut with an ellipsis at every width (a button label is one line).
+  assert.match(css, /#worker-status \{ min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; \}/);
+  assert.match(css, /@media \(min-width: 601px\) \{[\s\S]*?#worker-status \{ max-width: 46vw; \}/);
+  assert.match(css, /button \{[^}]*white-space: nowrap;/);
   // On phones the tab bar is the fixed bottom bar and the masthead scrolls away.
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.tabs \{\s*position: fixed;/);
   assert.doesNotMatch(css.slice(css.indexOf("@media (max-width: 600px) {")), /\.masthead \{[^}]*position: sticky/);
@@ -8032,9 +8035,64 @@ test("the dialog's primary button keeps a readable hover and its bar is as compa
 
 test("every button takes the compact size, with a mouse or a finger", () => {
   const block = css.slice(css.lastIndexOf("/* One button size everywhere"));
-  assert.match(block, /^:root \{ --control-size: 30px; \}/m);
+  assert.match(block, /^:root \{ --control-size: 30px; --control-radius: 5px;/m);
+  // Fields share the buttons' corner and height, and a 16px touch field is as tall as a 13px one.
+  assert.match(block, /input:not\(\[type="checkbox"\]\):not\(\[type="radio"\]\), select, textarea \{ border-radius: var\(--control-radius\); \}/);
+  assert.match(block, /select \{ line-height: 18px; \}/);
   assert.match(block, /^button, \.jd-primary, \.jd-secondary, \.jd-menu-item,/m);
   assert.match(block, /min-height: var\(--control-size\);\s*padding-block: 2px;\s*font-size: 13px;\s*border-radius: 5px;/);
   // Nothing below it is conditional on the pointer, so a touch screen is not left out.
   assert.doesNotMatch(block, /@media/);
+});
+
+test("a swipe settles open past half the tray, archives past most of the row, and springs back otherwise", () => {
+  const h = harness();
+  const settle = (dx, tray, width, canArchive) => h.run(`swipeSettle(${dx}, ${tray}, ${width}, ${canArchive})`);
+  assert.equal(settle(20, 142, 352, true), "closed");
+  assert.equal(settle(80, 142, 352, true), "open");
+  assert.equal(settle(142, 142, 352, false), "open");
+  assert.equal(settle(220, 142, 352, true), "archive");
+  // A row that cannot be archived never archives, however far the finger goes.
+  assert.equal(settle(300, 142, 352, false), "open");
+  // The tray resists past its own width and never follows a drag to the left.
+  assert.equal(h.run("swipeOffset(100, 142)"), 100);
+  assert.equal(h.run("swipeOffset(242, 142)"), 192);
+  assert.equal(h.run("swipeOffset(-30, 142)"), 0);
+});
+
+test("the swipe tray is only for touch screens and every shortened label names a real action", () => {
+  const block = css.slice(css.indexOf("/* Touch screens: a job's actions wait behind a swipe"));
+  assert.match(block, /@media \(hover: none\) and \(pointer: coarse\) \{\s*\.job-row\.has-menu \{ --swipe: 0px; overflow-x: clip; touch-action: pan-y;/);
+  // Nothing that reaches the desktop rail is changed outside that query.
+  assert.doesNotMatch(block.slice(0, block.indexOf("@media")), /\.job-actions/);
+  // A tray tile is one line and as tall as the row, like every button beside it.
+  assert.match(block, /\.job-row\.has-menu > \.job-actions > \.action-icon \{[^}]*min-height: 44px;[^}]*\}/);
+  const labels = source.match(/const trayLabels = (\{[^}]*\});/)?.[1];
+  assert.ok(labels, "trayLabels is declared");
+  for (const full of Object.keys(JSON.parse(labels)))
+    assert.ok(source.includes(`"${full}"`), `${full} is a label the app uses`);
+});
+
+test("a sheet closes past a quarter of its height or a quick flick, and springs back otherwise", () => {
+  const h = harness();
+  const settle = (dy, height, velocity) => h.run(`sheetSettle(${dy}, ${height}, ${velocity})`);
+  assert.equal(settle(20, 800, 0), "back");
+  assert.equal(settle(100, 800, 0.1), "back");
+  assert.equal(settle(140, 800, 0), "close");
+  // A short sheet closes at a quarter of itself, not at the full distance.
+  assert.equal(settle(60, 200, 0), "close");
+  // A quick flick closes early, but a tiny nudge never does.
+  assert.equal(settle(60, 800, 1), "close");
+  assert.equal(settle(30, 800, 2), "back");
+});
+
+test("the sheet drag moves the sheet and leaves closing to each dialog's own close button", () => {
+  const body = source.slice(source.indexOf("function sheetCloseButton"), source.indexOf("// More actions menus close"));
+  // Closing is the dialog's own button, so confirmations and clean-up still run.
+  assert.match(body, /button\.click\(\)/);
+  assert.doesNotMatch(body, /\.close\(\)|\.requestClose\(/);
+  assert.match(css, /\.dialog-heading,\s*\.jd-header \{\s*touch-action: none;/);
+  // Every dialog has a close button the drag can use.
+  for (const dialog of markup.match(/<dialog[\s\S]*?<\/dialog>/g))
+    assert.match(dialog, /<button[^>]*aria-label="Close/, dialog.slice(0, 60));
 });

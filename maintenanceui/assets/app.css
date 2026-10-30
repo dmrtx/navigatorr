@@ -192,6 +192,12 @@ body {
   color: var(--ink);
   font: 400 13px/1.4 var(--body);
 }
+/* The browser's `bolder` lands on Avenir Next's Bold from 400 and its Heavy from
+   600. One emphasis weight for every <strong>, so no label turns near-black. */
+strong,
+b {
+  font-weight: 600;
+}
 a {
   color: inherit;
 }
@@ -210,7 +216,9 @@ button {
   background: transparent;
   color: var(--ink);
   cursor: pointer;
-  overflow-wrap: anywhere;
+  /* A label is one line. A button that is too narrow for it is a layout
+     problem to fix, not a reason to grow a second line. */
+  white-space: nowrap;
   transition:
     background 0.15s,
     border-color 0.15s;
@@ -450,7 +458,6 @@ p {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  font-size: 12px;
 }
 .job-actions button svg {
   width: 14px;
@@ -513,12 +520,13 @@ p {
   color: var(--muted);
   font-size: 12px;
 }
-/* The masthead has a fixed height, so a long worker status is cut short
-   rather than wrapping into the tab bar. Phones let it grow instead. */
+/* The masthead has a fixed height, so a long worker status is cut short with
+   an ellipsis (its full text is the button's title) instead of wrapping. */
+.masthead-right { min-width: 0; }
+#worker-status { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 @media (min-width: 601px) {
   .brand { white-space: nowrap; }
-  .masthead-right { min-width: 0; }
-  #worker-status { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #worker-status { max-width: 46vw; }
 }
 main {
   max-width: 1580px;
@@ -2053,6 +2061,11 @@ body:has(dialog[open]) {
   padding: 3px 0;
   background: var(--surface);
 }
+/* A drag on the heading moves the sheet, so the browser must not scroll under it. */
+.dialog-heading,
+.jd-header {
+  touch-action: none;
+}
 .dialog-heading h2 {
   min-width: 0;
   margin: 0;
@@ -2077,7 +2090,6 @@ dialog .submit-actions button {
   width: auto;
   min-height: var(--control-size);
   padding: 4px 8px;
-  font-size: 12px;
 }
 pre {
   max-width: 100%;
@@ -2619,7 +2631,7 @@ pre {
 .goal-head { display: flex; align-items: flex-start; gap: .7rem; padding: .8rem .85rem; cursor: pointer; }
 .goal-head input { width: auto; margin: .2rem 0 0; accent-color: var(--select); }
 .goal-text { display: grid; gap: .2rem; min-width: 0; }
-.goal-title { font-size: 1rem; font-weight: 700; line-height: 1.3; color: var(--ink); }
+.goal-title { font-size: 1rem; font-weight: 600; line-height: 1.3; color: var(--ink); }
 .goal-desc { display: block; font-size: .82rem; line-height: 1.5; color: var(--muted); }
 .goal-body { display: grid; gap: .85rem; padding: .1rem .85rem .85rem 2.4rem; }
 .goal-body[hidden], .goal-option[hidden], .goal-body:not(:has(.goal-option:not([hidden]))) { display: none; }
@@ -2681,7 +2693,6 @@ pre {
 .advanced-state[data-on="true"] { border-color: var(--accent); color: var(--accent); }
 .advanced-profiles[open] { padding-bottom: .5rem; }
 .advanced-explain { margin: 0 0 .25rem; }
-#recipe-description { border: 1px solid var(--line); padding: .65rem; min-height: 42px; }
 #recipe-dirty[data-dirty="true"] { font-weight: 600; }
 #settings-worker { margin-bottom: 1.25rem; }
 .profile-action-bar .action-control { width: auto; min-width: 90px; gap: .5rem; }
@@ -2883,24 +2894,54 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .size-budget-points, .size-budget-siblings ul { margin: 4px 0 0; padding-left: 1.2rem; }
 .size-budget-warning { color: var(--warning-strong); background: var(--warning-wash); border: 1px solid var(--warning-line); border-radius: 6px; padding: 6px 8px; }
 
-/* Replacement review: one dialog lists the files with what each saves, then one button. */
-#batch-review { max-width: 560px; }
-#batch-review-data, #file-review-data { margin: 8px 0; }
-.replacement-row { display: grid; gap: 4px; }
+/* Replacement review: one dialog lists the files with what each saves, then one button.
+   The heading and the decision stay in view; only the file list scrolls, so the
+   buttons never sit below a long list. On a phone it is a full-screen sheet. */
+#batch-review, #file-review { max-width: 560px; }
+#batch-review[open], #file-review[open] { display: flex; flex-direction: column; overflow: hidden; }
+#batch-review[open] > *, #file-review[open] > * { flex: 0 0 auto; min-width: 0; }
+#batch-review[open] > [hidden], #file-review[open] > [hidden] { display: none; }
+#batch-review-notice { max-height: 30dvh; overflow-y: auto; }
+#batch-review[open] > #batch-review-data, #file-review[open] > #file-review-data { flex: 1 1 auto; min-height: 0; margin: 6px 0; overflow-y: auto; overscroll-behavior: contain; border-block: 1px solid var(--line); }
+#batch-review-data > .check { padding: 4px 0; border-bottom: 1px solid var(--line); }
+#batch-review-data > :last-child, #file-review-data > :last-child { border-bottom: 0; }
+#batch-review > p.muted, #file-review > p.muted { margin: 4px 0; font-size: 12px; }
+#batch-review .dialog-heading, #file-review .dialog-heading { position: static; }
+/* One file is a name and one line of numbers; the paths are a link on that line. */
+.replacement-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; padding: 4px 0; }
 .replacement-row p { margin: 0; }
-.replacement-name { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.replacement-row > .replacement-name { flex: 1 1 100%; }
+.replacement-name { font-size: 13px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+.replacement-name strong, strong.replacement-name { font-weight: inherit; }
+.replacement-name strong, strong.replacement-name, .replacement-name > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-width: 0; }
 /* A selectable file hangs its checkbox in the margin, so the name and its
    facts share one left edge and a long name wraps under itself. */
 .replacement-row.selectable { padding-left: 24px; }
 .replacement-row.selectable > .check { margin-left: -24px; gap: 8px; align-items: flex-start; min-height: 0; }
 .replacement-row.selectable > .check > input { flex: none; margin-top: 2px; }
 .replacement-sizes { font-size: 13px; font-variant-numeric: tabular-nums; }
-.replacement-quality, .replacement-tracks { overflow-wrap: anywhere; }
+.replacement-quality, .replacement-tracks { font-size: 12px; overflow-wrap: anywhere; }
+.replacement-row > .replacement-tracks, .replacement-row > .size-budget-warning { flex: 1 1 100%; }
 .replacement-row .size-budget-warning { margin: 2px 0; }
-.replacement-paths { font-size: 12px; }
+.replacement-paths { margin: -6px 0 -6px auto; font-size: 12px; }
+.replacement-paths[open] { flex: 1 1 100%; margin: 0; }
 .replacement-paths > summary { cursor: pointer; min-height: var(--action-height); display: flex; align-items: center; color: var(--muted); }
 .replacement-paths > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-.review-total { margin: 10px 0 4px; font-size: 15px; font-weight: 600; color: var(--forest); font-variant-numeric: tabular-nums; }
+/* A finger gets thumb-sized controls whatever the screen width: a visible disc
+   to close, and one row of equal-height buttons with the action filling the
+   rest. If the row cannot fit, a button moves to the next row; it never
+   overflows and never grows a second line. */
+@media (pointer: coarse) {
+  #batch-review .dialog-heading button { flex-basis: 40px; width: 40px; height: 40px; border-radius: 50%; background: var(--hover); }
+  #batch-review .submit-actions { flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  #batch-review .submit-actions button { flex: 0 0 auto; min-height: 44px; padding: 4px 12px; font-size: 14px; border-radius: 10px; }
+  #batch-review .submit-actions button.primary { flex: 1 1 auto; min-width: max-content; font-size: 15px; font-weight: 600; }
+}
+/* A phone shows the review as a full-screen sheet. */
+@media (max-width: 640px) {
+  #batch-review { inset: 0; width: 100%; max-width: none; height: 100dvh; max-height: none; margin: 0; border: 0; border-radius: 0; padding: calc(8px + env(safe-area-inset-top)) 16px calc(12px + env(safe-area-inset-bottom)); }
+}
+.review-total { margin: 4px 0 2px; font-size: 15px; font-weight: 600; color: var(--forest); font-variant-numeric: tabular-nums; }
 .review-total:empty { display: none; }
 .review-difference { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warning-line); border-radius: 3px; background: var(--warning-wash); color: var(--warning-strong); }
 .review-difference p { margin: 4px 0 0; }
@@ -3046,7 +3087,7 @@ html { scrollbar-gutter: stable; }
   background: var(--surface);
 }
 .jd-header h2 { flex: 1 1 auto; margin: 0; font-size: 16px; line-height: 1.3; }
-.jd-header .icon-button { flex: 0 0 44px; display: inline-grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; color: var(--icon); font-size: 24px; line-height: 1; }
+.jd-header .icon-button { flex: 0 0 44px; display: inline-grid; place-items: center; width: 44px; height: 44px; padding: 0; border: 0; color: var(--icon); font-size: 22px; line-height: 1; }
 .jd-header .icon-button svg { width: 18px; height: 18px; }
 .jd-status { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 14px 16px 12px; }
 .detail-status { display: flex; }
@@ -3183,11 +3224,65 @@ html { scrollbar-gutter: stable; }
 /* Focus lands here only from code (a job opened from a cleared row); the heading is not a control. */
 #job-detail-title:focus { outline: none; }
 
+/* Touch screens: a job's actions wait behind a swipe to the left. The row
+   slides over and a tray of tiles waits at its right edge; the buttons are the same
+   ones the corner shows with a pointer. */
+.swipe-hint { margin: 0 0 4px; }
+@media (hover: none) and (pointer: coarse) {
+  .job-row.has-menu { --swipe: 0px; overflow-x: clip; touch-action: pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .job-row.has-menu > .job-heading { padding-right: 0; }
+  .job-row.has-menu > :not(.job-actions) { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
+  .job-row.swiping > :not(.job-actions),
+  .job-row.swipe-open > :not(.job-actions) { transform: translateX(calc(var(--swipe) * -1)); }
+  .job-row.swiping > :not(.job-actions),
+  .job-row.swipe-restored > :not(.job-actions) { transition: none; }
+  .job-row.has-menu > .job-actions {
+    position: absolute;
+    inset: 4px 0 4px auto;
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    visibility: hidden;
+    transition: visibility 0s linear .22s;
+  }
+  .job-row.swiping > .job-actions,
+  .job-row.swipe-open > .job-actions { visibility: visible; transition-delay: 0s; }
+  .job-row.has-menu > .job-actions > .action-icon {
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 4px;
+    width: auto;
+    min-width: 64px;
+    height: auto;
+    min-height: 44px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 10px;
+    background: var(--hover);
+    color: var(--ink);
+    font-size: 11px;
+  }
+  .job-row.has-menu > .job-actions > .action-icon.danger { background: var(--danger-wash); color: var(--danger); }
+  .job-row.has-menu > .job-actions > .action-icon .action-label { display: block; }
+  .job-row.has-menu > .job-actions > .action-icon svg { width: 20px; height: 20px; }
+  .job-row.has-menu > .job-actions > .action-icon::after { display: none; }
+  .job-row.swipe-armed > .job-actions > [aria-label="Archive"] { background: var(--forest); color: var(--on-forest); }
+}
+
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
    the file so it wins over the sizes each component, and the touch rules above,
    gave their own buttons. */
-:root { --control-size: 30px; }
+:root { --control-size: 30px; --control-radius: 5px; --action-height: var(--control-size); }
+/* One corner and one height for every control: buttons and fields alike, in a
+   dialog or out of it. A field's text sits on its own line so a 16px field
+   (kept for iOS) is as tall as a 13px one. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea { border-radius: var(--control-radius); }
+input:not([type="checkbox"]):not([type="radio"]), select { line-height: 18px; }
+.queue-tool, .theme-switch button, .profile-action-bar .action-control, .job-row .job-actions .action-icon { border-radius: var(--control-radius); }
+.theme-switch { border-radius: calc(var(--control-radius) + 2px); }
+.theme-switch button { padding-block: 2px; }
+.profile-action-bar .action-control { padding-block: 2px; }
 button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
   min-height: var(--control-size);
   padding-block: 2px;
