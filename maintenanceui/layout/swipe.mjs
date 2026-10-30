@@ -104,15 +104,18 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             // 3. A tap on the open row shuts it and does not open the job.
             const before = page.url();
             const tapX = Math.max(Math.round(open.trayLeft) - 24, 8);
-            await page.touchscreen.tap(tapX, row.y);
+            // The first swipe hides the hint above the list, so the row has moved since it was picked.
+            const tapY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
+            await page.touchscreen.tap(tapX, tapY);
             await page.waitForTimeout(120);
             if ((await state0())[n].open) mark("tap-closes", "a tap on the open row left the tray open", where);
             if (page.url() !== before) mark("tap-navigates", "the tap that shuts the tray opened the job", where);
             // 4. Swipe open, then swipe right to shut.
-            await drag(cdp, row.x, row.y, -Math.min(row.width * 0.45, 190));
+            const rowY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
+            await drag(cdp, row.x, rowY, -Math.min(row.width * 0.45, 190));
             await page.waitForTimeout(120);
             const trayPx = (await state0())[n].trayLeft;
-            await drag(cdp, Math.min(trayPx + 20, screen.width - 40), row.y, 140);
+            await drag(cdp, Math.min(trayPx + 20, screen.width - 40), rowY, 140);
             await page.waitForTimeout(120);
             if ((await state0())[n].open) mark("swipe-left", "a swipe to the right did not shut the tray", where);
           }
