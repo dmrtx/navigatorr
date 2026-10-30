@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,7 +32,14 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	e := &transcode.FinalQualityEvidence{Verdict: "fail", CandidateSHA256: candidateSHA, CandidateSizeBytes: candidateSize, PlanDigest: plan.PlanDigest, BenchmarkRequestDigest: q.BenchmarkRequestDigest}
 	fail := func(code string, cause error) (*transcode.FinalQualityEvidence, error) {
 		e.ReasonCodes = append(e.ReasonCodes, code)
-		return e, fmt.Errorf("%s: %w", code, cause)
+		err := fmt.Errorf("%s: %w", code, cause)
+		if code == "quality_final_sample_misaligned" {
+			// The same source and encode cut the same way misalign again, and
+			// the encode that precedes this check runs for hours, so the job is
+			// never replayed on its own; a manual retry re-encodes.
+			err = candidateInvalid(err)
+		}
+		return e, err
 	}
 	if q.Quality.FinalValidation == nil || q.Quality.FinalValidation.Mode != "sampled" {
 		return fail("quality_final_plan_invalid", fmt.Errorf("unsupported final validation mode"))
@@ -195,16 +203,19 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 				return bad("quality_final_sample_extract_failed", err)
 			}
 		}
+		// Which window failed and where it sits tells a gap in the source's
+		// timeline from a shifted encode.
+		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
 		refPTS, err := probeSamplePTS(ctx, w.ffprobePath, refPath)
 		if err != nil {
-			return bad("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
 		}
 		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
 		if err != nil {
-			return bad("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract: %w", where, err))
 		}
 		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
-			return bad("quality_final_sample_misaligned", err)
+			return bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))
 		}
 		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
 			return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
@@ -572,14 +583,38 @@ func probeFirstFrameTime(ctx context.Context, ffprobePath, path string, videoInd
 	return 0, fmt.Errorf("no timestamped video frame at the start of the file")
 }
 
+// leadingTimestampCount is how many timestamps of each extract an alignment
+// failure reports: enough to see an offset, a gap or a duplicated picture at
+// the start without printing a whole window.
+const leadingTimestampCount = 5
+
+// leadingTimestamps formats the first timestamps of an extract, in seconds from
+// its own first picture, and its last one, so a failure shows where each side's
+// pictures start and how long the extract runs.
+func leadingTimestamps(pts []float64) string {
+	if len(pts) == 0 {
+		return "[]"
+	}
+	n := min(len(pts), leadingTimestampCount)
+	parts := make([]string, 0, n+1)
+	for _, v := range pts[:n] {
+		parts = append(parts, strconv.FormatFloat(v, 'f', 3, 64))
+	}
+	text := "[" + strings.Join(parts, " ")
+	if len(pts) > n {
+		text += fmt.Sprintf(" … %s", strconv.FormatFloat(pts[len(pts)-1], 'f', 3, 64))
+	}
+	return text + "]"
+}
+
 func verifySampleAlignment(ref, cand []float64, fps float64) error {
 	if len(ref) != len(cand) || len(ref) == 0 {
-		return fmt.Errorf("source/candidate frame count mismatch: %d versus %d", len(ref), len(cand))
+		return fmt.Errorf("source/candidate frame count mismatch: %d versus %d (source timestamps %s, candidate timestamps %s)", len(ref), len(cand), leadingTimestamps(ref), leadingTimestamps(cand))
 	}
 	tolerance := 0.25 / fps
 	for i := range ref {
 		if math.Abs((ref[i]-ref[0])-(cand[i]-cand[0])) > tolerance {
-			return fmt.Errorf("source/candidate timestamp mismatch at frame %d", i)
+			return fmt.Errorf("source/candidate timestamp mismatch at frame %d: source %.3f, candidate %.3f (source timestamps %s, candidate timestamps %s)", i, ref[i]-ref[0], cand[i]-cand[0], leadingTimestamps(ref), leadingTimestamps(cand))
 		}
 	}
 	return nil
