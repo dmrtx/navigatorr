@@ -106,6 +106,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             const tapX = Math.max(Math.round(open.trayLeft) - 24, 8);
             // The first swipe hides the hint above the list, so the row has moved since it was picked.
             const tapY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
+            await page.evaluate(() => { window.__ev = []; for (const t of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "click"]) document.addEventListener(t, e => window.__ev.push(`${t}@${Math.round(performance.now())}:${e.target.tagName}${e.defaultPrevented ? "!" : ""}`), true); });
             // The same raw touch path as the swipes: a press, a short beat, a lift.
             await touch(cdp, "touchStart", [[tapX, tapY]]);
             await page.waitForTimeout(40);
@@ -114,7 +115,8 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             await page.waitForFunction(id => !document.querySelector(`.job-row[data-operation-id="${id}"]`)?.classList.contains("swipe-open"), row.id, { timeout: 700 }).catch(() => {});
             if ((await state0())[n].open) {
               const why = await page.evaluate(([id, x, y]) => { const el = document.elementFromPoint(x, y); return `tap at ${x},${y} hit ${el?.tagName}.${el?.className} in ${el?.closest(".job-row")?.dataset.operationId}; row ${id} classes ${document.querySelector(`.job-row[data-operation-id="${id}"]`)?.className}`; }, [row.id, tapX, tapY]);
-              mark("tap-closes", `a tap on the open row left the tray open (${why})`, where);
+              const events = await page.evaluate(() => `${window.__ev.join(" ")} now@${Math.round(performance.now())}`);
+              mark("tap-closes", `a tap on the open row left the tray open (${why}; events ${events})`, where);
             }
             if (page.url() !== before) mark("tap-navigates", "the tap that shuts the tray opened the job", where);
             // 4. Swipe open, then swipe right to shut.
