@@ -489,3 +489,23 @@ func TestRerunWithoutHardwareAfterAVideoToolboxLadderMissed(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+// A full encode that missed the goal's size limit is a finished round without a
+// result: the file is offered again like any other.
+func TestRerunIsOfferedAfterTheSizeLimitWasMissed(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	inputs := map[string]any{"path": "/media/Show/S01E01.mkv", "mode": "size", "replace_original": false}
+	missed := map[string]any{"reason_code": "insufficient_savings", "original_intact": true, "skip_transcode": true}
+	seedOperation(t, st, "missed", "transcode_media", "completed", inputs, missed, nil)
+	w := request(h, "GET", "/api/maintenance/operations?id=missed", "", true)
+	var page struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if operationMap(page.Jobs[0]["rerun"])["mode"] != "size" {
+		t.Fatalf("no rerun offered: %v", page.Jobs[0])
+	}
+}

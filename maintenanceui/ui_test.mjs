@@ -4903,8 +4903,11 @@ test("a standalone file that missed its size limit offers the goal form its next
   const labels = (job) => h.run(`jobControls(${job}).children.map(b=>b.textContent)`);
   assert.ok(labels(base).includes("Choose a goal"));
   assert.ok(!labels(base).includes("Run again"));
+  // The server offers the same goal again too, and both stay.
+  const again = labels(`{...${base},rerun:{source_path:"/media/Show/S01E01.mkv",mode:"size",replace_original:false,no_winner_rounds:1}}`);
+  assert.ok(again.includes("Run again") && again.includes("Choose a goal"));
   // Reviewed, batch-owned or already offered another way: nothing doubles up.
-  for (const patch of ['candidate_ready:true', 'status:"failed"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'rerun_refused:"why"', 'rerun:{source_path:"/media/Show/S01E01.mkv"}', 'benchmark:{outcome:"no_suitable_candidate"}'])
+  for (const patch of ['candidate_ready:true', 'status:"failed"', 'parent_item_key:"epfile-1"', 'replacement_action_id:"r"', 'rerun_refused:"why"', 'benchmark:{outcome:"no_suitable_candidate"}'])
     assert.equal(labels(`{...${base},${patch}}`).filter((l) => l === "Choose a goal").length, patch.startsWith("rerun_refused") ? 1 : 0, patch);
   h.run('selectTab=()=>{};setFileStep=()=>{};controls=()=>{}');
   await h.run(`jobControls(${base}).children.find(b=>b.textContent==="Choose a goal")`).listeners.get("click")();
