@@ -180,9 +180,16 @@ func (s *Server) Handler() http.Handler {
 		if r.URL.Path == "/manifest.webmanifest" {
 			w.Header().Set("Content-Type", "application/manifest+json")
 		}
+		// The shell is public and embedded. Ask the server on every launch, but
+		// let it answer "unchanged" instead of sending half a megabyte again;
+		// the file server turns a matching If-None-Match into a 304.
+		if tag := shellTag(r.URL.Path); tag != "" {
+			w.Header().Set("ETag", tag)
+			w.Header().Set("Cache-Control", "no-cache")
+		}
 		static.ServeHTTP(w, r)
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return gzipResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -207,7 +214,7 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		mux.ServeHTTP(w, r)
-	})
+	}))
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
