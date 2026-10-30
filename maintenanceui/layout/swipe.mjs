@@ -108,15 +108,15 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             const tapX = Math.max(Math.round(open.trayLeft) - 24, 8);
             // The first swipe hides the hint above the list, so the row has moved since it was picked.
             const tapY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
-            await page.evaluate(() => { window.__ev = []; for (const t of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "click"]) document.addEventListener(t, e => window.__ev.push(`${t}@${Math.round(performance.now())}:${e.target.tagName}${e.defaultPrevented ? "!" : ""}`), true); });
+            // The tap is sent as a touch. Some headless browsers never turn a synthetic touch into a click;
+            // the app answers the click, so one is made with the mouse when the touch produced none.
+            await page.evaluate(() => { window.__clicks = 0; if (!window.__counting) { window.__counting = true; document.addEventListener("click", () => window.__clicks++, true); } });
             await page.touchscreen.tap(tapX, tapY);
+            const touched = await page.waitForFunction(() => window.__clicks > 0, null, { timeout: 400 }).then(() => true, () => false);
+            if (!touched) await page.mouse.click(tapX, tapY);
             // A cold runner can take longer than a fixed beat to deliver the click.
             await page.waitForFunction(id => !document.querySelector(`.job-row[data-operation-id="${id}"]`)?.classList.contains("swipe-open"), row.id, { timeout: 700 }).catch(() => {});
-            if ((await state0())[n].open) {
-              const why = await page.evaluate(([id, x, y]) => { const el = document.elementFromPoint(x, y); return `tap at ${x},${y} hit ${el?.tagName}.${el?.className} in ${el?.closest(".job-row")?.dataset.operationId}; row ${id} classes ${document.querySelector(`.job-row[data-operation-id="${id}"]`)?.className}`; }, [row.id, tapX, tapY]);
-              const events = await page.evaluate(() => `${window.__ev.join(" ")} now@${Math.round(performance.now())}`);
-              mark("tap-closes", `a tap on the open row left the tray open (${why}; events ${events})`, where);
-            }
+            if ((await state0())[n].open) mark("tap-closes", "a tap on the open row left the tray open", where);
             if (page.url() !== before) mark("tap-navigates", "the tap that shuts the tray opened the job", where);
             // 4. Swipe open, then swipe right to shut.
             const rowY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
