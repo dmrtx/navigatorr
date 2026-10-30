@@ -51,7 +51,9 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
           const cdp = await context.newCDPSession(page);
           await page.goto(`${server.origin}/?view=queue`);
           await page.waitForSelector(".job-row.has-menu", { timeout: 10000 });
-          await page.waitForTimeout(200);
+          // The page loads the queue more than once at start; a row redrawn under a finger takes the click with it.
+          await page.waitForLoadState("networkidle").catch(() => {});
+          await page.waitForTimeout(400);
           const state0 = () => page.evaluate(() => {
             const r = el => el.getBoundingClientRect();
             return [...document.querySelectorAll(".job-row.has-menu")].map(row => {
@@ -107,10 +109,7 @@ export async function runSwipe({ screenNames = Object.keys(screens).filter(n => 
             // The first swipe hides the hint above the list, so the row has moved since it was picked.
             const tapY = await page.evaluate(id => { const h = document.querySelector(`.job-row[data-operation-id="${id}"] .job-heading`).getBoundingClientRect(); return Math.round(Math.min(Math.max(h.top + h.height / 2, 8), innerHeight - 8)); }, row.id);
             await page.evaluate(() => { window.__ev = []; for (const t of ["pointerdown", "pointerup", "pointercancel", "touchstart", "touchend", "click"]) document.addEventListener(t, e => window.__ev.push(`${t}@${Math.round(performance.now())}:${e.target.tagName}${e.defaultPrevented ? "!" : ""}`), true); });
-            // The same raw touch path as the swipes: a press, a short beat, a lift.
-            await touch(cdp, "touchStart", [[tapX, tapY]]);
-            await page.waitForTimeout(40);
-            await touch(cdp, "touchEnd", []);
+            await page.touchscreen.tap(tapX, tapY);
             // A cold runner can take longer than a fixed beat to deliver the click.
             await page.waitForFunction(id => !document.querySelector(`.job-row[data-operation-id="${id}"]`)?.classList.contains("swipe-open"), row.id, { timeout: 700 }).catch(() => {});
             if ((await state0())[n].open) {
