@@ -2472,6 +2472,34 @@ test("Cloudflare mode opens the workspace without a local sign-in or sign-out", 
   assert.equal(h.elements.get("logout").hidden, true);
 });
 
+test("the first screen does not wait for the profiles", async () => {
+  const boot = (search, loadRecipes) => {
+    const h = harness();
+    h.document.querySelector = () => new Element();
+    h.run(
+      `api = async (path) => path === "auth-info" ? {auth_mode:"cloudflare_access"} : {roots:[],services:[],tools:["recipe_list"],transcode_enabled:true}; resetLibrary = () => {}; controls = () => {}; loadJobs = async () => {}; window = {location:{search:${JSON.stringify(search)}}}; loadRecipes = ${loadRecipes}; applyNavigation = async () => { globalThis.__order.push("navigation"); };`,
+    );
+    h.run("globalThis.__order = []; var __release; var __profiles = new Promise(r => { __release = r; });");
+    return h;
+  };
+  // A profile load that has not answered yet leaves the queue free to draw.
+  let h = boot("?view=queue", 'async () => { globalThis.__order.push("recipes start"); await __profiles; globalThis.__order.push("recipes done"); }');
+  await h.run("initialize()");
+  assert.deepEqual(JSON.parse(h.run("JSON.stringify(globalThis.__order)")), ["recipes start", "navigation"]);
+  h.run("__release()");
+  await h.run("__profiles");
+  // A link straight into the Profiles tab needs them first.
+  h = boot("?view=recipes", 'async () => { globalThis.__order.push("recipes start"); globalThis.__order.push("recipes done"); }');
+  await h.run("initialize()");
+  assert.deepEqual(JSON.parse(h.run("JSON.stringify(globalThis.__order)")), ["recipes start", "recipes done", "navigation"]);
+  // A failed profile load is told to the person and does not stop the console opening.
+  h = boot("?view=queue", 'async () => { throw new Error("profiles unavailable"); }');
+  await h.run("initialize()");
+  await h.run("Promise.resolve()");
+  assert.equal(h.elements.get("workspace").hidden, false);
+  assert.match(h.elements.get("notice").textContent, /profiles unavailable/);
+});
+
 test("token mode reached through Access opens without the token form or a local sign-out", async () => {
   const h = harness();
   h.document.querySelector = () => new Element();
