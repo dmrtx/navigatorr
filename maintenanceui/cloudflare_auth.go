@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -24,6 +25,8 @@ type cloudflareAccessVerifier struct {
 	mu                 sync.Mutex
 	keys               map[string]*rsa.PublicKey
 	expires, nextFetch time.Time
+	logMu              sync.Mutex
+	logged             map[string]time.Time
 }
 
 func newCloudflareVerifier(issuer, audience string) *cloudflareAccessVerifier {
@@ -67,8 +70,16 @@ func (v *cloudflareAccessVerifier) verify(ctx context.Context, token string) err
 		return fmt.Errorf("invalid assertion claims")
 	}
 	now := time.Now().Unix()
-	if claims.Issuer != v.issuer || claims.Expires <= now || claims.NotBefore > now || claims.IssuedAt > now {
-		return fmt.Errorf("invalid assertion issuer or lifetime")
+	// Only the reason and the clock offset are reported, never the claims' values.
+	switch {
+	case claims.Issuer != v.issuer:
+		return fmt.Errorf("assertion issuer is not the configured Access team")
+	case claims.Expires <= now:
+		return fmt.Errorf("assertion expired %ds ago", now-claims.Expires)
+	case claims.NotBefore > now:
+		return fmt.Errorf("assertion not valid for another %ds", claims.NotBefore-now)
+	case claims.IssuedAt > now:
+		return fmt.Errorf("assertion issued %ds in the future", claims.IssuedAt-now)
 	}
 	var audiences []string
 	if json.Unmarshal(claims.Audience, &audiences) != nil {
@@ -97,6 +108,22 @@ func (v *cloudflareAccessVerifier) verify(ctx context.Context, token string) err
 	}
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
 	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature)
+}
+
+// rejected logs why an Access assertion did not authorize a request, at most
+// once a minute per reason. It takes a reason only, never the assertion.
+func (v *cloudflareAccessVerifier) rejected(reason string) {
+	v.logMu.Lock()
+	defer v.logMu.Unlock()
+	now := time.Now()
+	if last, ok := v.logged[reason]; ok && now.Sub(last) < time.Minute {
+		return
+	}
+	if v.logged == nil || len(v.logged) >= 32 {
+		v.logged = map[string]time.Time{}
+	}
+	v.logged[reason] = now
+	log.Printf("Cloudflare Access assertion rejected: %s", reason)
 }
 
 func (v *cloudflareAccessVerifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {

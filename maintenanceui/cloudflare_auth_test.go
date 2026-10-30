@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -323,5 +325,53 @@ func TestCloudflareKeyFetchSurvivesCallerCancellation(t *testing.T) {
 	}
 	if v.verify(context.Background(), token) != nil || *calls != 1 {
 		t.Fatal("key set not cached after a fetch for an aborted caller")
+	}
+}
+
+func TestCloudflareRejectionLogNamesReasonNotCredentials(t *testing.T) {
+	original, _ := testUI(t)
+	original.cfg.Web.CloudflareAccess = config.CloudflareAccessConfig{TeamDomain: "example.cloudflareaccess.com", Audience: "application-audience"}
+	s, err := New(original.cfg, original.registry, original.engine, original.mcp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, key, _ := accessFixture(t)
+	s.access = verifier
+	h := s.Handler()
+	var out strings.Builder
+	log.SetOutput(&out)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	claims := accessClaims(verifier)
+	claims["email"] = "allowed@example.com"
+	claims["aud"] = []string{"another-app"}
+	token := accessJWT(t, key, map[string]any{"alg": "RS256", "kid": "key-1"}, claims)
+	send := func(path, assertion string) int {
+		r := httptest.NewRequest("GET", path, nil)
+		if assertion != "" {
+			r.Header.Set("Cf-Access-Jwt-Assertion", assertion)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < 3; i++ {
+		send("/api/maintenance/auth-info", token)
+	}
+	send("/api/maintenance/auth-info", "")
+	send("/api/maintenance/bootstrap", "")
+	logged := out.String()
+	for _, want := range []string{"wrong assertion audience", "0 assertion headers on /api/maintenance/auth-info"} {
+		if strings.Count(logged, want) != 1 {
+			t.Fatalf("want %q once in the log:\n%s", want, logged)
+		}
+	}
+	if strings.Contains(logged, "/api/maintenance/bootstrap") {
+		t.Fatalf("a token client's missing assertion was logged:\n%s", logged)
+	}
+	for _, secret := range []string{token, "allowed@example.com", "application-audience", "another-app"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("log exposes %q:\n%s", secret, logged)
+		}
 	}
 }
