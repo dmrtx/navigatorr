@@ -2659,7 +2659,7 @@ function renderProfileFacts(output, data, name, preserveDepth) {
   add("Process", p.optimization?.enabled ? "Not available: it calibrates with samples, which was removed" : "Converts full video using this profile");
   add("Output depth", preserveDepth ? "Same as source · Overrides profile depth" : v.profile === "main10" || /10/.test(v.pixel_format || "") ? "10-bit" : v.pixel_format || v.profile ? "8-bit" : "Encoder default");
   if (v.spatial_aq != null) add("Image detail", v.spatial_aq ? "Adaptive allocation across image details" : "Standard allocation");
-  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossless Atmos/DTS:X lose object and height channels; lossy tracks (E-AC-3 Atmos included) copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode || "Profile default");
+  add("Audio", p.audio?.mode === "copy" ? "Keep original audio tracks" : p.audio?.mode === "compact" ? "Compact · Convert lossless tracks to AAC, same layout; E-AC-3/AC-3/AAC copied" : p.audio?.mode === "compact_lossless" ? "Lossless to AAC · TrueHD, DTS-HD MA, PCM and FLAC become AAC, same layout; lossless Atmos/DTS:X lose object and height channels; lossy tracks (E-AC-3 Atmos included) copied" : p.audio?.mode === "he_aac" ? "HE-AAC · 64 kbps mono/stereo, 160 kbps surround (lossy)" : p.audio?.mode === "size_aac" ? "AAC-LC · lossless tracks, and lossy tracks at least 1.25× the target, become AAC-LC (stereo 192, 5.1 384 kbps), same layout; E-AC-3 Atmos copied" : p.audio?.mode === "size_he_aac" ? "HE-AAC · tracks at least 1.25× the target become HE-AAC (stereo 64, 5.1 160 kbps), other layouts AAC-LC; E-AC-3 Atmos copied" : p.audio?.mode === "size_aac_bed" ? "AAC-LC · lossless tracks, and lossy tracks at least 1.25× the target, become AAC-LC (stereo 192, 5.1 384 kbps), same layout; Atmos keeps its 5.1/7.1 bed, objects dropped" : p.audio?.mode === "size_he_aac_bed" ? "HE-AAC · tracks at least 1.25× the target become HE-AAC (stereo 64, 5.1 160 kbps), other layouts AAC-LC; Atmos keeps its channel bed, objects dropped" : p.audio?.mode || "Profile default");
   add("Output", p.container?.toUpperCase() || "Profile default");
   output.append(facts, node("p", `Profile ID: ${name}`, "metadata"));
 }
@@ -4306,7 +4306,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-limits").hidden = Boolean(plan.mode);
 
     $("reconfigure-profile-info").hidden = true;
-    $("reconfigure-note").textContent = "Same task · Originals kept · Replaced candidates removed";
+    $("reconfigure-note").textContent = savedPlan?.ready_candidate ? "Same task · Original kept · Its ready candidate is removed" : "Same task · Originals kept · Replaced candidates removed";
     $("reconfigure-title").textContent = plan.mode ? "Change goal" : plan.requires_explicit_profile ? "Try another profile" : "Change settings";
     $("reconfigure-summary").textContent = batchSettingsSummary(plan);
     $("reconfigure-scope").replaceChildren();
@@ -4819,8 +4819,8 @@ function jobControls(job, detail = false) {
   // An encode that finished but could not be saved is tried again as it is;
   // a new goal would encode the file again.
   const savingFailed = job.waiting_options?.some(option => option.decision === "recheck");
-  if (job.parent_item_key && job.parent_action_id && !job.candidate_ready && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
-    add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key}));
+  if (job.parent_item_key && job.parent_action_id && !job.replacement_plan && !job.replacement_action_id && !savingFailed && ["completed","failed","cancelled","waiting_decision"].includes(job.status) && !(job.mode && sourceGateReason(job.reason_code)))
+    add(job.mode ? "Change goal" : "Change settings", () => reconfigureBatch(job.parent_action_id, false, {item_key:job.parent_item_key, ready_candidate:Boolean(job.candidate_ready)}));
   if (reconfigurable && !(job.mode && onlyUnsupportedSources(job))) add(job.mode ? "Change goal" : job.batch?.outcome === "no_changes" ? "Try another profile" : "Change settings", () => reconfigureBatch(job.id));
   if (job.status === "failed" && !reconfigurable && !job.parent_item_key && !declinedReplacement(job)) {
     if (rejectedCandidate(job)) {
@@ -5646,7 +5646,7 @@ function sizeModeLines(size) {
   if (size.hardware && size.hardware_reason) lines.push(`Chosen because: ${size.hardware_reason}`);
   if (size.size_budget) lines.push(...sizeBudgetLines(size.size_budget));
   else if (size.size_budget_note) lines.push(size.size_budget_note);
-  if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only lossless audio is compacted");
+  if (size.video_copy) lines.push({verified: "Video copied unchanged · verified bit-identical", failed: "Video copy check failed · original kept"}[size.video_copy] || "Video will be copied unchanged · not yet verified; only the audio is made smaller");
   // A media engine result that failed the whole-file check, and what followed;
   // the failed attempt's numbers stay here after the x265 result takes over.
   const hc = size.hardware_continuation;
@@ -7108,7 +7108,9 @@ function batchFileRow(item, id) {
     }
   } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
   const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
-  if (item.can_reconfigure && !unsupportedSource && ["skip","review","failed","cancelled","waiting_decision"].includes(item.status)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key}));
+  // A ready candidate can also be encoded again under a new goal; the dialog
+  // says that candidate is removed, and Replace file stays the primary action.
+  if (item.can_reconfigure && !unsupportedSource && (["skip","review","failed","cancelled","waiting_decision"].includes(item.status) || item.candidate_ready && !item.replacement_plan)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key, ready_candidate:Boolean(item.candidate_ready)}));
   // A cancelled or failed file can be encoded again as it was set up, without
   // reopening the goal dialog.
   if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
@@ -7486,9 +7488,11 @@ function replacementQuality(facts) {
 }
 // One file as a person decides on it. The paths stay behind a disclosure.
 function replacementCard({name, facts, originalPath, newPath, check, onView}) {
-  const card = node("div", "", "candidate-review-row replacement-row");
+  const card = node("div", "", `candidate-review-row replacement-row${check ? " selectable" : ""}`);
   // The name is cut at two lines in a narrow list; its full text is the title.
-  const nameLine = node("strong", name, check ? "" : "replacement-name");
+  // Inside a label it is a plain span: a <strong> there would render bolder
+  // than the label's weight, i.e. the font's heaviest face.
+  const nameLine = node(check ? "span" : "strong", name, check ? "" : "replacement-name");
   nameLine.title = name;
   if (check) {
     const label = node("label", "", "check replacement-name");

@@ -20,7 +20,8 @@ import (
 //   - every other goal starts at the most compressed rung and, when the final
 //     check fails on quality, encodes again one rung better. The first rung
 //     that passes is kept. A rung refused for its size stops the ladder: a
-//     better rung only makes the file larger.
+//     better rung only makes the file larger. So does a failed check whose
+//     last two scores point short of its limit on the next rung.
 //
 // A rung is a function of the frozen policy, the source and the record's Rung,
 // so validation rebuilds it and needs no other evidence. The worker sees the
@@ -184,9 +185,11 @@ func (p *ModePolicySnapshot) workerVersion() string {
 		return p.Version
 	}
 	if p.Mode == "size" {
-		// A size budget that froze audio levels is policy v5; every other size
-		// goal, and budgets frozen before the levels, stay v3.
-		if p.Size != nil && p.Size.SizeBudget != nil && p.Size.SizeBudget.Audio != nil {
+		// A size goal whose audio is one of the levels is policy v5: every
+		// budget that froze them, and every goal frozen once level 1 became
+		// the default. Snapshots frozen before either keep compact_lossless
+		// and stay v3.
+		if transcode.IsAudioLevelMode(p.Profile.Audio.Mode) {
 			return transcode.ModePolicyV5
 		}
 		return SizeModePolicyVersion
@@ -437,9 +440,102 @@ func qualityLadderFailures(f *FinalQualitySummary) string {
 	return "no scores reported"
 }
 
+// qualityLadderTriedWords names each rung tried and why it missed.
+func qualityLadderTriedWords(rec *QualityLadderRecord) string {
+	parts := make([]string, len(rec.Tried))
+	for i, t := range rec.Tried {
+		parts[i] = fmt.Sprintf("%s (%s)", recipeRungName(rec.VideoCodec, t.Quality), qualityLadderFailures(t.Final))
+	}
+	return joinWords(parts)
+}
+
+// qualityLadderTrend is one failed check's scores on the last two rungs and
+// the score they point to on the next one.
+type qualityLadderTrend struct {
+	Metric                           string
+	Previous, Last, Projected, Limit float64
+	// Maximum is set for a check held under its limit (CAMBI) rather than
+	// over it (VMAF).
+	Maximum bool
+}
+
+// improved reports whether the score moved toward its limit.
+func (t qualityLadderTrend) improved() bool {
+	if t.Maximum {
+		return t.Last < t.Previous
+	}
+	return t.Last > t.Previous
+}
+
+// qualityLadderProjectedMiss extrapolates each check the last rung failed
+// along a straight line through the last two rungs, one rung step further. It
+// returns the first check that would still miss its limit on the next rung,
+// or one that did not improve at all, and nil when every check it can
+// project would reach its limit. Only checks with a numeric limit and scores
+// on both rungs are projected; with nothing to go on the ladder goes on.
+func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderTrend {
+	if prev == nil || last == nil || last.Limits == nil {
+		return nil
+	}
+	l, p, m := last.Limits, prev.Measured, last.Measured
+	seen := map[string]bool{}
+	for _, code := range last.FailedChecks {
+		var t qualityLadderTrend
+		var before, now, limit *float64
+		switch code {
+		case "below_minimum_quality", "sample_below_minimum_quality":
+			t.Metric, before, now, limit = "VMAF mean", p.VMAFMean, m.VMAFMean, l.VMAFMean
+		case "quality_vmaf_p5_below_minimum":
+			t.Metric, before, now, limit = "VMAF p5", p.VMAFP5, m.VMAFP5, l.VMAFP5
+		case "quality_vmaf_worst_window_below_minimum":
+			t.Metric, before, now, limit = fmt.Sprintf("VMAF worst %.0f-second window", l.WorstWindowSeconds), p.VMAFWorstWindow, m.VMAFWorstWindow, l.VMAFWorstWindow
+		case "quality_cambi_mean_above_maximum":
+			t.Metric, before, now, limit, t.Maximum = "CAMBI mean", p.CAMBIMean, m.CAMBIMean, l.CAMBIMean, true
+		case "quality_cambi_peak_above_maximum":
+			t.Metric, before, now, limit, t.Maximum = "CAMBI peak", p.CAMBIPeak, m.CAMBIPeak, l.CAMBIPeak, true
+		default:
+			continue
+		}
+		if seen[t.Metric] || before == nil || now == nil || limit == nil {
+			continue
+		}
+		seen[t.Metric] = true
+		t.Previous, t.Last, t.Limit = *before, *now, *limit
+		t.Projected = t.Last + (t.Last - t.Previous)
+		// A hair of tolerance so a trend that lands exactly on the limit
+		// still gets its encode.
+		reaches := t.Projected >= t.Limit-1e-9
+		if t.Maximum {
+			reaches = t.Projected <= t.Limit+1e-9
+		}
+		if !t.improved() || !reaches {
+			return &t
+		}
+	}
+	return nil
+}
+
+// qualityLadderTrendMessage says where a check was heading when the ladder
+// stopped before nextQ: "VMAF p5 went from 80.7 at x265 CRF 22 to 82.2 at
+// CRF 19, which points to about 83.7 at CRF 16, short of the minimum 84.0".
+func qualityLadderTrendMessage(codec string, prevQ, lastQ, nextQ int, t *qualityLadderTrend) string {
+	short := fmt.Sprintf("short of the minimum %.1f", t.Limit)
+	if t.Maximum {
+		short = fmt.Sprintf("over the maximum %.1f", t.Limit)
+	}
+	switch {
+	case t.Last == t.Previous:
+		return fmt.Sprintf("%s stayed at %.1f from %s to %s, %s", t.Metric, t.Last, recipeRungName(codec, prevQ), recipeRungShort(codec, lastQ), short)
+	case !t.improved():
+		return fmt.Sprintf("%s got worse, from %.1f at %s to %.1f at %s, %s", t.Metric, t.Previous, recipeRungName(codec, prevQ), t.Last, recipeRungShort(codec, lastQ), short)
+	}
+	return fmt.Sprintf("%s went from %.1f at %s to %.1f at %s, which points to about %.1f at %s, %s", t.Metric, t.Previous, recipeRungName(codec, prevQ), t.Last, recipeRungShort(codec, lastQ), t.Projected, recipeRungShort(codec, nextQ), short)
+}
+
 // advanceQualityLadder handles the worker's refusal of a quality ladder rung.
 // A rung that missed the quality limits is encoded again one rung better; one
-// refused for its size, or the last rung, ends the ladder. It reports false
+// refused for its size, the last rung, or a trend that shows the next rung
+// would miss too, ends the ladder. It reports false
 // when the action is not running a quality ladder or the refusal is not one
 // the ladder answers.
 func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext, st transcode.JobStatus) (StepResult, bool) {
@@ -473,27 +569,32 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 	}
 	was := recipeRungName(rec.VideoCodec, tried.Quality)
 	if reason != reasonQualityNotMet {
-		size := ""
+		size := "came out"
 		if st.CandidateSizeBytes > 0 {
-			size = fmt.Sprintf(" at %s", formatBudgetBytes(st.CandidateSizeBytes))
+			size = cameOutAt(st.CandidateSizeBytes, sizeRefusedWhileEncoding(st))
 		}
 		why := fmt.Sprintf("does not save the %.0f%% this goal needs", snapshot.MinSavingsPercent)
 		if reason == "size_growth" || snapshot.MinSavingsPercent <= 0 {
 			why = "is larger than the original"
 		}
-		msg := fmt.Sprintf("%s came out%s, which %s. A better setting would only make it larger, so the goal stops here. Original preserved.", was, size, why)
+		msg := fmt.Sprintf("%s %s, which %s. A better setting would only make it larger, so the goal stops here. Original preserved.", was, size, why)
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reason, msg), true
 	}
 	if st.QualityEvidence == nil || rec.Rung+1 >= len(rec.Values) {
-		parts := make([]string, len(rec.Tried))
-		for i, t := range rec.Tried {
-			parts[i] = fmt.Sprintf("%s (%s)", recipeRungName(rec.VideoCodec, t.Quality), qualityLadderFailures(t.Final))
-		}
-		msg := fmt.Sprintf("Every step missed this goal's quality limits: %s. No candidate is offered; original preserved.", joinWords(parts))
+		msg := fmt.Sprintf("Every step missed this goal's quality limits: %s. No candidate is offered; original preserved.", qualityLadderTriedWords(rec))
 		if rec.Rung+1 < len(rec.Values) {
 			msg = fmt.Sprintf("%s missed this goal's quality limits, and the worker reported no scores to go on. No candidate is offered; original preserved.", was)
 		}
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
+	}
+	// Each rung is a whole-file encode. When the last two rungs' scores show
+	// the next one would still miss, the ladder ends as if it had.
+	if n := len(rec.Tried); n >= 2 && rec.Rung >= 1 && rec.Tried[n-2].Quality == rec.Values[rec.Rung-1] && rec.Tried[n-1].Quality == rec.Values[rec.Rung] {
+		if trend := qualityLadderProjectedMiss(rec.Tried[n-2].Final, rec.Tried[n-1].Final); trend != nil {
+			msg := fmt.Sprintf("Each step tried missed this goal's quality limits: %s. The ladder stops before %s because the trend shows it would not reach them: %s. No candidate is offered; original preserved.",
+				qualityLadderTriedWords(rec), recipeRungShort(rec.VideoCodec, rec.Values[rec.Rung+1]), qualityLadderTrendMessage(rec.VideoCodec, rec.Values[rec.Rung-1], rec.Values[rec.Rung], rec.Values[rec.Rung+1], trend))
+			return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
+		}
 	}
 	rec.Rung++
 	next, err := e.qualityLadderPlan(ec, snapshot, r, rec.Rung)
@@ -524,8 +625,9 @@ func (e *Engine) rewindQualityLadder(ec *ExecutionContext, rec *QualityLadderRec
 }
 
 // endQualityLadder ends a ladder with no candidate. A size goal whose policy
-// allows it still tries to compact the lossless audio alone, with the video
-// copied, as it did after a search without a winner.
+// allows it still tries to convert the audio alone (the lossless audio, or
+// under a level every track above its target), with the video copied, as it
+// did after a search without a winner.
 func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, snapshot *ModePolicySnapshot, st transcode.JobStatus, rec *QualityLadderRecord, reason, message string) StepResult {
 	rec.Outcome, rec.Message = reason, message
 	// Every VideoToolbox rung missed: x265 at the same goal usually keeps
@@ -541,6 +643,9 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 			if res.Status == StepCompleted && getString(ec.State, "plan_source") == "audio_only" {
 				plan := getPlan(ec.State["plan"])
 				rec.Message = message + " The video is copied unchanged and only the lossless audio is compacted instead."
+				if transcode.IsAudioLevelMode(plan.AudioMode) {
+					rec.Message = message + " The video is copied unchanged and only the audio is re-encoded instead."
+				}
 				out := e.rewindQualityLadder(ec, rec, plan, fmt.Sprintf("job-%s-recipe-audio", ec.InstanceID))
 				ec.State["plan_source"] = "audio_only"
 				mergeMap(out.Outputs, map[string]any{"plan": plan, "plan_source": "audio_only", "plan_digest": plan.PlanDigest})
@@ -580,6 +685,10 @@ func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any
 		return false
 	}
 	if plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != 0 || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != getString(state, "benchmark_request_digest") {
+		return false
+	}
+	// Every rung carries the audio the goal froze.
+	if plan.AudioMode != snapshot.Profile.Audio.Mode {
 		return false
 	}
 	want, err := qualityLadderVideo(r, snapshotHardware(snapshot), max(sourceVideoBitDepth(getSourceReport(state["source_report"])), plan.ExpectedBitDepth), rec.Rung)

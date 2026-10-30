@@ -252,6 +252,30 @@ The over-budget steps stay in the job's size and quality points. Validation
 rebuilds the step from the frozen policy, the source and the step number kept
 in the record and accepts only a plan that matches it and the ceiling exactly.
 
+**Stopping an encode early.** The worker does not wait for the whole file to
+refuse it for its size. While any encode with a size policy runs (the real
+pass of a two-pass x265 encode; copied video is not watched), it reads the
+output's size and ffmpeg's progress every few seconds and stops the encode
+when more bytes are already written than the policy accepts (the lowest of
+the budget, the minimum saving's ceiling and the growth limit), or when the
+projected final size is too far over it. The projection adds the rest of the
+duration, at the rate the file grew since the first progress the watch read,
+to what is written; bytes written before the first frame (Matroska writes
+attachments such as fonts there) are not scaled up with the encoded part. A
+plan with an average bitrate target is projected from 25% of the duration on
+and stopped more than 25% over; a plan at a constant quality (CRF,
+VideoToolbox `-q:v`), whose bitrate follows the content, is projected from
+50% on and stopped more than 50% over. The margins are deliberately wide:
+content varies along a file and credits are cheap, and a false stop throws
+away a candidate that would have passed. The job ends exactly as a refusal
+after the encode does (same reason code, `policy_rejected`, partial candidate
+removed) and reports as the candidate size the projected size, or the bytes
+written when the encode stopped before it could be projected; its error says
+how far the encode got. Such a job never started validating, so the
+coordinator says the step was stopped partway, on course for at least that
+size, instead of that it came out at it, and records the point as not
+measured.
+
 **The x265 budget encode.** With the media engine off (`allow_hardware=false`),
 or on a worker without it, one two-pass x265 average-bitrate encode (preset
 medium, lookahead 40, 4 B-frames, 3 reference frames, aq-mode 3, aq-strength 1,
@@ -273,16 +297,23 @@ the planner and the worker:
 
 | Level | Mode | What it does to a track |
 | --- | --- | --- |
-| 1 | `size_aac` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
-| 2 | `size_he_aac` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
+| 1 | `size_aac_bed` | A track at least 1.25 times its AAC-LC target, lossless or lossy, becomes AAC-LC at that target: stereo 192, mono 128, 5.1 384, 7.1 512 kbps. |
+| 2 | `size_he_aac_bed` | A stereo, quad or 5.1 track (including 5.1(side) and quad(side)) at least 1.25 times its HE-AAC target becomes HE-AAC: stereo 64, quad and 5.1 160 kbps. Every other layout is handled exactly as at level 1. |
 
 The 1.25 factor is a minimum gain: AC-3 5.1 at 448 kbps is copied at level 1
 (it would save 14% for a second lossy generation) while E-AC-3 5.1 at 640 kbps
 is converted, and AAC 5.1 at 384 kbps becomes HE-AAC at 160 at level 2. At both
 levels any other track is copied: one under the factor, lossless included when
 it states its bitrate (a quiet or mono FLAC can already be smaller than the
-target), E-AC-3 Atmos (JOC), a layout AAC cannot keep, more than 8 channels, and
-a lossy track whose bitrate the probe could not read. A lossless track that
+target), a layout AAC cannot keep, more than 8 channels, and a lossy track whose
+bitrate the probe could not read. Atmos and DTS:X are converted like any other
+track, lossless or lossy (E-AC-3 JOC): FFmpeg decodes the 5.1 or 7.1 channel
+bed, the objects and height channels are dropped, and the result is not a
+stereo downmix. Goals frozen before 2026-10-28 carry the first pair, `size_aac`
+and `size_he_aac`, which is identical except that it copies lossy Atmos and
+DTS:X; workers keep running it, and the bed pair needs a worker that reports
+`size_audio_object_bed` (the coordinator declines a budget or refuses the plan
+otherwise). A lossless track that
 states no bitrate is converted. Track count, order, languages, titles,
 dispositions and channel layout never change, and subtitles and attachments are
 never touched. Level 1 is the minimum for a new goal: lossy tracks over the

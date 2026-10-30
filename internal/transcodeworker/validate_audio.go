@@ -20,10 +20,10 @@ type audioPacketSpan struct {
 // the candidate's audio timing and bitrate are measured against the source.
 func needsAudioPacketValidation(plan *transcode.Plan, src SourceProbe) bool {
 	switch plan.AudioMode {
-	case "compact", "he_aac", transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC:
+	case "compact", "he_aac", transcode.AudioModeCompactLossless:
 		return countStreams(src.Streams, "audio") > 0
 	}
-	return false
+	return transcode.IsAudioLevelMode(plan.AudioMode) && countStreams(src.Streams, "audio") > 0
 }
 
 // audioPacketSpans reads actual packet timing/size, not inherited Matroska

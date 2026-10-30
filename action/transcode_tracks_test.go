@@ -183,6 +183,14 @@ func TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.mode == "size" && tc.budget == nil {
+				// Frozen before level 1 became the default too.
+				old = preLevelSizePolicy(t, old)
+			}
+			if tc.budget != nil {
+				// And before the bed audio levels.
+				old = objectCopySizePolicy(t, old)
+			}
 			if old.Digest != tc.digest || old.Tracks != nil {
 				t.Fatalf("digest %s tracks %+v, want %s", old.Digest, old.Tracks, tc.digest)
 			}
@@ -373,10 +381,10 @@ func TestSizeBudgetCountsOnlyTheKeptTracks(t *testing.T) {
 	}
 	kept := planSizeBudgetEncode(policy, keptRep, keptBytes, 1_000_000_000)
 	t.Logf("all 8 tracks: %s at %d kbps video (good %d kbps); kept 4 tracks: %s at %d kbps video, audio %d tracks %d bytes non-video", all.AudioMode, all.X265.BitrateKbps, good, kept.AudioMode, kept.X265.BitrateKbps, len(kept.Audio.Tracks), kept.NonVideoBytes)
-	if all.Reason != "" || all.AudioMode != transcode.AudioModeSizeHEAAC {
+	if all.Reason != "" || all.AudioMode != transcode.AudioModeSizeHEAACBed {
 		t.Fatalf("the eight tracks plan %+v", all)
 	}
-	if kept.Reason != "" || kept.AudioMode != transcode.AudioModeSizeAAC || kept.Audio == nil || kept.Audio.Level != 1 || len(kept.Audio.Tracks) != 4 {
+	if kept.Reason != "" || kept.AudioMode != transcode.AudioModeSizeAACBed || kept.Audio == nil || kept.Audio.Level != 1 || len(kept.Audio.Tracks) != 4 {
 		t.Fatalf("the four tracks plan %+v", kept)
 	}
 	if kept.X265.BitrateKbps < good || kept.X265.BitrateKbps <= all.X265.BitrateKbps {
@@ -422,7 +430,7 @@ func TestSizeBudgetPlanStepUsesTheSelection(t *testing.T) {
 	if plan == nil || rec == nil || rec.Outcome == SizeBudgetExceeded || getBool(c.ec.State, "skip_transcode") {
 		t.Fatalf("not planned: %+v skip=%v reason=%v note=%v", rec, c.ec.State["skip_transcode"], c.ec.State["reason_code"], c.ec.State["plan_note"])
 	}
-	if plan.ModePolicyVersion != transcode.ModePolicyV6 || !plan.Tracks.Equal(sel) || plan.AudioMode != transcode.AudioModeSizeAAC || rec.Audio == nil || len(rec.Audio.Tracks) != 4 {
+	if plan.ModePolicyVersion != transcode.ModePolicyV6 || !plan.Tracks.Equal(sel) || plan.AudioMode != transcode.AudioModeSizeAACBed || rec.Audio == nil || len(rec.Audio.Tracks) != 4 {
 		t.Fatalf("plan %s %s tracks %+v record %+v", plan.ModePolicyVersion, plan.AudioMode, plan.Tracks, rec.Audio)
 	}
 	if !trackSelectionMatches(c.snapshot, c.ec.State, plan) || !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
@@ -547,7 +555,7 @@ func TestSelectionOfASourceWithoutAudio(t *testing.T) {
 func TestTrackSelectionNeedsAWorkerThatFollowsIt(t *testing.T) {
 	for _, capable := range []bool{false, true} {
 		mock := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
-			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, TrackSelection: capable}, nil
+			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, SizeAudioObjectBed: true, TrackSelection: capable}, nil
 		}}
 		e := NewEngine(EngineDeps{Transcode: mock})
 		ec := testReconcileEC("job-tracks")
@@ -608,7 +616,7 @@ func TestTrackSelectionNeedsAWorkerThatFollowsIt(t *testing.T) {
 // working against an old worker.
 func TestPlansWithoutSelectionNeedNoCapability(t *testing.T) {
 	mock := &mockTranscodeExecutor{capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
-		return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true}, nil
+		return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, SizeAudioLevels: true, SizeAudioObjectBed: true}, nil
 	}}
 	e := NewEngine(EngineDeps{Transcode: mock})
 	ec := testReconcileEC("job-old")

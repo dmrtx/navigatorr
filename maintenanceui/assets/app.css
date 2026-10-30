@@ -2911,9 +2911,14 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .replacement-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 12px; padding: 4px 0; }
 .replacement-row p { margin: 0; }
 .replacement-row > .replacement-name { flex: 1 1 100%; }
-.replacement-name { font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.replacement-name { font-size: 13px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
 .replacement-name strong, strong.replacement-name { font-weight: inherit; }
-.replacement-name strong, strong.replacement-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-width: 0; }
+.replacement-name strong, strong.replacement-name, .replacement-name > span { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; min-width: 0; }
+/* A selectable file hangs its checkbox in the margin, so the name and its
+   facts share one left edge and a long name wraps under itself. */
+.replacement-row.selectable { padding-left: 24px; }
+.replacement-row.selectable > .check { margin-left: -24px; gap: 8px; align-items: flex-start; min-height: 0; }
+.replacement-row.selectable > .check > input { flex: none; margin-top: 2px; }
 .replacement-sizes { font-size: 13px; font-variant-numeric: tabular-nums; }
 .replacement-quality, .replacement-tracks { font-size: 12px; overflow-wrap: anywhere; }
 .replacement-row > .replacement-tracks, .replacement-row > .size-budget-warning { flex: 1 1 100%; }

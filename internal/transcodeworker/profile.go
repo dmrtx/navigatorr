@@ -25,7 +25,7 @@ func Capabilities() WorkerCapabilities {
 	return WorkerCapabilities{
 		Containers:           []string{"mkv"},
 		VideoCodecs:          []string{"hevc_videotoolbox", "libx265"},
-		AudioOperations:      []string{"copy", "compact", "he_aac", transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC},
+		AudioOperations:      []string{"copy", "compact", "he_aac", transcode.AudioModeCompactLossless, transcode.AudioModeSizeAAC, transcode.AudioModeSizeHEAAC, transcode.AudioModeSizeAACBed, transcode.AudioModeSizeHEAACBed},
 		SubtitleOperations:   []string{"copy", "transcode"},
 		SubtitleEncodeCodecs: []string{"subrip"},
 		SubtitleCopyCodecs:   []string{"subrip", "srt", "ass", "ssa", "hdmv_pgs_subtitle", "pgs", "dvd_subtitle", "vobsub", "dvb_subtitle", "dvb_teletext", "webvtt", "text"},

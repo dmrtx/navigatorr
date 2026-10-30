@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -59,9 +60,9 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 		values  []int
 		workerV string
 	}{
-		"size with the media engine": {map[string]any{"mode": "size"}, RecipeQualityLadder, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}, transcode.ModePolicyV3},
-		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}, transcode.ModePolicyV3},
-		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV3},
+		"size with the media engine": {map[string]any{"mode": "size"}, RecipeQualityLadder, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}, transcode.ModePolicyV5},
+		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}, transcode.ModePolicyV5},
+		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV5},
 		"quality":                    {map[string]any{"mode": "quality"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}, ModePolicyVersion},
 		"x265_preserve":              {map[string]any{"mode": "x265_preserve"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}, ModePolicyVersion},
 		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, ModePolicyVersion},
@@ -239,8 +240,9 @@ func TestQualityLadderRecipes(t *testing.T) {
 				t.Fatalf("a second pass replanned: %+v", again)
 			}
 			// Each quality miss encodes one rung better, under a new job id.
+			// p5 rises 80, 87: on course for every goal's minimum.
 			for rung := 1; rung < len(tc.values); rung++ {
-				res := advanceRung(t, c, failedRung(85, 80))
+				res := advanceRung(t, c, failedRung(85, float64(73+7*rung)))
 				rec = QualityLadderOf(c.ec.State)
 				next := getPlan(c.ec.State["plan"])
 				if res.Status != StepCompleted || res.RewindTo != "submit_transcode" || rec.Rung != rung || next.Quality != tc.values[rung] || c.ec.State["job_id"] != fmt.Sprintf("job-%s-recipe-r%d", c.ec.InstanceID, rung) {
@@ -290,6 +292,23 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 			t.Fatalf("message %q", rec.Message)
 		}
 	}
+	// A refusal the worker made while encoding, before any validation, reports
+	// a projected size: the message never says the file came out at it.
+	for name, tc := range map[string]struct {
+		st   transcode.JobStatus
+		want string
+	}{
+		"finished file": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now(), ValidationStartedAt: time.Now()}}, "came out at 9.00 GB"},
+		"stopped early": {transcode.JobStatus{JobTelemetry: transcode.JobTelemetry{EncodeFinishedAt: time.Now()}}, "was stopped partway through the encode, on course for at least 9.00 GB"},
+	} {
+		c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
+		planRecipe(t, c)
+		tc.st.Status, tc.st.ReasonCode, tc.st.CandidateSizeBytes = transcode.StatusFailed, "insufficient_savings", 9_000_000_000
+		advanceRung(t, c, tc.st)
+		if rec := QualityLadderOf(c.ec.State); rec.Outcome != "insufficient_savings" || !strings.Contains(rec.Message, tc.want) {
+			t.Fatalf("%s: message %q", name, rec.Message)
+		}
+	}
 	// A quality miss without scores ends the goal rather than guessing.
 	c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
 	planRecipe(t, c)
@@ -302,6 +321,88 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 	planRecipe(t, c)
 	if _, handled := c.engine.advanceQualityLadder(context.Background(), c.ec, transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "encoder_error"}); handled {
 		t.Fatal("an encoder failure advanced the ladder")
+	}
+}
+
+// A failed check's trend over the last two rungs decides whether the next
+// rung is worth encoding.
+func TestQualityLadderProjectedMiss(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	limits := &QualityLimits{VMAFMean: f(88), VMAFP5: f(84), VMAFWorstWindow: f(85), WorstWindowSeconds: 5, FrameThreshold: f(70), MaxFramesBelow: new(int), CAMBIMean: f(6), CAMBIPeak: f(16)}
+	rung := func(failed []string, n QualityNumbers) *FinalQualitySummary {
+		return &FinalQualitySummary{Verdict: "fail", FailedChecks: failed, Measured: n, Limits: limits}
+	}
+	p5 := []string{"quality_vmaf_p5_below_minimum"}
+	for name, tc := range map[string]struct {
+		prev, last *FinalQualitySummary
+		metric     string // empty: the ladder goes on
+		projected  float64
+	}{
+		// The production case: CRF 22 then 19 scored p5 80.7 then 82.2.
+		"p5 heading short of the floor": {rung(p5, QualityNumbers{VMAFP5: f(80.7)}), rung(p5, QualityNumbers{VMAFP5: f(82.2)}), "VMAF p5", 83.7},
+		"p5 heading past the floor":     {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82.5)}), "", 0},
+		"p5 landing on the floor":       {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82)}), "", 0},
+		"p5 not improving":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 80},
+		"p5 getting worse":              {rung(p5, QualityNumbers{VMAFP5: f(81)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 79},
+		"mean heading short":            {rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(84)}), rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(85.5)}), "VMAF mean", 87},
+		"worst window heading past":     {rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(80)}), rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(83)}), "", 0},
+		"CAMBI peak heading under":      {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(19)}), "", 0},
+		"CAMBI peak heading over":       {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(20)}), "CAMBI peak", 18},
+		"CAMBI mean getting worse":      {rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7)}), rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7.5)}), "CAMBI mean", 8},
+		// Any failed check heading short stops the ladder.
+		"mean on course, p5 not": {
+			rung([]string{"below_minimum_quality", "quality_vmaf_p5_below_minimum"}, QualityNumbers{VMAFMean: f(85), VMAFP5: f(80.7)}),
+			rung([]string{"below_minimum_quality", "quality_vmaf_p5_below_minimum"}, QualityNumbers{VMAFMean: f(87), VMAFP5: f(82.2)}), "VMAF p5", 83.7},
+		// A check the last rung passed is not projected, however it moved.
+		"passed check getting worse": {rung(p5, QualityNumbers{VMAFP5: f(80), VMAFMean: f(92)}), rung(p5, QualityNumbers{VMAFP5: f(82.5), VMAFMean: f(90)}), "", 0},
+		// Checks without a numeric limit, or without both scores, are not.
+		"frames below threshold": {rung([]string{"quality_vmaf_frames_below_limit_exceeded"}, QualityNumbers{}), rung([]string{"quality_vmaf_frames_below_limit_exceeded"}, QualityNumbers{}), "", 0},
+		"no earlier score":       {rung(p5, QualityNumbers{}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "", 0},
+		"no earlier rung":        {nil, rung(p5, QualityNumbers{VMAFP5: f(80)}), "", 0},
+		"no limits":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), &FinalQualitySummary{Verdict: "fail", FailedChecks: p5, Measured: QualityNumbers{VMAFP5: f(80)}}, "", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := qualityLadderProjectedMiss(tc.prev, tc.last)
+			if tc.metric == "" {
+				if got != nil {
+					t.Fatalf("stopped on %+v", got)
+				}
+				return
+			}
+			if got == nil || got.Metric != tc.metric || got.Projected < tc.projected-1e-6 || got.Projected > tc.projected+1e-6 {
+				t.Fatalf("got %+v, want %s projected to %.1f", got, tc.metric, tc.projected)
+			}
+		})
+	}
+}
+
+// A ladder whose last two rungs show the next one would still miss ends as
+// if every rung had; one whose trend reaches the limits goes on.
+func TestQualityLadderStopsOnTrend(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(90, 80.7))
+	res := advanceRung(t, c, failedRung(90, 82.2))
+	rec := QualityLadderOf(c.ec.State)
+	if res.RewindTo != "" || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != reasonQualityNotMet || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || len(rec.Tried) != 2 {
+		t.Fatalf("trend stop: %+v %+v", res, rec)
+	}
+	for _, want := range []string{"x265 CRF 22 (VMAF p5 80.7 is below the minimum 84.0)", "x265 CRF 19 (VMAF p5 82.2", "stops before CRF 16", "VMAF p5 went from 80.7 at x265 CRF 22 to 82.2 at CRF 19", "about 83.7 at CRF 16", "minimum 84.0", "original preserved"} {
+		if !strings.Contains(rec.Message, want) {
+			t.Fatalf("message %q lacks %q", rec.Message, want)
+		}
+	}
+	// The ladder's outcome reads as the quality rejection it is.
+	if e := ExplainTranscode(&ActionResult{ActionName: "transcode_media", Status: StatusCompleted, Inputs: c.ec.Inputs, State: c.ec.State, Outputs: map[string]any{}}); e == nil || e.Outcome != "quality_rejected" || e.Message != rec.Message || e.FinalQuality == nil {
+		t.Fatalf("explanation %+v", e)
+	}
+
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(90, 80))
+	res = advanceRung(t, c, failedRung(90, 82.5))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || rec.Outcome != QualityLadderEncoding || getPlan(c.ec.State["plan"]).Quality != 16 {
+		t.Fatalf("trend on course: %+v %+v", res, rec)
 	}
 }
 
@@ -406,7 +507,7 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	if !strings.Contains(rec.Choice.Message, "allow_hardware=false") {
 		t.Fatalf("choice %q", rec.Choice.Message)
 	}
-	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, 4_100_000_000); handled {
+	if _, handled := c.engine.advanceSizeBudgetRung(c.ec, 4_100_000_000, false); handled {
 		t.Fatal("a one-encode budget advanced to another rung")
 	}
 	if _, fits := finishSizeBudget(c.ec, 4_100_000_000); fits {
@@ -692,7 +793,7 @@ func TestVideoToolboxLadderFallsBackToX265(t *testing.T) {
 		t.Fatal("an x265 rung matched the VideoToolbox recipe without the recorded choice")
 	}
 	for rung, q := range []int{19, 16} {
-		advanceRung(t, c, failedRung(85, 80))
+		advanceRung(t, c, failedRung(85, float64(80+7*rung)))
 		rec = QualityLadderOf(c.ec.State)
 		if next := getPlan(c.ec.State["plan"]); rec.Rung != rung+1 || next.Quality != q || next.VideoCodec != transcode.VideoCodecLibX265 || !qualityLadderPlanMatches(c.snapshot, c.ec.State, next, rec) {
 			t.Fatalf("rung %d: %+v %+v", rung+1, rec, next)
@@ -722,7 +823,7 @@ func TestQualityLadderOutcomeSurvivesAnUnfinishedAudioOnlyFallback(t *testing.T)
 	c := newRecipeCase(t, nil, nil)
 	planRecipe(t, c)
 	advanceRung(t, c, failedRung(85, 80))
-	advanceRung(t, c, failedRung(85, 80))
+	advanceRung(t, c, failedRung(85, 87))
 	// Lossless audio could be compacted, but the worker cannot be asked.
 	c.ec.State["source_report"], c.ec.State["original_size"] = audioOnlyReport(), int64(10_700_000_000)
 	c.executor.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func sizeV5TestPlan(mode string) *transcode.Plan {
 // Plan version 5 admits the two levels and nothing else for audio, and the
 // levels are admitted by no other version or goal.
 func TestSizeV5PlanAdmitsOnlyTheAudioLevels(t *testing.T) {
-	for _, mode := range transcode.AudioLevelModes {
+	for _, mode := range append(slices.Clone(transcode.ObjectCopyAudioLevelModes), transcode.AudioLevelModes...) {
 		if err := ValidatePlan(sizeV5TestPlan(mode)); err != nil {
 			t.Fatalf("%s plan rejected: %v", mode, err)
 		}
@@ -95,7 +96,8 @@ func levelSource() []SourceStream {
 // The execution plan and the ffmpeg arguments follow the level: AAC-LC and
 // HE-AAC through AudioToolbox's encoder (profile 2 and 4) where it keeps the
 // layout, FFmpeg's native encoder for 7.1, and a track under 1.25 times its
-// target or E-AC-3 JOC copied. Track order is the source's.
+// target copied, and E-AC-3 JOC copied by the first pair and converted to its
+// channel bed by the bed pair. Track order is the source's.
 func TestSizeAudioLevelsExecutionPlanAndArguments(t *testing.T) {
 	type want struct {
 		target  string
@@ -105,8 +107,10 @@ func TestSizeAudioLevelsExecutionPlanAndArguments(t *testing.T) {
 		profile string // the -profile:a value, empty for the native encoder
 	}
 	for mode, tracks := range map[string][]want{
-		transcode.AudioModeSizeAAC:   {{"aac", 384, false, "aac_at", "2"}, {"copy", 0, false, "", ""}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
-		transcode.AudioModeSizeHEAAC: {{"aac", 160, true, "aac_at", "4"}, {"aac", 64, true, "aac_at", "4"}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
+		transcode.AudioModeSizeAAC:      {{"aac", 384, false, "aac_at", "2"}, {"copy", 0, false, "", ""}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
+		transcode.AudioModeSizeHEAAC:    {{"aac", 160, true, "aac_at", "4"}, {"aac", 64, true, "aac_at", "4"}, {"aac", 512, false, "aac", ""}, {"copy", 0, false, "", ""}},
+		transcode.AudioModeSizeAACBed:   {{"aac", 384, false, "aac_at", "2"}, {"copy", 0, false, "", ""}, {"aac", 512, false, "aac", ""}, {"aac", 384, false, "aac_at", "2"}},
+		transcode.AudioModeSizeHEAACBed: {{"aac", 160, true, "aac_at", "4"}, {"aac", 64, true, "aac_at", "4"}, {"aac", 512, false, "aac", ""}, {"aac", 160, true, "aac_at", "4"}},
 	} {
 		ep, err := BuildExecutionPlan(sizeV5TestPlan(mode), levelSource(), 1800)
 		if err != nil {
@@ -293,10 +297,10 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		if len(audio) != 2 || audio[0].Codec != "aac" || audio[0].Channels != 6 || audio[0].Language != "eng" || audio[1].Language != "jpn" || audio[1].Channels != 2 {
 			t.Fatalf("%s: audio %+v", mode, audio)
 		}
-		if mode == transcode.AudioModeSizeAAC && (audio[0].Profile != "LC" || audio[1].Profile != "LC") {
+		if !transcode.IsHEAACAudioLevelMode(mode) && (audio[0].Profile != "LC" || audio[1].Profile != "LC") {
 			t.Fatalf("level 1 profiles %q %q", audio[0].Profile, audio[1].Profile)
 		}
-		if mode == transcode.AudioModeSizeHEAAC && (audio[0].Profile != "HE-AAC" || audio[1].Profile != "HE-AAC") {
+		if transcode.IsHEAACAudioLevelMode(mode) && (audio[0].Profile != "HE-AAC" || audio[1].Profile != "HE-AAC") {
 			t.Fatalf("level 2 profiles %q %q", audio[0].Profile, audio[1].Profile)
 		}
 		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
@@ -315,13 +319,13 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		if keys := statisticsTagKeys(rep.Video[0].Tags); len(keys) != 1 || keys[0] != "DURATION" {
 			t.Errorf("%s: re-encoded video keeps source statistics %v", mode, rep.Video[0].Tags)
 		}
-		if mode == transcode.AudioModeSizeAAC && rep.Audio[1].Tags["BPS"] != "128000" {
+		if !transcode.IsHEAACAudioLevelMode(mode) && rep.Audio[1].Tags["BPS"] != "128000" {
 			t.Errorf("copied track lost its statistics: %v", rep.Audio[1].Tags)
 		}
 	}
 	// The candidate of one level is not the other level's: the profile and the
 	// bitrate each tell them apart.
-	for mode, other := range map[string]string{transcode.AudioModeSizeAAC: transcode.AudioModeSizeHEAAC, transcode.AudioModeSizeHEAAC: transcode.AudioModeSizeAAC} {
+	for mode, other := range map[string]string{transcode.AudioModeSizeAACBed: transcode.AudioModeSizeHEAACBed, transcode.AudioModeSizeHEAACBed: transcode.AudioModeSizeAACBed} {
 		ep, err := BuildExecutionPlan(sizeV5TestPlan(other), srcProbe.Streams, srcProbe.DurationSec)
 		if err != nil {
 			t.Fatal(err)
@@ -337,13 +341,60 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 // and the ceiling is the nominal bitrate's, so a 160 kbps HE-AAC track that
 // came out at 384 kbps is refused while ordinary variable-bitrate swing is not.
 func TestSizeAudioLevelsBitrateIsMeasuredByPacket(t *testing.T) {
-	for _, mode := range transcode.AudioLevelModes {
+	for _, mode := range append(slices.Clone(transcode.ObjectCopyAudioLevelModes), transcode.AudioLevelModes...) {
 		if !needsAudioPacketValidation(sizeV5TestPlan(mode), SourceProbe{Streams: levelSource()}) {
 			t.Errorf("%s plan skips the packet bitrate check", mode)
 		}
 	}
 	if needsAudioPacketValidation(sizeV5TestPlan(transcode.AudioModeSizeAAC), SourceProbe{Streams: levelSource()[:1]}) {
 		t.Error("a source without audio asks for the packet check")
+	}
+}
+
+// A size goal without a budget plans level 1 under v5 too: an x265 ladder rung
+// with no byte ceiling. Lossy surround well above the AAC-LC target becomes
+// AAC-LC, a track under 1.25 times it is copied. A v3 plan (frozen before)
+// still copies every lossy track.
+func TestSizeGoalWithoutBudgetPlansLevelOne(t *testing.T) {
+	src := []SourceStream{
+		{Kind: "video", Index: 0, Codec: "h264", Width: 1920, Height: 1080},
+		{Kind: "audio", Index: 1, TypeIndex: 0, Codec: "dts", Profile: "DTS", Channels: 6, Layout: "5.1(side)", Language: "eng", BitrateKbps: 1536},
+		{Kind: "audio", Index: 2, TypeIndex: 1, Codec: "ac3", Channels: 6, Layout: "5.1(side)", Language: "spa", BitrateKbps: 640},
+		{Kind: "audio", Index: 3, TypeIndex: 2, Codec: "ac3", Channels: 6, Layout: "5.1(side)", Language: "jpn", BitrateKbps: 448},
+	}
+	level1 := sizeV5TestPlan(transcode.AudioModeSizeAAC)
+	level1.Quality = 22
+	level1.PlanDigest, _ = transcode.DigestPlan(level1)
+	for name, tc := range map[string]struct {
+		plan *transcode.Plan
+		want []string
+	}{
+		"level 1": {level1, []string{"aac", "aac", "copy"}},
+		"v3":      {sizeV3TestPlan(true), []string{"copy", "copy", "copy"}},
+	} {
+		if tc.plan.SizePolicy.MaxCandidateBytes != 0 {
+			t.Fatalf("%s: the test plan carries a byte ceiling", name)
+		}
+		if err := ValidatePlan(tc.plan); err != nil {
+			t.Fatalf("%s plan rejected: %v", name, err)
+		}
+		ep, err := BuildExecutionPlan(tc.plan, src, 6000)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		i := 0
+		for _, s := range ep.Streams {
+			if s.Kind != "audio" {
+				continue
+			}
+			if s.TargetCodec != tc.want[i] || s.TargetCodec == "aac" && (s.BitrateKbps != 384 || s.HEAAC) {
+				t.Errorf("%s track %d: %+v, want %s", name, i, s, tc.want[i])
+			}
+			i++
+		}
+		if i != len(tc.want) {
+			t.Fatalf("%s: %d audio actions", name, i)
+		}
 	}
 	if ceiling := transcode.AudioBitrateCeilingBps(160); ceiling < 200_000 || ceiling >= 384_000 {
 		t.Errorf("ceiling for a 160 kbps track is %d bps", ceiling)

@@ -228,6 +228,8 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// Size policy v5 converts per track to AAC-LC or HE-AAC, so it needs both
 	// encoders.
 	caps.SizeAudioLevels = caps.CompactAudio && caps.HEAACAudio
+	// The bed levels use the same encoders; FFmpeg decodes E-AC-3 JOC's bed.
+	caps.SizeAudioObjectBed = caps.SizeAudioLevels
 	// Track selection maps explicit streams and validates the output against
 	// them; it needs no encoder of its own.
 	caps.TrackSelection = true

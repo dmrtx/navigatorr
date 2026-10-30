@@ -60,3 +60,46 @@ func TestSizePolicyCapIsOmittedWhenZero(t *testing.T) {
 		t.Fatalf("zero cap must be omitted: %s", b)
 	}
 }
+
+// The largest accepted candidate is exactly the boundary ValidateFinalSize
+// draws: it passes and one byte more is refused, whichever limit is lowest.
+func TestMaxAcceptedCandidateBytesIsTheValidationBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source int64
+		policy SizePolicy
+		want   int64
+	}{
+		{"minimum saving", 10_000, SizePolicy{MinSavingsPercent: 15}, 8_500},
+		{"fractional saving floors", 1_001, SizePolicy{MinSavingsPercent: 15}, 850},
+		{"decimal percent is exact", 1_000, SizePolicy{MinSavingsPercent: 0.1}, 999},
+		{"budget under the saving", 10_000, SizePolicy{MinSavingsPercent: 15, MaxCandidateBytes: 6_000}, 6_000},
+		{"no saving required", 10_000, SizePolicy{MaxSizeIncreasePercent: 50}, 10_000},
+		{"whole file saving", 10_000, SizePolicy{MinSavingsPercent: 100}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := MaxAcceptedCandidateBytes(tc.source, &tc.policy)
+			if !ok || got != tc.want {
+				t.Fatalf("MaxAcceptedCandidateBytes = %d, %v; want %d", got, ok, tc.want)
+			}
+			if got > 0 {
+				if err := ValidateFinalSize(tc.source, got, &tc.policy); err != nil {
+					t.Fatalf("the limit itself must pass: %v", err)
+				}
+			}
+			var rejected *PolicyRejectionError
+			if err := ValidateFinalSize(tc.source, got+1, &tc.policy); !errors.As(err, &rejected) {
+				t.Fatalf("one byte over the limit must be a policy refusal, got %v", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		source int64
+		policy *SizePolicy
+	}{{"no policy", 1_000, nil}, {"no source size", 0, &SizePolicy{MinSavingsPercent: 15}}, {"invalid policy", 1_000, &SizePolicy{MinSavingsPercent: 150}}} {
+		if _, ok := MaxAcceptedCandidateBytes(tc.source, tc.policy); ok {
+			t.Fatalf("%s: no limit can be stated", tc.name)
+		}
+	}
+}

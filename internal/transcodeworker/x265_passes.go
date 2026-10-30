@@ -24,9 +24,11 @@ func reportEncoderPhase(ctx context.Context, phase string) error {
 // runEncoderCommand preserves the existing invocation for legacy plans. The
 // two-pass path owns a private stats directory per sample/job, never accepts
 // stats paths from callers, and never starts pass two after failure/cancellation.
+// Only the pass that writes the output is size-watched (see runWatchedEncode):
+// the analysis pass writes nothing to measure.
 func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *transcode.Plan, output string) error {
 	if plan.X265 == nil {
-		return runCharged(ctx, cmd)
+		return runWatchedEncode(ctx, cmd)
 	}
 	if err := plan.X265.Validate(plan.VideoCodec, plan.Quality); err != nil {
 		return err
@@ -90,7 +92,7 @@ func runEncoderCommand(ctx context.Context, cmd *exec.Cmd, args []string, plan *
 	}
 	cmd.Dir = statsDir
 	cmd.Args = append([]string{cmd.Path}, withX265Pass(args, 2)...)
-	return runCharged(ctx, cmd)
+	return runWatchedEncode(ctx, cmd)
 }
 
 func withX265Pass(args []string, pass int) []string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -154,6 +155,9 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 	if policy.Audio != nil && !caps.SizeAudioLevels {
 		return decline("size_budget_worker_unsupported", "The size budget needs a worker that converts audio per track to AAC and HE-AAC; upgrade the worker to use it.")
 	}
+	if policy.Audio != nil && slices.ContainsFunc(policy.Audio.Modes, transcode.IsObjectBedAudioLevelMode) && !caps.SizeAudioObjectBed {
+		return decline("size_budget_worker_unsupported", "The size budget converts Atmos audio to its channel bed, which needs an updated worker; upgrade the worker to use it.")
+	}
 	if snapshot.Size.AudioOnlyFallback && caps.SizeAudioOnly {
 		if audioMode, _, fits := sizeBudgetAudioOnlyLevel(policy, keptRep, keptBytes, budget); fits {
 			// Copying the video loses no picture quality, and also answers a
@@ -262,8 +266,9 @@ func joinLadder(values []int) string {
 // advanceSizeBudgetRung moves a ladder to its next rung after the worker
 // refused the current rung's file as over the budget. It reports false when the
 // action is not running a ladder or the last rung was the one refused; the
-// caller then ends the budget as exceeded.
-func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int64) (StepResult, bool) {
+// caller then ends the budget as exceeded. projected marks a size the worker
+// projected when it stopped the encode early (see sizeRefusedWhileEncoding).
+func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int64, projected bool) (StepResult, bool) {
 	rec := sizeBudgetLadderOf(ec.State)
 	plan := getPlan(ec.State["plan"])
 	if rec == nil || plan == nil {
@@ -280,7 +285,7 @@ func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int6
 	if enc.Reason != "" {
 		return StepResult{Status: StepFailed, Error: "size budget encode can no longer be planned for the next VideoToolbox step (fail closed)"}, true
 	}
-	over := SizeBudgetPoint{Kind: sizeBudgetRungOverKind, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: plan.Quality, BitrateKbps: plan.AverageBitrateKbps, Bytes: candidateBytes, Measured: true}
+	over := SizeBudgetPoint{Kind: sizeBudgetRungOverKind, VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: plan.Quality, BitrateKbps: plan.AverageBitrateKbps, Bytes: candidateBytes, Measured: !projected}
 	was := sizeBudgetRungDescription(plan)
 	rec.Rung++
 	video, err := sizeBudgetVideo(snapshot, rep, plan, enc, rec)
@@ -298,11 +303,14 @@ func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int6
 		}
 	}
 	rec.Curve = append(curve, over, SizeBudgetPoint{Kind: "budget_fallback", VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Quality: next.Quality, BitrateKbps: next.AverageBitrateKbps, Bytes: rec.TargetBytes, WithinBudget: true})
-	size := "over the budget"
+	size := "came out over the budget"
 	if candidateBytes > 0 {
-		size = fmt.Sprintf("%s, over the %s budget", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
+		size = fmt.Sprintf("came out %s, over the %s budget", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
+		if projected {
+			size = fmt.Sprintf("%s, over the %s budget", cameOutAt(candidateBytes, true), formatBudgetBytes(rec.BudgetBytes))
+		}
 	}
-	rec.Message = fmt.Sprintf("VideoToolbox at %s came out %s; encoding at %s.", was, size, sizeBudgetRungDescription(next))
+	rec.Message = fmt.Sprintf("VideoToolbox at %s %s; encoding at %s.", was, size, sizeBudgetRungDescription(next))
 	appendFailureHistory(ec, "size_budget", "policy_rejected", rec.Message)
 	for _, key := range transcodeAttemptKeys {
 		delete(ec.State, key)

@@ -39,6 +39,37 @@ func TestCompactBenchmarkExplainsAStoredNoWinnerAndActualAudioPlan(t *testing.T)
 	}
 }
 
+// A size goal planned at audio level 1 shows the lossy surround it converts and
+// the track it copies for being under 1.25 times the AAC-LC target.
+func TestSizeBenchmarkShowsAudioLevelOne(t *testing.T) {
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, Inputs: map[string]any{"mode": "size"}, State: map[string]any{
+		"plan_source": "quality_ladder",
+		"plan":        transcode.Plan{Mode: "size", AudioMode: transcode.AudioModeSizeAAC},
+		"original": map[string]any{"duration_sec": 6000, "audio": []map[string]any{
+			{"index": 1, "codec": "dts", "profile": "DTS", "channels": 6, "channel_layout": "5.1(side)", "bit_rate": 1536000},
+			{"index": 2, "codec": "ac3", "channels": 6, "channel_layout": "5.1(side)", "bit_rate": 640000},
+			{"index": 3, "codec": "ac3", "channels": 6, "channel_layout": "5.1(side)", "bit_rate": 448000},
+		}},
+	}}
+	data, _ := json.Marshal(res)
+	var persisted action.ActionResult
+	if err := json.Unmarshal(data, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	s := toCompactSummary(&persisted).Benchmark
+	if s == nil || len(s.Audio) != 3 {
+		t.Fatalf("bad summary: %+v", s)
+	}
+	for i, want := range []struct {
+		output string
+		kbps   int
+	}{{"aac", 384}, {"aac", 384}, {"ac3", 0}} {
+		if a := s.Audio[i]; a.OutputCodec != want.output || a.TargetKbps != want.kbps {
+			t.Errorf("track %d: %+v, want %+v", i, a, want)
+		}
+	}
+}
+
 // Sample tests have no template any more; the ones in history have no summary.
 func TestCompactBenchmarkIsAbsentForSampleTests(t *testing.T) {
 	res := &action.ActionResult{ActionName: "benchmark_transcode", Status: action.StatusCompleted, Inputs: map[string]any{"path": "/media/Show/S01E01.mkv"},

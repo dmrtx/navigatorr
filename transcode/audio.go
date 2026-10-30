@@ -15,9 +15,10 @@ import (
 const AudioModeCompactLossless = "compact_lossless"
 
 // The size goal's audio levels, least compressed first. A size goal with a
-// byte budget freezes both and picks one per source (see AudioLevelModes).
-// Level 0, AudioModeCompactLossless, is what size operations froze before the
-// levels existed and is never chosen for a new one.
+// byte budget freezes both and picks one per source (see AudioLevelModes); one
+// without a budget plans level 1. Level 0, AudioModeCompactLossless, is what
+// size operations froze before the levels existed and is never chosen for a
+// new one.
 //
 //	level 1  AudioModeSizeAAC    a track at least 1.25 times its AAC-LC target
 //	                             (stereo 192, mono 128, 5.1 384, 7.1 512 kbps)
@@ -27,23 +28,47 @@ const AudioModeCompactLossless = "compact_lossless"
 //	                             HE-AAC (stereo 64, quad and 5.1 160 kbps); any
 //	                             other track as level 1
 //
+// The "bed" pair (AudioModeSizeAACBed, AudioModeSizeHEAACBed) applies the same
+// levels to lossy Atmos and DTS:X tracks too: E-AC-3 JOC keeps its channel bed
+// as AAC and loses its objects, as lossless Atmos already does. New goals freeze
+// the bed pair; goals frozen before it keep the pair that copies those tracks.
+//
 // At every level any other track is copied: one below 1.25 times its target
-// (lossless included, when it states its bitrate), E-AC-3 JOC (Atmos), layouts
+// (lossless included, when it states its bitrate), E-AC-3 JOC (Atmos) under the
+// first pair, layouts
 // AAC cannot keep, more than 8 channels, and a lossy track whose source bitrate
 // is unknown. A lossless track of unknown bitrate is converted. Track count,
 // order, languages, titles, dispositions and channel layouts never change.
 const (
-	AudioModeSizeAAC   = "size_aac"
-	AudioModeSizeHEAAC = "size_he_aac"
+	AudioModeSizeAAC      = "size_aac"
+	AudioModeSizeHEAAC    = "size_he_aac"
+	AudioModeSizeAACBed   = "size_aac_bed"
+	AudioModeSizeHEAACBed = "size_he_aac_bed"
 )
 
 // AudioLevelModes are the audio modes of the size goal's levels 1 and 2, least
-// compressed first.
-var AudioLevelModes = []string{AudioModeSizeAAC, AudioModeSizeHEAAC}
+// compressed first, that new goals freeze: the bed pair.
+var AudioLevelModes = []string{AudioModeSizeAACBed, AudioModeSizeHEAACBed}
 
-// IsAudioLevelMode reports a size goal audio level (1 or 2).
+// ObjectCopyAudioLevelModes are the levels goals froze before the bed pair:
+// lossy Atmos and DTS:X tracks are copied. Their snapshots stay valid.
+var ObjectCopyAudioLevelModes = []string{AudioModeSizeAAC, AudioModeSizeHEAAC}
+
+// IsAudioLevelMode reports a size goal audio level (1 or 2) of either pair.
 func IsAudioLevelMode(mode string) bool {
-	return mode == AudioModeSizeAAC || mode == AudioModeSizeHEAAC
+	return mode == AudioModeSizeAAC || mode == AudioModeSizeHEAAC || IsObjectBedAudioLevelMode(mode)
+}
+
+// IsObjectBedAudioLevelMode reports a level of the bed pair, which also
+// converts lossy object audio to its channel bed. Only workers that report
+// WorkerCapabilities.SizeAudioObjectBed run it.
+func IsObjectBedAudioLevelMode(mode string) bool {
+	return mode == AudioModeSizeAACBed || mode == AudioModeSizeHEAACBed
+}
+
+// IsHEAACAudioLevelMode reports level 2 of either pair.
+func IsHEAACAudioLevelMode(mode string) bool {
+	return mode == AudioModeSizeHEAAC || mode == AudioModeSizeHEAACBed
 }
 
 // AudioTrack is what the audio policy reads from a source track. Title and
@@ -215,7 +240,9 @@ const sizeLevelMinGainNum, sizeLevelMinGainDen = 5, 4
 // lossless included (a quiet or mono FLAC can be smaller than the target), is
 // copied. A lossy track of unknown bitrate is copied, never guessed. A
 // lossless track of unknown bitrate is converted: PCM and FLAC in a remux
-// often state none and are nearly always far above any target.
+// often state none and are nearly always far above any target. A lossy object
+// track (E-AC-3 JOC) is copied by the first pair and converted like any other
+// lossy track by the bed pair; FFmpeg decodes its channel bed.
 //
 // AAC-LC is encoded with AudioToolbox (aac_at) where it keeps the track's
 // layout, else with FFmpeg's native encoder. HE-AAC (level 2) is aac_at too and
@@ -225,19 +252,20 @@ const sizeLevelMinGainNum, sizeLevelMinGainDen = 5, 4
 //
 // This function, its targets and the layout tables below are the contract of
 // plan version transcode-modes-v5 (see TestSizeAudioV5Contract): a change to
-// what it returns needs a new policy and plan version.
+// what it returns for a mode needs a new policy and plan version, or a new mode
+// that older workers refuse, as the bed pair is.
 func sizeLevelOutput(mode string, t AudioTrack) AudioOutput {
 	channels := t.Channels
 	if channels < 1 || channels > 8 || !aacKeepsLayout(t.Layout, channels) {
 		return audioCopy
 	}
 	lossless := losslessAudio(strings.ToLower(strings.TrimSpace(t.Codec)), t.Profile)
-	if !lossless && (t.BitrateKbps <= 0 || ObjectAudio(t)) {
+	if !lossless && (t.BitrateKbps <= 0 || ObjectAudio(t) && !IsObjectBedAudioLevelMode(mode)) {
 		return audioCopy
 	}
 	toolbox := audioToolboxKeepsLayout(t.Layout, channels)
 	out := AudioOutput{Codec: "aac", Kbps: aacLCKbps(channels), AudioToolbox: toolbox}
-	if mode == AudioModeSizeHEAAC && heAACKeepsLayout(t.Layout, channels) {
+	if IsHEAACAudioLevelMode(mode) && heAACKeepsLayout(t.Layout, channels) {
 		out.Kbps, out.HEAAC = heAACKbps(channels), true
 	}
 	if t.BitrateKbps > 0 && t.BitrateKbps*sizeLevelMinGainDen < out.Kbps*sizeLevelMinGainNum {

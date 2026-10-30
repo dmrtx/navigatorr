@@ -242,6 +242,13 @@ func TestWithReferenceChain(t *testing.T) {
 	if got != "-i src.mkv -map 0:v:0 -filter:v:0 CHAIN -c:v ffv1 -c:v ffv1 out.mkv" {
 		t.Fatal(got)
 	}
+	// A window extract already selects its pictures with a filter; the chain
+	// runs after the selection, in the same filter, not in a second one.
+	extract := BuildReferenceExtractionArgs("src.mkv", "out.mkv", 0, 0, -0.02, 0.98)
+	got = strings.Join(withReferenceChain(extract, "CHAIN"), " ")
+	if !strings.Contains(got, "-filter:v:0 settb=AVTB,trim=end=0.980000,CHAIN -avoid_negative_ts") || strings.Count(got, "-filter:v:0") != 1 || strings.Contains(got, "-ss") {
+		t.Fatal(got)
+	}
 }
 
 func TestCheckCompactOutput(t *testing.T) {

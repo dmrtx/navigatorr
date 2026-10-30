@@ -709,6 +709,13 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 // false when the candidate is larger than the budget, which ends the action
 // with the original kept.
 func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRecord, bool) {
+	return finishSizeBudgetSized(ec, candidateBytes, false)
+}
+
+// finishSizeBudgetSized is finishSizeBudget for a size the worker may have
+// projected when it stopped the encode early (see sizeRefusedWhileEncoding):
+// such a size is no measurement and the record says so.
+func finishSizeBudgetSized(ec *ExecutionContext, candidateBytes int64, projected bool) (*SizeBudgetRecord, bool) {
 	rec := sizeBudgetOf(ec.State)
 	if rec == nil {
 		return nil, true
@@ -720,7 +727,7 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 		rec.BelowTarget = sizeBudgetMissedTarget(rec.Final.Measured, rec.Target)
 	}
 	point := sizeBudgetEncodedPoint(ec, rec)
-	point.Bytes, point.Measured, point.WithinBudget = candidateBytes, true, candidateBytes <= rec.BudgetBytes
+	point.Bytes, point.Measured, point.WithinBudget = candidateBytes, !projected, candidateBytes <= rec.BudgetBytes
 	if rec.Final != nil {
 		point.VMAFMean, point.VMAFP5, point.VMAFWorst = rec.Final.Measured.VMAFMean, rec.Final.Measured.VMAFP5, rec.Final.Measured.VMAFWorstWindow
 		point.Passed = len(rec.BelowTarget) == 0
@@ -736,12 +743,16 @@ func finishSizeBudget(ec *ExecutionContext, candidateBytes int64) (*SizeBudgetRe
 	switch {
 	case !fits:
 		rec.Outcome = SizeBudgetExceeded
-		rec.Message = fmt.Sprintf("The budget encode came out at %s, over the %s budget. Original preserved.", formatBudgetBytes(candidateBytes), formatBudgetBytes(rec.BudgetBytes))
+		rec.Message = fmt.Sprintf("The budget encode %s, over the %s budget. Original preserved.", cameOutAt(candidateBytes, projected), formatBudgetBytes(rec.BudgetBytes))
 		if sizeBudgetIsLadder(rec) {
 			// Two-pass x265 lands on its average bitrate where VideoToolbox,
 			// with one pass, can miss it.
 			rec.RetryWithoutHardware = true
-			rec.Message = fmt.Sprintf("All %d VideoToolbox steps came out over the %s budget (the last, %s, at %s). Original preserved. Try again with x265 (allow_hardware off): its two passes land on the budget.", rec.Rung+1, formatBudgetBytes(rec.BudgetBytes), sizeBudgetRungDescription(getPlan(ec.State["plan"])), formatBudgetBytes(candidateBytes))
+			last := "at " + formatBudgetBytes(candidateBytes)
+			if projected {
+				last = cameOutAt(candidateBytes, true)
+			}
+			rec.Message = fmt.Sprintf("All %d VideoToolbox steps came out over the %s budget (the last, %s, %s). Original preserved. Try again with x265 (allow_hardware off): its two passes land on the budget.", rec.Rung+1, formatBudgetBytes(rec.BudgetBytes), sizeBudgetRungDescription(getPlan(ec.State["plan"])), last)
 		}
 	case rec.Final != nil && len(rec.BelowTarget) == 0:
 		rec.Outcome = SizeBudgetMeetsTarget
@@ -770,10 +781,11 @@ func sizeBudgetEncodedPoint(ec *ExecutionContext, rec *SizeBudgetRecord) SizeBud
 
 // overshotSizeBudget records a budget encode refused for its size before the
 // budget itself was checked: the 15% minimum saving, which every budget sits
-// under, so it is over the budget too.
-func overshotSizeBudget(ec *ExecutionContext, candidateBytes int64) *SizeBudgetRecord {
+// under, so it is over the budget too. projected marks a size the worker
+// projected when it stopped the encode early.
+func overshotSizeBudget(ec *ExecutionContext, candidateBytes int64, projected bool) *SizeBudgetRecord {
 	if candidateBytes > 0 {
-		rec, _ := finishSizeBudget(ec, candidateBytes)
+		rec, _ := finishSizeBudgetSized(ec, candidateBytes, projected)
 		return rec
 	}
 	rec := sizeBudgetOf(ec.State)
@@ -890,6 +902,24 @@ func formatBudgetBytesUp(n int64) string {
 		return fmt.Sprintf("%.2f GB", math.Ceil(float64(n)/1e7)/100)
 	}
 	return fmt.Sprintf("%.0f MB", math.Ceil(float64(n)/1e6))
+}
+
+// sizeRefusedWhileEncoding reports a size refusal the worker made while the
+// encode still ran: it stops an encode whose file cannot pass the size policy
+// and reports the size it was on course for (at least what it had written),
+// never validating a file. A refusal
+// of a finished file always follows the start of its validation.
+func sizeRefusedWhileEncoding(st transcode.JobStatus) bool {
+	return !st.EncodeFinishedAt.IsZero() && st.ValidationStartedAt.IsZero()
+}
+
+// cameOutAt says what size a refused encode reached: the size its file came
+// out at, or the size the worker projected when it stopped the encode early.
+func cameOutAt(n int64, projected bool) string {
+	if projected {
+		return "was stopped partway through the encode, on course for at least " + formatBudgetBytes(n)
+	}
+	return "came out at " + formatBudgetBytes(n)
 }
 
 func formatBudgetBytes(n int64) string {
