@@ -174,7 +174,11 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			}
 			s.Audio = append(s.Audio, entry)
 		}
-		s.AudioNote = "Planned audio only (first 8 tracks). Compact mode copies already compact codecs such as EAC3."
+		s.AudioNote = "Planned audio only (first 8 tracks)."
+		// The size goal's audio levels convert E-AC-3 too; the other modes copy it.
+		if !transcode.IsAudioLevelMode(plan.AudioMode) {
+			s.AudioNote += " Compact mode copies already compact codecs such as EAC3."
+		}
 	}
 	return s
 }
