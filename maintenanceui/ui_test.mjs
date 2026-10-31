@@ -4084,6 +4084,25 @@ test("the goal is sent only while technical profiles are off", async () => {
   assert.equal(sent[1].profile, "general-hevc");
 });
 
+test("Audio only is sent as the size goal with audio_only and no encoder or size limit", async () => {
+  const { h } = submissionHarness();
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('processingMode=()=>"audio_only"; tool=async(...args)=>capture(...args); $("technical").checked=false; $("allow-hardware").checked=true; $("path").value="/media/one.mp4"; $("scope").value="file";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal(sent[0].mode, "size");
+  assert.equal(sent[0].audio_only, true);
+  for (const key of ["allow_hardware", "size_budget_percent", "size_budget_bytes", "size_budget_source"]) assert.equal(key in sent[0], false, key);
+  h.run('processingMode=()=>"size"; $("path").value="/media/two.mp4";');
+  await h.run('buildAndSubmitJob("encode")');
+  assert.equal("audio_only" in sent[1], false);
+  // Its own options stay hidden: the video is copied, so there is no encoder or limit to pick.
+  const form = harness();
+  form.run('processingMode=()=>"audio_only"; controls();');
+  assert.equal(form.elements.get("hardware-option").hidden, true);
+  assert.equal(form.elements.get("size-budget-option").hidden, true);
+});
+
 test("the media engine option belongs to the smaller files goal and starts on", () => {
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
   const goal = form.slice(form.indexOf('<fieldset id="processing-goal"'), form.indexOf("</fieldset>", form.indexOf('<fieldset id="processing-goal"')));
@@ -5515,17 +5534,17 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
   const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
   const more = form.slice(form.indexOf('<details id="more-goals"'));
-  assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
+  assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>[\s\S]*value="audio_only"[\s\S]*<strong class="goal-title">Audio only<\/strong>[\s\S]*id="goal-note-audio_only"/);
   assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
   assert.match(more, /<summary>More goals<\/summary>/);
   assert.doesNotMatch(more, /checked/);
   assert.match(more, /value="quality"[\s\S]*<strong class="goal-title">Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
   assert.match(more, /value="x265_preserve"[\s\S]*<strong class="goal-title">Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
   const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
-  for (const name of ["Save space", "Shrink to 1080p SDR", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
+  for (const name of ["Save space", "Shrink to 1080p SDR", "Audio only", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
   assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to x265/);
   const h = harness();
-  assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
+  assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", audio_only: "Audio only", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
 });
 
 // ---- Segmented controls ----
@@ -6827,6 +6846,49 @@ test("one file's tracks show their size and what the goal makes of them, and aud
   // A file the probe could not size shows no preview.
   h.run('streamPreview($("keep-tracks-preview"), {audio: [], subtitles: []}, "size", () => true)');
   assert.equal(el("keep-tracks-preview").hidden, true);
+});
+
+test("Audio only previews the video as copied and what the audio alone saves", () => {
+  const h = harness();
+  h.context.tracks = sizedFixture();
+  h.run('streamPreview($("keep-tracks-preview"), tracks, "audio_only", (k, t) => t.keep)');
+  const shown = leaves(h.elements.get("keep-tracks-preview"));
+  assert.ok(shown.includes("≈ 3.00 GB · 30% · copied unchanged"), shown.join(" | "));
+  assert.ok(shown.includes("6.58 GB · 66% → about 560.0 MB"));
+  assert.ok(shown.includes("This goal saves about 6.30 GB, 63% of the file, from the audio and the tracks removed; the video stays as it is."));
+  assert.ok(!shown.some((t) => t.startsWith("Stronger audio")));
+  assert.equal(h.run('trackOutputText(tracks.audio[0], "audio_only")'), "AAC 384 kbps · 240.0 MB");
+  // Nothing converts and nothing is removed: the goal has nothing to save.
+  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 800e6, subtitles: [], audio: [
+    {index: 1, keep: true, bytes: 100e6, outputs: {size: {output: "copy", bytes: 100e6}}}]}, "audio_only", () => true)`);
+  assert.ok(leaves(h.elements.get("keep-tracks-preview")).some((t) => t.startsWith("Nothing here gets smaller")));
+});
+
+test("Change goal offers Audio only, shows a saved one and sends it as the size goal", async () => {
+  const h = harness();
+  h.context.plan = { id: "b", mode: "size", scope: "all", selected: 2, kept: 0, active: 0, files: ["one", "two"], selection_version: "v1", settings: { allow_hardware: true, audio_only: true } };
+  h.run('state.info={};state.recipes=[];api=async()=>plan;');
+  await h.run('reconfigureBatch("b")');
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("reconfigure-mode").value, "audio_only");
+  h.run("updateReconfigureHardware()");
+  assert.equal(el("reconfigure-hardware-option").hidden, true);
+  const calls = [];
+  h.context.record = (path, body) => calls.push(body);
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  h.run('submissionID=()=>"audio-1";commandRequest=async(path,body)=>{record(path,body);return {id:"b"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[0].mode, "size");
+  assert.equal(calls[0].audio_only, true);
+  assert.equal("allow_hardware" in calls[0], false);
+  // Save space picked instead sends no audio_only.
+  h.run('$("reconfigure-mode").value="size"; updateReconfigureHardware(); submissionID=()=>"audio-2";');
+  await h.run("submitReconfiguredBatch()");
+  assert.equal(calls[1].mode, "size");
+  assert.equal("audio_only" in calls[1], false);
+  // Encoding one file again keeps its goal.
+  assert.equal(h.run('JSON.stringify(sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true,allow_hardware:true}}))').includes('"audio_only":true'), true);
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true}}).allow_hardware'), undefined);
 });
 
 test("one file's Change goal previews its streams under the goal picked", async () => {

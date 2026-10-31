@@ -27,10 +27,18 @@ const ModePolicyV5 = "transcode-modes-v5"
 // it refuses a v6 plan at its first gate.
 const ModePolicyV6 = "transcode-modes-v6"
 
+// ModePolicyV7 is the plan version of the size goal "audio only": the video is
+// stream-copied and proven unchanged, the audio converts to one of v5's levels,
+// and the plan may keep only some tracks (Plan.Tracks) without becoming v6.
+// It has no minimum savings beyond the output not being larger than the
+// source, so a worker that predates it refuses it at its first gate.
+const ModePolicyV7 = "transcode-modes-v7"
+
 // IsSizePolicyVersion reports a size mode policy version: v3, v5 which adds
-// the audio levels, or v6 which adds the track selection.
+// the audio levels, v6 which adds the track selection, or v7 the audio-only
+// goal.
 func IsSizePolicyVersion(version string) bool {
-	return version == ModePolicyV3 || version == ModePolicyV5 || version == ModePolicyV6
+	return version == ModePolicyV3 || version == ModePolicyV5 || version == ModePolicyV6 || version == ModePolicyV7
 }
 
 // CompactMinimumSavingsPercent is the measured savings compact mode requires.
@@ -46,6 +54,11 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 	if !valid || source <= 0 || candidate <= 0 {
 		return false
 	}
+	// The audio-only goal promises a smaller file: one the same size saved
+	// nothing. Other goals with no minimum keep any file that did not grow.
+	if version == ModePolicyV7 {
+		return candidate < source
+	}
 	if minimum == 0 {
 		return candidate <= source
 	}
@@ -57,6 +70,9 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 // ModeMinimumSavings is shared by the planner and full-plan admission,
 // including historical plans.
 func ModeMinimumSavings(mode, version string) (int, bool) {
+	if version == ModePolicyV7 {
+		return 0, mode == "size"
+	}
 	if version == ModePolicyV6 {
 		switch mode {
 		case "size":

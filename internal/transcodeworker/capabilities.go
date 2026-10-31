@@ -236,6 +236,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// A submit without a source digest is hashed while the worker stages the
 	// file, and the digest comes back in the job status.
 	caps.LearnSourceDigest = true
+	// The audio-only goal (policy v7) is an audio-only plan at the bed levels,
+	// with or without a track selection.
+	caps.SizeAudioOnlyGoal = caps.SizeAudioOnly && caps.SizeAudioObjectBed && caps.TrackSelection
 	// Search-only flags, kept for fingerprint stability; they go when the
 	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.

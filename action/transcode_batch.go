@@ -35,7 +35,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "paths", "service", "series_id",
+			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -425,7 +425,15 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 		var itemDecision, itemProfile, itemStatus string
 		var itemReasons []string
 
-		if mode := getString(ec.Inputs, "mode"); mode != "" {
+		if mode := getString(ec.Inputs, "mode"); mode != "" && getBool(ec.Inputs, "audio_only") {
+			if reason := audioOnlySourceReason(gateRep); reason != "" {
+				itemDecision, itemStatus = "skip", "skip"
+				itemReasons = []string{reason}
+			} else {
+				itemDecision, itemStatus, itemProfile = "transcode", "queued", "mode-"+mode
+				itemReasons = []string{"the video is copied unchanged and only the audio is converted; the result is kept if it comes out smaller"}
+			}
+		} else if mode != "" {
 			hfrSupported, err := hfr.forSource(ctx, gateRep)
 			if err != nil {
 				// Items already created are reused when the step resumes.
@@ -1020,6 +1028,7 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	delete(inputs, "size_budget_source")
 	delete(inputs, "size_budget_sibling_multiplier")
 	delete(inputs, "max_height")
+	delete(inputs, "audio_only")
 	var policy ModePolicySnapshot
 	b, err := json.Marshal(rawPolicy)
 	if err != nil || json.Unmarshal(b, &policy) != nil {
@@ -1030,6 +1039,9 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	}
 	if policy.Size == nil {
 		return
+	}
+	if policy.Size.AudioOnly {
+		inputs["audio_only"] = true
 	}
 	if rules := policy.Size.AutomaticSearch; rules != nil && slices.Contains(rules.QualityFallbackPresets, "slow") {
 		inputs["allow_slow_preset"] = true
@@ -1134,7 +1146,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height"} {
+		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "audio_only"} {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}

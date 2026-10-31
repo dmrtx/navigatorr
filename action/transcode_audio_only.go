@@ -123,24 +123,37 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	if estimate.Compacted == 0 {
 		return StepResult{}, false
 	}
-	skip := func(reason string) (StepResult, bool) {
-		ec.State["skip_transcode"] = true
-		ec.State["reason_code"] = reason
-		outputs["skipped"] = true
-		outputs["reason_code"] = reason
-		return StepResult{Status: StepCompleted, Outputs: outputs}, true
-	}
 	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	if !transcode.ModeSizeAllowedVersion(snapshot.Mode, original, estimate.CandidateBytes, snapshot.workerVersion()) {
 		if estimate.Unknown > 0 {
-			return skip("audio_estimate_unavailable")
+			return skipAudioOnly(ec, outputs, "audio_estimate_unavailable")
 		}
-		return skip("audio_compaction_insufficient")
+		return skipAudioOnly(ec, outputs, "audio_compaction_insufficient")
 	}
-	video := rep.MainVideo()
+	note := "No video encode met the quality floor and the savings gate; the video is copied unchanged and only lossless audio is compacted."
+	if transcode.IsAudioLevelMode(audioMode) {
+		note = "No video encode met the quality floor and the savings gate; the video is copied unchanged and only the audio is re-encoded."
+	}
+	return e.commitAudioOnlyPlan(ctx, ec, base, audioMode, outputs, note)
+}
+
+// skipAudioOnly ends an audio-only plan with a reason and no encode.
+func skipAudioOnly(ec *ExecutionContext, outputs map[string]any, reason string) (StepResult, bool) {
+	ec.State["skip_transcode"] = true
+	ec.State["reason_code"] = reason
+	outputs["skipped"] = true
+	outputs["reason_code"] = reason
+	return StepResult{Status: StepCompleted, Outputs: outputs}, true
+}
+
+// commitAudioOnlyPlan makes the audio-only plan derived from base, at
+// audioMode, the action's encode, once the source has one programme video and
+// the worker can prove a copied stream.
+func (e *Engine) commitAudioOnlyPlan(ctx context.Context, ec *ExecutionContext, base *transcode.Plan, audioMode string, outputs map[string]any, note string) (StepResult, bool) {
+	video := getSourceReport(ec.State["source_report"]).MainVideo()
 	if len(video) != 1 {
-		return skip("unsupported_source")
+		return skipAudioOnly(ec, outputs, "unsupported_source")
 	}
 	if !e.workersConfigured() {
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, true
@@ -149,8 +162,11 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	if err != nil {
 		return workerCapabilityLookupResult(err, "size audio-only"), true
 	}
+	if base.ModePolicyVersion == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal {
+		return StepResult{Status: StepFailed, Error: errAudioOnlyGoalWorker + " before encoding"}, true
+	}
 	if !caps.SizeAudioOnly {
-		return skip("audio_only_worker_unsupported")
+		return skipAudioOnly(ec, outputs, "audio_only_worker_unsupported")
 	}
 	base, err = planWithAudioMode(base, audioMode)
 	if err != nil {
@@ -168,9 +184,40 @@ func (e *Engine) sizeAudioOnlyFallback(ctx context.Context, ec *ExecutionContext
 	outputs["plan"] = plan
 	outputs["plan_source"] = "audio_only"
 	outputs["plan_digest"] = plan.PlanDigest
-	outputs["plan_note"] = "No video encode met the quality floor and the savings gate; the video is copied unchanged and only lossless audio is compacted."
-	if transcode.IsAudioLevelMode(plan.AudioMode) {
-		outputs["plan_note"] = "No video encode met the quality floor and the savings gate; the video is copied unchanged and only the audio is re-encoded."
-	}
+	outputs["plan_note"] = note
 	return StepResult{Status: StepCompleted, Outputs: outputs}, true
+}
+
+// errAudioOnlyGoalWorker is the failure of an audio-only goal on a worker that
+// does not run policy v7.
+const errAudioOnlyGoalWorker = "worker does not run the audio-only goal; upgrade the worker"
+
+// startAudioOnlyGoal plans the size goal "audio only" (RecipeAudioOnly): the
+// video is copied unchanged and the audio converted at the goal's level, with
+// the tracks the goal keeps. It needs no saving beyond a smaller file, which
+// the final gate measures, so only a source where nothing would convert and
+// nothing is removed is skipped here. It is not handled for any other goal.
+func (e *Engine) startAudioOnlyGoal(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
+	snapshot, err := freezeModePolicy(ec)
+	if err != nil || snapshot == nil || snapshot.Recipe == nil || snapshot.Recipe.Kind != RecipeAudioOnly {
+		return StepResult{}, false
+	}
+	base := getPlan(ec.State["plan"])
+	if base == nil || base.ModePolicyVersion != transcode.ModePolicyV7 {
+		return StepResult{Status: StepFailed, Error: "the audio-only goal's frozen plan is missing (fail closed)"}, true
+	}
+	outputs := map[string]any{}
+	original := getInt64(ec.State, "original_size")
+	rep := getSourceReport(ec.State["source_report"])
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
+	estimate := estimateAudioOnly(keptRep, keptBytes, base.AudioMode)
+	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
+	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
+	// A selection that keeps every track (hand-picked boxes left as they were)
+	// removes nothing either.
+	removes := rep != nil && keptRep != nil && len(keptRep.Audio)+len(keptRep.Subtitles) < len(rep.Audio)+len(rep.Subtitles)
+	if estimate.Compacted == 0 && !removes {
+		return skipAudioOnly(ec, outputs, "audio_only_nothing_to_convert")
+	}
+	return e.commitAudioOnlyPlan(ctx, ec, base, base.AudioMode, outputs, "This goal copies the video unchanged and only converts the audio (and removes the tracks it does not keep); the file is kept if it comes out smaller.")
 }

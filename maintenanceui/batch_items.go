@@ -49,6 +49,8 @@ type batchItemView struct {
 	// MaxHeight is the frozen compact output height, so the goal label
 	// names the size actually produced.
 	MaxHeight int `json:"max_height,omitempty"`
+	// AudioOnly marks the size goal frozen as Audio only.
+	AudioOnly bool `json:"audio_only,omitempty"`
 
 	PreviousAttempts []store.TranscodeBatchItem `json:"previous_attempts,omitempty"`
 	RetryPending     bool                       `json:"retry_pending,omitempty"`
@@ -120,6 +122,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			if view.Mode == "compact" {
 				view.MaxHeight = compactMaxHeight(policy)
 			}
+			view.AudioOnly = view.Mode == "size" && operationMap(operationMap(policy)["size"])["audio_only"] == true
 			reserved, err := s.engine.BatchItemReplacementReserved(item)
 			if err != nil {
 				fail(w, 500, "read file replacement")

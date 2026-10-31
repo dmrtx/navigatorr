@@ -509,3 +509,14 @@ func TestRerunIsOfferedAfterTheSizeLimitWasMissed(t *testing.T) {
 		t.Fatalf("no rerun offered: %v", page.Jobs[0])
 	}
 }
+
+func TestRerunSummaryNamesTheAudioOnlyGoal(t *testing.T) {
+	r := operationRecord{inputs: map[string]any{"path": "/media/a.mkv", "mode": "size", "audio_only": true}, state: map[string]any{}}
+	if got := rerunSummary(r, nil); got["mode"] != "size" || got["audio_only"] != true {
+		t.Fatalf("summary = %v", got)
+	}
+	r.inputs["audio_only"] = false
+	if _, ok := rerunSummary(r, nil)["audio_only"]; ok {
+		t.Fatal("a Save space job says audio_only")
+	}
+}

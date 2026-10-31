@@ -32,9 +32,11 @@ import (
 const ModePolicyV4 = "transcode-modes-v4"
 
 const (
-	// The two kinds of recipe a v4 snapshot freezes.
+	// The kinds of recipe a v4 snapshot freezes. RecipeAudioOnly is the size
+	// goal "audio only": one plan that copies the video and converts the audio.
 	RecipeQualityLadder = "quality_ladder"
 	RecipeSizeBudget    = "size_budget"
+	RecipeAudioOnly     = "audio_only"
 
 	// qualityLadderKey holds the QualityLadderRecord; its plans carry
 	// qualityLadderPlanSource.
@@ -91,6 +93,9 @@ func modeRecipeFor(p *ModePolicySnapshot, allowSlow bool) *ModeRecipe {
 		if p.Size == nil {
 			return nil
 		}
+		if p.Size.AudioOnly {
+			return &ModeRecipe{Kind: RecipeAudioOnly, VideoCodec: transcode.VideoCodecCopy}
+		}
 		if p.Size.SizeBudget != nil {
 			codec := transcode.VideoCodecLibX265
 			if len(p.Size.SizeBudget.VTLadder) > 0 && p.Size.Hardware != nil {
@@ -121,7 +126,18 @@ func (r *ModeRecipe) validate(p *ModePolicySnapshot) error {
 	if p.Version != ModePolicyV4 {
 		return fmt.Errorf("only policy v4 freezes a recipe")
 	}
+	if audioOnly := p.Size != nil && p.Size.AudioOnly; audioOnly != (r.Kind == RecipeAudioOnly) {
+		return fmt.Errorf("only the audio-only goal freezes the audio-only recipe")
+	}
 	switch r.Kind {
+	case RecipeAudioOnly:
+		// The goal copies the video, converts the audio at a level and needs
+		// no saving beyond a smaller file: nothing else may ride along.
+		if p.Mode != "size" || p.Size.SizeBudget != nil || p.Size.Hardware != nil || p.MinSavingsPercent != 0 || !transcode.IsAudioLevelMode(p.Profile.Audio.Mode) ||
+			r.VideoCodec != transcode.VideoCodecCopy || r.Preset != "" || len(r.QualityValues) != 0 || r.Fallback != nil {
+			return fmt.Errorf("an audio-only recipe needs a size goal at an audio level with no budget, media engine or minimum saving")
+		}
+		return nil
 	case RecipeSizeBudget:
 		if p.Mode != "size" || p.Size == nil || p.Size.SizeBudget == nil || r.Preset != "" || len(r.QualityValues) != 0 || r.Fallback != nil {
 			return fmt.Errorf("a size budget recipe needs a size budget and nothing else")
@@ -185,6 +201,11 @@ func (p *ModePolicySnapshot) workerVersion() string {
 		return p.Version
 	}
 	if p.Mode == "size" {
+		// The audio-only goal has its own version, which only workers that
+		// run it accept.
+		if p.Size != nil && p.Size.AudioOnly {
+			return transcode.ModePolicyV7
+		}
 		// A size goal whose audio is one of the levels is policy v5: every
 		// budget that froze them, and every goal frozen once level 1 became
 		// the default. Snapshots frozen before either keep compact_lossless

@@ -1,5 +1,9 @@
 const $ = (id) => document.getElementById(id);
-const goalNames = {size: "Save space", compact: "Shrink to 1080p SDR", quality: "Strict quality", x265_preserve: "Convert to HEVC"};
+const goalNames = {size: "Save space", compact: "Shrink to 1080p SDR", audio_only: "Audio only", quality: "Strict quality", x265_preserve: "Convert to HEVC"};
+// Audio only is the Save space goal with the video copied: it is sent as
+// mode=size with audio_only, and shown under its own name.
+const goalMode = goal => goal === "audio_only" ? "size" : goal;
+const goalKeyOf = (mode, audioOnly) => mode === "size" && audioOnly ? "audio_only" : mode;
 const moreGoals = ["quality", "x265_preserve"];
 const state = {
   tab: "library",
@@ -678,7 +682,7 @@ function navigationRoute(search = "") {
     status:routeStatuses.includes(q.get("status")) ? q.get("status") : "all",
     job:(q.get("job") || "").slice(0,200), profile:(q.get("profile") || "").slice(0,128),
     copies:q.get("copies") === "1", configure:q.get("configure") === "1", locate:q.get("locate") === "1",
-    mode:["size","quality","x265_preserve","compact"].includes(q.get("mode")) ? q.get("mode") : "size", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
+    mode:["size","quality","x265_preserve","compact","audio_only"].includes(q.get("mode")) ? q.get("mode") : "size", modeExplicit:q.has("mode"), technical:q.get("technical") === "1",
   };
 }
 function navigationQuery() {
@@ -2455,7 +2459,7 @@ $("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
 // or every track. For one file the file's tracks are listed too, checked the
 // way the server's rules would keep them (the server answers, so the rules live
 // in one place); changing a box sends explicit stream lists instead.
-const keepGoals = ["size", "compact"];
+const keepGoals = ["size", "compact", "audio_only"];
 const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
 // Which file or files the choice is for; null while the goal keeps no tracks.
 function keepTrackTarget() {
@@ -2562,7 +2566,7 @@ const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has
 // The stream preview: what each stream of one file weighs and what a goal's
 // audio mode makes of each audio track, from the sizes source-tracks reads off
 // the probe. Nothing is measured; the video's new size is the encode's.
-const previewAudioKey = mode => mode === "size" || mode === "compact" ? mode : "";
+const previewAudioKey = mode => mode === "size" || mode === "compact" ? mode : mode === "audio_only" ? "size" : "";
 function trackOutputText(track, mode) {
   const out = track.outputs?.[previewAudioKey(mode)];
   if (!out || out.output === "copy") return "Copied";
@@ -2603,21 +2607,23 @@ function streamPreview(output, data, mode, kept) {
   const facts = node("dl", "", "profile-facts stream-preview-facts");
   const add = (label, value) => facts.append(node("dt", label), node("dd", value));
   add("File", bytes(total));
-  add("Video", video ? `${data.video_approx ? "≈ " : ""}${bytes(video)} · ${pct(video)} · re-encoded, its new size is set by the encode` : "Size unknown · re-encoded");
+  const copied = mode === "audio_only";
+  add("Video", video ? `${data.video_approx ? "≈ " : ""}${bytes(video)} · ${pct(video)} · ${copied ? "copied unchanged" : "re-encoded, its new size is set by the encode"}` : copied ? "Size unknown · copied unchanged" : "Size unknown · re-encoded");
   add("Audio kept", t.audio ? `${bytes(t.audio)} · ${pct(t.audio)}${t.converted ? ` → about ${bytes(t.after)}` : " · copied"}` : t.unknown ? "Size unknown" : "None");
   if (t.subtitles) add("Subtitles kept", `${bytes(t.subtitles)}${t.subtitles >= total / 100 ? ` · ${pct(t.subtitles)}` : ""}`);
   if (t.removed) add("Tracks removed", `−${bytes(t.removed)} · ${pct(t.removed)}`);
   output.append(facts);
   const saved = t.audio - t.after + t.removed;
-  if (saved > 0) output.append(node("p", `Audio and track choices alone save about ${bytes(saved)}, ${pct(saved)} of the file; the video encode saves on top of that.`, "metadata"));
+  if (saved > 0) output.append(node("p", copied ? `This goal saves about ${bytes(saved)}, ${pct(saved)} of the file, from the audio and the tracks removed; the video stays as it is.` : `Audio and track choices alone save about ${bytes(saved)}, ${pct(saved)} of the file; the video encode saves on top of that.`, "metadata"));
+  else if (copied && !t.unknown) output.append(node("p", "Nothing here gets smaller: every kept audio track is already at this goal's level and no track is removed, so there is nothing for this goal to save.", "stream-preview-warning"));
   if (t.unknown) output.append(node("p", `${t.unknown === 1 ? "One kept audio track states" : `${t.unknown} kept audio tracks state`} no size, so ${t.unknown === 1 ? "it is" : "they are"} left out of these totals.`, "metadata"));
   if (mode === "size") {
     const strong = previewTotals(data, kept, "size_he"), more = t.after - strong.after;
     if (more >= Math.max(total / 100, 1e6)) output.append(node("p", `Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about ${bytes(more)} more. A size budget switches to it when the budget needs it.`, "metadata"));
   }
   if (video && t.audio > video) {
-    const copied = !t.converted;
-    output.append(node("p", `Audio weighs more than the video in this file (${bytes(t.audio)} against ${bytes(video)}).${copied ? " This goal copies it, so most of the file stays as it is; removing tracks or Save space would shrink it." : ` After this goal it is about ${bytes(t.after)}.`}`, "stream-preview-warning"));
+    const audioCopied = !t.converted;
+    output.append(node("p", `Audio weighs more than the video in this file (${bytes(t.audio)} against ${bytes(video)}).${audioCopied ? " This goal copies it, so most of the file stays as it is; removing tracks or Save space would shrink it." : ` After this goal it is about ${bytes(t.after)}.`}`, "stream-preview-warning"));
   }
 }
 function keepTracksCount(data) {
@@ -3046,17 +3052,19 @@ async function buildAndSubmitJob(mode = "encode") {
   const batch = $("scope").value === "batch";
   const name = batch ? "transcode_batch" : "transcode_media";
   const simple = !$("technical").checked;
-  const inputs = simple ? {mode:processingMode()} : { preserve_source_bit_depth: $("preserve-depth").checked };
-  if (simple && inputs.mode === "size") {
+  const goal = processingMode();
+  const inputs = simple ? {mode:goalMode(goal)} : { preserve_source_bit_depth: $("preserve-depth").checked };
+  if (simple && goal === "audio_only") inputs.audio_only = true;
+  else if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
-  if (simple && keepGoals.includes(inputs.mode)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
+  if (simple && keepGoals.includes(goal)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
   // Settings of an earlier job's goal that the form has no control for, while
   // it is still that file and that goal.
   const carry = state.goalCarry;
-  if (simple && !batch && carry && carry.path === $("path").value.trim() && carry.mode === inputs.mode) Object.assign(inputs, carry.inputs);
+  if (simple && !batch && carry && carry.path === $("path").value.trim() && carry.mode === goal) Object.assign(inputs, carry.inputs);
   const folderSource = $("service").value.startsWith("folder:");
   const explicitSelection = (folderSource ? state.folderSelected?.size : state.selected.size) > 0 && (simple || $("selected-only").checked);
   if (batch) {
@@ -4376,7 +4384,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
     $("reconfigure-mode-label").hidden = !plan.mode;
-    $("reconfigure-mode").value = plan.mode || "quality";
+    $("reconfigure-mode").value = goalKeyOf(plan.mode, plan.settings.audio_only === true) || "quality";
     // A batch that never said anything about the media engine gets the default: on, 15 %.
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
     showSizeBudget("reconfigure-budget", plan.settings);
@@ -4421,6 +4429,7 @@ function sameSettingsRequest(plan) {
   const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true};
   if (!plan.mode) return {...body, profile:"same"};
   body.mode = plan.mode;
+  if (plan.mode === "size" && s.audio_only) return {...body, audio_only:true};
   if (plan.mode !== "size") return body;
   body.allow_hardware = s.allow_hardware !== false;
   if (s.hardware_margin_percent > 0) body.hardware_margin_percent = s.hardware_margin_percent;
@@ -4576,8 +4585,9 @@ async function submitReconfiguredBatch() {
     if (!Number.isFinite(value)) throw new Error("Enter a valid savings or growth limit.");
     return value;
   };
-  const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:$("reconfigure-mode").value} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
-  if (plan.mode && body.mode === "size") {
+  const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:goalMode($("reconfigure-mode").value)} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
+  if (plan.mode && $("reconfigure-mode").value === "audio_only") body.audio_only = true;
+  else if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
   }
@@ -4694,7 +4704,7 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
   const info = job.rerun || {};
   const content = [node("p", queuePresentation(job).title, "review-filename")];
   const remedy = mode ? remedyActions[mode] : null;
-  const goal = rerunGoals[info.mode];
+  const goal = rerunGoals[goalKeyOf(info.mode, info.audio_only === true)];
   if (remedy) content.push(node("p", remedy.line));
   else content.push(node("p", goal ? `Goal: ${goal}` : "The same settings as before."));
   if (withoutHardware) content.push(node("p", "The media engine is turned off for this job, so it encodes with x265: slower, but it usually keeps more quality at the same size."));
@@ -4735,7 +4745,7 @@ function applyGoalSettings(path, goal) {
   showSizeBudget("size-budget", goal);
   const inputs = {};
   for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
-  state.goalCarry = {path, mode: goal.mode, inputs};
+  state.goalCarry = {path, mode: goalKeyOf(goal.mode, goal.audio_only === true), inputs};
   renderShrinkTitle();
 }
 // Drops what applyGoalSettings carried, so a later ordinary pick of the same
@@ -4771,7 +4781,7 @@ function openGoalForm(path, options = {}) {
   state.fileMedia = null;
   state.fileService = null;
   clearGoalCarry();
-  if (options.mode) setProcessingMode(options.mode);
+  if (options.mode) setProcessingMode(goalKeyOf(options.mode, options.goal?.audio_only === true));
   if (options.goal) applyGoalSettings(path, options.goal);
   applyLibraryContext(options.context, options.goal);
   if (options.languages) presetKeepLanguages(options.languages);
@@ -5040,6 +5050,7 @@ function shortJobReason(reason) {
     no_suitable_candidate: "None of the tested settings met this goal; original kept",
     audio_compaction_insufficient: "No video setting met this goal, and compacting the lossless audio alone would not save enough; original kept",
     audio_estimate_unavailable: "No video setting met this goal, and the lossless audio size could not be read to estimate audio-only savings; original kept",
+    audio_only_nothing_to_convert: "Every audio track is already at or below this goal's level and no track is removed; original kept",
     audio_only_worker_unsupported: "No video setting met this goal; compacting only the audio needs an updated worker. Original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
     hdr_requires_compact: "HDR or Dolby Vision source; only the Shrink to 1080p SDR goal converts it. Original kept",
@@ -7242,7 +7253,7 @@ function batchFileRow(item, id) {
   const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
   if (settled) {
     // Nothing to add.
-  } else if (item.mode && item.mode !== job?.mode) body.append(node("p", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[item.mode] || item.mode}`, "metadata batch-file-profile"));
+  } else if (item.mode && (item.mode !== job?.mode || item.audio_only)) body.append(node("p", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[goalKeyOf(item.mode, item.audio_only)] || item.mode}`, "metadata batch-file-profile"));
   else if (item.requested_profile || item.profile) body.append(node("p", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
   if (item.previous_attempts?.length) {
     const history = node("details", "", "batch-attempt-history");

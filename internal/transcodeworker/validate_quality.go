@@ -719,10 +719,13 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 		}
 	}
 	// An audio-only plan copies the video untouched, so there is no frame to
-	// measure; the source must still be the SDR class size mode admitted.
+	// measure; the source must still be the class size mode admitted. The
+	// audio-only goal (v7) admits HDR and Dolby Vision, whose signalling the
+	// copy proof then compares; the fallback of the other size versions only
+	// ever planned SDR.
 	if transcode.IsSizeAudioOnlyPlan(plan) {
-		if mediainspect.IsHDRorDolbyVisionReport(&rep) || v.BitDepth != plan.ExpectedBitDepth {
-			return &transcode.PolicyRejectionError{ReasonCode: "preservation_not_met", Message: "audio-only source no longer matches its frozen SDR plan"}
+		if plan.ModePolicyVersion != transcode.ModePolicyV7 && mediainspect.IsHDRorDolbyVisionReport(&rep) || v.BitDepth != plan.ExpectedBitDepth {
+			return &transcode.PolicyRejectionError{ReasonCode: "preservation_not_met", Message: "audio-only source no longer matches its frozen plan"}
 		}
 		return nil
 	}

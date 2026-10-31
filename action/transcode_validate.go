@@ -63,6 +63,10 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		if !trackSelectionMatches(snapshot, ec.State, plan) {
 			return StepResult{Status: StepFailed, Error: "the plan's track selection does not match the goal's frozen policy and the source; original preserved"}, nil
 		}
+		// The audio-only goal re-encodes no video, whatever planned it.
+		if snapshot.Recipe != nil && snapshot.Recipe.Kind == RecipeAudioOnly && !audioOnly {
+			return StepResult{Status: StepFailed, Error: "the audio-only goal's plan re-encodes the video; original preserved"}, nil
+		}
 		if audioOnly {
 			// The video was copied, so the proof is bit-identical video, not
 			// a perceptual score; only a policy that allows it may use it.

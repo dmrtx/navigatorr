@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -322,4 +323,126 @@ func mustSize(t *testing.T, path string) int64 {
 		t.Fatal(err)
 	}
 	return info.Size()
+}
+
+// sizeAudioOnlyGoalTestPlan is a plan of the audio-only goal (policy v7): the
+// video copied, a bed level, no minimum savings, and the selection if any.
+func sizeAudioOnlyGoalTestPlan(t *testing.T, sel *transcode.TrackSelection) *transcode.Plan {
+	t.Helper()
+	base := sizeV3TestPlan(false)
+	base.ModePolicyVersion, base.AudioMode, base.SizePolicy = transcode.ModePolicyV7, transcode.AudioModeSizeAACBed, &transcode.SizePolicy{}
+	p, err := transcode.NewSizeAudioOnlyPlan(base, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Tracks = sel
+	p.PlanDigest = ""
+	p.PlanDigest, _ = transcode.DigestPlan(p)
+	return p
+}
+
+func TestSizeAudioOnlyGoalPlanVersion(t *testing.T) {
+	for _, sel := range []*transcode.TrackSelection{nil, {KeepAudio: []int{1}}} {
+		if err := ValidatePlan(sizeAudioOnlyGoalTestPlan(t, sel)); err != nil {
+			t.Fatalf("v7 plan (selection %v) rejected: %v", sel, err)
+		}
+	}
+	if m, ok := transcode.ModeMinimumSavings("size", transcode.ModePolicyV7); !ok || m != 0 {
+		t.Fatalf("v7 size minimum = %d, %v", m, ok)
+	}
+	if _, ok := transcode.ModeMinimumSavings("compact", transcode.ModePolicyV7); ok {
+		t.Fatal("v7 admits compact")
+	}
+	for name, mutate := range map[string]func(*transcode.Plan){
+		"the size goal's minimum": func(p *transcode.Plan) { p.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: 15} },
+		"lossless compaction":     func(p *transcode.Plan) { p.AudioMode = transcode.AudioModeCompactLossless },
+		"audio copied":            func(p *transcode.Plan) { p.AudioMode = "copy" },
+		"compact mode":            func(p *transcode.Plan) { p.Mode = "compact" },
+		"a video encode": func(p *transcode.Plan) {
+			e := sizeV3TestPlan(false)
+			p.VideoCodec, p.Quality, p.Preset, p.VideoProfile, p.PixelFormat, p.QualityValidation = e.VideoCodec, e.Quality, e.Preset, e.VideoProfile, e.PixelFormat, e.QualityValidation
+		},
+	} {
+		p := sizeAudioOnlyGoalTestPlan(t, nil)
+		mutate(p)
+		p.PlanDigest, _ = transcode.DigestPlan(p)
+		if err := ValidatePlan(p); err == nil {
+			t.Errorf("v7 plan with %s accepted", name)
+		}
+	}
+	// v6 still requires its selection, and only v6 and v7 carry one.
+	v6 := sizeAudioOnlyGoalTestPlan(t, nil)
+	v6.ModePolicyVersion, v6.SizePolicy = transcode.ModePolicyV6, &transcode.SizePolicy{MinSavingsPercent: 15}
+	v6.PlanDigest, _ = transcode.DigestPlan(v6)
+	if err := ValidatePlan(v6); err == nil {
+		t.Fatal("v6 plan without a track selection accepted")
+	}
+	v5 := sizeAudioOnlyGoalTestPlan(t, &transcode.TrackSelection{KeepAudio: []int{1}})
+	v5.ModePolicyVersion, v5.SizePolicy = transcode.ModePolicyV5, &transcode.SizePolicy{MinSavingsPercent: 15}
+	v5.PlanDigest, _ = transcode.DigestPlan(v5)
+	if err := ValidatePlan(v5); err == nil {
+		t.Fatal("v5 plan with a track selection accepted")
+	}
+}
+
+// The audio-only goal (v7) takes HDR sources: the preflight admits them
+// where the SDR-only fallback refuses them, and a plain remux proves the
+// copy, its HDR signalling included.
+func TestAudioOnlyGoalTakesHDRSources(t *testing.T) {
+	ffmpeg, ffprobe, ctx := videoCopyTools(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "hdr.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=2",
+		"-f", "lavfi", "-i", "aevalsrc=sin(440*2*PI*t)|sin(550*2*PI*t):s=48000:c=stereo:d=2", "-map", "0:v", "-map", "1:a",
+		"-vf", "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv",
+		"-c:v", "libx265", "-preset", "ultrafast", "-pix_fmt", "yuv420p10le",
+		"-x265-params", "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:hdr10=1:hdr10-opt=1:repeat-headers=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50):max-cll=1000,400:log-level=error",
+		"-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv",
+		"-c:a", "pcm_s24le", source).CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, out)
+	}
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
+	goal := func() *transcode.Plan {
+		base := sizeV3TestPlan(false)
+		base.ModePolicyVersion, base.AudioMode, base.SizePolicy = transcode.ModePolicyV7, transcode.AudioModeSizeAACBed, &transcode.SizePolicy{}
+		p, err := transcode.NewSizeAudioOnlyPlan(base, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.PlanDigest, _ = transcode.DigestPlan(p)
+		return p
+	}()
+	if err := w.validateModeSourceQuality(ctx, source, goal); err != nil {
+		t.Fatalf("v7 refused an HDR source: %v", err)
+	}
+	var rejected *transcode.PolicyRejectionError
+	if err := w.validateModeSourceQuality(ctx, source, sizeAudioOnlyTestPlan(t, 10)); !errors.As(err, &rejected) || rejected.ReasonCode != "preservation_not_met" {
+		t.Fatalf("the SDR fallback admitted an HDR source: %v", err)
+	}
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source, "-map", "0", "-c", "copy", "-copyinkf", "-c:a", "aac", "-b:a", "128k", candidate).CombinedOutput(); err != nil {
+		t.Fatalf("remux: %v %s", err, out)
+	}
+	evidence, err := w.validateVideoCopy(ctx, source, candidate, goal, "sha256:c", mustSize(t, candidate))
+	if err != nil || evidence.Verdict != "pass" || evidence.VideoCopy.Check() != nil {
+		t.Fatalf("HDR copy rejected: %+v %v", evidence, err)
+	}
+}
+
+func TestSameDynamicRangeIgnoresOnlyTheFramesRead(t *testing.T) {
+	a := mediainspect.DynamicRange{Class: "dolby_vision", FramesProbed: 3, DolbyVision: &mediainspect.DolbyVisionInfo{Profile: 8, BLCompatibilityID: 1, ConfigRecord: true}}
+	b := a
+	b.FramesProbed = 9
+	b.DolbyVision = &mediainspect.DolbyVisionInfo{Profile: 8, BLCompatibilityID: 1, ConfigRecord: true}
+	if !sameDynamicRange(a, b) {
+		t.Fatal("the same signalling read twice differs")
+	}
+	b.DolbyVision = &mediainspect.DolbyVisionInfo{Profile: 8, BLCompatibilityID: 1}
+	if sameDynamicRange(a, b) {
+		t.Fatal("a lost Dolby Vision configuration record passed")
+	}
+	b.DolbyVision, b.MasteringDisplay = a.DolbyVision, &mediainspect.MasteringDisplayMetadata{}
+	if sameDynamicRange(a, b) {
+		t.Fatal("added mastering metadata passed")
+	}
 }
