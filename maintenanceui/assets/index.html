@@ -347,6 +347,9 @@
                 <div class="goal-card">
                   <label class="goal-head"><input type="radio" name="processing-mode" value="compact" /><span class="goal-text"><strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
                 </div>
+                <div class="goal-card">
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="audio_only" /><span class="goal-text"><strong class="goal-title">Audio only</strong><small class="goal-desc">Use it to keep the picture exactly as it is, 4K and HDR included. The video is copied; only heavy audio becomes AAC and unkept tracks are removed. Any smaller result is kept.</small><em id="goal-note-audio_only" class="goal-note" hidden></em></span></label>
+                </div>
                 <details id="more-goals" class="more-goals">
                   <summary>More goals</summary>
                   <div class="goal-card">
@@ -1033,7 +1036,7 @@
       <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
-        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
+        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><option value="audio_only">Audio only · Video copied, only the audio converted</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
         <div id="reconfigure-hardware-option" class="goal-option" hidden>
           <span id="reconfigure-engine-label" class="goal-option-label">Encoder</span>
           <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-engine-label">

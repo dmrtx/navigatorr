@@ -21,6 +21,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		BudgetBytes      *float64 `json:"size_budget_bytes"`
 		BudgetSource     *string  `json:"size_budget_source"`
 		BudgetMultiplier *float64 `json:"size_budget_sibling_multiplier"`
+		AudioOnly        *bool    `json:"audio_only"`
 		ID               string   `json:"id"`
 		Scope            string   `json:"scope"`
 		CandidateID      string   `json:"candidate_id"`
@@ -81,6 +82,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	itemSettings := operationMap(state["batch_item_settings"])
 	var hardware action.HardwareChoice
 	var budgets []frozenBudget
+	audioOnly := 0
 	profiles := map[string]int{}
 	damaged := 0
 	for _, item := range items {
@@ -103,6 +105,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			hardware.Add(allow, margin)
 		}
 		budgets = append(budgets, itemFrozenSizeBudget(state, item.ItemKey))
+		if itemFrozenAudioOnly(state, item.ItemKey) {
+			audioOnly++
+		}
 		if body.Scope == "file" {
 			// The file itself, so the goal dialog can preview its streams.
 			plan["item_key"], plan["source_path"] = item.ItemKey, item.FilePath
@@ -206,6 +211,10 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settingsView["allow_hardware"], settingsView["hardware_margin_percent"] = hardware.Allow, hardware.Margin
 		settingsView["hardware_mixed"] = hardware.Mixed
 	}
+	// Whether the files were frozen with the audio-only goal: all, some or none.
+	if selected > 0 {
+		settingsView["audio_only"], settingsView["audio_only_mixed"] = audioOnly == selected, audioOnly > 0 && audioOnly < selected
+	}
 	// The size budget the files were frozen with, when they agree on one.
 	if len(budgets) > 0 {
 		settingsView["size_budget_mixed"] = false
@@ -255,6 +264,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.BudgetMultiplier != nil {
 			settings["size_budget_sibling_multiplier"] = *body.BudgetMultiplier
+		}
+		if body.AudioOnly != nil && *body.AudioOnly {
+			settings["audio_only"] = true
 		}
 		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
 			fail(w, 400, err.Error())
@@ -320,6 +332,16 @@ func itemFrozenSizeBudget(state map[string]any, itemKey string) frozenBudget {
 		b.source, b.multiplier = "siblings", operationNumber(siblings["multiplier"])
 	}
 	return b
+}
+
+// itemFrozenAudioOnly reports whether the item's goal, its own goal-change
+// policy when it has one, else the batch's, is the audio-only size goal.
+func itemFrozenAudioOnly(state map[string]any, itemKey string) bool {
+	holder := state
+	if row := operationMap(operationMap(state["batch_item_settings"])[itemKey]); operationMap(row["mode_policy"]) != nil {
+		holder = row
+	}
+	return operationMap(operationMap(holder["mode_policy"])["size"])["audio_only"] == true
 }
 
 func containsMode(mode string) bool {

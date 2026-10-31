@@ -156,6 +156,9 @@ func rerunSummary(r operationRecord, rounds map[string]int) map[string]any {
 		"replace_original": r.inputs["replace_original"] == true,
 		"no_winner_rounds": rounds[rerunSource(r)],
 	}
+	if r.inputs["audio_only"] == true {
+		summary["audio_only"] = true
+	}
 	if remedy := remedyMode(r); remedy != "" {
 		summary["remedy_mode"] = remedy
 	}

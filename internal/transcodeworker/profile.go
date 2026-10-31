@@ -91,6 +91,10 @@ func ValidatePlan(p *transcode.Plan) error {
 				return err
 			}
 		}
+		// v7 is the audio-only goal: its plan always copies the video.
+		if p.ModePolicyVersion == transcode.ModePolicyV7 && !audioOnly {
+			return fmt.Errorf("mode policy v7 requires an audio-only plan (fail closed)")
+		}
 	}
 	if normalizeContainer(p.Container) != "mkv" {
 		return fmt.Errorf("unsupported container %q (only mkv is allowed; fail closed)", p.Container)
@@ -120,13 +124,15 @@ func ValidatePlan(p *transcode.Plan) error {
 	if norm(p.AudioMode) == transcode.AudioModeCompactLossless && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV3 && p.ModePolicyVersion != transcode.ModePolicyV6) {
 		return fmt.Errorf("compact_lossless audio requires size mode policy v3 (fail closed)")
 	}
-	if transcode.IsAudioLevelMode(norm(p.AudioMode)) && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV5 && p.ModePolicyVersion != transcode.ModePolicyV6) {
+	if transcode.IsAudioLevelMode(norm(p.AudioMode)) && (p.Mode != "size" || p.ModePolicyVersion != transcode.ModePolicyV5 && p.ModePolicyVersion != transcode.ModePolicyV6 && p.ModePolicyVersion != transcode.ModePolicyV7) {
 		return fmt.Errorf("%s audio requires size mode policy v5 (fail closed)", p.AudioMode)
 	}
-	// A track selection is exactly what makes a plan v6, and the subtitle
-	// actions are those of the kept subtitles only.
-	if (p.Tracks != nil) != (p.ModePolicyVersion == transcode.ModePolicyV6) || p.Tracks != nil && p.Mode != "size" && p.Mode != "compact" {
-		return fmt.Errorf("a track selection requires mode policy v6, and v6 requires a track selection (fail closed)")
+	// A track selection is exactly what makes a plan v6, except under v7 (the
+	// audio-only goal), which may carry one or not. The subtitle actions are
+	// those of the kept subtitles only.
+	v7 := p.ModePolicyVersion == transcode.ModePolicyV7
+	if p.Tracks == nil && p.ModePolicyVersion == transcode.ModePolicyV6 || p.Tracks != nil && p.ModePolicyVersion != transcode.ModePolicyV6 && !v7 || p.Tracks != nil && p.Mode != "size" && p.Mode != "compact" {
+		return fmt.Errorf("a track selection requires mode policy v6 or v7, and v6 requires a track selection (fail closed)")
 	}
 	if err := p.Tracks.Validate(); err != nil {
 		return fmt.Errorf("%w (fail closed)", err)
@@ -290,9 +296,10 @@ func modeAudioMode(mode, version string) string {
 }
 
 // modeAudioModeAllowed also admits size v5's audio levels: its plan carries
-// the level chosen for the source, either of the two.
+// the level chosen for the source, either of the two. The audio-only goal (v7)
+// carries one of them too.
 func modeAudioModeAllowed(mode, version, audioMode string) bool {
-	if mode == "size" && version == transcode.ModePolicyV5 {
+	if mode == "size" && (version == transcode.ModePolicyV5 || version == transcode.ModePolicyV7) {
 		return transcode.IsAudioLevelMode(audioMode)
 	}
 	// v6 extends whichever of the others the goal froze: a size plan carries

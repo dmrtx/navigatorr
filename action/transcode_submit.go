@@ -135,6 +135,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if !caps.SizeAudioOnly {
 			return StepResult{Status: StepFailed, Error: "worker cannot prove a copied video stream; upgrade the worker before encoding"}, nil
 		}
+		if plan.ModePolicyVersion == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal {
+			return StepResult{Status: StepFailed, Error: errAudioOnlyGoalWorker + " before encoding"}, nil
+		}
 	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)

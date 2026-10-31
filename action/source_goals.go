@@ -18,6 +18,10 @@ const (
 // SourceGoalModes lists the automatic goals in display order.
 var SourceGoalModes = []string{"size", "compact", "quality", "x265_preserve"}
 
+// AudioOnlyGoal is the key of the audio-only size goal (mode=size with
+// audio_only) among a source's goal verdicts.
+const AudioOnlyGoal = "audio_only"
+
 // GoalVerdict is whether one goal would take a source or end it as a skip.
 type GoalVerdict struct {
 	Status     string `json:"status"`
@@ -44,7 +48,7 @@ type SourceClassifier func(context.Context, *mediainspect.DetailedReport) (media
 // that needs evidence the caller could not collect yields "unknown", never a
 // guess. classify may be nil to use ffprobe on path with the engine's ffprobe.
 func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect.DetailedReport, classify SourceClassifier) SourceGoals {
-	out := SourceGoals{Goals: make(map[string]GoalVerdict, len(SourceGoalModes))}
+	out := SourceGoals{Goals: make(map[string]GoalVerdict, len(SourceGoalModes)+1)}
 	if rep == nil {
 		return out
 	}
@@ -97,6 +101,10 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 			verdict = GoalVerdict{Status: GoalSkip, ReasonCode: reason}
 		}
 		out.Goals[mode] = verdict
+	}
+	out.Goals[AudioOnlyGoal] = GoalVerdict{Status: GoalOK}
+	if reason := audioOnlySourceReason(gateRep); reason != "" {
+		out.Goals[AudioOnlyGoal] = GoalVerdict{Status: GoalSkip, ReasonCode: reason}
 	}
 	if d, err := classify(ctx, gateRep); err == nil {
 		out.Dynamic = &d

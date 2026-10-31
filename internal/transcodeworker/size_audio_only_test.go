@@ -323,3 +323,63 @@ func mustSize(t *testing.T, path string) int64 {
 	}
 	return info.Size()
 }
+
+// sizeAudioOnlyGoalTestPlan is a plan of the audio-only goal (policy v7): the
+// video copied, a bed level, no minimum savings, and the selection if any.
+func sizeAudioOnlyGoalTestPlan(t *testing.T, sel *transcode.TrackSelection) *transcode.Plan {
+	t.Helper()
+	base := sizeV3TestPlan(false)
+	base.ModePolicyVersion, base.AudioMode, base.SizePolicy = transcode.ModePolicyV7, transcode.AudioModeSizeAACBed, &transcode.SizePolicy{}
+	p, err := transcode.NewSizeAudioOnlyPlan(base, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Tracks = sel
+	p.PlanDigest = ""
+	p.PlanDigest, _ = transcode.DigestPlan(p)
+	return p
+}
+
+func TestSizeAudioOnlyGoalPlanVersion(t *testing.T) {
+	for _, sel := range []*transcode.TrackSelection{nil, {KeepAudio: []int{1}}} {
+		if err := ValidatePlan(sizeAudioOnlyGoalTestPlan(t, sel)); err != nil {
+			t.Fatalf("v7 plan (selection %v) rejected: %v", sel, err)
+		}
+	}
+	if m, ok := transcode.ModeMinimumSavings("size", transcode.ModePolicyV7); !ok || m != 0 {
+		t.Fatalf("v7 size minimum = %d, %v", m, ok)
+	}
+	if _, ok := transcode.ModeMinimumSavings("compact", transcode.ModePolicyV7); ok {
+		t.Fatal("v7 admits compact")
+	}
+	for name, mutate := range map[string]func(*transcode.Plan){
+		"the size goal's minimum": func(p *transcode.Plan) { p.SizePolicy = &transcode.SizePolicy{MinSavingsPercent: 15} },
+		"lossless compaction":     func(p *transcode.Plan) { p.AudioMode = transcode.AudioModeCompactLossless },
+		"audio copied":            func(p *transcode.Plan) { p.AudioMode = "copy" },
+		"compact mode":            func(p *transcode.Plan) { p.Mode = "compact" },
+		"a video encode": func(p *transcode.Plan) {
+			e := sizeV3TestPlan(false)
+			p.VideoCodec, p.Quality, p.Preset, p.VideoProfile, p.PixelFormat, p.QualityValidation = e.VideoCodec, e.Quality, e.Preset, e.VideoProfile, e.PixelFormat, e.QualityValidation
+		},
+	} {
+		p := sizeAudioOnlyGoalTestPlan(t, nil)
+		mutate(p)
+		p.PlanDigest, _ = transcode.DigestPlan(p)
+		if err := ValidatePlan(p); err == nil {
+			t.Errorf("v7 plan with %s accepted", name)
+		}
+	}
+	// v6 still requires its selection, and only v6 and v7 carry one.
+	v6 := sizeAudioOnlyGoalTestPlan(t, nil)
+	v6.ModePolicyVersion, v6.SizePolicy = transcode.ModePolicyV6, &transcode.SizePolicy{MinSavingsPercent: 15}
+	v6.PlanDigest, _ = transcode.DigestPlan(v6)
+	if err := ValidatePlan(v6); err == nil {
+		t.Fatal("v6 plan without a track selection accepted")
+	}
+	v5 := sizeAudioOnlyGoalTestPlan(t, &transcode.TrackSelection{KeepAudio: []int{1}})
+	v5.ModePolicyVersion, v5.SizePolicy = transcode.ModePolicyV5, &transcode.SizePolicy{MinSavingsPercent: 15}
+	v5.PlanDigest, _ = transcode.DigestPlan(v5)
+	if err := ValidatePlan(v5); err == nil {
+		t.Fatal("v5 plan with a track selection accepted")
+	}
+}

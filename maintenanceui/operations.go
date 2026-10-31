@@ -201,7 +201,7 @@ func operationTracks(r operationRecord) map[string]any {
 // operationGoalKeys are the inputs that make up a file job's goal, the ones a
 // new job for the same file needs to run the same goal: Choose tracks starts one
 // from them. Paths, receipts and profiles are not among them.
-var operationGoalKeys = []string{"mode", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "media_type", "is_anime"}
+var operationGoalKeys = []string{"mode", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "media_type", "is_anime"}
 
 // operationGoal is the goal a Save space or Shrink job was submitted with, as
 // the job's inputs hold it. It is nil for any other job.

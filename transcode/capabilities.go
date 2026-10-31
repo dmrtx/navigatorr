@@ -121,6 +121,12 @@ type WorkerCapabilities struct {
 	// those modes, so the coordinator checks this before it submits one. Like
 	// TrackSelection, it is not part of the pinned capability fingerprint.
 	SizeAudioObjectBed bool `json:"size_audio_object_bed,omitempty"`
+	// SizeAudioOnlyGoal reports a worker that runs plans of mode policy v7, the
+	// size goal "audio only": a copied video, the audio levels, an optional
+	// track selection and no fixed minimum savings. Older workers refuse the
+	// version, so the coordinator checks this before it submits one. Like
+	// TrackSelection, it is not part of the pinned capability fingerprint.
+	SizeAudioOnlyGoal bool `json:"size_audio_only_goal,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
