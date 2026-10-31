@@ -30,7 +30,7 @@ func TestCompactBenchmarkExplainsAStoredNoWinnerAndActualAudioPlan(t *testing.T)
 	if len(s.Audio) != 2 || s.Audio[0].Operation != "copy" || s.Audio[0].OutputCodec != "eac3" || s.Audio[0].TargetKbps != 0 || s.Audio[1].TargetKbps != 192 {
 		t.Fatalf("incorrect audio conversion claim: %+v", s.Audio)
 	}
-	if !strings.Contains(s.NextStep, "Keep the original") || !strings.Contains(s.AudioNote, "Planned audio only") {
+	if !strings.Contains(s.NextStep, "Keep the original") || !strings.Contains(s.AudioNote, "Planned audio only") || !strings.Contains(s.AudioNote, "EAC3") {
 		t.Fatalf("missing next step or evidence limits: %+v", s)
 	}
 	b, _ := json.Marshal(s)
@@ -67,6 +67,10 @@ func TestSizeBenchmarkShowsAudioLevelOne(t *testing.T) {
 		if a := s.Audio[i]; a.OutputCodec != want.output || a.TargetKbps != want.kbps {
 			t.Errorf("track %d: %+v, want %+v", i, a, want)
 		}
+	}
+	// The size goal's levels convert E-AC-3, so the note must not say it is copied.
+	if strings.Contains(s.AudioNote, "EAC3") {
+		t.Errorf("size goal note claims E-AC-3 is copied: %q", s.AudioNote)
 	}
 }
 
