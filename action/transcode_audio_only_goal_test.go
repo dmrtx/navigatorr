@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -119,6 +120,13 @@ func TestAudioOnlyGoalPlansACopy(t *testing.T) {
 	if result, handled := small.engine.startAudioOnlyGoal(context.Background(), small.ec); !handled || result.Status != StepCompleted || getString(small.ec.State, "reason_code") != "audio_only_nothing_to_convert" {
 		t.Fatalf("nothing to convert %+v state %+v", result, small.ec.State)
 	}
+	// Hand-picked boxes that keep every track remove nothing either.
+	kept := newAudioOnlyGoalCase(t, audioOnlyGoalCaps())
+	kept.ec.State["source_report"] = rep
+	kept.ec.State[trackSelectionKey] = &transcode.TrackSelection{KeepAudio: []int{1}}
+	if result, handled := kept.engine.startAudioOnlyGoal(context.Background(), kept.ec); !handled || result.Status != StepCompleted || getString(kept.ec.State, "reason_code") != "audio_only_nothing_to_convert" {
+		t.Fatalf("selection keeping everything %+v state %+v", result, kept.ec.State)
+	}
 }
 
 func TestAudioOnlyGoalKeepsAnySmallerFile(t *testing.T) {
@@ -133,6 +141,7 @@ func TestAudioOnlyGoalKeepsAnySmallerFile(t *testing.T) {
 	}{
 		"5% smaller": {candidate: 95, saved: true},
 		"larger":     {candidate: 101},
+		"the same":   {candidate: 100},
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := t.TempDir() + "/candidate.mkv"
@@ -175,5 +184,22 @@ func TestAudioOnlySourceReasonTakesHDR(t *testing.T) {
 	rep.Video[0].BitDepth = 12
 	if audioOnlySourceReason(rep) != "unsupported_source" {
 		t.Fatal("12-bit video accepted")
+	}
+}
+
+// The audio-only goal encodes no video, so a goal change away from it starts
+// from the default media engine choice, not from "off".
+func TestAudioOnlyGoalMadeNoMediaEngineChoice(t *testing.T) {
+	c := newAudioOnlyGoalCase(t, audioOnlyGoalCaps())
+	data, err := json.Marshal(map[string]any{"mode_policy": c.snapshot})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var holder map[string]any
+	if err := json.Unmarshal(data, &holder); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := FrozenHardware(holder); ok {
+		t.Fatal("the audio-only goal reports a media engine choice")
 	}
 }

@@ -14,7 +14,8 @@ func objectMap(v any) map[string]any {
 // or HEVC attempt reports no choice and so does an operation not frozen yet.
 func FrozenHardware(holder any) (allow bool, margin any, ok bool) {
 	size := objectMap(objectMap(objectMap(holder)["mode_policy"])["size"])
-	if size == nil {
+	// The audio-only goal encodes no video, so it made no choice either.
+	if size == nil || size["audio_only"] == true {
 		return false, nil, false
 	}
 	rules := objectMap(size["hardware_search"])

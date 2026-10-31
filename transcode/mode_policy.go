@@ -54,6 +54,11 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 	if !valid || source <= 0 || candidate <= 0 {
 		return false
 	}
+	// The audio-only goal promises a smaller file: one the same size saved
+	// nothing. Other goals with no minimum keep any file that did not grow.
+	if version == ModePolicyV7 {
+		return candidate < source
+	}
 	if minimum == 0 {
 		return candidate <= source
 	}

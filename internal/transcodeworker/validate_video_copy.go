@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -198,6 +199,23 @@ func (w *Worker) validateVideoCopy(ctx context.Context, source, candidate string
 	if of(s, srcFacts) != of(c, candFacts) {
 		return fail("video_copy_parameters_changed", fmt.Errorf("source %+v, candidate %+v", of(s, srcFacts), of(c, candFacts)))
 	}
+	// HDR and Dolby Vision signalling partly lives in the container (the
+	// mastering display, light level and Dolby Vision configuration), which
+	// identical packets do not prove; the audio-only goal admits such sources,
+	// so their classification must survive the remux unchanged.
+	if plan.ModePolicyVersion == transcode.ModePolicyV7 && (mediainspect.IsHDRorDolbyVisionReport(&srcRep) || mediainspect.IsHDRorDolbyVisionReport(&candRep)) {
+		srcDR, err := classifySourceDynamicRange(ctx, w.ffprobePath, source, &srcRep)
+		if err != nil {
+			return nil, fmt.Errorf("video_copy_source_unreadable: %w", err)
+		}
+		candDR, err := classifySourceDynamicRange(ctx, w.ffprobePath, candidate, &candRep)
+		if err != nil {
+			return nil, fmt.Errorf("video_copy_candidate_unreadable: %w", err)
+		}
+		if !sameDynamicRange(srcDR, candDR) {
+			return fail("video_copy_dynamic_range_changed", fmt.Errorf("source %+v, candidate %+v", srcDR, candDR))
+		}
+	}
 	// Both files are read in parallel: the proof reads every packet.
 	type listing struct {
 		packets []videoPacket
@@ -223,4 +241,11 @@ func (w *Worker) validateVideoCopy(ctx context.Context, source, candidate string
 	}
 	copyEvidence.Verdict, evidence.Verdict = "pass", "pass"
 	return evidence, nil
+}
+
+// sameDynamicRange compares two classifications of the same video stream,
+// ignoring how many frames each read took.
+func sameDynamicRange(a, b mediainspect.DynamicRange) bool {
+	a.FramesProbed, b.FramesProbed = 0, 0
+	return reflect.DeepEqual(a, b)
 }

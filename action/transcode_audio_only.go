@@ -208,11 +208,15 @@ func (e *Engine) startAudioOnlyGoal(ctx context.Context, ec *ExecutionContext) (
 	}
 	outputs := map[string]any{}
 	original := getInt64(ec.State, "original_size")
-	keptRep, keptBytes := keptViewOf(ec.State, getSourceReport(ec.State["source_report"]), original)
+	rep := getSourceReport(ec.State["source_report"])
+	keptRep, keptBytes := keptViewOf(ec.State, rep, original)
 	estimate := estimateAudioOnly(keptRep, keptBytes, base.AudioMode)
 	outputs["audio_only_estimated_bytes"] = estimate.CandidateBytes
 	ec.State["audio_only_estimated_bytes"] = estimate.CandidateBytes
-	if estimate.Compacted == 0 && trackSelectionOf(ec.State) == nil {
+	// A selection that keeps every track (hand-picked boxes left as they were)
+	// removes nothing either.
+	removes := rep != nil && keptRep != nil && len(keptRep.Audio)+len(keptRep.Subtitles) < len(rep.Audio)+len(rep.Subtitles)
+	if estimate.Compacted == 0 && !removes {
 		return skipAudioOnly(ec, outputs, "audio_only_nothing_to_convert")
 	}
 	return e.commitAudioOnlyPlan(ctx, ec, base, base.AudioMode, outputs, "This goal copies the video unchanged and only converts the audio (and removes the tracks it does not keep); the file is kept if it comes out smaller.")
