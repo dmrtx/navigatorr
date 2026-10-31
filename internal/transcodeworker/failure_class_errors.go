@@ -72,3 +72,12 @@ func candidateHashFailure(err error) error {
 	}
 	return err
 }
+
+// sourceDamaged marks err as the source's own bytes being damaged. Every
+// retry of the same file fails the same way, so none is offered.
+func sourceDamaged(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &classedError{class: resilience.FFmpegInputCorrupt, err: err}
+}

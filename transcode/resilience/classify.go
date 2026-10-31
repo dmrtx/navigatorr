@@ -80,7 +80,7 @@ func Classify(message string) FailureClass {
 	s := strings.ToLower(message)
 	// Explicit serialized classes take precedence over generic phrases such
 	// as "connection reset", which formerly labeled SMB failures as SSH.
-	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid} {
+	for _, class := range []FailureClass{SMBSigningRequired, SMBSessionInvalid, SMBAuthFailed, SMBTransportError, StoragePermissionDenied, StorageIOError, SourceUnreachable, Cancelled, StorageFull, BenchmarkEvidenceIncomplete, InternalInvariant, MediaProbeFailed, CandidateInvalid, FFmpegInputCorrupt} {
 		if s == string(class) || strings.Contains(s, string(class)+":") {
 			return class
 		}

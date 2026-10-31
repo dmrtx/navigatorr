@@ -198,18 +198,21 @@ type DetailedStream struct {
 
 // DetailedReport provides full-fidelity inspection including video, audio, subtitles, attachments, and chapters.
 type DetailedReport struct {
-	Path        string           `json:"path"`
-	Container   string           `json:"container"`
-	DurationSec float64          `json:"duration_sec"`
-	SizeBytes   int64            `json:"size_bytes"`
-	BitRate     int64            `json:"bit_rate,omitempty"` // format/overall container bitrate in bps
-	Video       []DetailedStream `json:"video"`
-	Audio       []DetailedStream `json:"audio"`
-	Subtitles   []DetailedStream `json:"subtitles"`
-	Attachments []DetailedStream `json:"attachments"`
-	Chapters    int              `json:"chapters"`
-	Probed      bool             `json:"probed"`
-	HDR         *HDRReport       `json:"hdr,omitempty"`
+	Path        string  `json:"path"`
+	Container   string  `json:"container"`
+	DurationSec float64 `json:"duration_sec"`
+	// VideoSeconds is the programme video's measured length from its first
+	// picture (MeasureVideoSeconds), zero when it was not measured.
+	VideoSeconds float64          `json:"video_seconds,omitempty"`
+	SizeBytes    int64            `json:"size_bytes"`
+	BitRate      int64            `json:"bit_rate,omitempty"` // format/overall container bitrate in bps
+	Video        []DetailedStream `json:"video"`
+	Audio        []DetailedStream `json:"audio"`
+	Subtitles    []DetailedStream `json:"subtitles"`
+	Attachments  []DetailedStream `json:"attachments"`
+	Chapters     int              `json:"chapters"`
+	Probed       bool             `json:"probed"`
+	HDR          *HDRReport       `json:"hdr,omitempty"`
 	// ProbeFailure is why the file was not inspected (Probed is false). It is
 	// the same *ProbeError InspectDetailed returns and is never serialized.
 	ProbeFailure *ProbeError `json:"-"`

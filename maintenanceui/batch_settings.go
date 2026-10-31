@@ -82,7 +82,11 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	var hardware action.HardwareChoice
 	var budgets []frozenBudget
 	profiles := map[string]int{}
+	damaged := 0
 	for _, item := range items {
+		if (body.Scope == "unfinished" || body.Scope == "all") && action.BatchItemSourceDamaged(item) {
+			damaged++
+		}
 		if !action.BatchRevisionSelects(item, body.Scope, selectionID) {
 			continue
 		}
@@ -159,6 +163,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	plan["selected"], plan["kept"], plan["active"], plan["files"] = selected, len(items)-selected, active, files
+	plan["damaged"] = damaged
 	plan["requires_explicit_profile"] = requiresProfile
 	plan["mode"] = inputs["mode"]
 	if goal := operationString(state["batch_goal"]); goal != "" {

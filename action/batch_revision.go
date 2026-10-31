@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
 func stateObject(state map[string]any, key string) map[string]any {
@@ -44,9 +45,24 @@ func BatchRevisionSelects(item store.TranscodeBatchItem, scope, selectionID stri
 		return item.ChildActionID == selectionID && selectionID != ""
 	}
 	if scope == "all" {
-		return true
+		return !BatchItemSourceDamaged(item)
 	}
-	return scope == "unfinished" && item.Status != "completed" && item.Status != "skip"
+	return scope == "unfinished" && item.Status != "completed" && item.Status != "skip" && !BatchItemSourceDamaged(item)
+}
+
+// BatchItemSourceDamaged reports a file whose last run failed because its own
+// bytes are damaged: the worker's packet scan said so, or the MP4 has no moov
+// atom. A run of the batch's unfinished or all files leaves it out, since it
+// would fail the same way until the file is replaced; the settings dialog
+// counts it, and once replaced it is run again by selecting that file. Other
+// unreadable-input errors ("Invalid data found") can be passing, a file read
+// while it was still being copied, and are run again as before.
+func BatchItemSourceDamaged(item store.TranscodeBatchItem) bool {
+	if item.Status != "failed" {
+		return false
+	}
+	msg := strings.ToLower(item.Error)
+	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found")
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {

@@ -202,6 +202,32 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if probeErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
+	// A damaged container, or final windows past the end of the video, fail
+	// in seconds here instead of at the final gate after the whole encode.
+	if videoIndex := programmeVideoIndex(srcProbe.Streams); videoIndex >= 0 {
+		scanStart := time.Now()
+		scanCPU := &cpuMeter{}
+		scan, scanErr := w.scanSourceVideoForJob(withCPUMeter(ctx, scanCPU), r.effectiveInput, videoIndex)
+		scanCost := transcode.PhaseCost{ActiveComputeMs: scanCPU.activeComputeMs()}
+		if inputOnNAS {
+			scanCost.NASReadBytes = knownCount(sourceInfo.Size())
+		}
+		w.persistPhaseCost(jobDir, jobFile, job, "source_scan", scanStart, scanCost)
+		if scanErr != nil {
+			if ctx.Err() != nil {
+				// The runner is shutting down mid-scan: leave the job
+				// resumable instead of failing it as killed.
+				return ctx.Err()
+			}
+			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source video packets: %w", scanErr))
+		}
+		if err := scan.damage(sourceInfo.Size()); err != nil {
+			return w.failJobTerminal(jobDir, jobFile, job, err)
+		}
+		if err := finalWindowsFitVideo(job.Plan, scan); err != nil {
+			return w.failJobTerminal(jobDir, jobFile, job, err)
+		}
+	}
 
 	if err := w.validateModeSourceQuality(ctx, r.effectiveInput, job.Plan); err != nil {
 		var rejected *transcode.PolicyRejectionError
@@ -1441,6 +1467,19 @@ func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (Sou
 		return SourceProbe{Streams: streams, DurationSec: dur}, err
 	}
 	return ProbeSourceDetails(ctx, w.ffprobePath, path)
+}
+
+// scanSourceVideoForJob uses the injected scan when present. A test that
+// injects the probe describes a file it never wrote, so without an injected
+// scan there is nothing to scan and the scan finds nothing.
+func (w *Worker) scanSourceVideoForJob(ctx context.Context, path string, streamIndex int) (sourceVideoScan, error) {
+	if w.scanVideo != nil {
+		return w.scanVideo(ctx, path, streamIndex)
+	}
+	if w.probeDetails != nil || w.probeSource != nil {
+		return sourceVideoScan{FirstErrorByte: -1}, nil
+	}
+	return scanSourceVideo(ctx, w.ffprobePath, path, streamIndex)
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the

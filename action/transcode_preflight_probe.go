@@ -19,6 +19,7 @@ const preflightProbeAttempts = 2
 var (
 	preflightProbeBackoff = 3 * time.Second
 	preflightInspect      = mediainspect.InspectDetailed
+	preflightVideoSeconds = mediainspect.MeasureVideoSeconds
 )
 
 // inspectSourceForPreflight inspects the original. A failure that could be
@@ -35,6 +36,7 @@ func (e *Engine) inspectSourceForPreflight(ctx context.Context, ec *ExecutionCon
 	for attempt = 1; attempt <= preflightProbeAttempts; attempt++ {
 		rep, err = preflightInspect(ctx, e.deps.Ffprobe, path)
 		if err == nil && rep.Probed {
+			measureVideoSeconds(ctx, e.deps.Ffprobe, path, &rep)
 			return rep, nil
 		}
 		if err == nil {
@@ -61,4 +63,18 @@ func (e *Engine) inspectSourceForPreflight(ctx context.Context, ec *ExecutionCon
 		err = fmt.Errorf("%w (after %d attempts)", err, attempt)
 	}
 	return rep, err
+}
+
+// measureVideoSeconds records how long the programme video runs, which the
+// quality windows are planned on when the container runs longer
+// (DetailedReport.WindowSeconds). It is best effort: a video that cannot be
+// measured keeps the container's duration, as every source did before.
+func measureVideoSeconds(ctx context.Context, ffprobe, path string, rep *mediainspect.DetailedReport) {
+	video := rep.MainVideo()
+	if len(video) == 0 {
+		return
+	}
+	if seconds, err := preflightVideoSeconds(ctx, ffprobe, path, video[0].Index, rep.DurationSec); err == nil && seconds > 0 {
+		rep.VideoSeconds = seconds
+	}
 }
