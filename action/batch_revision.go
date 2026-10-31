@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
 func stateObject(state map[string]any, key string) map[string]any {
@@ -44,9 +45,17 @@ func BatchRevisionSelects(item store.TranscodeBatchItem, scope, selectionID stri
 		return item.ChildActionID == selectionID && selectionID != ""
 	}
 	if scope == "all" {
-		return true
+		return !BatchItemSourceDamaged(item)
 	}
-	return scope == "unfinished" && item.Status != "completed" && item.Status != "skip"
+	return scope == "unfinished" && item.Status != "completed" && item.Status != "skip" && !BatchItemSourceDamaged(item)
+}
+
+// BatchItemSourceDamaged reports a file whose last run failed because its own
+// bytes are damaged. A run of the batch's unfinished or all files leaves it
+// out: it would fail the same way until the file is replaced, and a replaced
+// file is run again on its own.
+func BatchItemSourceDamaged(item store.TranscodeBatchItem) bool {
+	return item.Status == "failed" && resilience.Classify(item.Error) == resilience.FFmpegInputCorrupt
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {

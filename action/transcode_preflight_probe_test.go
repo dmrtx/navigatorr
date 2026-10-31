@@ -203,3 +203,31 @@ func TestPreflightProbeRetryStopsWhenTheCallerCancels(t *testing.T) {
 		})
 	}
 }
+
+// Preflight measures the programme video, never cover art, and a failed
+// measurement leaves the report as ffprobe described it.
+func TestPreflightMeasuresTheProgrammeVideo(t *testing.T) {
+	old := preflightVideoSeconds
+	t.Cleanup(func() { preflightVideoSeconds = old })
+	rep := mediainspect.DetailedReport{DurationSec: 100, Video: []mediainspect.DetailedStream{
+		{Index: 0, Kind: "video", Disposition: map[string]int{"attached_pic": 1}},
+		{Index: 1, Kind: "video"},
+	}}
+	var measured []int
+	preflightVideoSeconds = func(_ context.Context, _, _ string, index int, duration float64) (float64, error) {
+		measured = append(measured, index)
+		return 80, nil
+	}
+	measureVideoSeconds(context.Background(), "ffprobe", "/media/a.mkv", &rep)
+	if len(measured) != 1 || measured[0] != 1 || rep.VideoSeconds != 80 || rep.WindowSeconds() != 80 {
+		t.Fatalf("measured %v, video %v", measured, rep.VideoSeconds)
+	}
+	rep.VideoSeconds = 0
+	preflightVideoSeconds = func(context.Context, string, string, int, float64) (float64, error) {
+		return 0, errors.New("timed out")
+	}
+	measureVideoSeconds(context.Background(), "ffprobe", "/media/a.mkv", &rep)
+	if rep.VideoSeconds != 0 || rep.WindowSeconds() != 100 {
+		t.Fatalf("a failed measurement changed the report: %+v", rep)
+	}
+}

@@ -306,6 +306,7 @@ type Worker struct {
 	runFFmpeg             func(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error
 	probeSource           func(ctx context.Context, path string) ([]SourceStream, float64, error)
 	probeDetails          func(ctx context.Context, path string) (SourceProbe, error)
+	scanVideo             func(ctx context.Context, path string, streamIndex int) (sourceVideoScan, error)
 	finalizeOutput        func(ctx context.Context, localCandidate, destination, jobID string) error
 	afterEncodeCheckpoint func(jobDir string, job *JobRecord)
 	// leaseManager is optional: when set, external staging sources and external

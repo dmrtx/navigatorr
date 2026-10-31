@@ -30,13 +30,13 @@ func finalValidationJobID(ec *ExecutionContext) (string, error) {
 	return id, nil
 }
 
-// buildFinalSamples places the sample windows the source's duration allows.
+// buildFinalSamples places the sample windows the source's video allows.
 func buildFinalSamples(rep *mediainspect.DetailedReport, optSampling *recipe.SamplingPolicy) ([]transcode.BenchmarkSampleWindow, error) {
-	if rep.DurationSec <= 0 {
-		return nil, fmt.Errorf("invalid source duration %.3f: must be positive", rep.DurationSec)
+	if rep.WindowSeconds() <= 0 {
+		return nil, fmt.Errorf("invalid source duration %.3f: must be positive", rep.WindowSeconds())
 	}
 	samplePlan, err := transcode.PlanSamples(transcode.SamplePlanConfig{
-		Duration:          rep.DurationSec,
+		Duration:          rep.WindowSeconds(),
 		SampleSeconds:     optSampling.SampleSeconds,
 		SampleCount:       optSampling.SampleCount,
 		Positions:         optSampling.Positions,
@@ -201,7 +201,7 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if err != nil {
 		return nil, err
 	}
-	if samples, err = finalSampleWindows(rep.DurationSec, samples); err != nil {
+	if samples, err = finalSampleWindows(rep.WindowSeconds(), samples); err != nil {
 		return nil, err
 	}
 	metric, err := finalValidationMetric(opt.Quality)
@@ -240,11 +240,13 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 		ProtocolVersion: transcode.WorkerProtocolVersion,
 		ID:              id,
 		SourcePath:      cleanPath,
-		SourceDuration:  rep.DurationSec,
-		Metric:          metric,
-		Samples:         samples,
-		Quality:         ensureFinalQualityMetric(buildFinalQualityConfig(opt.Quality), metric),
-		SourceSHA256:    getString(ec.State, "original_sha256"),
+		// The windows are planned on the video, which can end before a
+		// container that a subtitle or attachment keeps running.
+		SourceDuration: rep.WindowSeconds(),
+		Metric:         metric,
+		Samples:        samples,
+		Quality:        ensureFinalQualityMetric(buildFinalQualityConfig(opt.Quality), metric),
+		SourceSHA256:   getString(ec.State, "original_sha256"),
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		policy, err := freezeModePolicy(ec)

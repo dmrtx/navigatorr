@@ -334,3 +334,26 @@ func reviewedItemMode(ec *ExecutionContext, item store.TranscodeBatchItem) strin
 	}
 	return getString(ec.Inputs, "mode")
 }
+
+// A file that failed on its own damaged bytes, at the coordinator's probe or
+// in the worker's scan, is left out of a batch-wide run: it would fail the
+// same way. It can still be run on its own once replaced.
+func TestBatchRevisionLeavesDamagedFilesOut(t *testing.T) {
+	probe := store.TranscodeBatchItem{ItemKey: "a", Status: "failed", Error: "failed to probe original media /m/S03.mp4 (fail closed): ffprobe tool_exit after 63ms: exit status 1: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov atom not found\n/m/S03.mp4: Invalid data found when processing input"}
+	scan := store.TranscodeBatchItem{ItemKey: "b", Status: "failed", Error: "worker job failed: ffmpeg_input_corrupt: the source file is damaged: reading its video the demuxer reported 28 errors"}
+	other := store.TranscodeBatchItem{ItemKey: "c", Status: "failed", Error: "quality_final_sample_misaligned: window 4"}
+	for _, item := range []store.TranscodeBatchItem{probe, scan} {
+		if !BatchItemSourceDamaged(item) {
+			t.Fatalf("%s: not seen as damaged", item.ItemKey)
+		}
+		if BatchRevisionSelects(item, "unfinished", "") || BatchRevisionSelects(item, "all", "") {
+			t.Fatalf("%s: a damaged file was selected for a batch-wide run", item.ItemKey)
+		}
+		if !BatchRevisionSelects(item, "file", item.ItemKey) {
+			t.Fatalf("%s: a damaged file cannot be run on its own", item.ItemKey)
+		}
+	}
+	if BatchItemSourceDamaged(other) || !BatchRevisionSelects(other, "unfinished", "") {
+		t.Fatal("an ordinary failure was left out")
+	}
+}

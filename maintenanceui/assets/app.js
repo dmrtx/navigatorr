@@ -4386,7 +4386,8 @@ $("reconfigure-hardware").addEventListener("change", updateReconfigureHardware);
 $("reconfigure-budget-kind").addEventListener("change", updateReconfigureHardware);
 function batchSettingsSummary(plan) {
   const selection = plan.selected === 1 && plan.files?.[0] ? plan.files[0] : `${plan.title || "Saved selection"} · ${plan.selected} files`;
-  return `${selection}${plan.active > 0 ? ` · ${plan.active} active ${plan.active === 1 ? "file finishes" : "files finish"} first` : ""}`;
+  const damaged = plan.damaged > 0 ? ` · ${plan.damaged} damaged ${plan.damaged === 1 ? "file is" : "files are"} left out; replace ${plan.damaged === 1 ? "it" : "them"}, then run ${plan.damaged === 1 ? "it" : "each"} again on ${plan.damaged === 1 ? "its" : "their"} own` : "";
+  return `${selection}${plan.active > 0 ? ` · ${plan.active} active ${plan.active === 1 ? "file finishes" : "files finish"} first` : ""}${damaged}`;
 }
 function updateBatchSettingsProfile() {
   const plan = state.reconfigurePlan;
