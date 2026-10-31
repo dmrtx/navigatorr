@@ -4390,7 +4390,8 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-mode").value = goalKeyOf(plan.mode, plan.settings.audio_only === true) || "quality";
     // A batch that never said anything about the media engine gets the default: on, 15 %.
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
-    setShrinkHeight("reconfigure-height", shrinkOffers(plan.settings.max_height) ? plan.settings.max_height : 1080);
+    // A batch frozen at 720 or 1440 shows neither until one is picked.
+    setShrinkHeight("reconfigure-height", plan.settings.max_height || 1080);
     showSizeBudget("reconfigure-budget", plan.settings);
     updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
@@ -4593,7 +4594,7 @@ async function submitReconfiguredBatch() {
   };
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:goalMode($("reconfigure-mode").value)} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
   if (plan.mode && $("reconfigure-mode").value === "audio_only") body.audio_only = true;
-  else if (plan.mode && body.mode === "compact" && shrinkHeight("reconfigure-height") !== 1080) body.max_height = shrinkHeight("reconfigure-height");
+  else if (plan.mode && body.mode === "compact" && shrinkHeight("reconfigure-height", plan.settings.max_height) !== 1080) body.max_height = shrinkHeight("reconfigure-height", plan.settings.max_height);
   else if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
@@ -4839,10 +4840,11 @@ function applyGoalSettings(path, goal) {
   showSizeBudget("size-budget", goal);
   const inputs = {};
   for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
-  // A height the Resolution choice offers is shown there instead of carried.
-  if (goal.mode === "compact" && shrinkOffers(goal.max_height ?? 1080)) {
+  // A height the Resolution choice offers is shown there instead of carried;
+  // a carried 720 or 1440 leaves both unpicked, so either pick replaces it.
+  if (goal.mode === "compact") {
     setShrinkHeight("compact-height", goal.max_height ?? 1080);
-    delete inputs.max_height;
+    if (shrinkOffers(goal.max_height ?? 1080)) delete inputs.max_height;
   }
   state.goalCarry = {path, mode: goalKeyOf(goal.mode, goal.audio_only === true), inputs};
   renderShrinkTitle();
@@ -4870,8 +4872,10 @@ function shrinkLabel(height) {
 function shrinkRadios(name) {
   return [...document.querySelectorAll(`input[name="${name}"]`)];
 }
-function shrinkHeight(name) {
-  return Number(shrinkRadios(name).find(r => r.checked)?.value || 1080);
+// The picked height; with neither picked (a 720 or 1440 kept from before),
+// the given fallback.
+function shrinkHeight(name, fallback = 1080) {
+  return Number(shrinkRadios(name).find(r => r.checked)?.value || fallback);
 }
 function setShrinkHeight(name, height) {
   for (const radio of shrinkRadios(name)) radio.checked = Number(radio.value) === height;

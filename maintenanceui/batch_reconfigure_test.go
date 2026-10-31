@@ -398,6 +398,13 @@ func TestGoalChangeCarriesAndShowsTheShrinkHeight(t *testing.T) {
 		t.Fatalf("mixed heights shown as one: %v", got)
 	}
 	_, version := read(map[string]any{})
+	// A height with another goal, or one Shrink does not offer, is refused now.
+	for _, bad := range []map[string]any{{"mode": "size", "max_height": 2160}, {"mode": "compact", "max_height": 900}} {
+		bad["id"], bad["scope"], bad["selection_version"], bad["key"] = "failed-batch", "all", version, "goal-bad"
+		if w := request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, bad), true); w.Code != 400 {
+			t.Fatalf("%v: %d %s", bad, w.Code, w.Body.String())
+		}
+	}
 	body := mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": version, "key": "goal-4k", "mode": "compact", "max_height": 2160})
 	w := request(h, "POST", "/api/maintenance/batch-settings", body, true)
 	var receipt map[string]string

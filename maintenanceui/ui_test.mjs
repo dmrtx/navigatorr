@@ -7373,9 +7373,12 @@ test("Shrink offers 1080p or Keep 4K, and only Keep 4K names a height", async ()
   assert.equal(title(), "Shrink to 4K SDR");
   await submit();
   assert.equal(sent[1].max_height, 2160);
-  // An earlier job's 720 is carried until a resolution is chosen.
+  // An earlier job's 720 is carried until a resolution is chosen, with
+  // neither picked, so picking 1080 replaces it.
+  pick("compact-height", "1080");
   h.run('$("path").value = "/media/one.mp4"; applyGoalSettings("/media/one.mp4", {mode:"compact", max_height:720})');
   assert.equal(title(), "Shrink to 720p SDR");
+  assert.equal(h.run('shrinkRadios("compact-height").some(r => r.checked)'), false);
   pick("compact-height", "1080");
   assert.equal(title(), "Shrink to 1080p SDR");
   await submit();
@@ -7384,6 +7387,9 @@ test("Shrink offers 1080p or Keep 4K, and only Keep 4K names a height", async ()
   h.run('applyGoalSettings("/media/one.mp4", {mode:"compact", max_height:2160})');
   assert.equal(h.run('shrinkHeight("compact-height")'), 2160);
   assert.equal(h.run('"max_height" in state.goalCarry.inputs'), false);
+  // The change-goal dialog keeps a batch frozen at 720 until a height is picked.
+  h.run('setShrinkHeight("reconfigure-height", 720)');
+  assert.equal(h.run('shrinkHeight("reconfigure-height", 720)'), 720);
   // Encode again keeps a batch file's frozen height; the batch row names it.
   assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"compact",settings:{max_height:2160}}).max_height'), 2160);
   assert.equal(h.run("shrinkLabel(2160)"), "Shrink to 4K SDR");

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Uses the stored item relation, never the current Sonarr/folder catalog.
@@ -280,6 +281,11 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			settings["audio_only"] = true
 		}
 		if body.MaxHeight != nil {
+			// Refused now rather than when the goal change runs.
+			if body.Mode != "compact" || !transcode.ValidCompactMaxHeight(int(*body.MaxHeight)) || *body.MaxHeight != float64(int(*body.MaxHeight)) {
+				fail(w, 400, fmt.Sprintf("max_height is only supported with mode=compact and must be one of %v", transcode.CompactMaxHeights))
+				return
+			}
 			settings["max_height"] = *body.MaxHeight
 		}
 		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
