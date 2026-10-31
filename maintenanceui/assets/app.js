@@ -2575,15 +2575,18 @@ function trackPlanText(kind, track, mode, kept, total) {
   return [size, plan].filter(Boolean).join(" → ");
 }
 // Kept audio before and after the goal's audio mode (key), kept subtitles, and
-// what removed tracks weigh. A copied track keeps its own size.
+// what removed tracks weigh. A copied track keeps its own size; a kept track of
+// unknown size is left out of both audio totals, so they compare like with
+// like. converted counts the kept tracks the mode converts.
 function previewTotals(data, kept, key) {
-  const t = {audio: 0, after: 0, subtitles: 0, removed: 0, unknown: 0};
+  const t = {audio: 0, after: 0, subtitles: 0, removed: 0, unknown: 0, converted: 0};
   for (const track of data.audio) {
     if (!kept("audio", track)) { t.removed += track.bytes || 0; continue; }
-    const out = track.outputs?.[key];
-    if (!track.bytes) t.unknown++;
-    t.audio += track.bytes || 0;
-    t.after += out && out.output !== "copy" ? out.bytes : track.bytes || 0;
+    const out = track.outputs?.[key], converted = out && out.output !== "copy";
+    if (converted) t.converted++;
+    if (!track.bytes) { t.unknown++; continue; }
+    t.audio += track.bytes;
+    t.after += converted ? out.bytes : track.bytes;
   }
   for (const track of data.subtitles) {
     if (kept("subtitles", track)) t.subtitles += track.bytes || 0;
@@ -2601,7 +2604,7 @@ function streamPreview(output, data, mode, kept) {
   const add = (label, value) => facts.append(node("dt", label), node("dd", value));
   add("File", bytes(total));
   add("Video", video ? `${data.video_approx ? "≈ " : ""}${bytes(video)} · ${pct(video)} · re-encoded, its new size is set by the encode` : "Size unknown · re-encoded");
-  add("Audio kept", t.audio ? `${bytes(t.audio)} · ${pct(t.audio)}${t.after < t.audio ? ` → about ${bytes(t.after)}` : " · copied"}` : t.unknown ? "Size unknown" : "None");
+  add("Audio kept", t.audio ? `${bytes(t.audio)} · ${pct(t.audio)}${t.converted ? ` → about ${bytes(t.after)}` : " · copied"}` : t.unknown ? "Size unknown" : "None");
   if (t.subtitles) add("Subtitles kept", `${bytes(t.subtitles)}${t.subtitles >= total / 100 ? ` · ${pct(t.subtitles)}` : ""}`);
   if (t.removed) add("Tracks removed", `−${bytes(t.removed)} · ${pct(t.removed)}`);
   output.append(facts);
@@ -2613,7 +2616,7 @@ function streamPreview(output, data, mode, kept) {
     if (more >= Math.max(total / 100, 1e6)) output.append(node("p", `Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about ${bytes(more)} more. A size budget switches to it when the budget needs it.`, "metadata"));
   }
   if (video && t.audio > video) {
-    const copied = !previewAudioKey(mode) || t.after >= t.audio;
+    const copied = !t.converted;
     output.append(node("p", `Audio weighs more than the video in this file (${bytes(t.audio)} against ${bytes(video)}).${copied ? " This goal copies it, so most of the file stays as it is; removing tracks or Save space would shrink it." : ` After this goal it is about ${bytes(t.after)}.`}`, "stream-preview-warning"));
   }
 }
@@ -4458,7 +4461,8 @@ async function loadReconfigurePreview(plan, revision, auth) {
   renderReconfigurePreview();
 }
 function renderReconfigurePreview() {
-  const data = state.reconfigurePreview, mode = $("reconfigure-mode").value;
+  // The preview is one file's: a wider scope hides it until the file is back.
+  const data = $("reconfigure-scope").value === "file" ? state.reconfigurePreview : null, mode = $("reconfigure-mode").value;
   const kept = (kind, track) => !keepGoals.includes(mode) || track.keep;
   streamPreview($("reconfigure-preview"), data, mode, kept);
   if (data && keepGoals.includes(mode) && [...data.audio, ...data.subtitles].some(track => !track.keep))
@@ -4531,6 +4535,7 @@ $("reconfigure-scope").addEventListener("change", () => safe(async () => {
   if (!plan) return;
   const revision=state.reconfigureScopeRevision=(state.reconfigureScopeRevision || 0)+1;
   $("submit-reconfigure").disabled=true;
+  renderReconfigurePreview();
   try {
     const next=await api(`batch-settings?${new URLSearchParams({id:plan.id,scope:$("reconfigure-scope").value,...(plan.candidate_id ? {candidate_id:plan.candidate_id} : {}),...(plan.item_key ? {item_key:plan.item_key} : {})})}`);
     if (revision!==state.reconfigureScopeRevision || state.reconfigurePlan?.id!==plan.id || !$("reconfigure-batch").open) return;
@@ -4548,6 +4553,7 @@ $("reconfigure-scope").addEventListener("change", () => safe(async () => {
     if (revision===state.reconfigureScopeRevision && $("reconfigure-batch").open) {
       $("reconfigure-scope").value=state.reconfigurePlan.scope;
       updateBatchSettingsProfile();
+      renderReconfigurePreview();
     }
     throw error;
   }

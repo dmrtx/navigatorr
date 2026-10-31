@@ -6809,6 +6809,21 @@ test("one file's tracks show their size and what the goal makes of them, and aud
   assert.ok(copied.includes("Audio kept") && copied.includes("6.86 GB · 69% · copied"));
   assert.ok(copied.some((t) => t.includes("This goal copies it, so most of the file stays as it is")));
 
+  // A converted track of unknown size stays out of both audio totals, and a
+  // conversion that grows a track still reads as a conversion, not a copy.
+  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+    {index: 1, keep: true, bytes: 500e6, outputs: {compact: {output: "copy", bytes: 500e6}}},
+    {index: 2, keep: true, bytes: 0, outputs: {compact: {output: "aac", kbps: 384, bytes: 200e6}}}]}, "compact", (k, t) => t.keep)`);
+  let shown = leaves(el("keep-tracks-preview"));
+  assert.ok(shown.includes("500.0 MB · 50% → about 500.0 MB"), shown.join(" | "));
+  assert.ok(shown.includes("One kept audio track states no size, so it is left out of these totals."));
+  assert.ok(shown.some((t) => t.startsWith("Audio weighs more than the video") && t.endsWith("After this goal it is about 500.0 MB.")));
+  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+    {index: 1, keep: true, bytes: 400e6, outputs: {compact: {output: "aac", kbps: 128, bytes: 500e6}}}]}, "compact", (k, t) => t.keep)`);
+  shown = leaves(el("keep-tracks-preview"));
+  assert.ok(shown.includes("400.0 MB · 40% → about 500.0 MB"), shown.join(" | "));
+  assert.ok(!shown.some((t) => t.includes("This goal copies it")));
+
   // A file the probe could not size shows no preview.
   h.run('streamPreview($("keep-tracks-preview"), {audio: [], subtitles: []}, "size", () => true)');
   assert.equal(el("keep-tracks-preview").hidden, true);
@@ -6831,6 +6846,14 @@ test("one file's Change goal previews its streams under the goal picked", async 
   el("reconfigure-mode").listeners.get("change")();
   assert.ok(leaves(el("reconfigure-preview")).includes("6.86 GB · 69% · copied"));
   assert.ok(!leaves(el("reconfigure-preview")).includes("Tracks as the saved language list keeps them."));
+  // A wider scope is not this file any more: the preview goes until it is.
+  h.context.plan = { ...h.context.plan, scope: "all", selected: 3, files: ["a.mkv", "b.mkv", "c.mkv"], source_path: undefined };
+  el("reconfigure-scope").value = "all";
+  el("reconfigure-scope").listeners.get("change")();
+  assert.equal(el("reconfigure-preview").hidden, true);
+  el("reconfigure-scope").value = "file";
+  el("reconfigure-mode").listeners.get("change")();
+  assert.equal(el("reconfigure-preview").hidden, false);
 });
 
 test("hand-picked tracks send explicit lists, and picking the automatic choice again sends none", async () => {
