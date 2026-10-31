@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -811,6 +812,22 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			if endedWithoutResult(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
+				if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
+					full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+					job["explanation"] = explainResult(full)
+					// A batch file takes its steps from its batch row, which knows
+					// whether this job is still the file's latest attempt.
+					if operationString(full.inputs["parent_action_id"]) == "" {
+						steps := nextStepsFor(full)
+						if s.rerunRefusal(full) != "" {
+							// Its own settings cannot run again; a new goal still can.
+							steps = slices.DeleteFunc(steps, func(st nextStep) bool { return st.Inputs == nil && st.ID != "tracks" })
+						}
+						job["next_steps"] = steps
+					}
+				}
+			}
 			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
 				// The snapshot keeps only the keys the queue lists, so whether
 				// running it again would be refused, and what its ladder offers,

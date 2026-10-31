@@ -54,7 +54,7 @@ func rerunEligible(r operationRecord) bool {
 	if operationString(r.inputs["parent_action_id"]) != "" || operationString(r.inputs["path"]) == "" {
 		return false
 	}
-	return r.inst.Status == store.ActionStatusCancelled || isNoWinnerRound(r) || remedyMode(r) != ""
+	return endedWithoutResult(r)
 }
 
 // remedyMode is the goal that would handle this job's source, or "" when the
@@ -181,6 +181,9 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		// Mode starts the file under the goal that handles its source. It must be
 		// the server's remedy for this job; the client cannot pick another goal.
 		Mode string `json:"mode"`
+		// Step is one of the next steps the server lists for this job; the
+		// server rebuilds its inputs, so the client names it and nothing more.
+		Step string `json:"step"`
 	}
 	if decode(w, r, &body) != nil || !reconfigureKey.MatchString(body.Key) {
 		fail(w, 400, "a job and a valid submission key are required")
@@ -205,29 +208,58 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "a new attempt needs a new submission key")
 		return
 	}
+	var step nextStep
+	if body.Step != "" {
+		var offered bool
+		if step, offered = stepByID(old, body.Step); !offered || step.ID == "tracks" || body.Mode != "" || body.WithoutHardware {
+			fail(w, 409, "this job does not offer that next step")
+			return
+		}
+	}
 	remedy := remedyMode(old)
 	if body.Mode != "" && (body.Mode != remedy || body.WithoutHardware) {
 		fail(w, 409, "this job has no remedy for that goal")
 		return
 	}
-	if body.Mode == "" && remedy != "" {
+	if body.Mode == "" && body.Step == "" && remedy != "" {
 		fail(w, 409, "this file was skipped because of its goal; choose the goal that handles it instead of running it again")
 		return
 	}
-	if why := s.rerunRefusal(old); body.Mode == "" && why != "" {
+	// A step that switches goal starts from neutral inputs, as a remedy does.
+	switching := body.Mode != "" || step.Inputs != nil
+	if why := s.rerunRefusal(old); !switching && why != "" {
 		fail(w, 409, why)
 		return
 	}
 	inputs := map[string]any{}
-	if body.Mode != "" {
+	if switching {
 		for _, k := range remedyInputKeys {
 			if v, ok := old.inputs[k]; ok {
 				inputs[k] = v
 			}
 		}
 		inputs["mode"] = body.Mode
+		for k, v := range step.Inputs {
+			inputs[k] = v
+		}
 	} else {
 		inputs = rerunInputs(old)
+	}
+	if step.ID == "x265" {
+		inputs["allow_hardware"] = false
+		delete(inputs, "hardware_margin_percent")
+	}
+	// A new budget keeps the goal, so it keeps the job's tracks and an encode
+	// that ran without the media engine stays on x265.
+	if step.ID == "budget" {
+		for _, k := range []string{"keep_languages", "keep_audio_streams", "keep_subtitle_streams"} {
+			if v, ok := old.inputs[k]; ok {
+				inputs[k] = v
+			}
+		}
+		if allow, _, ok := action.FrozenHardware(old.state); (ok && !allow) || old.inputs["allow_hardware"] == false {
+			inputs["allow_hardware"] = false
+		}
 	}
 	if body.WithoutHardware {
 		if !offersWithoutHardware(old) {
@@ -239,7 +271,7 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 	}
 	// A goal switch starts from the neutral inputs alone: nothing the earlier goal
 	// froze carries over.
-	same := body.Mode == ""
+	same := !switching
 	// Run again means the same settings. A size job that never named the media
 	// engine would otherwise take today's default instead of the policy it ran
 	// under, so carry the choice its frozen policy made.
@@ -300,7 +332,7 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "this job produced a candidate or replacement; review it instead of running it again")
 		return
 	}
-	if body.Mode != "" && remedyTaken(old, records) {
+	if switching && remedyTaken(old, records) {
 		fail(w, 409, "this file already has a newer job; open that one instead")
 		return
 	}

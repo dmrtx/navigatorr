@@ -2769,6 +2769,10 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .technical-reason { margin: 6px 0; font-size: 12px; }
 .technical-reason p { overflow-wrap: anywhere; }
 .result-next { margin-top: 8px; }
+.result-learned-head { margin: 8px 0 2px; font-weight: 600; }
+.result-learned { margin: 0; padding-left: 1.2em; }
+.result-learned li { margin: 2px 0; }
+.batch-learned summary { cursor: pointer; }
 .encoding-plan { margin: 6px 0; font-size: 13px; }
 .encoding-plan.plan-profile_base { color: var(--warning-strong); }
 .worker-admission {

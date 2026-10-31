@@ -8299,3 +8299,87 @@ test("the sheet drag moves the sheet and leaves closing to each dialog's own clo
   for (const dialog of markup.match(/<dialog[\s\S]*?<\/dialog>/g))
     assert.match(dialog, /<button[^>]*aria-label="Close/, dialog.slice(0, 60));
 });
+
+test("the server's next steps replace Run again, the remedy and x265, the first as the primary", async () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const steps = '[{id:"audio_only",label:"Audio only",detail:"Keep the video.",inputs:{mode:"size",audio_only:true}},{id:"x265",label:"Try with x265",detail:"Slower."},{id:"tracks",label:"Choose tracks",detail:"Pick."},{id:"same",label:"Run again unchanged",detail:"Same."}]';
+  const base = `{id:"old",action_name:"transcode_media",status:"completed",mode:"size",reason_code:"insufficient_savings",source_path:"/media/Show/S01E01.mkv",rerun:{source_path:"/media/Show/S01E01.mkv",mode:"size",replace_original:false,no_winner_rounds:2,without_hardware:true},next_steps:${steps}}`;
+  const rail = h.run(`jobControls(${base})`);
+  const labels = rail.children.map(b => b.textContent);
+  assert.deepEqual(labels.filter(l => ["Audio only","Try with x265","Choose tracks","Run again unchanged","Run again"].includes(l)), ["Audio only","Try with x265","Choose tracks","Run again unchanged"]);
+  assert.equal(rail.children.find(b => b.textContent === "Audio only").className, "primary");
+  assert.equal(rail.children.find(b => b.textContent === "Choose tracks").dataset.requiresWorker, "false");
+  assert.equal(rail.children.find(b => b.textContent === "Try with x265").dataset.requiresWorker, "true");
+  // Hidden once there is a candidate or a decision.
+  for (const patch of ['candidate_ready:true', 'status:"waiting_decision"', 'replacement_action_id:"r"'])
+    assert.ok(!h.run(`jobControls({...${base},${patch}}).children.map(b=>b.textContent)`).includes("Audio only"), patch);
+
+  const calls = [], reviews = [];
+  h.context.calls = calls; h.context.reviews = reviews;
+  h.run('api=async(path,body)=>{calls.push({path,body});return {id:"new"}};loadJobs=async()=>{};openJob=async()=>{};notify=()=>{};let n=0;submissionID=()=>"key-"+(++n);reviewAction=async(r)=>{reviews.push(r);return true};let opened="";openGoalForm=p=>{opened=p};');
+  await h.run(`runNextStep(${base}, ${base}.next_steps[0])`);
+  assert.equal(JSON.stringify(calls[0]), JSON.stringify({path: "rerun", body: {id: "old", key: "key-1", step: "audio_only"}}));
+  assert.match(reviews[0].content.map(n => n.textContent).join(" "), /Keep the video\./);
+  await h.run(`runNextStep(${base}, ${base}.next_steps[3])`);
+  assert.match(reviews[1].content.map(n => n.textContent).join(" "), /already had 2 rounds/);
+  await h.run(`runNextStep(${base}, ${base}.next_steps[2])`);
+  assert.equal(h.run("opened"), "/media/Show/S01E01.mkv");
+  assert.equal(calls.length, 2);
+
+});
+
+test("a batch file applies a next step as a goal change for that file", async () => {
+  const h = harness();
+  const sent = [];
+  h.context.sent = sent;
+  h.run('api=async()=>({id:"batch-a",item_key:"k",mode:"size",selection_version:"v",decision_version:"d",settings:{allow_hardware:true,hardware_margin_percent:30}});commandRequest=async(path,body)=>{sent.push([path,body]);return {}};loadJobs=async()=>{};refreshOpenDetail=async()=>{};notify=()=>{};reviewAction=async()=>true;');
+  await h.run('applyBatchStep("batch-a","k",{id:"audio_only",label:"Audio only",detail:"d",inputs:{mode:"size",audio_only:true}})');
+  assert.equal(sent[0][0], "batch-settings");
+  assert.deepEqual([sent[0][1].scope, sent[0][1].item_key, sent[0][1].mode, sent[0][1].audio_only, "allow_hardware" in sent[0][1]], ["file", "k", "size", true, false]);
+  await h.run('applyBatchStep("batch-a","k",{id:"x265",label:"Try with x265",detail:"d"})');
+  assert.deepEqual([sent[1][1].mode, sent[1][1].allow_hardware, "hardware_margin_percent" in sent[1][1]], ["size", false, false]);
+  // Declining sends nothing.
+  h.run("reviewAction=async()=>false");
+  await h.run('applyBatchStep("batch-a","k",{id:"budget",label:"Aim",detail:"d",inputs:{mode:"size",size_budget_percent:80}})');
+  assert.equal(sent.length, 2);
+  // A new budget keeps x265 for a file that ran without the media engine.
+  h.run('reviewAction=async()=>true;api=async()=>({id:"batch-a",item_key:"k",mode:"size",selection_version:"v",decision_version:"d",settings:{allow_hardware:false}})');
+  await h.run('applyBatchStep("batch-a","k",{id:"budget",label:"Aim",detail:"d",inputs:{mode:"size",size_budget_percent:60}})');
+  assert.deepEqual([sent[2][1].size_budget_percent, sent[2][1].allow_hardware], [60, false]);
+  // x265 under another goal opens the goal form for the file instead.
+  const opened = [];
+  h.context.opened = opened;
+  h.run('api=async()=>({id:"batch-a",item_key:"k",mode:"quality",selection_version:"v",decision_version:"d",settings:{}});reconfigureBatch=async(...a)=>{opened.push(a)}');
+  await h.run('applyBatchStep("batch-a","k",{id:"x265",label:"Try with x265",detail:"d"})');
+  assert.equal(sent.length, 3);
+  assert.equal(JSON.stringify(opened[0]), JSON.stringify(["batch-a", false, {item_key: "k"}]));
+});
+
+test("batch rows list the next steps and say what happened", async () => {
+  const items = [
+    { item_key: "k-s", display_label: "Missed", status: "skip", child_action_id: "t-s", file_path: "/media/tv/S.mkv", can_reconfigure: true, mode: "size", reason_code: "insufficient_savings",
+      explanation: { happened: "The new file came out 9% smaller.", learned: ["Video is 2 GB."] },
+      next_steps: [{ id: "audio_only", label: "Audio only", detail: "d", inputs: { mode: "size", audio_only: true } }, { id: "same", label: "Run again unchanged", detail: "d" }] },
+    { item_key: "k-c", display_label: "Cancelled", status: "cancelled", child_action_id: "t-c", file_path: "/media/tv/C.mkv", can_reconfigure: true, mode: "size", next_steps: [{ id: "same", label: "Run again", detail: "d" }] },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:2});');
+  await h.run('loadBatchItems("batch-a",2)');
+  const rows = itemRows(h);
+  const first = buttonLabels(rows[0]);
+  assert.ok(first.includes("Audio only") && first.includes("Encode again") && first.includes("Change goal"), first.join());
+  assert.ok(flatten(rows[0]).some(e => e.textContent === "The new file came out 9% smaller."));
+  // "same" becomes the one Encode again, not two.
+  assert.equal(buttonLabels(rows[1]).filter(l => l === "Encode again").length, 1);
+});
+
+test("the explanation says what happened and what was learned", () => {
+  const h = harness();
+  assert.equal(h.run("explanationReport(null)"), null);
+  const box = h.run('explanationReport({happened:"It came out 9% smaller.",learned:["Audio is 41%.","Converting the audio alone would save 1 GB."]})');
+  const text = flatten(box).map(e => e.textContent).join(" | ");
+  assert.match(text, /What happened: /);
+  assert.match(text, /Converting the audio alone/);
+});
