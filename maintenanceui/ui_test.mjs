@@ -8451,3 +8451,19 @@ test("the Compression tab shows each goal from the server and what changed", asy
   assert.equal(h.elements.get("compression-error").hidden, false);
   assert.match(h.elements.get("compression-error").textContent, /offline/);
 });
+
+test("a failed file keeps Retry unless the server says running it again cannot help", () => {
+  const h = harness();
+  h.run('state.workerInfo={ready:true}');
+  const labels = job => h.run(`jobControls(${job})`).children.map(b => b.textContent);
+  const failed = '{id:"f",action_name:"transcode_media",status:"failed",mode:"size",source_path:"/media/a.mkv",error:"Transcode failed (runner_killed): killed",explanation:{happened:"The job stopped because the worker or the NAS could not be reached."}}';
+  assert.ok(labels(failed).includes("Retry"));
+  const damaged = '{id:"d",action_name:"transcode_media",status:"failed",mode:"size",source_path:"/media/a.mp4",error:"moov atom not found",retry_blocked:"This file is damaged.",next_steps:[]}';
+  assert.ok(!labels(damaged).includes("Retry"));
+  const tracks = '{id:"t",action_name:"transcode_media",status:"failed",mode:"size",source_path:"/media/a.mkv",error:"choosing the tracks to keep: stream 4",retry_blocked:"Same tracks.",next_steps:[{id:"tracks",label:"Choose tracks",detail:"Pick."}]}';
+  const rail = h.run(`jobControls(${tracks})`);
+  assert.ok(!rail.children.some(b => b.textContent === "Retry"));
+  const choose = rail.children.find(b => b.textContent === "Choose tracks");
+  assert.ok(choose);
+  assert.equal(choose.className, "primary");
+});

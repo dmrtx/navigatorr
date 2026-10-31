@@ -828,6 +828,18 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					}
 				}
 			}
+			if failedFileJob(r) {
+				if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
+					full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+					e, blocked, steps := explainFailure(full)
+					job["explanation"] = e
+					// A batch file is run again from its batch row.
+					if blocked != "" && operationString(full.inputs["parent_action_id"]) == "" {
+						job["retry_blocked"] = blocked
+						job["next_steps"] = append([]nextStep{}, steps...)
+					}
+				}
+			}
 			if rerunEligible(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
 				// The snapshot keeps only the keys the queue lists, so whether
 				// running it again would be refused, and what its ladder offers,

@@ -444,6 +444,10 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if removedSearchAction(inst, parseExecutionContext(inst, e)) {
 		return nil, errors.New(removedSearchMessage)
 	}
+	// A damaged file fails the same way every time; it is replaced first.
+	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
+		return nil, errors.New("this file is damaged, so running it again fails the same way; replace the file, then choose a goal for it")
+	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {

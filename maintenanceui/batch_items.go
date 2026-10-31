@@ -174,6 +174,9 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 							if view.CanReconfigure {
 								view.NextSteps = nextStepsFor(r)
 							}
+						} else if !view.RetryPending && failedFileJob(r) {
+							e, _, _ := explainFailure(r)
+							view.Explanation = &e
 						}
 						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
