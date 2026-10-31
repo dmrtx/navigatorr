@@ -5072,7 +5072,9 @@ function jobControls(job, detail = false) {
     // Failed replacements are retried per file below. The batch's own Retry stays
     // when nothing is retryable per file and only the batch recorded the failure,
     // so a transient error can still be retried from here.
-    else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
+    // The server says when running it again cannot change anything (a damaged
+    // file, tracks the file does not have); its next steps replace Retry.
+    else if (!job.retry_blocked && (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0))) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server's next steps replace Run again, the remedy, x265 and the goal
   // form after a missed limit; a batch child takes them from its batch row.

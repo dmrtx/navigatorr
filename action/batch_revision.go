@@ -58,11 +58,16 @@ func BatchRevisionSelects(item store.TranscodeBatchItem, scope, selectionID stri
 // unreadable-input errors ("Invalid data found") can be passing, a file read
 // while it was still being copied, and are run again as before.
 func BatchItemSourceDamaged(item store.TranscodeBatchItem) bool {
-	if item.Status != "failed" {
-		return false
-	}
-	msg := strings.ToLower(item.Error)
-	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found")
+	return item.Status == "failed" && SourceDamaged(item.Error)
+}
+
+// SourceDamaged reports a failure message that blames the file's own bytes:
+// the worker's packet scan, or an MP4 with no moov atom. A missing moov atom
+// in the worker's probe of its own candidate is the encode's failure, not the
+// file's, and a new encode can pass.
+func SourceDamaged(msg string) bool {
+	msg = strings.ToLower(msg)
+	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found") && !strings.Contains(msg, "candidate")
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
