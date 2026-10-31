@@ -6762,6 +6762,100 @@ test("the picker lists the file's tracks, checked as the server's rules keep the
   assert.deepEqual(inputs(false), {});
 });
 
+// Every leaf's text under a preview, in order.
+const leaves = (n) => (n.children.length ? n.children.flatMap(leaves) : [n.textContent]);
+function sizedFixture() {
+  const out = (output, kbps, bytes) => ({ output, kbps, bytes });
+  const tracks = keepFixture();
+  Object.assign(tracks, { size_bytes: 10e9, duration_sec: 5000, video_bytes: 3e9, video_approx: true });
+  Object.assign(tracks.audio[0], { bytes: 4e9, kbps: 6400, outputs: { size: out("aac", 384, 240e6), size_he: out("he_aac", 160, 100e6), compact: out("aac", 384, 240e6) } });
+  Object.assign(tracks.audio[1], { bytes: 280e6, kbps: 448, outputs: { size: out("copy", 0, 280e6), size_he: out("he_aac", 160, 100e6), compact: out("copy", 0, 280e6) } });
+  Object.assign(tracks.audio[2], { bytes: 80e6, kbps: 128, outputs: { size: out("copy", 0, 80e6), size_he: out("he_aac", 64, 40e6), compact: out("copy", 0, 80e6) } });
+  Object.assign(tracks.audio[3], { bytes: 2.5e9, kbps: 4000, outputs: { size: out("aac", 384, 240e6), size_he: out("he_aac", 160, 100e6), compact: out("aac", 384, 240e6) } });
+  tracks.subtitles[0].bytes = 50e3;
+  tracks.subtitles[1].bytes = 40e3;
+  return tracks;
+}
+
+test("one file's tracks show their size and what the goal makes of them, and audio heavier than the video is called out", async () => {
+  const { h, el, open } = keepHarness();
+  h.context.tracks = sizedFixture();
+  await open();
+  const plan = (list, i) => el(list).children[i].children[0].children[1].children[2];
+  assert.equal(plan("keep-audio-list", 0).textContent, "4.00 GB (40%) → AAC 384 kbps · 240.0 MB");
+  assert.equal(plan("keep-audio-list", 1).textContent, "280.0 MB (3%) → Removed");
+  assert.equal(plan("keep-audio-list", 2).textContent, "80.0 MB (1%) → Copied");
+  assert.equal(plan("keep-subtitle-list", 0).textContent, "50.0 KB");
+  assert.equal(plan("keep-subtitle-list", 2).hidden, true, "a subtitle of unknown size kept says nothing");
+  const preview = leaves(el("keep-tracks-preview"));
+  assert.equal(el("keep-tracks-preview").hidden, false);
+  assert.deepEqual(preview.slice(0, 10), [
+    "File", "10.00 GB",
+    "Video", "≈ 3.00 GB · 30% · re-encoded, its new size is set by the encode",
+    "Audio kept", "6.58 GB · 66% → about 560.0 MB",
+    "Subtitles kept", "50.0 KB",
+    "Tracks removed", "−280.0 MB · 3%",
+  ]);
+  assert.ok(preview.includes("Audio and track choices alone save about 6.30 GB, 63% of the file; the video encode saves on top of that."));
+  assert.ok(preview.includes("Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about 320.0 MB more. A size budget switches to it when the budget needs it."));
+  assert.ok(preview.includes("Audio weighs more than the video in this file (6.58 GB against 3.00 GB). After this goal it is about 560.0 MB."));
+  assert.equal(el("keep-tracks-summary").textContent, "Audio outweighs video · Saved list: English, Japanese, Spanish");
+
+  // Under compact the stronger level is not offered; a goal that copies the audio says so.
+  h.run('setProcessingMode("compact"); renderKeepTracks()');
+  assert.ok(!leaves(el("keep-tracks-preview")).some((t) => t.startsWith("Stronger audio")));
+  h.run('streamPreview($("keep-tracks-preview"), keepTracks.data, "quality", () => true)');
+  const copied = leaves(el("keep-tracks-preview"));
+  assert.ok(copied.includes("Audio kept") && copied.includes("6.86 GB · 69% · copied"));
+  assert.ok(copied.some((t) => t.includes("This goal copies it, so most of the file stays as it is")));
+
+  // A converted track of unknown size stays out of both audio totals, and a
+  // conversion that grows a track still reads as a conversion, not a copy.
+  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+    {index: 1, keep: true, bytes: 500e6, outputs: {compact: {output: "copy", bytes: 500e6}}},
+    {index: 2, keep: true, bytes: 0, outputs: {compact: {output: "aac", kbps: 384, bytes: 200e6}}}]}, "compact", (k, t) => t.keep)`);
+  let shown = leaves(el("keep-tracks-preview"));
+  assert.ok(shown.includes("500.0 MB · 50% → about 500.0 MB"), shown.join(" | "));
+  assert.ok(shown.includes("One kept audio track states no size, so it is left out of these totals."));
+  assert.ok(shown.some((t) => t.startsWith("Audio weighs more than the video") && t.endsWith("After this goal it is about 500.0 MB.")));
+  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+    {index: 1, keep: true, bytes: 400e6, outputs: {compact: {output: "aac", kbps: 128, bytes: 500e6}}}]}, "compact", (k, t) => t.keep)`);
+  shown = leaves(el("keep-tracks-preview"));
+  assert.ok(shown.includes("400.0 MB · 40% → about 500.0 MB"), shown.join(" | "));
+  assert.ok(!shown.some((t) => t.includes("This goal copies it")));
+
+  // A file the probe could not size shows no preview.
+  h.run('streamPreview($("keep-tracks-preview"), {audio: [], subtitles: []}, "size", () => true)');
+  assert.equal(el("keep-tracks-preview").hidden, true);
+});
+
+test("one file's Change goal previews its streams under the goal picked", async () => {
+  const h = harness();
+  h.context.tracks = sizedFixture();
+  h.context.plan = { id: "batch", mode: "size", item_key: "f1", source_path: "/media/movie.mkv", scope: "file", selected: 1, kept: 0, files: ["movie.mkv"], settings: {} };
+  h.run(`var queries = []; api = async (path) => { queries.push(path); return path.startsWith("source-tracks") ? tracks : plan; };`);
+  await h.run('reconfigureBatch("batch", false, {item_key: "f1"})');
+  await h.run("new Promise(resolve => resolve())");
+  assert.ok(h.run("queries").includes("source-tracks?path=%2Fmedia%2Fmovie.mkv"));
+  const el = (id) => h.elements.get(id);
+  assert.equal(el("reconfigure-preview").hidden, false);
+  assert.ok(leaves(el("reconfigure-preview")).includes("6.58 GB · 66% → about 560.0 MB"));
+  assert.ok(leaves(el("reconfigure-preview")).includes("Tracks as the saved language list keeps them."));
+  // Strict quality keeps and copies every track.
+  el("reconfigure-mode").value = "quality";
+  el("reconfigure-mode").listeners.get("change")();
+  assert.ok(leaves(el("reconfigure-preview")).includes("6.86 GB · 69% · copied"));
+  assert.ok(!leaves(el("reconfigure-preview")).includes("Tracks as the saved language list keeps them."));
+  // A wider scope is not this file any more: the preview goes until it is.
+  h.context.plan = { ...h.context.plan, scope: "all", selected: 3, files: ["a.mkv", "b.mkv", "c.mkv"], source_path: undefined };
+  el("reconfigure-scope").value = "all";
+  el("reconfigure-scope").listeners.get("change")();
+  assert.equal(el("reconfigure-preview").hidden, true);
+  el("reconfigure-scope").value = "file";
+  el("reconfigure-mode").listeners.get("change")();
+  assert.equal(el("reconfigure-preview").hidden, false);
+});
+
 test("hand-picked tracks send explicit lists, and picking the automatic choice again sends none", async () => {
   const { h, el, open, boxes, inputs } = keepHarness();
   await open();

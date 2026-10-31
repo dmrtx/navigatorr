@@ -16,12 +16,16 @@ import (
 )
 
 type tracksResponse struct {
-	Languages []string    `json:"languages"`
-	Audio     []trackView `json:"audio"`
-	Subtitles []trackView `json:"subtitles"`
-	Error     string      `json:"error"`
-	Code      string      `json:"code"`
-	Field     string      `json:"field"`
+	Languages   []string    `json:"languages"`
+	Audio       []trackView `json:"audio"`
+	Subtitles   []trackView `json:"subtitles"`
+	SizeBytes   int64       `json:"size_bytes"`
+	DurationSec float64     `json:"duration_sec"`
+	VideoBytes  int64       `json:"video_bytes"`
+	VideoApprox bool        `json:"video_approx"`
+	Error       string      `json:"error"`
+	Code        string      `json:"code"`
+	Field       string      `json:"field"`
 }
 
 // tracksFixture serves one fake video with the given audio and subtitle
@@ -131,6 +135,42 @@ func TestSourceTracksFollowTheSavedListUnlessTheJobGivesOne(t *testing.T) {
 	_, out = get(q)
 	if !reflect.DeepEqual(out.Languages, []string{"fra"}) || !reflect.DeepEqual(keepOf(out.Audio), []bool{true, true, true, false}) {
 		t.Fatalf("saved list: %+v", out)
+	}
+}
+
+func TestSourceTracksSizeEachStreamAndPlanEachGoal(t *testing.T) {
+	audio := []mediainspect.DetailedStream{
+		{Index: 1, Kind: "audio", Codec: "flac", Language: "eng", Channels: 2, ChannelLayout: "stereo", BitRate: 900_000},
+		{Index: 2, Kind: "audio", Codec: "aac", Language: "spa", Channels: 2, ChannelLayout: "stereo", BitRate: 128_000},
+	}
+	subs := []mediainspect.DetailedStream{{Index: 3, Kind: "subtitle", Codec: "subrip", Language: "eng", Tags: map[string]string{"NUMBER_OF_BYTES": "40000"}}}
+	get, video, s := tracksFixture(t, audio, subs)
+	s.probe = func(_ context.Context, _, path string) (mediainspect.DetailedReport, error) {
+		return mediainspect.DetailedReport{Path: path, Probed: true, DurationSec: 100, SizeBytes: 100_000_000,
+			Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", Width: 1920, Height: 1080}}, Audio: audio, Subtitles: subs}, nil
+	}
+	code, out := get("path=" + url.QueryEscape(video))
+	if code != 200 || out.SizeBytes != 100_000_000 || out.DurationSec != 100 {
+		t.Fatal(code, out)
+	}
+	if want := int64(100_000_000 - 11_250_000 - 1_600_000 - 40_000); out.VideoBytes != want || !out.VideoApprox {
+		t.Fatalf("video %d approx=%v, want %d", out.VideoBytes, out.VideoApprox, want)
+	}
+	flac, aac := out.Audio[0], out.Audio[1]
+	if flac.Bytes != 11_250_000 || flac.Kbps != 900 || aac.Bytes != 1_600_000 || out.Subtitles[0].Bytes != 40_000 {
+		t.Fatalf("sizes: %+v %+v %+v", flac, aac, out.Subtitles[0])
+	}
+	if o := flac.Outputs["size"]; o.Output != "aac" || o.Kbps != 192 || o.Bytes != 2_400_000 {
+		t.Fatalf("size goal on FLAC: %+v", o)
+	}
+	if o := aac.Outputs["compact"]; o.Output != "copy" || o.Bytes != 1_600_000 {
+		t.Fatalf("compact copies AAC: %+v", o)
+	}
+	if o := aac.Outputs["size_he"]; o.Output != "he_aac" || o.Kbps != 64 {
+		t.Fatalf("level 2 on AAC 128: %+v", o)
+	}
+	if out.Subtitles[0].Outputs != nil {
+		t.Fatalf("subtitles have no audio outputs: %+v", out.Subtitles[0])
 	}
 }
 

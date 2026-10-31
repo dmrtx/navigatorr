@@ -3015,6 +3015,13 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 @media (max-width: 480px) { .track-badges { flex-direction: column; align-items: flex-end; } }
 .track-name { font-weight: 600; }
 .track-facts { overflow-wrap: anywhere; }
+.track-plan { overflow-wrap: anywhere; }
+.track-plan[hidden] { display: none; }
+.stream-preview { display: grid; gap: .45rem; }
+.stream-preview[hidden] { display: none; }
+.stream-preview p, .stream-preview dl { margin: 0; }
+.stream-preview-facts { grid-template-columns: 110px minmax(0, 1fr); }
+.stream-preview-warning { padding: 8px 10px; border-left: 3px solid var(--warning-line); border-radius: 4px; background: var(--warning-wash); color: var(--warning-strong); font-size: 13px; }
 .track-badge { margin: 0; padding: 2px 7px; border: 1px solid var(--line-strong); border-radius: 999px; font-size: 11px; }
 .track-report { margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-left: 3px solid var(--forest); border-radius: 4px; background: var(--paper); font-size: 13px; }
 .track-report p { margin: 0; }

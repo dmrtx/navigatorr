@@ -26,6 +26,21 @@ type trackView struct {
 	// Original marks the audio track the file was made in; it is always kept.
 	Original bool `json:"original,omitempty"`
 	Keep     bool `json:"keep"`
+	// Bytes is the track's size from the probe, zero when unknown; Kbps is an
+	// audio track's bitrate as the audio policy reads it.
+	Bytes int64 `json:"bytes,omitempty"`
+	Kbps  int   `json:"kbps,omitempty"`
+	// Outputs is what each goal's audio mode makes of an audio track, keyed as
+	// action.PreviewAudioModes is.
+	Outputs map[string]trackOutput `json:"outputs,omitempty"`
+}
+
+// trackOutput is an audio track under one goal: copied, or converted to aac or
+// he_aac at Kbps; Bytes is the projected size, zero when unknown.
+type trackOutput struct {
+	Output string `json:"output"`
+	Kbps   int    `json:"kbps,omitempty"`
+	Bytes  int64  `json:"bytes,omitempty"`
 }
 
 type sourceTracksView struct {
@@ -34,10 +49,18 @@ type sourceTracksView struct {
 	Languages []string    `json:"languages"`
 	Audio     []trackView `json:"audio"`
 	Subtitles []trackView `json:"subtitles"`
+	// The file's size and duration, and its video's: the video stream's own
+	// statistics, else the file less its audio and subtitles (VideoApprox).
+	// Zero is unknown.
+	SizeBytes   int64   `json:"size_bytes,omitempty"`
+	DurationSec float64 `json:"duration_sec,omitempty"`
+	VideoBytes  int64   `json:"video_bytes,omitempty"`
+	VideoApprox bool    `json:"video_approx,omitempty"`
 }
 
 // sourceTracks lists a video's audio and subtitle streams with what the size
-// and compact goals would keep of them. keep_languages (a comma separated list,
+// and compact goals would keep of them, what each weighs, and what each goal's
+// audio mode would make of an audio track. keep_languages (a comma separated list,
 // possibly empty) stands in for the saved setting, as it does on a job. The
 // path is read the way source-profile reads it, from the same allow-list;
 // nothing is queued or written, and no path is returned.
@@ -80,19 +103,33 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	original, hasOriginal := transcode.OriginalAudioTrack(infos)
+	preview := action.PreviewStreams(rep)
 	list := func(kind string, streams []mediainspect.DetailedStream) []trackView {
 		out := make([]trackView, 0, len(streams))
 		for _, st := range streams {
 			info := transcode.TrackInfo{Language: st.Language}
-			out = append(out, trackView{
+			v := trackView{
 				Index: st.Index, Language: info.LanguageLabel(), Title: st.Title, Codec: st.Codec,
 				Channels: st.Channels, ChannelLayout: st.ChannelLayout,
 				Default: st.Disposition["default"] > 0, Forced: st.Disposition["forced"] > 0,
 				Original: hasOriginal && kind == "audio" && st.Index == original.Index,
 				Keep:     selection.Keeps(kind, st.Index),
-			})
+			}
+			if kind == "subtitle" {
+				v.Bytes = preview.Subtitles[st.Index]
+			} else if a, ok := preview.Audio[st.Index]; ok {
+				v.Bytes, v.Kbps = a.Bytes, a.Kbps
+				v.Outputs = make(map[string]trackOutput, len(a.Outputs))
+				for name, o := range a.Outputs {
+					v.Outputs[name] = trackOutput{Output: o.Output, Kbps: o.Kbps, Bytes: o.Bytes}
+				}
+			}
+			out = append(out, v)
 		}
 		return out
 	}
-	writeJSON(w, 200, sourceTracksView{Languages: languages, Audio: list("audio", rep.Audio), Subtitles: list("subtitle", rep.Subtitles)})
+	writeJSON(w, 200, sourceTracksView{
+		Languages: languages, Audio: list("audio", rep.Audio), Subtitles: list("subtitle", rep.Subtitles),
+		SizeBytes: preview.SourceBytes, DurationSec: preview.DurationSec, VideoBytes: preview.VideoBytes, VideoApprox: preview.VideoDerived,
+	})
 }
