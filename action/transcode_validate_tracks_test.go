@@ -157,3 +157,27 @@ func TestAcceptedValidationLossStillReportsTheTracks(t *testing.T) {
 		t.Fatalf("a report appeared from nothing: %+v", result.Outputs)
 	}
 }
+
+// A source track tagged "und" comes out with no language tag at all (the
+// muxer writes none for it); that keeps the language, as the worker's check
+// already says. Any other loss or change of language does not.
+func TestSameLanguageTreatsUndAsNoTag(t *testing.T) {
+	for _, tc := range []struct {
+		source, output string
+		want           bool
+	}{
+		{"", "", true},
+		{"", "eng", true},
+		{"und", "", true},
+		{"UND", "", true},
+		{"und", "und", true},
+		{"und", "eng", false},
+		{"eng", "", false},
+		{"eng", "ENG", true},
+		{"eng", "spa", false},
+	} {
+		if got := sameLanguage(tc.source, tc.output); got != tc.want {
+			t.Errorf("sameLanguage(%q, %q) = %v, want %v", tc.source, tc.output, got, tc.want)
+		}
+	}
+}
