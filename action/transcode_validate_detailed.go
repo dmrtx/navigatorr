@@ -228,7 +228,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			}
 			audioDuration = "ok"
 		}
-		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {
+		if !sameLanguage(a.Language, b.Language) {
 			return waitDecision(fmt.Sprintf("Audio language mismatch at stream %d: original=%s output=%s", i, a.Language, b.Language)), nil
 		}
 		// Under a selection the default flag is part of the plan: a kept track
@@ -273,7 +273,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if act.Operation == "transcode" && normCodec(b.Codec) != normCodec(act.Codec) {
 			return waitDecision(fmt.Sprintf("Converted subtitle codec mismatch at stream %d: expected=%s output=%s", i, act.Codec, b.Codec)), nil
 		}
-		if a.Language != "" && normCodec(a.Language) != normCodec(b.Language) {
+		if !sameLanguage(a.Language, b.Language) {
 			return waitDecision(fmt.Sprintf("Subtitle language mismatch at stream %d", i)), nil
 		}
 		for _, d := range []string{"forced", "default"} {
@@ -351,3 +351,14 @@ func expectedVideoCodec(codec string) string {
 }
 
 func normCodec(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// sameLanguage reports whether an output track keeps its source track's
+// language. A source with no language has nothing to keep. "und" is the
+// absence of one, and the muxer writes no tag for it, so an output with no
+// language keeps it: the worker's own check accepts the same.
+func sameLanguage(source, output string) bool {
+	if source == "" || (normCodec(source) == "und" && output == "") {
+		return true
+	}
+	return normCodec(source) == normCodec(output)
+}
