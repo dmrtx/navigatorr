@@ -8327,9 +8327,6 @@ test("the server's next steps replace Run again, the remedy and x265, the first 
   assert.equal(h.run("opened"), "/media/Show/S01E01.mkv");
   assert.equal(calls.length, 2);
 
-  // A batch child takes the steps through its batch and leaves "same" to the batch.
-  const child = `{...${base},parent_action_id:"batch-a",parent_item_key:"k"}`;
-  assert.ok(!h.run(`jobControls(${child}).children.map(b=>b.textContent)`).includes("Run again unchanged"));
 });
 
 test("a batch file applies a next step as a goal change for that file", async () => {
@@ -8346,6 +8343,17 @@ test("a batch file applies a next step as a goal change for that file", async ()
   h.run("reviewAction=async()=>false");
   await h.run('applyBatchStep("batch-a","k",{id:"budget",label:"Aim",detail:"d",inputs:{mode:"size",size_budget_percent:80}})');
   assert.equal(sent.length, 2);
+  // A new budget keeps x265 for a file that ran without the media engine.
+  h.run('reviewAction=async()=>true;api=async()=>({id:"batch-a",item_key:"k",mode:"size",selection_version:"v",decision_version:"d",settings:{allow_hardware:false}})');
+  await h.run('applyBatchStep("batch-a","k",{id:"budget",label:"Aim",detail:"d",inputs:{mode:"size",size_budget_percent:60}})');
+  assert.deepEqual([sent[2][1].size_budget_percent, sent[2][1].allow_hardware], [60, false]);
+  // x265 under another goal opens the goal form for the file instead.
+  const opened = [];
+  h.context.opened = opened;
+  h.run('api=async()=>({id:"batch-a",item_key:"k",mode:"quality",selection_version:"v",decision_version:"d",settings:{}});reconfigureBatch=async(...a)=>{opened.push(a)}');
+  await h.run('applyBatchStep("batch-a","k",{id:"x265",label:"Try with x265",detail:"d"})');
+  assert.equal(sent.length, 3);
+  assert.equal(JSON.stringify(opened[0]), JSON.stringify(["batch-a", false, {item_key: "k"}]));
 });
 
 test("batch rows list the next steps and say what happened", async () => {

@@ -37,6 +37,9 @@ var stepReasons = map[string]bool{"audio_only_nothing_to_convert": true}
 // original is a 20% saving, past the plain goal's 15% minimum.
 const offeredBudgetPercent = 80.0
 
+// maxBudgetPercent is the largest size_budget_percent a size goal takes.
+const maxBudgetPercent = 85.0
+
 // endedWithoutResult is a finished job that next steps apply to.
 func endedWithoutResult(r operationRecord) bool {
 	if r.inst.ActionName != "transcode_media" {
@@ -258,9 +261,9 @@ func nextStepsFor(r operationRecord) []nextStep {
 	case "size_budget_exceeded":
 		original := float64(operationNumber(operationValue(r, "original_size")))
 		candidate := float64(operationNumber(operationValue(r, "candidate_size_bytes")))
-		if original > 0 && candidate > 0 && candidate < original {
-			// The next 5% step above what this encode reached.
-			percent := math.Min(95, math.Ceil(candidate*100/original/5)*5+5)
+		// The next 5% step above what this encode reached, while a budget can
+		// still name it (at most 85% of the source).
+		if percent := math.Ceil(candidate*100/original/5)*5 + 5; original > 0 && candidate > 0 && percent <= maxBudgetPercent {
 			add(nextStep{ID: "budget", Label: fmt.Sprintf("Aim for %.0f%% of the original", percent), Detail: fmt.Sprintf("A target just above the %.0f%% this encode reached.", candidate*100/original), Inputs: map[string]any{"mode": "size", "size_budget_percent": percent}})
 		}
 		if x265 {

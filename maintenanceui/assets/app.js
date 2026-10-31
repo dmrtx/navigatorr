@@ -4782,10 +4782,20 @@ async function applyBatchStep(batchID, itemKey, step) {
     const plan = await api(`batch-settings?${new URLSearchParams({id: batchID, scope: "file", item_key: itemKey})}`);
     if (auth !== state.authRevision) return;
     let body;
+    // x265 is a choice of Save space; a file under another goal picks its
+    // goal again instead of keeping the media engine unsaid.
+    if (step.id === "x265" && plan.mode !== "size") {
+      state.busyJobs.delete(batchID);
+      return reconfigureBatch(batchID, false, {item_key: itemKey});
+    }
     if (step.id === "x265") {
       body = {...sameSettingsRequest(plan), allow_hardware: false};
       delete body.hardware_margin_percent;
-    } else body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
+    } else {
+      body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
+      // A new budget keeps the goal, so it keeps the file's encoder choice.
+      if (step.id === "budget" && plan.mode === "size" && plan.settings?.allow_hardware === false) body.allow_hardware = false;
+    }
     await commandRequest("batch-settings", body);
     if (auth !== state.authRevision) return;
     await Promise.all([loadJobs(), refreshOpenDetail()]);
@@ -5025,13 +5035,11 @@ function jobControls(job, detail = false) {
     else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server's next steps replace Run again, the remedy, x265 and the goal
-  // form after a missed limit; a batch child takes them through its batch.
+  // form after a missed limit; a batch child takes them from its batch row.
   const legacySteps = !Array.isArray(job.next_steps);
   if (!legacySteps && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision") {
-    const child = Boolean(job.parent_item_key && job.parent_action_id);
     job.next_steps.forEach((step, i) => {
-      if (child && step.id === "same") return; // Change goal and the batch row cover it.
-      add(step.label, () => child ? applyBatchStep(job.parent_action_id, job.parent_item_key, step) : runNextStep(job, step));
+      add(step.label, () => runNextStep(job, step));
       const b = [...actionRail.children].at(-1);
       if (i === 0) b.className = "primary";
       if (step.id !== "tracks") { b.dataset.requiresWorker = "true"; b.disabled = jobControlDisabled(b); }

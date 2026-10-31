@@ -76,10 +76,10 @@ func TestNextStepsForOtherEndings(t *testing.T) {
 		state  map[string]any
 		want   string
 	}{
-		"cancelled": {"cancelled", map[string]any{"path": "/a", "mode": "size"}, map[string]any{}, "same"},
-		"HDR under Save space": {"completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "hdr_requires_compact", "source_report": heavyAudioReport(2160)}, "compact,audio_only,tracks"},
-		"media engine missed quality": {"completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "quality_not_met", "quality_ladder": map[string]any{"retry_without_hardware": true, "tried": []any{map[string]any{}, map[string]any{}, map[string]any{}}}}, "x265,same"},
-		"budget missed": {"completed", map[string]any{"path": "/a", "mode": "size", "size_budget_percent": float64(40)}, map[string]any{"reason_code": "size_budget_exceeded", "original_size": float64(1000), "candidate_size_bytes": float64(520), "size_budget": map[string]any{"budget_bytes": float64(400)}}, "budget,same"},
+		"cancelled":                    {"cancelled", map[string]any{"path": "/a", "mode": "size"}, map[string]any{}, "same"},
+		"HDR under Save space":         {"completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "hdr_requires_compact", "source_report": heavyAudioReport(2160)}, "compact,audio_only,tracks"},
+		"media engine missed quality":  {"completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "quality_not_met", "quality_ladder": map[string]any{"retry_without_hardware": true, "tried": []any{map[string]any{}, map[string]any{}, map[string]any{}}}}, "x265,same"},
+		"budget missed":                {"completed", map[string]any{"path": "/a", "mode": "size", "size_budget_percent": float64(40)}, map[string]any{"reason_code": "size_budget_exceeded", "original_size": float64(1000), "candidate_size_bytes": float64(520), "size_budget": map[string]any{"budget_bytes": float64(400)}}, "budget,same"},
 		"Audio only had nothing to do": {"completed", map[string]any{"path": "/a", "mode": "size", "audio_only": true}, map[string]any{"reason_code": "audio_only_nothing_to_convert", "skip_transcode": true}, "size"},
 		"a result is not a step":       {"completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{}, ""},
 	} {
@@ -96,6 +96,12 @@ func TestNextStepsForOtherEndings(t *testing.T) {
 	}
 	if e := explainResult(budget); !strings.Contains(e.Happened, "52% of the original; the target was 40%") {
 		t.Fatalf("budget explanation %q", e.Happened)
+	}
+	// A budget cannot name more than 85% of the source, so an encode that
+	// reached 88% is not offered one.
+	high := endedRecord("completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "size_budget_exceeded", "original_size": float64(1000), "candidate_size_bytes": float64(880), "size_budget": map[string]any{"budget_bytes": float64(400)}})
+	if _, ok := stepByID(high, "budget"); ok {
+		t.Fatalf("budget offered above 85%%: %s", stepIDs(nextStepsFor(high)))
 	}
 	ladder := endedRecord("completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "quality_not_met", "quality_ladder": map[string]any{"tried": []any{1, 2, 3}}})
 	if e := explainResult(ladder); !strings.Contains(e.Happened, "Each of the 3 settings") {
@@ -151,8 +157,16 @@ func TestRerunStartsAnOfferedStep(t *testing.T) {
 	if x265["allow_hardware"] != false || x265["keep_languages"] == nil {
 		t.Fatalf("x265 inputs %v", x265)
 	}
+	// A new budget keeps the goal's tracks.
 	budget := start(`{"id":"missed","key":"step-budget","step":"budget"}`)
-	if budget["size_budget_percent"] != offeredBudgetPercent {
+	if budget["size_budget_percent"] != offeredBudgetPercent || budget["keep_languages"] == nil {
 		t.Fatalf("budget inputs %v", budget)
+	}
+
+	// A batch file shows what happened, and leaves its steps to its batch row.
+	child := map[string]any{"path": "/media/Show/S01E02.mkv", "mode": "size", "parent_action_id": "batch-x", "batch_item_key": "k"}
+	seedOperation(t, st, "child", "transcode_media", "completed", child, map[string]any{"reason_code": "insufficient_savings"}, state)
+	if view := rerunJobView(t, h, "child"); view["explanation"] == nil || view["next_steps"] != nil {
+		t.Fatalf("child view %v", view)
 	}
 }

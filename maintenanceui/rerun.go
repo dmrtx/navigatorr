@@ -249,6 +249,18 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		inputs["allow_hardware"] = false
 		delete(inputs, "hardware_margin_percent")
 	}
+	// A new budget keeps the goal, so it keeps the job's tracks and an encode
+	// that ran without the media engine stays on x265.
+	if step.ID == "budget" {
+		for _, k := range []string{"keep_languages", "keep_audio_streams", "keep_subtitle_streams"} {
+			if v, ok := old.inputs[k]; ok {
+				inputs[k] = v
+			}
+		}
+		if allow, _, ok := action.FrozenHardware(old.state); (ok && !allow) || old.inputs["allow_hardware"] == false {
+			inputs["allow_hardware"] = false
+		}
+	}
 	if body.WithoutHardware {
 		if !offersWithoutHardware(old) {
 			fail(w, 409, "this job did not offer a retry without the media engine")
