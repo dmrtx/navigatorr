@@ -379,6 +379,7 @@
                   <p class="muted">Tracks in the file's original language and untagged tracks are always kept.</p>
                   <div id="keep-tracks-file" class="goal-option" hidden>
                     <p id="keep-tracks-status" class="metadata" role="status"></p>
+                    <div id="keep-tracks-preview" class="stream-preview" hidden></div>
                     <fieldset id="keep-audio" class="track-group">
                       <legend>Audio · keep at least one</legend>
                       <ul id="keep-audio-list" class="track-list"></ul>
@@ -1071,6 +1072,7 @@
           <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
           <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
         </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></details>
+        <div id="reconfigure-preview" class="stream-preview" hidden></div>
         <p id="reconfigure-settings" class="muted"></p>
         <div class="submit-actions"><button id="dismiss-reconfigure" type="button">Back</button><button id="submit-reconfigure" type="submit" class="primary">Apply settings</button></div>
       </form>

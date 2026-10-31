@@ -2559,6 +2559,64 @@ function trackChannels(count) {
   return {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}[count] || (count > 0 ? `${count} channels` : "");
 }
 const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has(track.index) : track.keep;
+// The stream preview: what each stream of one file weighs and what a goal's
+// audio mode makes of each audio track, from the sizes source-tracks reads off
+// the probe. Nothing is measured; the video's new size is the encode's.
+const previewAudioKey = mode => mode === "size" || mode === "compact" ? mode : "";
+function trackOutputText(track, mode) {
+  const out = track.outputs?.[previewAudioKey(mode)];
+  if (!out || out.output === "copy") return "Copied";
+  return `${out.output === "he_aac" ? "HE-AAC" : "AAC"} ${out.kbps} kbps${out.bytes ? ` · ${bytes(out.bytes)}` : ""}`;
+}
+function trackPlanText(kind, track, mode, kept, total) {
+  const share = track.bytes && total > 0 ? Math.round(track.bytes * 100 / total) : 0;
+  const size = track.bytes ? `${bytes(track.bytes)}${share >= 1 ? ` (${share}%)` : ""}` : kind === "audio" ? "Size unknown" : "";
+  const plan = !kept ? "Removed" : kind === "audio" ? trackOutputText(track, mode) : "";
+  return [size, plan].filter(Boolean).join(" → ");
+}
+// Kept audio before and after the goal's audio mode (key), kept subtitles, and
+// what removed tracks weigh. A copied track keeps its own size.
+function previewTotals(data, kept, key) {
+  const t = {audio: 0, after: 0, subtitles: 0, removed: 0, unknown: 0};
+  for (const track of data.audio) {
+    if (!kept("audio", track)) { t.removed += track.bytes || 0; continue; }
+    const out = track.outputs?.[key];
+    if (!track.bytes) t.unknown++;
+    t.audio += track.bytes || 0;
+    t.after += out && out.output !== "copy" ? out.bytes : track.bytes || 0;
+  }
+  for (const track of data.subtitles) {
+    if (kept("subtitles", track)) t.subtitles += track.bytes || 0;
+    else t.removed += track.bytes || 0;
+  }
+  return t;
+}
+function streamPreview(output, data, mode, kept) {
+  output.replaceChildren();
+  const total = data?.size_bytes, video = data?.video_bytes;
+  output.hidden = !total;
+  if (!total) return;
+  const t = previewTotals(data, kept, previewAudioKey(mode)), pct = n => `${Math.round(n * 100 / total)}%`;
+  const facts = node("dl", "", "profile-facts stream-preview-facts");
+  const add = (label, value) => facts.append(node("dt", label), node("dd", value));
+  add("File", bytes(total));
+  add("Video", video ? `${data.video_approx ? "≈ " : ""}${bytes(video)} · ${pct(video)} · re-encoded, its new size is set by the encode` : "Size unknown · re-encoded");
+  add("Audio kept", t.audio ? `${bytes(t.audio)} · ${pct(t.audio)}${t.after < t.audio ? ` → about ${bytes(t.after)}` : " · copied"}` : t.unknown ? "Size unknown" : "None");
+  if (t.subtitles) add("Subtitles kept", `${bytes(t.subtitles)}${t.subtitles >= total / 100 ? ` · ${pct(t.subtitles)}` : ""}`);
+  if (t.removed) add("Tracks removed", `−${bytes(t.removed)} · ${pct(t.removed)}`);
+  output.append(facts);
+  const saved = t.audio - t.after + t.removed;
+  if (saved > 0) output.append(node("p", `Audio and track choices alone save about ${bytes(saved)}, ${pct(saved)} of the file; the video encode saves on top of that.`, "metadata"));
+  if (t.unknown) output.append(node("p", `${t.unknown === 1 ? "One kept audio track states" : `${t.unknown} kept audio tracks state`} no size, so ${t.unknown === 1 ? "it is" : "they are"} left out of these totals.`, "metadata"));
+  if (mode === "size") {
+    const strong = previewTotals(data, kept, "size_he"), more = t.after - strong.after;
+    if (more >= Math.max(total / 100, 1e6)) output.append(node("p", `Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about ${bytes(more)} more. A size budget switches to it when the budget needs it.`, "metadata"));
+  }
+  if (video && t.audio > video) {
+    const copied = !previewAudioKey(mode) || t.after >= t.audio;
+    output.append(node("p", `Audio weighs more than the video in this file (${bytes(t.audio)} against ${bytes(video)}).${copied ? " This goal copies it, so most of the file stays as it is; removing tracks or Save space would shrink it." : ` After this goal it is about ${bytes(t.after)}.`}`, "stream-preview-warning"));
+  }
+}
 function keepTracksCount(data) {
   const kept = kind => data[kind].filter(track => trackKept(kind, track)).length;
   const part = (kind, one, many) => data[kind].length ? `${kept(kind)} of ${data[kind].length} ${data[kind].length === 1 ? one : many}` : "";
@@ -2588,6 +2646,8 @@ function trackRow(kind, track) {
   name.append(node("strong", languageName(track.language), "track-name"));
   const facts = [trackCodec(track.codec), kind === "audio" ? trackChannels(track.channels) : "", track.title].filter(Boolean);
   if (facts.length) name.append(node("span", facts.join(" · "), "metadata track-facts"));
+  const plan = node("span", "", "metadata track-plan");
+  name.append(plan);
   label.append(box, name);
   // The badges stay on the track's own row, stacked when the row is narrow.
   const badges = node("span", "", "track-badges");
@@ -2595,18 +2655,22 @@ function trackRow(kind, track) {
     if (track[flag]) badges.append(node("span", text, "badge track-badge"));
   if (badges.children.length) label.append(badges);
   row.append(label);
-  return {row, box, kind, track};
+  return {row, box, kind, track, plan};
 }
 // The boxes are built when a file is read and updated in place afterwards, so a
 // keyboard user toggling one never loses their place.
 function syncTrackBoxes() {
   const loading = keepTracks.status === "loading";
   const audioKept = keepTracks.boxes.filter(entry => entry.kind === "audio" && trackKept(entry.kind, entry.track)).length;
+  const mode = processingMode(), total = keepTracks.data?.size_bytes;
   for (const entry of keepTracks.boxes) {
     entry.box.checked = trackKept(entry.kind, entry.track);
     // Boxes wait for the file to be read again; the last audio track cannot be unticked.
     entry.box.disabled = loading || (entry.kind === "audio" && entry.box.checked && audioKept <= 1);
+    entry.plan.textContent = trackPlanText(entry.kind, entry.track, mode, entry.box.checked, total);
+    entry.plan.hidden = !entry.plan.textContent;
   }
+  streamPreview($("keep-tracks-preview"), loading ? null : keepTracks.data, mode, trackKept);
 }
 function renderKeepTracks() {
   const kt = keepTracks, target = keepTrackTarget();
@@ -2643,6 +2707,9 @@ function renderKeepTracks() {
   $("keep-subtitles").hidden = !data?.subtitles.length;
   syncTrackBoxes();
   $("keep-tracks-reset").hidden = !kt.picks;
+  // The section starts closed, so its summary carries the one warning, first
+  // because a narrow summary is cut at its end.
+  if (data?.video_bytes && previewTotals(data, trackKept, "").audio > data.video_bytes) $("keep-tracks-summary").textContent = `Audio outweighs video · ${$("keep-tracks-summary").textContent}`;
   $("keep-tracks-status").textContent = kt.status === "error" ? kt.error : kt.status === "loading" ? "Reading the file's tracks…"
     : [data ? keepTracksCount(data) : "", kt.notice].filter(Boolean).join(" ");
 }
@@ -4292,7 +4359,8 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
   state.reconfigureScopeRevision=(state.reconfigureScopeRevision || 0)+1;
   const revision = state.reconfigureRevision = (state.reconfigureRevision || 0) + 1;
   const auth = state.authRevision;
-  state.reconfigurePlan = null;
+  state.reconfigurePlan = state.reconfigurePreview = null;
+  renderReconfigurePreview();
   $("reconfigure-form").hidden = true;
   $("reconfigure-files").replaceChildren();
   $("reconfigure-summary").textContent = "Loading saved selection…";
@@ -4336,6 +4404,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-settings").textContent = `${plan.settings.preserve_source_bit_depth ? "Preserve source bit depth · " : ""}${plan.settings.promote_candidates ? "Ask for replacement approval after conversion" : "Create candidates; keep originals"}`;
     $("reconfigure-form").hidden = false;
     updateBatchSettingsProfile();
+    void loadReconfigurePreview(plan, revision, auth);
   } catch (error) {
     if (auth === state.authRevision && revision === state.reconfigureRevision)
       $("reconfigure-summary").textContent = error.message;
@@ -4375,11 +4444,32 @@ async function encodeFileAgain(id, itemKey) {
     setConnection(serverReachable);
   }
 }
+// One file's goal dialog previews its streams under the goal chosen, with the
+// tracks the saved language list keeps (the goals that keep every track keep
+// them all).
+async function loadReconfigurePreview(plan, revision, auth) {
+  if (!plan.mode || !plan.source_path) return;
+  let data = null;
+  try {
+    data = await readSource(`source-tracks?${new URLSearchParams({path: plan.source_path})}`, undefined, () => revision === state.reconfigureRevision);
+  } catch {}
+  if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
+  state.reconfigurePreview = data?.audio ? data : null;
+  renderReconfigurePreview();
+}
+function renderReconfigurePreview() {
+  const data = state.reconfigurePreview, mode = $("reconfigure-mode").value;
+  const kept = (kind, track) => !keepGoals.includes(mode) || track.keep;
+  streamPreview($("reconfigure-preview"), data, mode, kept);
+  if (data && keepGoals.includes(mode) && [...data.audio, ...data.subtitles].some(track => !track.keep))
+    $("reconfigure-preview").append(node("p", "Tracks as the saved language list keeps them.", "metadata"));
+}
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
   updateSizeBudgetFields("reconfigure-budget");
   renderSegmented(["reconfigure-budget"]);
+  renderReconfigurePreview();
 }
 $("reconfigure-mode").addEventListener("change", updateReconfigureHardware);
 $("reconfigure-hardware").addEventListener("change", updateReconfigureHardware);

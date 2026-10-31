@@ -118,7 +118,7 @@ func TestBatchFileSettingsCommandChangesOnlyReviewedFile(t *testing.T) {
 			seedActionableFiles(t, s)
 			w := request(h, "GET", "/api/maintenance/batch-settings?id=batch&scope=file&item_key="+key, "", true)
 			plan := map[string]any{}
-			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil || plan["selected"] != float64(1) || plan["item_key"] != key {
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil || plan["selected"] != float64(1) || plan["item_key"] != key || plan["source_path"] != "/media/"+key {
 				t.Fatal(w.Code, w.Body.String())
 			}
 			if key == "wait" && plan["decision_version"] == nil {

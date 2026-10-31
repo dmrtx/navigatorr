@@ -104,7 +104,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		budgets = append(budgets, itemFrozenSizeBudget(state, item.ItemKey))
 		if body.Scope == "file" {
-			plan["item_key"] = item.ItemKey
+			// The file itself, so the goal dialog can preview its streams.
+			plan["item_key"], plan["source_path"] = item.ItemKey, item.FilePath
 		}
 		profile := item.Profile
 		if profile == "" {
