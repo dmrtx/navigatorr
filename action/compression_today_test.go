@@ -16,7 +16,7 @@ func TestCompressionPolicyTodayDescribesEachGoal(t *testing.T) {
 	byGoal := map[string]CompressionGoal{}
 	for _, g := range today.Goals {
 		byGoal[g.Goal] = g
-		if "transcode-modes-"+g.Version != ModePolicyV4 || len(g.Digest) != 12 || strings.Contains(g.Digest, ":") || g.Picture == "" || g.Video == "" || g.Audio == "" || g.Keeps == "" {
+		if g.Version != ModePolicyV4 || len(g.Digest) != 12 || strings.Contains(g.Digest, ":") || g.Picture == "" || g.Video == "" || g.Audio == "" || g.Keeps == "" {
 			t.Fatalf("%s: %+v", g.Goal, g)
 		}
 	}
@@ -29,11 +29,18 @@ func TestCompressionPolicyTodayDescribesEachGoal(t *testing.T) {
 			t.Fatalf("size video %q lacks %q", size.Video, want)
 		}
 	}
-	if !strings.Contains(size.Quality, "VMAF at least 88 on average, 84 at the 5th percentile and 85 in the worst 5-second window") {
+	if !strings.Contains(size.Quality, "10-second windows, one per 10 minutes of the file (5 to 12): VMAF at least 88 on average and in every window, 84 at the 5th percentile, 85 in the worst 5 seconds; banding (CAMBI) at most 6 on average and 16 at its peak") {
 		t.Fatalf("size quality %q", size.Quality)
 	}
-	if !strings.Contains(size.Audio, "AAC-LC (mono 128, stereo 192, 5.1 384, 7.1 512 kbps)") || !strings.Contains(size.Audio, "Atmos and DTS:X keep their channel bed") {
+	if !strings.Contains(size.Audio, "AAC-LC (mono 128, stereo 192, 5.1 384, 7.1 512 kbps) when it is at least 1.25 times that target") || !strings.Contains(size.Audio, "keeps its channel bed") {
 		t.Fatalf("size audio %q", size.Audio)
+	}
+	if !strings.Contains(size.Video, "only the audio is converted, if that still saves 15%") || !strings.Contains(size.Video, "x265 is offered as a next step") {
+		t.Fatalf("size video %q", size.Video)
+	}
+	// Other goals are checked on the five default windows, never the whole file.
+	if q := byGoal["quality"].Quality; !strings.Contains(q, "five windows of up to 10 seconds") || strings.Contains(q, "whole file") {
+		t.Fatalf("quality check %q", q)
 	}
 	if !strings.Contains(size.Keeps, "at least 15% smaller") {
 		t.Fatalf("size keeps %q", size.Keeps)
@@ -65,5 +72,13 @@ func TestCompressionChangesNameEveryPolicyVersion(t *testing.T) {
 		if !named[v] {
 			t.Fatalf("no change names %s", v)
 		}
+	}
+}
+
+// HE-AAC covers stereo, quad and 5.1 only; mono and 7.1 stay AAC-LC.
+func TestCompressionAudioNamesHEAACLayouts(t *testing.T) {
+	got := describeAudio(transcode.AudioModeSizeHEAAC)
+	if !strings.Contains(got, "HE-AAC for stereo, quad and 5.1 (stereo 64, 5.1 160 kbps), else AAC-LC (mono 128, stereo 192, 5.1 384, 7.1 512 kbps)") {
+		t.Fatalf("HE-AAC audio %q", got)
 	}
 }

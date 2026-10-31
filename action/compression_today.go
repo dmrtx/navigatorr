@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
 // CompressionGoal says how one goal compresses a file today, in words built
@@ -67,7 +68,7 @@ func CompressionPolicyToday() (CompressionToday, error) {
 }
 
 func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
-	d := CompressionGoal{Goal: goal, Version: strings.TrimPrefix(p.Version, "transcode-modes-"), Digest: strings.TrimPrefix(p.Digest, "sha256:")}
+	d := CompressionGoal{Goal: goal, Version: p.Version, Digest: strings.TrimPrefix(p.Digest, "sha256:")}
 	if len(d.Digest) > 12 {
 		d.Digest = d.Digest[:12]
 	}
@@ -84,19 +85,15 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 	if p.Size != nil && p.Size.EightBitMain10 {
 		d.Video += " An 8-bit source may become 10-bit HEVC on a worker proven to keep its quality."
 	}
-	if vmaf := p.Profile.Optimization.Quality.VMAF; vmaf != nil && !(p.Size != nil && p.Size.AudioOnly) {
-		d.Quality = fmt.Sprintf("Each encode is measured against the original on the whole file: VMAF at least %g on average", vmaf.Minimum)
-		if vmaf.P5Minimum != nil {
-			d.Quality += fmt.Sprintf(", %g at the 5th percentile", *vmaf.P5Minimum)
-		}
-		if vmaf.WorstWindowMinimum != nil && vmaf.WorstWindowSeconds > 0 {
-			d.Quality += fmt.Sprintf(" and %g in the worst %g-second window", *vmaf.WorstWindowMinimum, vmaf.WorstWindowSeconds)
-		}
-		d.Quality += "."
+	if p.Size != nil && p.Size.AudioOnlyFallback && !p.Size.AudioOnly {
+		d.Video += fmt.Sprintf(" When no video encode passes, the video is copied and only the audio is converted, if that still saves %g%%.", p.MinSavingsPercent)
+	}
+	if o := p.Profile.Optimization; o != nil && o.Quality != nil && o.Quality.VMAF != nil && !(p.Size != nil && p.Size.AudioOnly) {
+		d.Quality = describeQuality(p, o.Quality)
 	}
 	d.Audio = describeAudio(p.Profile.Audio.Mode)
 	if goal == "size" || goal == "compact" || goal == AudioOnlyGoal {
-		d.Tracks = "Keeps the audio and subtitles in the languages to keep (Settings), plus the original language and untagged tracks; video, attachments and chapters are never removed."
+		d.Tracks = "With languages to keep (Settings), keeps the audio and subtitles in them, plus the original language and untagged tracks; when no audio track matches, every audio track is kept. With an empty list every track is kept. Video, attachments and chapters are never removed."
 	}
 	switch {
 	case p.Size != nil && p.Size.AudioOnly:
@@ -107,6 +104,27 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 		d.Keeps = "Kept if it does not grow, then waits for your approval before replacing the original."
 	}
 	return d
+}
+
+// describeQuality is the final check each encode must pass: VMAF and banding
+// on windows of the file, never the whole of it.
+func describeQuality(p *ModePolicySnapshot, q *recipe.QualityPolicy) string {
+	where := "five windows of up to 10 seconds spread across the file"
+	if s := p.Size; s != nil && s.FinalWindowSeconds > 0 && s.FinalWindowEverySeconds > 0 {
+		where = fmt.Sprintf("%d-second windows, one per %g minutes of the file (%d to %d)", s.FinalWindowSeconds, float64(s.FinalWindowEverySeconds)/60, s.FinalWindowsMinimum, s.FinalWindowsMaximum)
+	}
+	v := q.VMAF
+	text := fmt.Sprintf("Each encode is compared with the original on %s: VMAF at least %g on average and in every window", where, v.Minimum)
+	if v.P5Minimum != nil {
+		text += fmt.Sprintf(", %g at the 5th percentile", *v.P5Minimum)
+	}
+	if v.WorstWindowMinimum != nil && v.WorstWindowSeconds > 0 {
+		text += fmt.Sprintf(", %g in the worst %g seconds", *v.WorstWindowMinimum, v.WorstWindowSeconds)
+	}
+	if b := q.Banding; b != nil && b.Enabled && b.Enforcement == "reject" && b.MaxMean != nil && b.MaxPeak != nil {
+		text += fmt.Sprintf("; banding (CAMBI) at most %g on average and %g at its peak", *b.MaxMean, *b.MaxPeak)
+	}
+	return text + "."
 }
 
 func describeRecipe(r *ModeRecipe) string {
@@ -129,9 +147,9 @@ func describeRecipe(r *ModeRecipe) string {
 	case RecipeSizeBudget:
 		return "The whole file is encoded to fit the size limit."
 	}
-	text := ladder(r) + ", until an encode passes the quality check; one that fails is encoded again at the next, better setting."
+	text := ladder(r) + ", until an encode passes the quality check; one that fails is encoded again at the next, better setting. The ladder stops early when an encode misses the saving, since a better setting is only larger, or when the scores show the next setting would still miss."
 	if r.Fallback != nil {
-		text += " A worker without the media engine uses " + ladder(r.Fallback) + "."
+		text += " A worker without the media engine uses " + ladder(r.Fallback) + "; when every media engine setting misses, x265 is offered as a next step."
 	}
 	return text
 }
@@ -139,23 +157,24 @@ func describeRecipe(r *ModeRecipe) string {
 func describeAudio(mode string) string {
 	switch {
 	case transcode.IsAudioLevelMode(mode):
-		mono, stereo, surround, wide, num, den := transcode.AudioLevelTargetsKbps(transcode.IsHEAACAudioLevelMode(mode))
-		codec := "AAC-LC"
+		mono, stereo, surround, wide, num, den := transcode.AudioLevelTargetsKbps(false)
+		targets := fmt.Sprintf("AAC-LC (mono %d, stereo %d, 5.1 %d, 7.1 %d kbps)", mono, stereo, surround, wide)
 		if transcode.IsHEAACAudioLevelMode(mode) {
-			codec = "HE-AAC"
+			_, heStereo, heSurround, _, _, _ := transcode.AudioLevelTargetsKbps(true)
+			targets = fmt.Sprintf("HE-AAC for stereo, quad and 5.1 (stereo %d, 5.1 %d kbps), else %s", heStereo, heSurround, targets)
 		}
-		text := fmt.Sprintf("Lossless audio, and lossy audio at least %g times its target, becomes %s (mono %d, stereo %d, 5.1 %d, 7.1 %d kbps), keeping its channel layout.", float64(num)/float64(den), codec, mono, stereo, surround, wide)
+		text := fmt.Sprintf("A track up to 7.1, in a layout AAC keeps, becomes %s when it is at least %g times that target; a lossless track that states no bitrate is converted too.", targets, float64(num)/float64(den))
 		if transcode.IsObjectBedAudioLevelMode(mode) {
-			text += " Atmos and DTS:X keep their channel bed and lose their objects."
+			text += " A converted Atmos or DTS:X track keeps its channel bed and loses its objects."
 		} else {
 			text += " Lossy Atmos is copied."
 		}
-		return text + " Other audio is copied."
+		return text + " Every other track, a lossy one of unknown bitrate included, is copied with its objects."
 	case mode == transcode.AudioModeCompactLossless:
 		return "Lossless audio becomes AAC; lossy audio is copied."
 	case mode == "compact":
 		mono, stereo, surround, wide, _, _ := transcode.AudioLevelTargetsKbps(false)
-		return fmt.Sprintf("Lossless, DTS and PCM audio becomes AAC-LC (mono %d, stereo %d, 5.1 %d, 7.1 %d kbps), keeping its channel layout; TrueHD Atmos and DTS:X keep their channel bed and lose their objects. Other audio, lossy Atmos included, is copied.", mono, stereo, surround, wide)
+		return fmt.Sprintf("Lossless, DTS and PCM audio up to 7.1, in a layout AAC keeps, becomes AAC-LC (mono %d, stereo %d, 5.1 %d, 7.1 %d kbps); TrueHD Atmos and DTS:X keep their channel bed and lose their objects. Other audio, lossy Atmos included, is copied.", mono, stereo, surround, wide)
 	}
 	return "Audio is copied as it is."
 }

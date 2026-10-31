@@ -8052,7 +8052,7 @@ function renderCompression(today) {
   goals.replaceChildren(...(today.goals || []).map(g => {
     const card = node("article", "", "compression-goal");
     const head = node("div", "", "compression-goal-head");
-    head.append(node("h3", g.goal === "compact" ? "Shrink to SDR" : goalNames[g.goal] || g.goal), node("span", [g.version, g.digest].filter(Boolean).join(" · "), "metadata"));
+    head.append(node("h3", g.goal === "compact" ? "Shrink to SDR" : goalNames[g.goal] || g.goal), node("span", g.digest ? `Policy ${g.digest}` : "", "metadata"));
     const rows = node("dl", "", "compression-facts");
     for (const [key, label] of compressionRows) if (g[key]) rows.append(node("dt", label), node("dd", g[key]));
     card.append(head, rows);
@@ -8064,14 +8064,17 @@ function renderCompression(today) {
     return item;
   }));
 }
+// Only the latest request writes, and not after the session changed.
 async function loadCompression() {
-  const auth = state.authRevision;
+  const auth = state.authRevision, request = state.compressionRequest = (state.compressionRequest || 0) + 1;
+  const current = () => auth === state.authRevision && request === state.compressionRequest;
   try {
     const today = await api("compression");
-    if (auth !== state.authRevision) return;
+    if (!current()) return;
     $("compression-error").hidden = true;
     renderCompression(today);
   } catch (err) {
+    if (!current()) return;
     $("compression-error").textContent = `Could not load how files are compressed: ${err.message}`;
     $("compression-error").hidden = false;
   }

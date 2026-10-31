@@ -8435,13 +8435,17 @@ test("the Compression tab shows each goal from the server and what changed", asy
   assert.deepEqual(paths, ["compression"]);
   const cards = h.elements.get("compression-goals").children;
   assert.deepEqual(cards.map(c => c.children[0].children[0].textContent), ["Save space", "Shrink to SDR"]);
-  assert.equal(cards[0].children[0].children[1].textContent, "v4 · abc");
+  assert.equal(cards[0].children[0].children[1].textContent, "Policy abc");
   // Only the facts a goal has are listed; quality and tracks are left out here.
   assert.deepEqual(cards[0].children[1].children.filter((_, i) => i % 2 === 0).map(n => n.textContent), ["Picture", "Video", "Audio", "Kept when"]);
   const changes = h.elements.get("compression-change-list").children;
   assert.deepEqual(changes.map(li => li.children.map(n => n.textContent)), [["2026-10-31", "v7", "Audio only."], ["2026-10-20", "", "Size limit."]]);
   assert.equal(h.elements.get("compression-error").hidden, true);
 
+  // A reply from before the session changed is dropped.
+  h.run('api=async()=>{state.authRevision++;throw new Error("expired")};');
+  await h.run('loadCompression()');
+  assert.equal(h.elements.get("compression-error").hidden, true);
   h.run('api=async()=>{throw new Error("offline")};');
   await h.run('loadCompression()');
   assert.equal(h.elements.get("compression-error").hidden, false);

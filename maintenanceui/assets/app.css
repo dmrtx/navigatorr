@@ -1902,6 +1902,7 @@ main {
 /* How we compress today: one card per goal, then the dated changes. */
 .compression-page { margin-bottom: 24px; }
 .compression-page h2 { margin: 0 0 4px; }
+.compression-page .error { color: var(--accent); }
 .compression-goals {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));

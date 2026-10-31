@@ -13,7 +13,7 @@ var compressionChanges = []CompressionChange{
 	{Date: "2026-10-28", Text: "Save space converts any lossy track at least 1.25 times its AAC target, not only lossless audio."},
 	{Date: "2026-10-22", Version: transcode.ModePolicyV6, Text: "Save space and Shrink keep only the audio and subtitles in the languages to keep, the original language and untagged tracks."},
 	{Date: "2026-10-22", Version: transcode.ModePolicyV5, Text: "A size limit plans the audio per file: AAC-LC, or HE-AAC when AAC-LC would leave too little for the video."},
-	{Date: "2026-10-21", Version: ModePolicyV4, Text: "Every goal encodes the whole file at a short ladder of fixed settings instead of searching on samples; the quality check judges each encode on the whole file."},
+	{Date: "2026-10-21", Version: ModePolicyV4, Text: "Every goal encodes the whole file at a short ladder of fixed settings instead of searching on samples; each encode is checked on windows spread across the file. x265 after the media engine misses is now a next step you choose, not automatic."},
 	{Date: "2026-10-20", Text: "Save space can aim for a size limit: a percent of the original, a size, or like other episodes."},
 	{Date: "2026-10-19", Text: "Save space encodes on the Apple media engine first, with x265 when it cannot pass."},
 	{Date: "2026-10-18", Version: transcode.ModePolicyV3, Text: "Save space converts lossless audio to AAC and may encode 8-bit sources as 10-bit HEVC."},
