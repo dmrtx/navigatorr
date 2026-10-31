@@ -161,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-drain", s.workerDrain)
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
+	mux.HandleFunc("GET /api/maintenance/compression", s.compression)
 	mux.HandleFunc("GET /api/maintenance/keep-languages", s.keepLanguages)
 	mux.HandleFunc("PUT /api/maintenance/keep-languages", s.keepLanguages)
 	mux.HandleFunc("POST /api/maintenance/tool", s.tool)

@@ -8423,3 +8423,27 @@ test("the explanation says what happened and what was learned", () => {
   assert.match(text, /What happened: /);
   assert.match(text, /Converting the audio alone/);
 });
+
+test("the Compression tab shows each goal from the server and what changed", async () => {
+  const h = harness();
+  const today = {goals:[{goal:"size",version:"v4",digest:"abc",picture:"Same picture.",video:"HEVC.",audio:"AAC.",keeps:"Subtitles."},{goal:"compact",version:"v4",picture:"SDR.",video:"x265.",audio:"AAC.",keeps:"Chapters."}],changes:[{date:"2026-10-31",version:"transcode-modes-v7",text:"Audio only."},{date:"2026-10-20",text:"Size limit."}]};
+  const paths = [];
+  h.run('api=async(path)=>{record(path);return today;};');
+  h.context.record = (p) => paths.push(p);
+  h.context.today = today;
+  await h.run('loadCompression()');
+  assert.deepEqual(paths, ["compression"]);
+  const cards = h.elements.get("compression-goals").children;
+  assert.deepEqual(cards.map(c => c.children[0].children[0].textContent), ["Save space", "Shrink to SDR"]);
+  assert.equal(cards[0].children[0].children[1].textContent, "v4 · abc");
+  // Only the facts a goal has are listed; quality and tracks are left out here.
+  assert.deepEqual(cards[0].children[1].children.filter((_, i) => i % 2 === 0).map(n => n.textContent), ["Picture", "Video", "Audio", "Kept when"]);
+  const changes = h.elements.get("compression-change-list").children;
+  assert.deepEqual(changes.map(li => li.children.map(n => n.textContent)), [["2026-10-31", "v7", "Audio only."], ["2026-10-20", "", "Size limit."]]);
+  assert.equal(h.elements.get("compression-error").hidden, true);
+
+  h.run('api=async()=>{throw new Error("offline")};');
+  await h.run('loadCompression()');
+  assert.equal(h.elements.get("compression-error").hidden, false);
+  assert.match(h.elements.get("compression-error").textContent, /offline/);
+});

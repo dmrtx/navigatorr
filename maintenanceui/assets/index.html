@@ -92,7 +92,7 @@
             ></span></button
           ><button
             data-tab="recipes"
-            aria-label="Profiles"
+            aria-label="Compression"
             aria-current="false"
           >
             <svg
@@ -109,7 +109,7 @@
               <circle cx="9" cy="7" r="3" />
               <circle cx="15" cy="17" r="3" /></svg
             ><span class="tab-text"
-              ><span class="tab-label">Profiles</span></span
+              ><span class="tab-label">Compression</span></span
             ></button
           ><button data-tab="stats" aria-label="Stats" aria-current="false">
             <svg
@@ -680,8 +680,21 @@
           </div>
         </section>
         <section id="recipes" class="panel tab-content" hidden>
-          <div class="queue-toolbar">
-            <h2>Profiles</h2>
+          <div id="compression" class="compression-page">
+            <h2>How we compress today</h2>
+            <p class="metadata">
+              What each goal does to a new job now. A job keeps the rules it
+              started with.
+            </p>
+            <p id="compression-error" class="error" role="alert" hidden></p>
+            <div id="compression-goals" class="compression-goals"></div>
+            <details id="compression-changes" class="compression-changes">
+              <summary>What changed</summary>
+              <ol id="compression-change-list"></ol>
+            </details>
+          </div>
+          <div class="queue-toolbar technical-profiles-toolbar">
+            <h2>Technical profiles</h2>
             <button
               id="new-recipe"
               type="button"
