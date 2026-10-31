@@ -667,7 +667,7 @@ function option(select, value, text = value) {
   select.append(o);
   return o;
 }
-const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",stats:"stats",settings:"advanced",more:"advanced"};
+const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",compression:"recipes",stats:"stats",settings:"advanced",more:"advanced"};
 const routeStatuses = ["all","pending","running","waiting_external","waiting_decision","completed","failed","cancelled","archived"];
 function navigationRoute(search = "") {
   const q = new URLSearchParams(search);
@@ -855,6 +855,7 @@ function selectTab(tab, fromRoute = false) {
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
     resumeFolderSizes();
   }
+  if (tab === "recipes") void loadCompression();
   if (tab === "recipes" && !fromRoute)
     safe(async () => {
       const route = state.routeRevision, auth = state.authRevision;
@@ -8041,6 +8042,42 @@ function profileOptionLabel(name) {
   const title = data.source === "active_bundle" ? labels[name] || name : `${category} · ${effective}`;
   const encoder = p.video?.codec === "hevc_videotoolbox" ? "Hardware" : p.video?.codec === "libx265" ? "CPU" : p.video?.codec;
   return [title, encoder, p.optimization?.enabled ? "Test samples" : "", data.source === "managed" ? `Custom (${name})` : ""].filter(Boolean).join(" · ");
+}
+
+// How we compress today: each goal as a new job freezes it now, from the
+// server's policy, and the dated changes. The page only reads.
+const compressionRows = [["picture","Picture"],["video","Video"],["quality","Quality"],["audio","Audio"],["tracks","Tracks"],["keeps","Kept when"]];
+function renderCompression(today) {
+  const goals = $("compression-goals");
+  goals.replaceChildren(...(today.goals || []).map(g => {
+    const card = node("article", "", "compression-goal");
+    const head = node("div", "", "compression-goal-head");
+    head.append(node("h3", g.goal === "compact" ? "Shrink to SDR" : goalNames[g.goal] || g.goal), node("span", g.digest ? `Policy ${g.digest}` : "", "metadata"));
+    const rows = node("dl", "", "compression-facts");
+    for (const [key, label] of compressionRows) if (g[key]) rows.append(node("dt", label), node("dd", g[key]));
+    card.append(head, rows);
+    return card;
+  }));
+  $("compression-change-list").replaceChildren(...(today.changes || []).map(c => {
+    const item = node("li");
+    item.append(node("time", c.date, "metadata"), node("span", (c.version || "").replace(/^transcode-modes-/, ""), "compression-version"), node("span", c.text));
+    return item;
+  }));
+}
+// Only the latest request writes, and not after the session changed.
+async function loadCompression() {
+  const auth = state.authRevision, request = state.compressionRequest = (state.compressionRequest || 0) + 1;
+  const current = () => auth === state.authRevision && request === state.compressionRequest;
+  try {
+    const today = await api("compression");
+    if (!current()) return;
+    $("compression-error").hidden = true;
+    renderCompression(today);
+  } catch (err) {
+    if (!current()) return;
+    $("compression-error").textContent = `Could not load how files are compressed: ${err.message}`;
+    $("compression-error").hidden = false;
+  }
 }
 
 async function loadRecipes(initial = false, more = false) {

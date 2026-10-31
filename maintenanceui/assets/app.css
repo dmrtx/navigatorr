@@ -1899,6 +1899,47 @@ main {
 .stat-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 8px; white-space: nowrap; }
 .stat-facts strong { color: var(--forest); font-weight: 600; }
 
+/* How we compress today: one card per goal, then the dated changes. */
+.compression-page { margin-bottom: 24px; }
+.compression-page h2 { margin: 0 0 4px; }
+.compression-page .error { color: var(--accent); }
+.compression-goals {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.compression-goal {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.compression-goal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-bottom: 6px;
+}
+.compression-goal-head h3 { margin: 0; font-size: 15px; }
+.compression-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 0; }
+.compression-facts dt { color: var(--muted); }
+.compression-facts dd { margin: 0; overflow-wrap: anywhere; }
+.compression-changes summary { cursor: pointer; font-weight: 600; }
+.compression-changes ol { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.compression-changes li { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); gap: 10px; align-items: baseline; }
+.compression-version { color: var(--muted); min-width: 2ch; }
+.technical-profiles-toolbar { padding-top: 16px; border-top: 1px solid var(--line); }
+@media (max-width: 600px) {
+  .compression-facts { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .compression-facts dd { margin-bottom: 6px; }
+  .compression-changes li { grid-template-columns: max-content minmax(0, 1fr); }
+  .compression-changes li > span:last-child { grid-column: 1 / -1; }
+}
+
 /* Profiles: ordinary compact controls, with advanced options in a dialog. */
 .recipe-layout {
   display: grid;

@@ -171,3 +171,18 @@ func TestSourceProfileRequiresSignIn(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+// The How we compress page reads each goal and the changes from the server.
+func TestCompressionPageListsGoalsAndChanges(t *testing.T) {
+	_, h := testUI(t)
+	w := request(h, "GET", "/api/maintenance/compression", "", true)
+	var page struct {
+		Goals []struct {
+			Goal, Video string
+		} `json:"goals"`
+		Changes []struct{ Date, Text string } `json:"changes"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Goals) != 5 || page.Goals[0].Goal != "size" || page.Goals[0].Video == "" || len(page.Changes) == 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

@@ -390,3 +390,13 @@ func SameAudioLayout(source, output string) bool {
 	}
 	return canon(source) == canon(output)
 }
+
+// AudioLevelTargetsKbps are a level's targets for mono, stereo, 5.1 and 7.1
+// tracks, and the ratio over its target (num/den) a track must reach to be
+// re-encoded, for describing the size goal's audio.
+func AudioLevelTargetsKbps(heAAC bool) (mono, stereo, surround, wide, gainNum, gainDen int) {
+	if heAAC {
+		return aacLCKbps(1), heAACKbps(2), heAACKbps(6), aacLCKbps(8), sizeLevelMinGainNum, sizeLevelMinGainDen
+	}
+	return aacLCKbps(1), aacLCKbps(2), aacLCKbps(6), aacLCKbps(8), sizeLevelMinGainNum, sizeLevelMinGainDen
+}
