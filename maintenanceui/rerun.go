@@ -261,6 +261,14 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			inputs["allow_hardware"] = false
 		}
 	}
+	// A smaller saving runs the same encodes again; only the minimum changes.
+	if step.ID == "smaller" {
+		for _, k := range []string{"allow_slow_preset", "hardware_margin_percent"} {
+			if v, ok := old.inputs[k]; ok {
+				inputs[k] = v
+			}
+		}
+	}
 	if body.WithoutHardware {
 		if !offersWithoutHardware(old) {
 			fail(w, 409, "this job did not offer a retry without the media engine")

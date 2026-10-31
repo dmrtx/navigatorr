@@ -4801,6 +4801,10 @@ async function applyBatchStep(batchID, itemKey, step) {
     if (step.id === "x265") {
       body = {...sameSettingsRequest(plan), allow_hardware: false};
       delete body.hardware_margin_percent;
+    } else if (step.id === "smaller" && plan.mode === "size") {
+      // The same encodes again, keeping the file's encoder choice; only the
+      // minimum saving changes.
+      body = {...sameSettingsRequest(plan), ...step.inputs};
     } else {
       body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
       // A new budget keeps the goal, so it keeps the file's encoder choice.

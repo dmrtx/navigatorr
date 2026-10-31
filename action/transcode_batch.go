@@ -1150,7 +1150,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "audio_only"} {
+		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "audio_only", "accept_smaller_saving"} {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}

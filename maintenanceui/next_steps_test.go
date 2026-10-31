@@ -194,9 +194,9 @@ func TestRerunStartsAnOfferedStep(t *testing.T) {
 		t.Fatalf("budget inputs %v", budget)
 	}
 
-	// So does a smaller saving.
+	// So does a smaller saving, with the same encoder settings.
 	smaller := start(`{"id":"missed","key":"step-smaller","step":"smaller"}`)
-	if smaller["mode"] != "size" || smaller["accept_smaller_saving"] != true || smaller["keep_languages"] == nil {
+	if smaller["mode"] != "size" || smaller["accept_smaller_saving"] != true || smaller["keep_languages"] == nil || smaller["hardware_margin_percent"] != inputs["hardware_margin_percent"] {
 		t.Fatalf("smaller saving inputs %v", smaller)
 	}
 
