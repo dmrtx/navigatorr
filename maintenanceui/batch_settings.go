@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Uses the stored item relation, never the current Sonarr/folder catalog.
@@ -22,6 +23,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		BudgetSource     *string  `json:"size_budget_source"`
 		BudgetMultiplier *float64 `json:"size_budget_sibling_multiplier"`
 		AudioOnly        *bool    `json:"audio_only"`
+		MaxHeight        *float64 `json:"max_height"`
 		ID               string   `json:"id"`
 		Scope            string   `json:"scope"`
 		CandidateID      string   `json:"candidate_id"`
@@ -83,6 +85,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	var hardware action.HardwareChoice
 	var budgets []frozenBudget
 	audioOnly := 0
+	heights := map[int]bool{}
 	profiles := map[string]int{}
 	damaged := 0
 	for _, item := range items {
@@ -108,6 +111,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		if itemFrozenAudioOnly(state, item.ItemKey) {
 			audioOnly++
 		}
+		heights[itemFrozenMaxHeight(state, item.ItemKey)] = true
 		if body.Scope == "file" {
 			// The file itself, so the goal dialog can preview its streams.
 			plan["item_key"], plan["source_path"] = item.ItemKey, item.FilePath
@@ -215,6 +219,14 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	if selected > 0 {
 		settingsView["audio_only"], settingsView["audio_only_mixed"] = audioOnly == selected, audioOnly > 0 && audioOnly < selected
 	}
+	// The Shrink height the files were frozen with, when they agree on one.
+	if len(heights) == 1 {
+		for h := range heights {
+			if h > 0 {
+				settingsView["max_height"] = h
+			}
+		}
+	}
 	// The size budget the files were frozen with, when they agree on one.
 	if len(budgets) > 0 {
 		settingsView["size_budget_mixed"] = false
@@ -267,6 +279,14 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.AudioOnly != nil && *body.AudioOnly {
 			settings["audio_only"] = true
+		}
+		if body.MaxHeight != nil {
+			// Refused now rather than when the goal change runs.
+			if body.Mode != "compact" || !transcode.ValidCompactMaxHeight(int(*body.MaxHeight)) || *body.MaxHeight != float64(int(*body.MaxHeight)) {
+				fail(w, 400, fmt.Sprintf("max_height is only supported with mode=compact and must be one of %v", transcode.CompactMaxHeights))
+				return
+			}
+			settings["max_height"] = *body.MaxHeight
 		}
 		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
 			fail(w, 400, err.Error())
@@ -342,6 +362,20 @@ func itemFrozenAudioOnly(state map[string]any, itemKey string) bool {
 		holder = row
 	}
 	return operationMap(operationMap(holder["mode_policy"])["size"])["audio_only"] == true
+}
+
+// itemFrozenMaxHeight is the output height of the item's Shrink goal, its own
+// goal-change policy when it has one, else the batch's; 0 under another goal.
+func itemFrozenMaxHeight(state map[string]any, itemKey string) int {
+	holder := state
+	if row := operationMap(operationMap(state["batch_item_settings"])[itemKey]); operationMap(row["mode_policy"]) != nil {
+		holder = row
+	}
+	policy := operationMap(holder["mode_policy"])
+	if operationString(policy["mode"]) != "compact" {
+		return 0
+	}
+	return compactMaxHeight(policy)
 }
 
 func containsMode(mode string) bool {

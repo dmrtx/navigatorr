@@ -45,7 +45,7 @@ func TestSourceGoalsRecommendation(t *testing.T) {
 		t.Fatalf("%+v", g)
 	}
 	sdr4k := &mediainspect.DetailedReport{Probed: true, Video: []mediainspect.DetailedStream{{Codec: "hevc", BitDepth: 10, FPS: 24, Width: 3840, Height: 2160}}}
-	if g := e.SourceGoals(context.Background(), "/media/movie.mkv", sdr4k, sdrClassifier); g.Recommended != "compact" || g.Goals["compact"].Status != GoalOK {
+	if g := e.SourceGoals(context.Background(), "/media/movie.mkv", sdr4k, sdrClassifier); g.Recommended != "size" || g.Goals["compact"].Status != GoalOK {
 		t.Fatalf("%+v", g)
 	}
 	// An HDR source whose frames could not be read in time still gets the only

@@ -361,3 +361,57 @@ func TestGoalChangeShowsTheFrozenMediaEngineChoice(t *testing.T) {
 		t.Fatalf("an unfrozen batch invented a choice: %v", got)
 	}
 }
+
+// Shrink's height given with a goal change reaches the command, and the dialog
+// shows the height the files were frozen with.
+func TestGoalChangeCarriesAndShowsTheShrinkHeight(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "compact"
+	batch.InputsJSON = mustJSON(t, inputs)
+	read := func(state map[string]any) (map[string]any, string) {
+		batch.StateJSON = mustJSON(t, state)
+		if err := st.UpdateActionInstance(*batch); err != nil {
+			t.Fatal(err)
+		}
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+		var plan struct {
+			Settings map[string]any `json:"settings"`
+			Version  string         `json:"selection_version"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan.Settings, plan.Version
+	}
+	at4K := map[string]any{"mode": "compact", "compact": map[string]any{"max_height": float64(2160)}}
+	if got, _ := read(map[string]any{"mode_policy": at4K}); got["max_height"] != float64(2160) {
+		t.Fatalf("frozen height not shown: %v", got)
+	}
+	// Files frozen at different heights show none.
+	mixed := map[string]any{"mode_policy": at4K, "batch_item_settings": map[string]any{"epfile-101": map[string]any{"mode": "compact", "mode_policy": map[string]any{"mode": "compact", "compact": map[string]any{"max_height": float64(1080)}}}}}
+	if got, _ := read(mixed); got["max_height"] != nil {
+		t.Fatalf("mixed heights shown as one: %v", got)
+	}
+	_, version := read(map[string]any{})
+	// A height with another goal, or one Shrink does not offer, is refused now.
+	for _, bad := range []map[string]any{{"mode": "size", "max_height": 2160}, {"mode": "compact", "max_height": 900}} {
+		bad["id"], bad["scope"], bad["selection_version"], bad["key"] = "failed-batch", "all", version, "goal-bad"
+		if w := request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, bad), true); w.Code != 400 {
+			t.Fatalf("%v: %d %s", bad, w.Code, w.Body.String())
+		}
+	}
+	body := mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": version, "key": "goal-4k", "mode": "compact", "max_height": 2160})
+	w := request(h, "POST", "/api/maintenance/batch-settings", body, true)
+	var receipt map[string]string
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &receipt) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if command, _ := st.GetActionInstance(receipt["command_id"]); command == nil || !strings.Contains(command.InputsJSON, `"max_height":2160`) {
+		t.Fatalf("height not carried: %+v", command)
+	}
+}

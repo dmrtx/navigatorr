@@ -2775,6 +2775,7 @@ function controls() {
   $("legacy-controls").hidden = !technical;
   $("processing-goal").disabled = technical;
   $("hardware-option").hidden = processingMode() !== "size";
+  $("compact-height-option").hidden = processingMode() !== "compact";
   $("size-budget-option").hidden = processingMode() !== "size";
   updateSizeBudgetFields("size-budget");
   renderSegmented(["size-budget"]);
@@ -3055,6 +3056,8 @@ async function buildAndSubmitJob(mode = "encode") {
   const goal = processingMode();
   const inputs = simple ? {mode:goalMode(goal)} : { preserve_source_bit_depth: $("preserve-depth").checked };
   if (simple && goal === "audio_only") inputs.audio_only = true;
+  // 1080p is the goal's default, so only Keep 4K names a height.
+  else if (simple && goal === "compact" && shrinkHeight("compact-height") !== 1080) inputs.max_height = shrinkHeight("compact-height");
   else if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
@@ -4387,6 +4390,8 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-mode").value = goalKeyOf(plan.mode, plan.settings.audio_only === true) || "quality";
     // A batch that never said anything about the media engine gets the default: on, 15 %.
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
+    // A batch frozen at 720 or 1440 shows neither until one is picked.
+    setShrinkHeight("reconfigure-height", plan.settings.max_height || 1080);
     showSizeBudget("reconfigure-budget", plan.settings);
     updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
@@ -4429,6 +4434,7 @@ function sameSettingsRequest(plan) {
   const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true};
   if (!plan.mode) return {...body, profile:"same"};
   body.mode = plan.mode;
+  if (plan.mode === "compact" && s.max_height > 0) return {...body, max_height:s.max_height};
   if (plan.mode === "size" && s.audio_only) return {...body, audio_only:true};
   if (plan.mode !== "size") return body;
   body.allow_hardware = s.allow_hardware !== false;
@@ -4479,6 +4485,7 @@ function renderReconfigurePreview() {
 }
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
+  $("reconfigure-height-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "compact");
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
   updateSizeBudgetFields("reconfigure-budget");
   renderSegmented(["reconfigure-budget"]);
@@ -4587,6 +4594,7 @@ async function submitReconfiguredBatch() {
   };
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:goalMode($("reconfigure-mode").value)} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
   if (plan.mode && $("reconfigure-mode").value === "audio_only") body.audio_only = true;
+  else if (plan.mode && body.mode === "compact" && shrinkHeight("reconfigure-height", plan.settings.max_height) !== 1080) body.max_height = shrinkHeight("reconfigure-height", plan.settings.max_height);
   else if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
@@ -4832,6 +4840,12 @@ function applyGoalSettings(path, goal) {
   showSizeBudget("size-budget", goal);
   const inputs = {};
   for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
+  // A height the Resolution choice offers is shown there instead of carried;
+  // a carried 720 or 1440 leaves both unpicked, so either pick replaces it.
+  if (goal.mode === "compact") {
+    setShrinkHeight("compact-height", goal.max_height ?? 1080);
+    if (shrinkOffers(goal.max_height ?? 1080)) delete inputs.max_height;
+  }
   state.goalCarry = {path, mode: goalKeyOf(goal.mode, goal.audio_only === true), inputs};
   renderShrinkTitle();
 }
@@ -4841,13 +4855,38 @@ function clearGoalCarry() {
   state.goalCarry = null;
   renderShrinkTitle();
 }
-// The Shrink card names the height the form will send: a carried 720 is not
-// "Shrink to 1080p SDR".
+// The Shrink card names the height the form will send: the Resolution choice,
+// or a carried 720 or 1440 from an earlier job of the same file.
 function renderShrinkTitle() {
   const carry = state.goalCarry;
-  const height = carry?.mode === "compact" && carry.path === $("path").value.trim() ? carry.inputs.max_height : null;
-  $("goal-title-compact").textContent = `Shrink to ${height || 1080}p SDR`;
+  const carried = carry?.mode === "compact" && carry.path === $("path").value.trim() ? carry.inputs.max_height : null;
+  $("goal-title-compact").textContent = shrinkLabel(carried || shrinkHeight("compact-height"));
 }
+// Shrink offers 1080p, the smallest, or 4K, for HDR kept at its resolution.
+function shrinkOffers(height) {
+  return height === 1080 || height === 2160;
+}
+function shrinkLabel(height) {
+  return `Shrink to ${height >= 2160 ? "4K" : `${height || 1080}p`} SDR`;
+}
+function shrinkRadios(name) {
+  return [...document.querySelectorAll(`input[name="${name}"]`)];
+}
+// The picked height; with neither picked (a 720 or 1440 kept from before),
+// the given fallback.
+function shrinkHeight(name, fallback = 1080) {
+  return Number(shrinkRadios(name).find(r => r.checked)?.value || fallback);
+}
+function setShrinkHeight(name, height) {
+  for (const radio of shrinkRadios(name)) radio.checked = Number(radio.value) === height;
+}
+// Choosing a resolution replaces a height carried from an earlier job.
+for (const radio of shrinkRadios("compact-height"))
+  radio.addEventListener("change", () => {
+    if (state.goalCarry?.inputs) delete state.goalCarry.inputs.max_height;
+    controls();
+  });
+for (const radio of shrinkRadios("reconfigure-height")) radio.addEventListener("change", updateReconfigureHardware);
 // The series or movie the earlier job was made for, so the new job is listed
 // and replaced the same way.
 function applyLibraryContext(context, goal) {
@@ -7363,7 +7402,7 @@ function batchFileRow(item, id) {
   const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
   if (settled) {
     // Nothing to add.
-  } else if (item.mode && (item.mode !== job?.mode || item.audio_only)) body.append(node("p", `Goal: ${item.mode === "compact" ? `Shrink to ${item.max_height || 1080}p SDR` : goalNames[goalKeyOf(item.mode, item.audio_only)] || item.mode}`, "metadata batch-file-profile"));
+  } else if (item.mode && (item.mode !== job?.mode || item.audio_only)) body.append(node("p", `Goal: ${item.mode === "compact" ? shrinkLabel(item.max_height) : goalNames[goalKeyOf(item.mode, item.audio_only)] || item.mode}`, "metadata batch-file-profile"));
   else if (item.requested_profile || item.profile) body.append(node("p", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
   if (item.previous_attempts?.length) {
     const history = node("details", "", "batch-attempt-history");

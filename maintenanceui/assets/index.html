@@ -310,7 +310,7 @@
                 <legend>Choose your goal</legend>
                 <p id="source-profile" class="metadata source-profile" role="status" hidden></p>
                 <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="size" checked /><span class="goal-text"><strong class="goal-title">Save space</strong><small class="goal-desc">Use it for most files. Same look, at least 15% smaller; lossless and high-bitrate audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="size" checked /><span class="goal-text"><strong class="goal-title">Save space</strong><small class="goal-desc">Use it for most files, 4K included. Same look and resolution, at least 15% smaller; lossless and high-bitrate audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
                   <div class="goal-body">
                     <div id="hardware-option" class="goal-option" hidden>
                       <span id="size-engine-label" class="goal-option-label">Encoder</span>
@@ -345,7 +345,17 @@
                   </div>
                 </div>
                 <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="compact" /><span class="goal-text"><strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">Use it for 4K or HDR you don't need in 4K. At least 30% smaller; HDR is removed.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="compact" /><span class="goal-text"><strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">Use it for HDR and Dolby Vision, or 4K you don't need. Converted to SDR, at least 30% smaller; lossless audio becomes AAC.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
+                  <div class="goal-body">
+                    <div id="compact-height-option" class="goal-option" hidden>
+                      <span id="compact-height-label" class="goal-option-label">Resolution</span>
+                      <div class="segmented" role="radiogroup" aria-labelledby="compact-height-label">
+                        <label><input type="radio" name="compact-height" value="1080" checked /><span>1080p · smallest</span></label>
+                        <label><input type="radio" name="compact-height" value="2160" /><span>Keep 4K</span></label>
+                      </div>
+                      <p class="muted size-budget-help">Keep 4K converts HDR to SDR at 4K. An SDR file already in 4K is left as it is; Save space keeps it in 4K.</p>
+                    </div>
+                  </div>
                 </div>
                 <div class="goal-card">
                   <label class="goal-head"><input type="radio" name="processing-mode" value="audio_only" /><span class="goal-text"><strong class="goal-title">Audio only</strong><small class="goal-desc">Use it to keep the picture exactly as it is, 4K and HDR included. The video is copied; only heavy audio becomes AAC and unkept tracks are removed. Any smaller result is kept.</small><em id="goal-note-audio_only" class="goal-note" hidden></em></span></label>
@@ -1036,7 +1046,14 @@
       <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
-        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed</option><option value="audio_only">Audio only · Video copied, only the audio converted</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
+        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to SDR · At least 30% smaller, HDR removed</option><option value="audio_only">Audio only · Video copied, only the audio converted</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
+        <div id="reconfigure-height-option" class="goal-option" hidden>
+          <span id="reconfigure-height-label" class="goal-option-label">Resolution</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-height-label">
+            <label><input type="radio" name="reconfigure-height" value="1080" checked /><span>1080p · smallest</span></label>
+            <label><input type="radio" name="reconfigure-height" value="2160" /><span>Keep 4K</span></label>
+          </div>
+        </div>
         <div id="reconfigure-hardware-option" class="goal-option" hidden>
           <span id="reconfigure-engine-label" class="goal-option-label">Encoder</span>
           <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-engine-label">
