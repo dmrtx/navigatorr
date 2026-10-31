@@ -183,6 +183,13 @@ func TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.mode == "compact" {
+				// Frozen before Shrink took the size goal's audio levels.
+				old.Profile.Audio.Mode = "compact"
+				if err := digestModePolicy(&old); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.mode == "size" && tc.budget == nil {
 				// Frozen before level 1 became the default too.
 				old = preLevelSizePolicy(t, old)

@@ -4440,7 +4440,8 @@ function sameSettingsRequest(plan) {
   if (plan.mode !== "size") return body;
   body.allow_hardware = s.allow_hardware !== false;
   if (s.hardware_margin_percent > 0) body.hardware_margin_percent = s.hardware_margin_percent;
-  if (s.size_budget_percent > 0) body.size_budget_percent = s.size_budget_percent;
+  if (s.accept_smaller_saving) body.accept_smaller_saving = true;
+  else if (s.size_budget_percent > 0) body.size_budget_percent = s.size_budget_percent;
   else if (s.size_budget_bytes > 0) body.size_budget_bytes = s.size_budget_bytes;
   else if (s.size_budget_source === "siblings") Object.assign(body, {size_budget_source:"siblings", size_budget_sibling_multiplier:s.size_budget_sibling_multiplier || 1.5});
   return body;

@@ -129,6 +129,11 @@ func (r *ModeRecipe) validate(p *ModePolicySnapshot) error {
 	if audioOnly := p.Size != nil && p.Size.AudioOnly; audioOnly != (r.Kind == RecipeAudioOnly) {
 		return fmt.Errorf("only the audio-only goal freezes the audio-only recipe")
 	}
+	// The smaller saving and its minimum go together: one without the other
+	// would plan a minimum the worker refuses for the version.
+	if smaller := p.Size != nil && p.Size.SmallerSaving; smaller && (p.Mode != "size" || p.Size.AudioOnly || p.Size.SizeBudget != nil) || p.Mode == "size" && smaller != (p.MinSavingsPercent == transcode.SizeSmallerSavingPercent) {
+		return fmt.Errorf("a goal that accepts a smaller saving needs a size goal with no budget and a %d%% minimum", transcode.SizeSmallerSavingPercent)
+	}
 	switch r.Kind {
 	case RecipeAudioOnly:
 		// The goal copies the video, converts the audio at a level and needs
@@ -206,6 +211,10 @@ func (p *ModePolicySnapshot) workerVersion() string {
 		if p.Size != nil && p.Size.AudioOnly {
 			return transcode.ModePolicyV7
 		}
+		// A goal that accepts a smaller saving has its own version too.
+		if p.Size != nil && p.Size.SmallerSaving {
+			return transcode.ModePolicyV9
+		}
 		// A size goal whose audio is one of the levels is policy v5: every
 		// budget that froze them, and every goal frozen once level 1 became
 		// the default. Snapshots frozen before either keep compact_lossless
@@ -214,6 +223,11 @@ func (p *ModePolicySnapshot) workerVersion() string {
 			return transcode.ModePolicyV5
 		}
 		return SizeModePolicyVersion
+	}
+	// A compact goal at the size goal's audio levels is v8; compact goals
+	// frozen before it keep v2's compact audio.
+	if p.Mode == "compact" && transcode.IsAudioLevelMode(p.Profile.Audio.Mode) {
+		return transcode.ModePolicyV8
 	}
 	return ModePolicyVersion
 }

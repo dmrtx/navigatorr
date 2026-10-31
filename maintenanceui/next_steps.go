@@ -8,6 +8,7 @@ import (
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // nextStep is one way to go on with a file whose job ended without a result.
@@ -188,7 +189,8 @@ func formatSize(b int64) string {
 
 // nextStepsFor lists what the file can do next, the recommended step first.
 // Steps follow what the job measured: the media engine missing quality offers
-// x265, heavy audio offers Audio only, a missed saving offers a target size,
+// x265, heavy audio offers Audio only, a missed saving offers a smaller one
+// (when the encode saved at least that) and a target size,
 // HDR or a picture taller than 1080p offers Shrink to 1080p SDR. Running the
 // same settings again comes last, and only where something may change it.
 func nextStepsFor(r operationRecord) []nextStep {
@@ -276,7 +278,17 @@ func nextStepsFor(r operationRecord) []nextStep {
 		if known && split.audio*100 >= split.total*30 {
 			audioOnlyStep()
 		}
-		if mode == "size" && operationMap(operationMap(r.state["mode_policy"])["size"])["size_budget"] == nil {
+		frozenSize := operationMap(operationMap(r.state["mode_policy"])["size"])
+		// A size goal that saved a little, but less than its minimum, can
+		// keep that smaller saving.
+		original := operationNumber(operationValue(r, "original_size"))
+		candidate := operationNumber(operationValue(r, "candidate_size_bytes"))
+		minimum := operationNumber(operationMap(r.state["mode_policy"])["min_savings_percent"])
+		if saved := 100 - candidate*100/original; reason == "insufficient_savings" && mode == "size" && frozenSize["size_budget"] == nil && frozenSize["smaller_saving"] != true &&
+			original > 0 && candidate > 0 && saved >= transcode.SizeSmallerSavingPercent && saved < minimum {
+			add(nextStep{ID: "smaller", Label: fmt.Sprintf("Accept a %d%% saving", transcode.SizeSmallerSavingPercent), Detail: fmt.Sprintf("This encode saved %.0f%%. Run Save space again and keep any file at least %d%% smaller.", saved, transcode.SizeSmallerSavingPercent), Inputs: map[string]any{"mode": "size", "accept_smaller_saving": true}})
+		}
+		if mode == "size" && frozenSize["size_budget"] == nil {
 			add(nextStep{ID: "budget", Label: fmt.Sprintf("Aim for %.0f%% of the original", offeredBudgetPercent), Detail: "Encode to a target size: it lowers the quality floor to reach the saving.", Inputs: map[string]any{"mode": "size", "size_budget_percent": offeredBudgetPercent}})
 		}
 		compactStep()

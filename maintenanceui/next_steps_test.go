@@ -36,16 +36,21 @@ func endedRecord(status string, inputs, state map[string]any) operationRecord {
 }
 
 // A size goal that missed its saving on a file whose audio is heavy is offered
-// Audio only first, then a target size, x265 (it ran on the media engine), the
-// track picker, and the same settings last. It says what it reached and why.
+// Audio only first, then the 9% it saved, a target size, x265 (it ran on the
+// media engine), the track picker, and the same settings last. It says what it
+// reached and why.
 func TestNextStepsAfterAMissedSavingFollowWhatWasMeasured(t *testing.T) {
 	r := endedRecord("completed", map[string]any{"path": "/media/a.mkv", "mode": "size"}, map[string]any{
 		"reason_code": "insufficient_savings", "original_size": float64(4_000_000_000), "candidate_size_bytes": float64(3_640_000_000),
 		"mode_policy":   map[string]any{"mode": "size", "min_savings_percent": float64(15), "size": map[string]any{"hardware_search": map[string]any{"margin_percent": float64(30)}}},
 		"source_report": heavyAudioReport(1080),
 	})
-	if got := stepIDs(nextStepsFor(r)); got != "audio_only,budget,x265,tracks,same" {
+	if got := stepIDs(nextStepsFor(r)); got != "audio_only,smaller,budget,x265,tracks,same" {
 		t.Fatalf("steps %s", got)
+	}
+	smaller, _ := stepByID(r, "smaller")
+	if smaller.Inputs["mode"] != "size" || smaller.Inputs["accept_smaller_saving"] != true || !strings.Contains(smaller.Detail, "saved 9%") {
+		t.Fatalf("smaller saving step %+v", smaller)
 	}
 	e := explainResult(r)
 	if !strings.Contains(e.Happened, "9% smaller") || !strings.Contains(e.Happened, "at least 15% smaller") {
@@ -63,8 +68,34 @@ func TestNextStepsAfterAMissedSavingFollowWhatWasMeasured(t *testing.T) {
 	// engine is not offered x265 again.
 	r.state["source_report"] = heavyAudioReport(2160)
 	r.state["mode_policy"] = map[string]any{"mode": "size", "min_savings_percent": float64(15), "size": map[string]any{}}
-	if got := stepIDs(nextStepsFor(r)); got != "audio_only,budget,compact,tracks,same" {
+	if got := stepIDs(nextStepsFor(r)); got != "audio_only,smaller,budget,compact,tracks,same" {
 		t.Fatalf("4K steps %s", got)
+	}
+
+	// The smaller saving is offered only for what it would keep: not under
+	// 5%, not to a goal that already accepted it, not to a budget.
+	for name, mutate := range map[string]func(operationRecord){
+		"4% saved": func(r operationRecord) { r.state["candidate_size_bytes"] = float64(3_840_000_000) },
+		"grew":     func(r operationRecord) { r.state["reason_code"] = "size_growth" },
+		"already accepted": func(r operationRecord) {
+			r.state["mode_policy"] = map[string]any{"mode": "size", "min_savings_percent": float64(5), "size": map[string]any{"smaller_saving": true}}
+		},
+		"a budget": func(r operationRecord) {
+			r.state["mode_policy"] = map[string]any{"mode": "size", "min_savings_percent": float64(15), "size": map[string]any{"size_budget": map[string]any{"percent": float64(80)}}}
+		},
+		"a Shrink goal": func(r operationRecord) {
+			r.inputs["mode"] = "compact"
+			r.state["mode_policy"] = map[string]any{"mode": "compact", "min_savings_percent": float64(30)}
+		},
+	} {
+		r := endedRecord("completed", map[string]any{"path": "/media/a.mkv", "mode": "size"}, map[string]any{
+			"reason_code": "insufficient_savings", "original_size": float64(4_000_000_000), "candidate_size_bytes": float64(3_640_000_000),
+			"mode_policy": map[string]any{"mode": "size", "min_savings_percent": float64(15), "size": map[string]any{}}, "source_report": heavyAudioReport(1080),
+		})
+		mutate(r)
+		if _, ok := stepByID(r, "smaller"); ok {
+			t.Errorf("%s: smaller saving offered", name)
+		}
 	}
 }
 
@@ -121,7 +152,7 @@ func TestRerunStartsAnOfferedStep(t *testing.T) {
 
 	job := rerunJobView(t, h, "missed")
 	steps, _ := job["next_steps"].([]any)
-	if len(steps) != 5 || operationMap(steps[0])["id"] != "audio_only" || operationMap(job["explanation"])["happened"] == nil {
+	if len(steps) != 6 || operationMap(steps[0])["id"] != "audio_only" || operationMap(job["explanation"])["happened"] == nil {
 		t.Fatalf("job view %v", job)
 	}
 	for _, refused := range []string{`{"id":"missed","key":"step-compact","step":"compact"}`, `{"id":"missed","key":"step-tracks","step":"tracks"}`, `{"id":"missed","key":"step-mixed","step":"audio_only","without_hardware":true}`} {
@@ -161,6 +192,12 @@ func TestRerunStartsAnOfferedStep(t *testing.T) {
 	budget := start(`{"id":"missed","key":"step-budget","step":"budget"}`)
 	if budget["size_budget_percent"] != offeredBudgetPercent || budget["keep_languages"] == nil {
 		t.Fatalf("budget inputs %v", budget)
+	}
+
+	// So does a smaller saving.
+	smaller := start(`{"id":"missed","key":"step-smaller","step":"smaller"}`)
+	if smaller["mode"] != "size" || smaller["accept_smaller_saving"] != true || smaller["keep_languages"] == nil {
+		t.Fatalf("smaller saving inputs %v", smaller)
 	}
 
 	// A batch file shows what happened, and leaves its steps to its batch row.

@@ -136,6 +136,11 @@ type ModeSizePolicy struct {
 	// smaller file. Its recipe is RecipeAudioOnly and its plans policy v7. It
 	// is absent from every other snapshot, so their digests are unchanged.
 	AudioOnly bool `json:"audio_only,omitempty"`
+	// SmallerSaving is a size goal that accepts a smaller saving (input
+	// accept_smaller_saving): the minimum is transcode.SizeSmallerSavingPercent
+	// instead of 15%, and its plans are policy v9. It is absent from every
+	// other snapshot, so their digests are unchanged.
+	SmallerSaving bool `json:"smaller_saving,omitempty"`
 }
 
 // sizeEdgeSelectionMarginVMAF is how far a size-mode winner's VMAF p5 and
@@ -280,7 +285,8 @@ func modeHardwareInput(mode string, inputs map[string]any) (*transcode.HardwareS
 }
 
 // ValidateHardwareInputs reports whether allow_hardware,
-// hardware_margin_percent, allow_slow_preset and the size budget are acceptable for a goal, as
+// hardware_margin_percent, allow_slow_preset, audio_only,
+// accept_smaller_saving and the size budget are acceptable for a goal, as
 // the policy freeze reads them. Callers that admit a goal change use it to fail
 // early.
 func ValidateHardwareInputs(mode string, inputs map[string]any) error {
@@ -288,6 +294,9 @@ func ValidateHardwareInputs(mode string, inputs map[string]any) error {
 		return err
 	}
 	if _, err := modeAudioOnlyInput(mode, inputs); err != nil {
+		return err
+	}
+	if _, err := modeSmallerSavingInput(mode, inputs); err != nil {
 		return err
 	}
 	if _, err := modeSlowPresetInput(mode, inputs); err != nil {
@@ -370,17 +379,58 @@ func modeAudioOnlyInput(mode string, inputs map[string]any) (bool, error) {
 	return true, nil
 }
 
+// modeSmallerSavingInput reads accept_smaller_saving, the size goal that keeps
+// a file saving transcode.SizeSmallerSavingPercent instead of 15%: size mode
+// only, off unless the operation says true, and not with audio_only (which
+// keeps any smaller file) or a size budget (which picks its own size).
+func modeSmallerSavingInput(mode string, inputs map[string]any) (bool, error) {
+	raw, has := inputs["accept_smaller_saving"]
+	if !has || raw == nil {
+		return false, nil
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return false, inputErr("accept_smaller_saving", "accept_smaller_saving must be true or false")
+	}
+	if !b {
+		return false, nil
+	}
+	if mode != "size" {
+		return false, inputErr("accept_smaller_saving", "accept_smaller_saving is only supported with mode=size")
+	}
+	if only, _ := inputs["audio_only"].(bool); only {
+		return false, inputErr("accept_smaller_saving", "accept_smaller_saving cannot be combined with audio_only")
+	}
+	for _, key := range []string{"size_budget_percent", "size_budget_bytes", "size_budget_source"} {
+		if v, ok := inputs[key]; ok && v != nil {
+			return false, inputErr(key, "accept_smaller_saving cannot be combined with a size budget")
+		}
+	}
+	return true, nil
+}
+
 // modePolicyWithTracks also freezes the track selection (size and compact
 // only). It is frozen with the goal, so a later change of the global list never
 // reaches a job already planned.
 func modePolicyWithTracks(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy) (ModePolicySnapshot, error) {
-	return modePolicyGoal(mode, anime, maxHeight, hardware, allowSlow, budget, tracks, false)
+	return modePolicyGoal(mode, anime, maxHeight, hardware, allowSlow, budget, tracks, false, false)
 }
 
 // modePolicyGoal also freezes the audio-only size goal (audioOnly), which
 // drops the media engine and the minimum saving and plans one audio-only
-// encode (RecipeAudioOnly).
-func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy, audioOnly bool) (ModePolicySnapshot, error) {
+// encode (RecipeAudioOnly), and the size goal that accepts a smaller saving
+// (smallerSaving).
+func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy, audioOnly, smallerSaving bool) (ModePolicySnapshot, error) {
+	if smallerSaving {
+		switch {
+		case mode != "size":
+			return ModePolicySnapshot{}, inputErr("accept_smaller_saving", "accept_smaller_saving is only supported with mode=size")
+		case audioOnly:
+			return ModePolicySnapshot{}, inputErr("accept_smaller_saving", "accept_smaller_saving cannot be combined with audio_only")
+		case budget != nil:
+			return ModePolicySnapshot{}, inputErr(budget.field(), "accept_smaller_saving cannot be combined with a size budget")
+		}
+	}
 	if audioOnly {
 		if mode != "size" {
 			return ModePolicySnapshot{}, inputErr("audio_only", "audio_only is only supported with mode=size")
@@ -415,6 +465,17 @@ func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.
 		// goals freeze the bed pair's level 1, which converts lossy Atmos too;
 		// those frozen with size_aac keep it.
 		snapshot.Profile.Audio.Mode = transcode.AudioModeSizeAACBed
+	}
+	if mode == "compact" {
+		// Every new compact goal (Shrink) converts its audio at the size
+		// goal's level 1 too, which plans the audio per track instead of
+		// compact audio's one rule; its plans are policy v8. Goals frozen
+		// before keep compact audio, their digest and v2.
+		snapshot.Profile.Audio.Mode = transcode.AudioModeSizeAACBed
+	}
+	if smallerSaving {
+		snapshot.MinSavingsPercent = transcode.SizeSmallerSavingPercent
+		snapshot.Size.SmallerSaving = true
 	}
 	if audioOnly {
 		// Nothing is re-encoded, so no Main10 output and no minimum saving:
@@ -575,6 +636,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, err := modeAudioOnlyInput("", inputs); err != nil {
 			return err
 		}
+		if _, err := modeSmallerSavingInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -605,13 +669,17 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
+	smallerSaving, err := modeSmallerSavingInput(mode, inputs)
+	if err != nil {
+		return err
+	}
 	// Whether the global list or the job's own is in force is decided when the
 	// goal freezes; here the inputs only have to be well formed.
 	trackPolicy, err := trackPolicyFor(mode, tracks, nil)
 	if err != nil {
 		return attributeInput(inputKeepLanguages, err)
 	}
-	if _, err := modePolicyGoal(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, trackPolicy, audioOnly); err != nil {
+	if _, err := modePolicyGoal(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, trackPolicy, audioOnly, smallerSaving); err != nil {
 		return attributeInput("mode", err)
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -708,7 +776,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyGoal(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, tracks, audioOnly)
+	smallerSaving, err := modeSmallerSavingInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyGoal(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, tracks, audioOnly, smallerSaving)
 	if err != nil {
 		return nil, err
 	}

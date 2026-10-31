@@ -249,9 +249,9 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		inputs["allow_hardware"] = false
 		delete(inputs, "hardware_margin_percent")
 	}
-	// A new budget keeps the goal, so it keeps the job's tracks and an encode
-	// that ran without the media engine stays on x265.
-	if step.ID == "budget" {
+	// A new budget or a smaller saving keeps the goal, so it keeps the job's
+	// tracks and an encode that ran without the media engine stays on x265.
+	if step.ID == "budget" || step.ID == "smaller" {
 		for _, k := range []string{"keep_languages", "keep_audio_streams", "keep_subtitle_streams"} {
 			if v, ok := old.inputs[k]; ok {
 				inputs[k] = v

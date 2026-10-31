@@ -65,7 +65,7 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV5},
 		"quality":                    {map[string]any{"mode": "quality"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}, ModePolicyVersion},
 		"x265_preserve":              {map[string]any{"mode": "x265_preserve"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}, ModePolicyVersion},
-		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, ModePolicyVersion},
+		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, transcode.ModePolicyV8},
 		"size budget, media engine":  {map[string]any{"mode": "size", "size_budget_percent": 40.0}, RecipeSizeBudget, transcode.VideoCodecHEVCVideoToolbox, "", nil, transcode.ModePolicyV5},
 		"size budget, x265":          {map[string]any{"mode": "size", "size_budget_percent": 40.0, "allow_hardware": false}, RecipeSizeBudget, transcode.VideoCodecLibX265, "", nil, transcode.ModePolicyV5},
 	} {
@@ -145,6 +145,7 @@ func newRecipeCase(t *testing.T, inputs map[string]any, mutate func(*transcode.W
 	caps := budgetCaps()
 	caps.CompactAudio = true
 	caps.CompactTranscode = true
+	caps.TrackSelection, caps.CompactAudioLevels = true, true
 	if mutate != nil {
 		mutate(&caps)
 	}

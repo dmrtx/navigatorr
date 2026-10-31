@@ -23,6 +23,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		BudgetSource     *string  `json:"size_budget_source"`
 		BudgetMultiplier *float64 `json:"size_budget_sibling_multiplier"`
 		AudioOnly        *bool    `json:"audio_only"`
+		SmallerSaving    *bool    `json:"accept_smaller_saving"`
 		MaxHeight        *float64 `json:"max_height"`
 		ID               string   `json:"id"`
 		Scope            string   `json:"scope"`
@@ -84,7 +85,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	itemSettings := operationMap(state["batch_item_settings"])
 	var hardware action.HardwareChoice
 	var budgets []frozenBudget
-	audioOnly := 0
+	audioOnly, smaller := 0, 0
 	heights := map[int]bool{}
 	profiles := map[string]int{}
 	damaged := 0
@@ -108,8 +109,11 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			hardware.Add(allow, margin)
 		}
 		budgets = append(budgets, itemFrozenSizeBudget(state, item.ItemKey))
-		if itemFrozenAudioOnly(state, item.ItemKey) {
+		if itemFrozenSizeFlag(state, item.ItemKey, "audio_only") {
 			audioOnly++
+		}
+		if itemFrozenSizeFlag(state, item.ItemKey, "smaller_saving") {
+			smaller++
 		}
 		heights[itemFrozenMaxHeight(state, item.ItemKey)] = true
 		if body.Scope == "file" {
@@ -218,6 +222,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	// Whether the files were frozen with the audio-only goal: all, some or none.
 	if selected > 0 {
 		settingsView["audio_only"], settingsView["audio_only_mixed"] = audioOnly == selected, audioOnly > 0 && audioOnly < selected
+		// Whether they all accept the smaller saving, so encoding again keeps it.
+		settingsView["accept_smaller_saving"] = smaller == selected
 	}
 	// The Shrink height the files were frozen with, when they agree on one.
 	if len(heights) == 1 {
@@ -279,6 +285,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.AudioOnly != nil && *body.AudioOnly {
 			settings["audio_only"] = true
+		}
+		if body.SmallerSaving != nil && *body.SmallerSaving {
+			settings["accept_smaller_saving"] = true
 		}
 		if body.MaxHeight != nil {
 			// Refused now rather than when the goal change runs.
@@ -354,14 +363,15 @@ func itemFrozenSizeBudget(state map[string]any, itemKey string) frozenBudget {
 	return b
 }
 
-// itemFrozenAudioOnly reports whether the item's goal, its own goal-change
-// policy when it has one, else the batch's, is the audio-only size goal.
-func itemFrozenAudioOnly(state map[string]any, itemKey string) bool {
+// itemFrozenSizeFlag reports whether the item's goal, its own goal-change
+// policy when it has one, else the batch's, is a size goal with the flag set:
+// audio_only or smaller_saving.
+func itemFrozenSizeFlag(state map[string]any, itemKey, flag string) bool {
 	holder := state
 	if row := operationMap(operationMap(state["batch_item_settings"])[itemKey]); operationMap(row["mode_policy"]) != nil {
 		holder = row
 	}
-	return operationMap(operationMap(holder["mode_policy"])["size"])["audio_only"] == true
+	return operationMap(operationMap(holder["mode_policy"])["size"])[flag] == true
 }
 
 // itemFrozenMaxHeight is the output height of the item's Shrink goal, its own

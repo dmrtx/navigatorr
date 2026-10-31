@@ -8,11 +8,12 @@ import (
 // PreviewAudioModes are the audio modes the stream preview plans each track
 // under, keyed by the name the preview gives them: what a new size goal
 // freezes (its level 1, and level 2, which a size budget may pick), and what
-// compact freezes. Quality and x265_preserve copy every track.
+// compact freezes, now the same level 1. Quality and x265_preserve copy every
+// track.
 var PreviewAudioModes = map[string]string{
 	"size":    transcode.AudioModeSizeAACBed,
 	"size_he": transcode.AudioModeSizeHEAACBed,
-	"compact": "compact",
+	"compact": transcode.AudioModeSizeAACBed,
 }
 
 // StreamPreview is what a source's streams weigh and what each audio mode

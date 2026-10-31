@@ -239,6 +239,10 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// The audio-only goal (policy v7) is an audio-only plan at the bed levels,
 	// with or without a track selection.
 	caps.SizeAudioOnlyGoal = caps.SizeAudioOnly && caps.SizeAudioObjectBed && caps.TrackSelection
+	// Policy v8 is a compact plan at the bed levels, and v9 a size plan at
+	// them with a smaller minimum saving; either may select tracks.
+	caps.CompactAudioLevels = caps.SizeAudioObjectBed && caps.TrackSelection
+	caps.SizeSmallerSaving = caps.SizeAudioObjectBed && caps.TrackSelection
 	// Search-only flags, kept for fingerprint stability; they go when the
 	// fingerprint is versioned.
 	// Mode searches may stretch their budget while work keeps finishing.

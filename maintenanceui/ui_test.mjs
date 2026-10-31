@@ -6891,6 +6891,9 @@ test("Change goal offers Audio only, shows a saved one and sends it as the size 
   // Encoding one file again keeps its goal.
   assert.equal(h.run('JSON.stringify(sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true,allow_hardware:true}}))').includes('"audio_only":true'), true);
   assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true}}).allow_hardware'), undefined);
+  // A file that accepted the smaller saving keeps it, with no budget beside it.
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{accept_smaller_saving:true,size_budget_percent:80}}).accept_smaller_saving'), true);
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{accept_smaller_saving:true,size_budget_percent:80}}).size_budget_percent'), undefined);
 });
 
 test("one file's Change goal previews its streams under the goal picked", async () => {

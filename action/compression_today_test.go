@@ -45,10 +45,13 @@ func TestCompressionPolicyTodayDescribesEachGoal(t *testing.T) {
 	if !strings.Contains(size.Keeps, "at least 15% smaller") {
 		t.Fatalf("size keeps %q", size.Keeps)
 	}
-	// Shrink converts lossless audio to the same AAC-LC targets and copies lossy
-	// Atmos; it never drops a track.
-	if c := byGoal["compact"]; !strings.Contains(c.Picture, "at most 1080p") || !strings.Contains(c.Keeps, "at least 30% smaller") || !strings.Contains(c.Audio, "AAC-LC (mono 128, stereo 192, 5.1 384, 7.1 512 kbps)") || !strings.Contains(c.Audio, "lossy Atmos included, is copied") {
+	// Shrink converts audio like Save space; only Save space offers the
+	// smaller saving.
+	if c := byGoal["compact"]; !strings.Contains(c.Picture, "at most 1080p") || !strings.Contains(c.Keeps, "at least 30% smaller") || c.Audio != size.Audio || strings.Contains(c.Keeps, "accepting") {
 		t.Fatalf("compact %+v", c)
+	}
+	if !strings.Contains(size.Keeps, "accepting a 5% saving") {
+		t.Fatalf("size keeps %q", size.Keeps)
 	}
 	if a := byGoal[AudioOnlyGoal]; a.Quality != "" || !strings.Contains(a.Video, "not re-encoded") || !strings.Contains(a.Keeps, "smaller at all") {
 		t.Fatalf("audio only %+v", a)
