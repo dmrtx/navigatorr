@@ -4737,6 +4737,83 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     state.busyJobs.delete(job.id);
   }
 }
+// The server lists what a file that ended without a result can do next
+// (maintenanceui/next_steps.go), the recommended step first, from what the job
+// measured. The client shows them and names the one picked; the server
+// rebuilds its inputs. "tracks" opens the goal form with the track picker.
+async function runNextStep(job, step) {
+  if (step.id === "tracks") return openGoalForm(job.source_path);
+  const info = job.rerun || {};
+  const content = [node("p", queuePresentation(job).title, "review-filename"), node("p", step.detail)];
+  if (step.id === "same" && info.no_winner_rounds >= 2) content.push(node("p", `This file already had ${info.no_winner_rounds} rounds without a result. Run it again only if you want another round.`));
+  content.push(node("p", "This starts a new job; the earlier job is not changed. " + (info.replace_original ? "The original is replaced only after you approve the result." : "Originals stay in place."), "muted"));
+  // One key per open confirmation, as Run again keeps one.
+  state.rerunKeys ||= new Map();
+  const keyID = `${job.id}:step:${step.id}`;
+  if (!state.rerunKeys.has(keyID)) state.rerunKeys.set(keyID, submissionID());
+  if (!(await reviewAction({title: `${step.label}?`, content, confirmLabel: step.label, cancelLabel: "Not now"}))) {
+    state.rerunKeys.delete(keyID);
+    return;
+  }
+  if (jobIsBusy(job.id)) return;
+  state.busyJobs.add(job.id);
+  try {
+    const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(keyID), step: step.id});
+    state.rerunKeys.delete(keyID);
+    state.jobsLoaded = 0;
+    notify("Queued a new job. It is listed first.");
+    await loadJobs();
+    if (result?.id) await openJob(result.id);
+  } finally {
+    state.busyJobs.delete(job.id);
+  }
+}
+// A batch file takes the same steps as a goal change for that file: the step's
+// goal inputs over the file's scope, x265 as its current settings with the
+// media engine off, and "same" as Encode again.
+async function applyBatchStep(batchID, itemKey, step) {
+  if (step.id === "tracks") return reconfigureBatch(batchID, false, {item_key: itemKey});
+  if (step.id === "same") return encodeFileAgain(batchID, itemKey);
+  if (!(await reviewAction({title: `${step.label}?`, content: [node("p", step.detail), node("p", "The file is encoded again under this goal; the earlier attempt is kept in its history.", "muted")], confirmLabel: step.label, cancelLabel: "Not now"}))) return;
+  if (jobIsBusy(batchID)) return;
+  const auth = state.authRevision;
+  state.busyJobs.add(batchID);
+  try {
+    const plan = await api(`batch-settings?${new URLSearchParams({id: batchID, scope: "file", item_key: itemKey})}`);
+    if (auth !== state.authRevision) return;
+    let body;
+    if (step.id === "x265") {
+      body = {...sameSettingsRequest(plan), allow_hardware: false};
+      delete body.hardware_margin_percent;
+    } else body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
+    await commandRequest("batch-settings", body);
+    if (auth !== state.authRevision) return;
+    await Promise.all([loadJobs(), refreshOpenDetail()]);
+    notify(`${step.label}: the file is queued again.`);
+  } finally {
+    state.busyJobs.delete(batchID);
+    setConnection(serverReachable);
+  }
+}
+// What happened to a job that ended without a result and what it showed about
+// the file, in the server's measured words.
+function explanationReport(explanation) {
+  if (!explanation?.happened && !explanation?.learned?.length) return null;
+  const box = node("section", "", "result-report result-explanation");
+  box.setAttribute("aria-label", "What happened");
+  if (explanation.happened) {
+    const line = node("p", "");
+    line.append(node("strong", "What happened: "), node("span", explanation.happened));
+    box.append(line);
+  }
+  if (explanation.learned?.length) {
+    box.append(node("p", "What we learned:", "result-learned-head"));
+    const list = node("ul", "", "result-learned");
+    for (const fact of explanation.learned) list.append(node("li", fact));
+    box.append(list);
+  }
+  return box;
+}
 // A job's own goal, repeated for the same file: the encoder and the size limit
 // go into the form's controls, and what the form has no control for (the Shrink
 // height, the slow preset) is carried to the submit for this file and goal.
@@ -4947,9 +5024,23 @@ function jobControls(job, detail = false) {
     // so a transient error can still be retried from here.
     else if (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0)) add("Retry", () => jobControl(job.id, "action_retry"));
   }
+  // The server's next steps replace Run again, the remedy, x265 and the goal
+  // form after a missed limit; a batch child takes them through its batch.
+  const legacySteps = !Array.isArray(job.next_steps);
+  if (!legacySteps && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision") {
+    const child = Boolean(job.parent_item_key && job.parent_action_id);
+    job.next_steps.forEach((step, i) => {
+      if (child && step.id === "same") return; // Change goal and the batch row cover it.
+      add(step.label, () => child ? applyBatchStep(job.parent_action_id, job.parent_item_key, step) : runNextStep(job, step));
+      const b = [...actionRail.children].at(-1);
+      if (i === 0) b.className = "primary";
+      if (step.id !== "tracks") { b.dataset.requiresWorker = "true"; b.disabled = jobControlDisabled(b); }
+      b.title = step.detail;
+    });
+  }
   // The server marks only standalone files that were cancelled or ended with no
   // winner; batch children use Change goal and reviewed candidates are decided.
-  if (job.rerun && !job.rerun.remedy_mode && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
+  if (legacySteps && job.rerun && !job.rerun.remedy_mode && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision" && !(job.mode && sourceGateReason(job.reason_code)))
     add("Run again", () => rerunJob(job));
   // A job whose settings ran the removed sample search cannot run again as it
   // was; the server says why, and the file's goal form is offered instead.
@@ -4961,15 +5052,15 @@ function jobControls(job, detail = false) {
   // A file that missed its goal's size limit has no candidate to review and no
   // one goal the server can name, but its result tells the person to choose
   // another goal: the goal form is that step, next to Run again.
-  if (job.status === "completed" && job.benchmark?.outcome === "size_rejected" && job.source_path && !job.rerun_refused && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id)
+  if (legacySteps && job.status === "completed" && job.benchmark?.outcome === "size_rejected" && job.source_path && !job.rerun_refused && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id)
     add("Choose a goal", () => openGoalForm(job.source_path));
   // A file skipped because its goal is wrong for it: one button starts a new job
   // under the goal the server named. Running it again would skip it again.
-  if (job.rerun?.remedy_mode && remedyActions[job.rerun.remedy_mode] && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
+  if (legacySteps && job.rerun?.remedy_mode && remedyActions[job.rerun.remedy_mode] && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
     add(remedyActions[job.rerun.remedy_mode].label, () => rerunJob(job, {mode: job.rerun.remedy_mode}));
   // A media engine budget encode that fit but missed the quality floor offers no
   // candidate; x265 is slower and usually keeps more quality at the same size.
-  if (job.rerun && (job.rerun.without_hardware || job.size_mode?.size_budget?.retry_without_hardware) && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
+  if (legacySteps && job.rerun && (job.rerun.without_hardware || job.size_mode?.size_budget?.retry_without_hardware) && !job.parent_item_key && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision")
     add("Try with x265", () => rerunJob(job, {withoutHardware: true}));
   if (
     job.action_name === "transcode_batch" &&
@@ -6910,6 +7001,8 @@ function detailStatusNodes(job, presentation) {
   }
   const report = resultReport(job);
   if (report) notes.push(report);
+  const explained = explanationReport(job.explanation);
+  if (explained) notes.push(explained);
   const tracks = trackReport(job);
   if (tracks) notes.push(tracks);
   if (!presentation.showTelemetry && !model && !job.batch?.dry_run && job.batch?.outcome !== "no_changes") addOutcome(queueOutcome(job));
@@ -7234,7 +7327,16 @@ function batchFileRow(item, id) {
   if (item.can_reconfigure && !unsupportedSource && (["skip","review","failed","cancelled","waiting_decision"].includes(item.status) || item.candidate_ready && !item.replacement_plan)) add(item.mode ? "Change goal" : "Change settings", () => reconfigureBatch(id, false, {item_key:item.item_key, ready_candidate:Boolean(item.candidate_ready)}));
   // A cancelled or failed file can be encoded again as it was set up, without
   // reopening the goal dialog.
-  if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status))
+  const steps = item.can_reconfigure && !unsupportedSource && !item.candidate_ready ? item.next_steps || [] : [];
+  steps.forEach((step, i) => add(step.id === "same" ? "Encode again" : step.label, () => applyBatchStep(id, item.item_key, step), {primary: i === 0, requiresWorker: step.id !== "tracks"}));
+  if (item.explanation?.happened) body.append(node("p", item.explanation.happened, "jd-note batch-file-explanation"));
+  if (item.explanation?.learned?.length) {
+    const learned = node("details", "", "batch-learned");
+    learned.append(node("summary", "What we learned"));
+    for (const fact of item.explanation.learned) learned.append(node("p", fact, "metadata"));
+    body.append(learned);
+  }
+  if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status) && !steps.some(step => step.id === "same"))
     add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
   if (filesRouteFor(item.file_path))
     add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});

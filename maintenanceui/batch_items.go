@@ -51,6 +51,10 @@ type batchItemView struct {
 	MaxHeight int `json:"max_height,omitempty"`
 	// AudioOnly marks the size goal frozen as Audio only.
 	AudioOnly bool `json:"audio_only,omitempty"`
+	// Explanation and NextSteps are the child job's, as a single job shows
+	// them: what happened, what it showed, and the goals to try next.
+	Explanation *resultExplanation `json:"explanation,omitempty"`
+	NextSteps   []nextStep         `json:"next_steps,omitempty"`
 
 	PreviousAttempts []store.TranscodeBatchItem `json:"previous_attempts,omitempty"`
 	RetryPending     bool                       `json:"retry_pending,omitempty"`
@@ -164,6 +168,13 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 						}
 						view.CandidateReady = !view.RetryPending && child.Status == store.ActionStatusCompleted && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && operationValue(r, "original_intact") == true && operationValue(r, "candidate_removed") != true && projectOperationSavings(r, time.Now()).CandidateBytes != nil && !reserved
 						view.SizeBudgetOutcome = operationSizeBudgetOutcome(r)
+						if !view.RetryPending && endedWithoutResult(r) {
+							e := explainResult(r)
+							view.Explanation = &e
+							if view.CanReconfigure {
+								view.NextSteps = nextStepsFor(r)
+							}
+						}
 						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {
 							prior, err := st.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+child.ID)
