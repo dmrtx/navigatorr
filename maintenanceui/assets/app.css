@@ -906,6 +906,9 @@ main {
   border: 0;
   background: none;
   text-align: left;
+  /* A file name is content, not a button label: it wraps instead of running
+     under the size. */
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 .media-title {
@@ -929,6 +932,7 @@ main {
   flex-basis: 14px;
 }
 .media-row > .media-size {
+  flex: none;
   color: var(--muted);
   font: 400 11px/1.4 var(--body);
   white-space: nowrap;
