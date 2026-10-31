@@ -214,6 +214,11 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		}
 		w.persistPhaseCost(jobDir, jobFile, job, "source_scan", scanStart, scanCost)
 		if scanErr != nil {
+			if ctx.Err() != nil {
+				// The runner is shutting down mid-scan: leave the job
+				// resumable instead of failing it as killed.
+				return ctx.Err()
+			}
 			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source video packets: %w", scanErr))
 		}
 		if err := scan.damage(sourceInfo.Size()); err != nil {

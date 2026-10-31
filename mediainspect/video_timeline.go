@@ -37,7 +37,7 @@ func MeasureVideoSeconds(ctx context.Context, ffprobePath, path string, streamIn
 	res, err := runFFprobe(ctx, ffprobePath, videoTimelineTimeout,
 		"-v", "error", "-select_streams", strconv.Itoa(streamIndex),
 		"-read_intervals", strconv.FormatFloat(from, 'f', 3, 64)+"%",
-		"-show_entries", "packet=pts_time,duration_time:stream=start_time", "-of", "compact", path)
+		"-show_entries", "packet=pts_time,dts_time,duration_time:stream=start_time", "-of", "compact", path)
 	if err != nil {
 		return 0, err
 	}
@@ -57,7 +57,10 @@ func MeasureVideoSeconds(ctx context.Context, ffprobePath, path string, streamIn
 		case "packet":
 			pts, ok := values["pts_time"]
 			if !ok {
-				continue
+				// AVI and raw streams can carry decode times only.
+				if pts, ok = values["dts_time"]; !ok {
+					continue
+				}
 			}
 			if e := pts + values["duration_time"]; packets == 0 || e > end {
 				end = e
@@ -79,9 +82,10 @@ func MeasureVideoSeconds(ctx context.Context, ffprobePath, path string, streamIn
 // WindowSeconds is the timeline quality windows are placed on: the video's
 // measured length when the container runs more than a second longer, else the
 // container's duration, so a file whose video fills it keeps the windows it
-// always had.
+// always had. A measurement under half the container's duration is not
+// trusted: a recording whose clock restarted measures its last segment only.
 func (r *DetailedReport) WindowSeconds() float64 {
-	if r.VideoSeconds > 0 && r.VideoSeconds < r.DurationSec-1 {
+	if r.VideoSeconds > 0 && r.VideoSeconds < r.DurationSec-1 && r.VideoSeconds >= r.DurationSec/2 {
 		return r.VideoSeconds
 	}
 	return r.DurationSec

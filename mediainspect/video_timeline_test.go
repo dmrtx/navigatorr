@@ -62,6 +62,7 @@ func TestWindowSecondsKeepsTheContainerUnlessTheVideoIsShorter(t *testing.T) {
 		{100, 99.5, 100},   // a frame or two short: windows unchanged
 		{100, 100.04, 100}, // the last frame's end
 		{2115.59, 1855.87, 1855.87},
+		{5000, 2000, 5000}, // a restarted clock measures its last segment only
 	} {
 		rep := DetailedReport{DurationSec: c.duration, VideoSeconds: c.video}
 		if got := rep.WindowSeconds(); got != c.want {

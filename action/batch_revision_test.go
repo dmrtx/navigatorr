@@ -342,6 +342,9 @@ func TestBatchRevisionLeavesDamagedFilesOut(t *testing.T) {
 	probe := store.TranscodeBatchItem{ItemKey: "a", Status: "failed", Error: "failed to probe original media /m/S03.mp4 (fail closed): ffprobe tool_exit after 63ms: exit status 1: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov atom not found\n/m/S03.mp4: Invalid data found when processing input"}
 	scan := store.TranscodeBatchItem{ItemKey: "b", Status: "failed", Error: "worker job failed: ffmpeg_input_corrupt: the source file is damaged: reading its video the demuxer reported 28 errors"}
 	other := store.TranscodeBatchItem{ItemKey: "c", Status: "failed", Error: "quality_final_sample_misaligned: window 4"}
+	// Unreadable input with no sign of damage may have been a file read
+	// while it was still being copied: it is run again.
+	passing := store.TranscodeBatchItem{ItemKey: "d", Status: "failed", Error: "failed to probe original media /m/E01.mkv (fail closed): ffprobe tool_exit: exit status 1: /m/E01.mkv: Invalid data found when processing input"}
 	for _, item := range []store.TranscodeBatchItem{probe, scan} {
 		if !BatchItemSourceDamaged(item) {
 			t.Fatalf("%s: not seen as damaged", item.ItemKey)
@@ -353,7 +356,9 @@ func TestBatchRevisionLeavesDamagedFilesOut(t *testing.T) {
 			t.Fatalf("%s: a damaged file cannot be run on its own", item.ItemKey)
 		}
 	}
-	if BatchItemSourceDamaged(other) || !BatchRevisionSelects(other, "unfinished", "") {
-		t.Fatal("an ordinary failure was left out")
+	for _, item := range []store.TranscodeBatchItem{other, passing} {
+		if BatchItemSourceDamaged(item) || !BatchRevisionSelects(item, "unfinished", "") {
+			t.Fatalf("%s: an ordinary failure was left out", item.ItemKey)
+		}
 	}
 }

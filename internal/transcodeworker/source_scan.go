@@ -22,9 +22,13 @@ type sourceVideoScan struct {
 	// Start and End bound the video's presentation timeline: the earliest
 	// packet timestamp and the latest packet's end.
 	Start, End float64
-	// DemuxErrors counts the errors the container's demuxer reported while
-	// reading. FirstError is the first of them, and FirstErrorByte the byte
-	// offset it names (-1 when it names none).
+	// Discontinuous is set when the timestamps jump back by more than
+	// timestampResetSeconds (a broadcast recording whose clock restarts):
+	// Start and End then no longer measure the video's length.
+	Discontinuous bool
+	// DemuxErrors counts the packet damage the container's demuxer reported
+	// while reading. FirstError is the first of it, and FirstErrorByte the
+	// byte offset it names (-1 when it names none).
 	DemuxErrors    int
 	FirstError     string
 	FirstErrorByte int64
@@ -43,6 +47,18 @@ func (s sourceVideoScan) Seconds() float64 {
 // 27835247", "pos: 1234").
 var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?[: ]+(\d+)`)
 
+// packetDamagePattern is what a demuxer error says when the bytes it reads
+// are damaged. A demuxer also reports, at error level, header or metadata it
+// does not understand in files that play fine (a chapter track it cannot
+// find, a master element longer than its parent); those name no position in
+// the stream and are not damage.
+var packetDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?[: ]+\d+|EBML|corrupt|partial file|truncated`)
+
+// timestampResetSeconds is how far a packet's timestamp may fall behind the
+// latest end seen before the timeline counts as restarted. Reordered
+// B-frames fall back by a fraction of a second.
+const timestampResetSeconds = 10.0
+
 // scanSourceVideo reads every packet of stream streamIndex without decoding
 // it. Healthy files of every container the library holds read with no demuxer
 // error at all; the errors of a damaged one name where the damage sits.
@@ -57,8 +73,8 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		fields := strings.Split(line, "|")
 		switch fields[0] {
 		case "packet":
-			var pts, dur float64
-			hasPTS := false
+			var pts, dts, dur float64
+			hasPTS, hasDTS := false, false
 			for _, f := range fields[1:] {
 				key, value, _ := strings.Cut(f, "=")
 				v, err := strconv.ParseFloat(value, 64)
@@ -68,12 +84,21 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 				switch key {
 				case "pts_time":
 					pts, hasPTS = v, true
+				case "dts_time":
+					dts, hasDTS = v, true
 				case "duration_time":
 					dur = v
 				}
 			}
 			if !hasPTS {
-				return
+				// AVI and raw streams can carry decode times only.
+				if !hasDTS {
+					return
+				}
+				pts = dts
+			}
+			if !first && pts < scan.End-timestampResetSeconds {
+				scan.Discontinuous = true
 			}
 			if first || pts < scan.Start {
 				scan.Start = pts
@@ -106,9 +131,13 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	stderr := &lineWriter{line: func(line string) {
 		tag, text, ok := demuxerTag(line)
 		if !ok {
-			if len(stderrTail) < 5 {
-				stderrTail = append(stderrTail, line)
+			// The last lines: ffprobe ends with the reason it stopped.
+			if stderrTail = append(stderrTail, line); len(stderrTail) > 5 {
+				stderrTail = stderrTail[1:]
 			}
+			return
+		}
+		if !packetDamagePattern.MatchString(text) {
 			return
 		}
 		e := byTag[tag]
@@ -119,7 +148,7 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		e.count++
 	}}
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
-		"-show_entries", "packet=pts_time,duration_time:format=format_name", "-of", "compact", path)
+		"-show_entries", "packet=pts_time,dts_time,duration_time:format=format_name", "-of", "compact", path)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := runCharged(ctx, cmd)
 	stdout.flush()
@@ -180,7 +209,7 @@ func (s sourceVideoScan) damage(sizeBytes int64) error {
 // carries its duration); a window placed there has no pictures to extract,
 // which the final gate only found out after the whole encode.
 func finalWindowsFitVideo(plan *transcode.Plan, scan sourceVideoScan) error {
-	if plan == nil || plan.QualityValidation == nil || scan.Packets == 0 {
+	if plan == nil || plan.QualityValidation == nil || scan.Packets == 0 || scan.Discontinuous {
 		return nil
 	}
 	q := plan.QualityValidation

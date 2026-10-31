@@ -123,6 +123,66 @@ func TestFinalWindowsPastTheVideoFailBeforeTheEncode(t *testing.T) {
 	}
 }
 
+// A demuxer reports, at error level, header it does not understand in files
+// that play fine; only errors naming damaged bytes count.
+func TestPacketDamagePatternIgnoresHeaderNoise(t *testing.T) {
+	for _, text := range []string{
+		"0x00 at pos 738436 (0xb4484) invalid as first byte of an EBML number",
+		"Length 9 indicated by an EBML number's first byte 0x01 at pos 1 exceeds max length 8.",
+		"Packet corrupt (stream = 0, dts = 1234)",
+		"stream 0, offset 0x1a8bb6f: partial file",
+	} {
+		if !packetDamagePattern.MatchString(text) {
+			t.Errorf("damage not recognised: %q", text)
+		}
+	}
+	for _, text := range []string{
+		"Referenced QT chapter track not found",
+		"Something went wrong during header parsing, tag[0] has size 0, I will ignore it and try to continue anyway.",
+		"Element at 0x1f8 ending at 0x2a0 exceeds containing master element ending at 0x29a",
+	} {
+		if packetDamagePattern.MatchString(text) {
+			t.Errorf("header noise counted as damage: %q", text)
+		}
+	}
+}
+
+// A recording whose clock restarts has timestamps that no longer measure its
+// length; the window check stands aside instead of failing a healthy file.
+func TestFinalWindowsCheckSkipsARestartedTimeline(t *testing.T) {
+	ffmpeg, ffprobe := scanTestTools(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.ts"), filepath.Join(dir, "b.ts")
+	scanTestMedia(t, ffmpeg, "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=20", "-c:v", "mpeg2video", "-output_ts_offset", "1000", "-y", a)
+	// The second recording restarts inside the first's range. ffprobe reads a
+	// jump back of more than a minute in a transport stream as a clock wrap
+	// and keeps counting up, which only lengthens the timeline.
+	scanTestMedia(t, ffmpeg, "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=24:duration=10", "-c:v", "mpeg2video", "-output_ts_offset", "1005", "-y", b)
+	joined := filepath.Join(dir, "joined.ts")
+	first, err := os.ReadFile(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(joined, append(first, second...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := scanSourceVideo(context.Background(), ffprobe, joined, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scan.Discontinuous {
+		t.Fatalf("scan = %+v, want the restart seen", scan)
+	}
+	plan := &transcode.Plan{QualityValidation: &transcode.QualityValidationPlan{Samples: []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 25, DurationSeconds: 2}}}}
+	if err := finalWindowsFitVideo(plan, scan); err != nil {
+		t.Fatalf("a restarted timeline failed the window check: %v", err)
+	}
+}
+
 func TestDemuxerTagAndLineWriter(t *testing.T) {
 	tag, text, ok := demuxerTag("[matroska,webm @ 0x7cbd030000] 0x00 at pos 738436 (0xb4484) invalid")
 	if !ok || tag != "matroska,webm" || text != "0x00 at pos 738436 (0xb4484) invalid" {
