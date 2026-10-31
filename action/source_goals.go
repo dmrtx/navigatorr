@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
-	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Goal verdict statuses. "unknown" means a gate needs evidence this preview
@@ -113,12 +112,13 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 	return out
 }
 
-// recommendedGoal prefers compact for HDR, Dolby Vision and sources taller
-// than the compact target when compact accepts them, otherwise the size goal.
-// A goal that would skip is never recommended.
+// recommendedGoal prefers compact for HDR and Dolby Vision when compact accepts
+// them, otherwise the size goal: an SDR 4K source keeps its resolution under
+// Save space, which also compresses the audio more. A goal that would skip is
+// never recommended.
 func recommendedGoal(rep *mediainspect.DetailedReport, goals map[string]GoalVerdict) string {
 	video := rep.MainVideo()
-	if len(video) == 1 && goals["compact"].Status == GoalOK && (isSourceHDRorDV(rep) || video[0].Height > transcode.CompactDefaultMaxHeight) {
+	if len(video) == 1 && goals["compact"].Status == GoalOK && isSourceHDRorDV(rep) {
 		return "compact"
 	}
 	if goals["size"].Status != GoalSkip {

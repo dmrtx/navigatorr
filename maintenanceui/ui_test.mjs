@@ -82,6 +82,8 @@ const segmentGroups = {
   "size-budget-limit": ["", "siblings", "fixed"],
   "reconfigure-engine": ["fast", "small"],
   "reconfigure-budget-limit": ["", "siblings", "fixed"],
+  "compact-height": ["1080", "2160"],
+  "reconfigure-height": ["1080", "2160"],
 };
 function harness({ radios: withRadios = false, segments: withSegments = false } = {}) {
   const elements = new Map();
@@ -4226,7 +4228,7 @@ test("podcast cleaning is not launched from the main UI, but a podcast job in th
 
 test("size goal discloses which audio becomes AAC", () => {
   const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="size" checked \/>[\s\S]*?<\/label>/)?.[0] || "";
-  assert.match(radio, /Same look, at least 15% smaller; lossless and high-bitrate audio becomes AAC\./);
+  assert.match(radio, /Use it for most files, 4K included\. Same look and resolution, at least 15% smaller; lossless and high-bitrate audio becomes AAC\./);
   assert.match(source, /lossless Atmos\/DTS:X lose object and height channels; lossy tracks \(E-AC-3 Atmos included\) copied/);
   assert.match(source, /AAC-LC · lossless tracks, and lossy tracks at least 1\.25× the target, become AAC-LC/);
   assert.match(source, /"size_aac_bed" \? "AAC-LC · [^"]*Atmos keeps its 5\.1\/7\.1 bed, objects dropped"/);
@@ -4235,9 +4237,9 @@ test("size goal discloses which audio becomes AAC", () => {
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
-  assert.match(radio, /Use it for 4K or HDR you don't need in 4K\. At least 30% smaller; HDR is removed\./);
-  assert.match(markup, /<option value="compact">Shrink to 1080p SDR · At least 30% smaller, HDR removed/);
-  assert.match(source, /`Shrink to \$\{item\.max_height \|\| 1080\}p SDR`/);
+  assert.match(radio, /Use it for HDR and Dolby Vision, or 4K you don't need\. Converted to SDR, at least 30% smaller; lossless audio becomes AAC\./);
+  assert.match(markup, /<option value="compact">Shrink to SDR · At least 30% smaller, HDR removed/);
+  assert.match(source, /item\.mode === "compact" \? shrinkLabel\(item\.max_height\)/);
 });
 
 test("a source hash queued behind others reads as waiting, not stuck at zero bytes", () => {
@@ -5541,7 +5543,7 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   assert.match(more, /value="quality"[\s\S]*<strong class="goal-title">Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
   assert.match(more, /value="x265_preserve"[\s\S]*<strong class="goal-title">Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
   const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
-  for (const name of ["Save space", "Shrink to 1080p SDR", "Audio only", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
+  for (const name of ["Save space", "Shrink to SDR", "Audio only", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
   assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to x265/);
   const h = harness();
   assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", audio_only: "Audio only", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
@@ -7354,6 +7356,38 @@ test("cancelling Choose tracks drops the carried goal settings and the Shrink ca
   h.context.job = trackReportFixture({ goal: { mode: "size" } });
   await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
   assert.equal(title(), "Shrink to 1080p SDR");
+});
+
+test("Shrink offers 1080p or Keep 4K, and only Keep 4K names a height", async () => {
+  const { h } = submissionHarness({ radios: true, segments: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.status = "ready"; keepLanguages.saved = ["eng"]; setProcessingMode("compact");');
+  const pick = (name, value) => h.run(`{const r=shrinkRadios("${name}").find(r=>r.value==="${value}");shrinkRadios("${name}").forEach(x=>x.checked=x===r);r.listeners.get("change")();renderShrinkTitle();}`);
+  const title = () => h.elements.get("goal-title-compact").textContent;
+  // A submit clears the form, so each one names the file again.
+  const submit = () => h.run('$("path").value = "/media/one.mp4"; buildAndSubmitJob("encode")');
+  await submit();
+  assert.equal("max_height" in sent[0], false);
+  pick("compact-height", "2160");
+  assert.equal(title(), "Shrink to 4K SDR");
+  await submit();
+  assert.equal(sent[1].max_height, 2160);
+  // An earlier job's 720 is carried until a resolution is chosen.
+  h.run('$("path").value = "/media/one.mp4"; applyGoalSettings("/media/one.mp4", {mode:"compact", max_height:720})');
+  assert.equal(title(), "Shrink to 720p SDR");
+  pick("compact-height", "1080");
+  assert.equal(title(), "Shrink to 1080p SDR");
+  await submit();
+  assert.equal("max_height" in sent[2], false);
+  // An earlier job at 4K shows its height in the choice instead.
+  h.run('applyGoalSettings("/media/one.mp4", {mode:"compact", max_height:2160})');
+  assert.equal(h.run('shrinkHeight("compact-height")'), 2160);
+  assert.equal(h.run('"max_height" in state.goalCarry.inputs'), false);
+  // Encode again keeps a batch file's frozen height; the batch row names it.
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"compact",settings:{max_height:2160}}).max_height'), 2160);
+  assert.equal(h.run("shrinkLabel(2160)"), "Shrink to 4K SDR");
+  assert.equal(h.run("shrinkLabel(0)"), "Shrink to 1080p SDR");
 });
 
 test("a file without audio takes subtitle picks alone", async () => {
