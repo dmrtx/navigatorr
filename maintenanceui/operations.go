@@ -834,9 +834,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					e, blocked, steps := explainFailure(full)
 					job["explanation"] = e
 					// A batch file is run again from its batch row.
-					if blocked != "" && operationString(full.inputs["parent_action_id"]) == "" {
-						job["retry_blocked"] = blocked
-						job["next_steps"] = append([]nextStep{}, steps...)
+					if operationString(full.inputs["parent_action_id"]) == "" {
+						if blocked != "" {
+							job["retry_blocked"] = blocked
+						}
+						if blocked != "" || len(steps) > 0 {
+							job["next_steps"] = append([]nextStep{}, steps...)
+						}
 					}
 				}
 			}

@@ -62,10 +62,12 @@ func BatchItemSourceDamaged(item store.TranscodeBatchItem) bool {
 }
 
 // SourceDamaged reports a failure message that blames the file's own bytes:
-// the worker's packet scan, or an MP4 with no moov atom.
+// the worker's packet scan, or an MP4 with no moov atom. A missing moov atom
+// in the worker's probe of its own candidate is the encode's failure, not the
+// file's, and a new encode can pass.
 func SourceDamaged(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found")
+	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found") && !strings.Contains(msg, "candidate")
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {

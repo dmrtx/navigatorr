@@ -21,15 +21,20 @@ func TestFailuresSayWhyAndWhetherRetryCanHelp(t *testing.T) {
 		blocked  bool
 		steps    string
 	}{
-		"damaged MP4":       {"failed to probe original media /media/a.mp4 (fail closed): ffprobe tool_exit after 61ms: exit status 1: moov atom not found", nil, "MP4 index", true, ""},
-		"corrupt packets":   {"Transcode failed (ffmpeg_input_corrupt): ffmpeg_input_corrupt: packet scan failed", nil, "broken data", true, ""},
+		"damaged MP4":       {"failed to probe original media /media/a.mp4 (fail closed): ffprobe tool_exit after 61ms: exit status 1: moov atom not found", nil, "MP4 index", true, "tracks"},
+		"corrupt packets":   {"Transcode failed (ffmpeg_input_corrupt): ffmpeg_input_corrupt: packet scan failed", nil, "broken data", true, "tracks"},
+		"broken new file":   {"Transcode failed (candidate_invalid): probing local candidate for pre-publish validation: moov atom not found", nil, "failed Navigatorr's checks", false, ""},
 		"tracks mismatch":   {"choosing the tracks to keep: keep_audio_streams names stream 4, which is not an audio stream of this file", nil, "names stream 4", true, "tracks"},
-		"file replaced":     {"Transcode failed (source_changed): size differs", nil, "changed while the job ran", true, "tracks"},
-		"no permission":     {"Transcode failed (storage_permission_denied): open: permission denied", nil, "not allowed", true, "tracks"},
-		"worker restarted":  {"Transcode failed (runner_killed): signal: killed", nil, "could not be reached", false, ""},
+		"file replaced":     {"Transcode failed (source_changed): size differs", nil, "changed while the job ran", false, "tracks"},
+		"no permission":     {"Transcode failed (storage_permission_denied): open: permission denied", nil, "not allowed", false, ""},
+		"worker restarted":  {"Transcode failed (runner_killed): signal: killed", nil, "worker restart", false, ""},
+		"not reached":       {"Transcode failed (worker_unreachable): dial tcp: connection refused", nil, "could not be reached", false, ""},
 		"recorded class":    {"something odd", map[string]any{"failure_classification": "worker_unreachable"}, "could not be reached", false, ""},
+		"final class wins":  {"Transcode failed (runner_killed): signal: killed", map[string]any{"failure_classification": "media_probe_failed"}, "worker restart", false, ""},
 		"check failed":      {"Transcode failed (candidate_invalid): quality_final_sample_misaligned: window 4", nil, "quality measurement", false, ""},
+		"setup failed":      {"Transcode failed (worker_setup_failed): staging copy failed", nil, "could not prepare", false, ""},
 		"probe failed once": {"failed to probe original media /media/a.mkv (fail closed): ffprobe tool_exit: Invalid data found when processing input", nil, "could not be read", false, ""},
+		"probe refused":     {"failed to probe original media /media/a.mkv (fail closed): open: Permission denied", map[string]any{"failure_classification": "media_probe_failed"}, "not allowed to open", false, ""},
 		"unknown":           {"Transcode failed (ffmpeg_unknown): exit status 1", nil, "ffmpeg unknown", false, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
