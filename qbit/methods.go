@@ -122,3 +122,64 @@ func (c *Client) GetTransferInfo(ctx context.Context) (*TransferInfo, error) {
 	}
 	return &info, nil
 }
+
+// KeepPaths returns the folders qBittorrent saves into besides the ones its
+// torrents already name: the default save path, the incomplete-downloads folder
+// when enabled, and for every category its save path and its own incomplete
+// folder. A category with no save path (or a relative one) saves under the
+// default path, by the category's name when empty.
+func (c *Client) KeepPaths(ctx context.Context) ([]string, error) {
+	data, err := c.do(ctx, "GET", "/api/v2/app/preferences", nil)
+	if err != nil {
+		return nil, err
+	}
+	var prefs struct {
+		SavePath        string `json:"save_path"`
+		TempPath        string `json:"temp_path"`
+		TempPathEnabled bool   `json:"temp_path_enabled"`
+	}
+	if err := json.Unmarshal(data, &prefs); err != nil {
+		return nil, fmt.Errorf("decoding preferences: %w", err)
+	}
+	data, err = c.do(ctx, "GET", "/api/v2/torrents/categories", nil)
+	if err != nil {
+		return nil, err
+	}
+	var cats map[string]struct {
+		SavePath     string `json:"savePath"`
+		DownloadPath any    `json:"download_path"` // a path, or false
+	}
+	if err := json.Unmarshal(data, &cats); err != nil {
+		return nil, fmt.Errorf("decoding categories: %w", err)
+	}
+	var out []string
+	add := func(p string) {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	add(prefs.SavePath)
+	if prefs.TempPathEnabled {
+		add(prefs.TempPath)
+	}
+	under := func(base, p string) string {
+		if p == "" || strings.HasPrefix(p, "/") || base == "" {
+			return p
+		}
+		return strings.TrimRight(base, "/") + "/" + p
+	}
+	for name, cat := range cats {
+		switch {
+		case cat.SavePath != "":
+			add(under(prefs.SavePath, cat.SavePath))
+		default:
+			add(under(prefs.SavePath, name))
+		}
+		if dp, ok := cat.DownloadPath.(string); ok && dp != "" {
+			add(under(prefs.TempPath, dp))
+		} else if prefs.TempPathEnabled {
+			add(under(prefs.TempPath, name))
+		}
+	}
+	return out, nil
+}

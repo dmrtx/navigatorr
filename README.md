@@ -233,7 +233,7 @@ Beyond the request queue, Navigatorr keeps a **separate SQLite-backed maintenanc
 | Decisions | `decision_record`, `decision_list` (why-did-we-pick-this history) |
 | Inspection | `inspect_media` (ffprobe + sidecar subs + `*arr` fallback), `qbit_list_files` (torrent-content safety gate), `scan_dangerous_files` |
 | Ranking | `rank_releases` (deterministic scoring: codec, group, subs, seeders, size reduction) |
-| Workflow | `safe_replace` (step machine), `cleanup_imported_downloads` (evidence-gated), `scan_library_issues` (dry-run by default), `get_context` (compact LLM briefing) |
+| Workflow | `safe_replace` (step machine), `cleanup_imported_downloads` (evidence-gated), `cleanup_download_leftovers` (empty and junk-only folders left in downloads, list-first), `scan_library_issues` (dry-run by default), `get_context` (compact LLM briefing) |
 | Blocklist | `block_release`, `block_list` |
 | Scoped filesystem | `fs_stat`, `fs_list`, `fs_hash`, `fs_safe_move`, `fs_safe_delete` (all confined to `allowed_read_roots` / `allowed_write_roots`, symlinks resolved) |
 

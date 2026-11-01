@@ -238,6 +238,8 @@ To verify the active setting:
 | `fs_stat` / `fs_list` / `fs_hash` | `media.allowed_read_roots` | — | — | No |
 | `fs_safe_move` | `media.allowed_read_roots` (source) | `media.allowed_write_roots` (destination) | — | No |
 | `fs_safe_delete` | — | `media.allowed_write_roots` | Job in `replacing` | **YES** |
+| `cleanup_download_leftovers` (list) | `media.allowed_read_roots` | — | — | No |
+| `cleanup_download_leftovers` (remove_*) | `media.allowed_read_roots` | `media.allowed_write_roots` | — | **YES** |
 | `qbit_manage_torrent` (pause/resume) | — | — | — | No |
 | `qbit_manage_torrent` (delete/delete_files) | — | — | — | **YES** |
 | `transmission_manage_torrent` (remove/remove_data) | — | — | — | **YES** |
