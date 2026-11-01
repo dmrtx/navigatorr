@@ -7,6 +7,7 @@ import { runReview } from "./review.mjs";
 import { runSwipe } from "./swipe.mjs";
 import { runSheet } from "./sheet.mjs";
 import { runControls } from "./controls.mjs";
+import { runReviewTab } from "./review_tab.mjs";
 const started = Date.now();
 let done = 0;
 const report = await runMatrix({ onCell: () => { if (++done % 25 === 0) process.stdout.write(`\r${done} cells`); } });
@@ -89,5 +90,11 @@ if (controls.length) {
     console.log(`  ${v.rule}  (${v.screen}, ${v.theme}, ${v.view})  ${v.message}  ${v.where}`);
   }
 }
-if (report.failed || moves.length || stats.length || reviews.length || swipes.length || sheets.length || controls.length) process.exit(1);
+// The Review tab: its rows, the link into Files, Processed and Drop with Undo.
+const reviewTab = await runReviewTab();
+if (reviewTab.length) {
+  console.log(`\n${reviewTab.length} findings in the Review tab:`);
+  for (const v of reviewTab) console.log(`  ${v.rule}  (${v.screen}, ${v.theme})  ${v.message}`);
+}
+if (report.failed || moves.length || stats.length || reviews.length || swipes.length || sheets.length || controls.length || reviewTab.length) process.exit(1);
 console.log("All cells pass.");

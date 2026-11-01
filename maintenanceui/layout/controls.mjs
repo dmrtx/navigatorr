@@ -104,7 +104,7 @@ export async function runControls({ screenNames = ["desktop", "phone", "tablet"]
           await page.waitForSelector(".job-row", { timeout: 10000 });
           await page.waitForTimeout(300);
           await grab("queue");
-          for (const tab of ["library", "recipes", "stats", "advanced"]) {
+          for (const tab of ["library", "review", "recipes", "stats", "advanced"]) {
             await page.evaluate(t => document.querySelector(`[data-tab="${t}"]`)?.click(), tab);
             await page.waitForTimeout(400);
             await grab(tab);

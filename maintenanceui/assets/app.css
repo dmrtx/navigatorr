@@ -2252,7 +2252,7 @@ pre {
     z-index: 20;
     inset: auto 0 0;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 0;
     margin: 0;
     padding: 4px max(6px, env(safe-area-inset-right))
@@ -3413,6 +3413,26 @@ html { scrollbar-gutter: stable; }
 .skip-link:focus {
   top: 8px;
 }
+
+/* Review: one row per entry, the entry on the left and its two verdicts on the right. */
+.review-list { list-style: none; margin: 0; padding: 0; }
+.review-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 4px 8px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.review-row.empty, .review-list > .empty { display: block; }
+.review-main { display: grid; gap: 3px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--ink); font: inherit; text-align: left; }
+a.review-main { text-decoration: none; cursor: pointer; border-radius: 4px; }
+a.review-main:hover .review-title { color: var(--forest); text-decoration: underline; }
+.review-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; min-width: 0; }
+.review-title { font-weight: 500; overflow-wrap: anywhere; }
+.review-year { color: var(--muted); font-weight: 400; }
+.review-size { flex: 0 0 auto; color: var(--ink); font: 600 12px/1.4 var(--body); font-variant-numeric: tabular-nums; }
+.review-path { color: var(--muted); font: 400 11px/1.4 var(--body); overflow-wrap: anywhere; }
+.review-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.review-tag { padding: 0 6px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font: 500 11px/1.6 var(--body); }
+.review-tag.active { border-color: var(--info); color: var(--info); background: var(--info-wash); }
+.review-note { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; color: var(--muted); font: 400 12px/1.4 var(--body); overflow-wrap: anywhere; }
+.review-actions { display: flex; gap: 6px; align-items: center; }
+.review-action { display: inline-grid; place-items: center; width: var(--control-size); min-width: var(--control-size); height: var(--control-size); min-height: var(--control-size); padding: 0; }
+.review-action svg { width: 18px; height: 18px; }
 
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in

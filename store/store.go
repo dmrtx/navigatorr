@@ -609,6 +609,13 @@ func (s *Store) AddItem(it MaintenanceItem) (MaintenanceItem, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A candidate the owner dropped from the console stays dropped: adding it
+	// again returns that item, not a new pending one.
+	if it.MediaID != "" {
+		if dropped, ok := s.consoleDismissedLocked(it); ok {
+			return dropped, nil
+		}
+	}
 	now := nowStr()
 	res, err := s.db.Exec(`INSERT INTO maintenance_items
 		(media_type, service, media_id, title, issue_type, priority, status,
@@ -665,7 +672,7 @@ func (s *Store) getItemLocked(id int64) (MaintenanceItem, error) {
 	err := s.db.QueryRow(`SELECT `+maintColumns+` FROM maintenance_items WHERE id=?`, id).
 		Scan(maintScan(&it)...)
 	if err == sql.ErrNoRows {
-		return MaintenanceItem{}, fmt.Errorf("no such maintenance item %d", id)
+		return MaintenanceItem{}, fmt.Errorf("%w %d", ErrMaintNotFound, id)
 	}
 	return it, err
 }

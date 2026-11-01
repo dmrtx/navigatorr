@@ -134,6 +134,8 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, 200, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /api/maintenance/commands", s.commandStatus)
+	mux.HandleFunc("GET /api/maintenance/maintenance-queue", s.maintenanceQueue)
+	mux.HandleFunc("POST /api/maintenance/maintenance-queue", s.maintenanceQueue)
 	mux.HandleFunc("GET /api/maintenance/batch-candidates", s.batchCandidates)
 	mux.HandleFunc("POST /api/maintenance/batch-candidates", s.batchCandidates)
 	mux.HandleFunc("GET /api/maintenance/batch-settings", s.batchSettings)
