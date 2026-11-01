@@ -3325,6 +3325,92 @@ html { scrollbar-gutter: stable; }
   .job-row.swipe-armed > .job-actions > [aria-label="Archive"] { background: var(--forest); color: var(--on-forest); }
 }
 
+/* The main action stays in reach: the submit row and the phone's Continue stick
+   to the bottom of the screen while their form or list is on it. */
+#job-form .submit-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin: 8px 0 0;
+  padding: 8px 0;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+.mobile-selection-actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  padding: 8px 0;
+  background: var(--surface);
+}
+.mobile-selection-actions button {
+  flex: 1 1 auto;
+}
+@media (max-width: 600px) {
+  #job-form .submit-actions,
+  .mobile-selection-actions {
+    bottom: calc(49px + env(safe-area-inset-bottom));
+  }
+  #job-form .submit-actions .primary {
+    flex: 1 1 auto;
+  }
+}
+
+/* A job answers an archive or restore at once, before the list redraws. */
+.job-row.job-pending {
+  opacity: 0.55;
+  pointer-events: none;
+}
+.job-row.job-pending::after {
+  content: attr(data-pending);
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 12px;
+}
+.job-row.job-leaving {
+  overflow: hidden;
+  animation: job-leave 0.2s ease-in forwards;
+}
+@keyframes job-leave {
+  to { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; margin: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .job-row.job-leaving { animation: none; opacity: 0; }
+}
+#notice .notice-action {
+  margin-left: 12px;
+  padding: 0 12px;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+}
+.empty .quiet {
+  margin-top: 8px;
+}
+.empty.load-error {
+  color: var(--ink);
+}
+
+/* Keyboard users skip the five tabs; the link shows only while it has focus. */
+.skip-link {
+  position: absolute;
+  left: 8px;
+  top: -48px;
+  z-index: 60;
+  padding: 10px 14px;
+  background: var(--ink);
+  color: var(--paper);
+}
+.skip-link:focus {
+  top: 8px;
+}
+
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
    the file so it wins over the sizes each component, and the touch rules above,
