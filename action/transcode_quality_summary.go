@@ -36,7 +36,7 @@ type HardwareContinuation struct {
 	RemainingSearchSeconds float64 `json:"remaining_search_seconds,omitempty"`
 
 	// Sampled is what the failed result scored on the search's sample windows
-	// and Final what it scored on the whole file.
+	// and Final what it scored on the final sampled windows.
 	Sampled *QualityNumbers              `json:"sampled,omitempty"`
 	Final   *FinalQualitySummary         `json:"final,omitempty"`
 	Windows []transcode.WindowComparison `json:"windows,omitempty"`

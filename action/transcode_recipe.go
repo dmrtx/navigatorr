@@ -748,7 +748,7 @@ func passQualityLadder(ec *ExecutionContext, candidateBytes int64) *QualityLadde
 		scores = fmt.Sprintf(" (VMAF %.1f, p5 %.1f)", *rec.Final.Measured.VMAFMean, *rec.Final.Measured.VMAFP5)
 	}
 	rec.Outcome = QualityLadderPassed
-	rec.Message = fmt.Sprintf("%s passed this goal's quality limits on the whole file%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
+	rec.Message = fmt.Sprintf("%s passed this goal's quality limits on its sampled windows%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
 	ec.State[qualityLadderKey] = rec
 	return rec
 }
