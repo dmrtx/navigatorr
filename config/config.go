@@ -150,13 +150,6 @@ type ServiceConfig struct {
 	AuthPrefix string `yaml:"auth_prefix"`
 	APIVersion string `yaml:"api_version"`
 	OpenAPIURL string `yaml:"openapi_url"`
-	// Policy names a built-in request policy that every call to this service
-	// must pass before it leaves the process ("plex"). A service named like a
-	// policy gets it by default (DefaultPolicies); an empty policy allows all.
-	Policy string `yaml:"policy"`
-	// AllowWrites switches on named groups of writes under Policy. Everything
-	// a policy does not list stays blocked, whatever allow_destructive says.
-	AllowWrites []string `yaml:"allow_writes"`
 }
 type TransmissionConfig struct {
 	URL      string `yaml:"url"`
@@ -989,12 +982,6 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	for name, svc := range cfg.Services {
-		if svc.Policy == "" {
-			svc.Policy = DefaultPolicies[name]
-		}
-		if err := ValidateServicePolicy(name, svc); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", path, err)
-		}
 		if svc.AuthMethod == "" {
 			if m, ok := DefaultAuthMethods[name]; ok {
 				svc.AuthMethod = m
@@ -1005,8 +992,6 @@ func Load(path string) (*Config, error) {
 		if svc.AuthHeader == "" {
 			if h, ok := DefaultAuthHeaders[name]; ok {
 				svc.AuthHeader = h
-			} else if svc.Policy == PolicyPlex {
-				svc.AuthHeader = DefaultAuthHeaders[PolicyPlex]
 			} else if svc.AuthMethod == "header" {
 				svc.AuthHeader = "X-Api-Key"
 			}

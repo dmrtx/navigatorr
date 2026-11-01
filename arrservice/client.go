@@ -16,17 +16,6 @@ import (
 
 var httpClient = &http.Client{
 	Timeout: 180 * time.Second,
-	// Go forwards custom headers such as X-Plex-Token to wherever a redirect
-	// points. A service that redirects to another host gets its 3xx back instead.
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		if req.URL.Hostname() != via[0].URL.Hostname() {
-			return http.ErrUseLastResponse
-		}
-		return nil
-	},
 }
 
 // maxPingRedirects mirrors the cap Go's http.Client applies when CheckRedirect
@@ -103,8 +92,6 @@ func (s *Service) DoRequestWithContentType(ctx context.Context, method, path str
 	var statusCode int
 	var err error
 
-	method = strings.ToUpper(strings.TrimSpace(method))
-
 	if s.Pool != nil {
 		retryCfg := resilience.DefaultRetryConfig()
 		if method == "POST" || method == "PATCH" {
@@ -150,12 +137,10 @@ func (s *Service) Post(ctx context.Context, path string, body []byte) ([]byte, e
 }
 
 func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte, contentType string) ([]byte, int, error) {
-	// The policy sits here, below every entry point (pooled, once-only, ping),
-	// and judges the method exactly as it is sent.
-	method = strings.ToUpper(strings.TrimSpace(method))
-	if s.Policy != nil {
-		if perr := s.Policy.Check(method, path, query); perr != nil {
-			return nil, 0, perr
+	// Below every entry point (pooled, once-only, ping), so none skips it.
+	if s.policy != nil {
+		if err := s.policy.Check(method, path, query); err != nil {
+			return nil, 0, err
 		}
 	}
 	cleanPath := path

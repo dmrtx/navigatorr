@@ -93,9 +93,6 @@ var DefaultStatusPaths = map[string]string{
 	// is authenticated, so it also proves the token works rather than only
 	// that the host is up.
 	"audiobookshelf": "/me",
-	// Plex has no unauthenticated-looking status route that also proves the
-	// token, and the section list is cheap and needs it.
-	"plex": "/library/sections",
 }
 
 // DefaultSelfHostedSpecPaths maps service type to the instance-relative path
@@ -108,11 +105,4 @@ var DefaultSelfHostedSpecPaths = map[string]string{
 // DefaultAuthPrefixes maps service type to auth value prefix.
 var DefaultAuthPrefixes = map[string]string{
 	"audiobookshelf": "Bearer",
-}
-
-// DefaultPolicies maps service type to the request policy applied when the
-// config does not name one. Plex's token is an admin token that cannot be
-// scoped, so a service called plex is read-only unless allow_writes says more.
-var DefaultPolicies = map[string]string{
-	"plex": PolicyPlex,
 }
