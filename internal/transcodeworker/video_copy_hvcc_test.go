@@ -74,13 +74,13 @@ func TestVideoCopyFactsIgnoreHVCCCompleteness(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	dir := t.TempDir()
-	encode := func(name, crf string) string {
+	encode := func(name, size string) string {
 		out := filepath.Join(dir, name)
-		runFFmpeg(t, ctx, ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=1",
-			"-c:v", "libx265", "-preset", "ultrafast", "-crf", crf, "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error", out)
+		runFFmpeg(t, ctx, ffmpeg, "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size="+size+":rate=24:duration=1",
+			"-c:v", "libx265", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error", out)
 		return out
 	}
-	source := encode("ffmpeg.mkv", "20")
+	source := encode("ffmpeg.mkv", "320x240")
 	raw, err := os.ReadFile(source)
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +125,8 @@ func TestVideoCopyFactsIgnoreHVCCCompleteness(t *testing.T) {
 	if src != cand || src.extradata == "" {
 		t.Fatalf("remux changed the stream facts:\n%+v\n%+v", src, cand)
 	}
-	if other := facts(encode("other.mkv", "30")); other.extradata == src.extradata && other == src {
-		t.Fatal("a different encode matched")
+	// Another size is another SPS: the decoder record must differ.
+	if other := facts(encode("other.mkv", "352x288")); other.extradata == src.extradata {
+		t.Fatal("a different SPS matched")
 	}
 }
