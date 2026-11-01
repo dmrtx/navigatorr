@@ -180,12 +180,25 @@ function bytes(n) {
   if (v >= 1e3) return `${(v / 1e3).toFixed(1)} KB`;
   return `${Math.round(v)} B`;
 }
-function notify(text) {
+// A notice may carry one action ("Undo"); it lives as long as the notice does.
+function notify(text, {action} = {}) {
   const notice = $("notice");
   const dialog = document.querySelector?.("dialog[open]");
   (dialog || document.querySelector?.("main"))?.append(notice);
   notice.className = dialog ? "dialog-notice" : "";
   notice.textContent = text;
+  if (action) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "notice-action";
+    undo.textContent = action.label;
+    undo.addEventListener("click", () => {
+      $("notice").hidden = true;
+      clearTimeout(notify.timer);
+      void safe(action.run);
+    });
+    notice.append(undo);
+  }
   notice.hidden = false;
   clearTimeout(notify.timer);
   notify.timer = setTimeout(() => {
@@ -826,12 +839,15 @@ function rememberJobsScroll() {
   state.jobsScrollFilter = $("job-filter").value;
 }
 if (typeof window !== "undefined") window.addEventListener("scroll", rememberJobsScroll, {passive: true});
+const tabTitles = {library: "Files", jobs: "Activity", recipes: "Compression", stats: "Stats", advanced: "Settings"};
 function selectTab(tab, fromRoute = false) {
   if (!fromRoute && state.applyingNavigation) { state.routeRevision++; state.applyingNavigation=false; }
   // Leaving Activity remembers how far down it was, so coming back (the Back
   // button, or its tab) lands on the same job instead of the top.
   const cameFrom = state.tab;
   state.tab = tab;
+  // History and screen readers tell the views apart by the page title.
+  document.title = `${tabTitles[tab] || "Maintenance"} · Navigatorr`;
   document
     .querySelectorAll(".tab-content")
     .forEach((n) => (n.hidden = n.id !== tab));
@@ -1322,9 +1338,7 @@ async function loadLibrary(more = false) {
       $("library-items").append(row);
     }
     if (!(grouped ? page.season_groups : page.items).length)
-      $("library-items").append(
-        node("p", "No matching files or titles.", "empty"),
-      );
+      $("library-items").append(emptyLibrary());
     state.libraryLoaded = grouped ? page.season_groups.length : state.libraryOffset + page.items.length;
     state.libraryHasMore = !grouped && page.has_more;
     state.libraryError = false;
@@ -1354,6 +1368,20 @@ async function loadLibrary(more = false) {
       controls();
     }
   }
+}
+// Nothing listed means a search found nothing, a folder holds no videos, or the
+// library itself is empty; only the first has something to undo.
+function emptyLibrary() {
+  const box = node("div", "", "empty");
+  const query = $("search").value.trim();
+  if (query) {
+    box.append(node("p", `Nothing matches “${query}”.`));
+    box.append(button("Clear search", () => { $("search").value = ""; resetLibrary(); safe(loadLibrary); }, "quiet"));
+    return box;
+  }
+  const source = $("service").value;
+  box.append(node("p", source.startsWith("folder:") ? "No videos or folders here." : state.media ? "No video files found for this title." : `${source === "radarr" ? "Radarr" : "Sonarr"} has no ${source === "radarr" ? "movies" : "series"} yet.`));
+  return box;
 }
 function seriesSeasonSelected() {
   return $("service").value === "sonarr" && state.media && state.librarySeason != null;
@@ -1740,7 +1768,7 @@ async function loadFolder(revision = ++state.libraryRevision, more = false) {
 }
 function showFolderSize(target, size) {
   target.dataset.pending = size?.status === "calculating" || size?.updating ? "1" : "0";
-  target.textContent = size?.status === "calculating" ? (size.queued ? "En cola…" : "Calculating…")
+  target.textContent = size?.status === "calculating" ? (size.queued ? "Queued…" : "Calculating…")
     : size?.bytes != null ? `${size.status === "partial" ? "≥ " : ""}${bytes(size.bytes)}`
     : "Unavailable";
   target.title = size?.note || (size?.status !== "calculating" && size?.measured_at
@@ -1802,7 +1830,7 @@ async function updateFolderSizes(revision, path, query, loaded, everything = fal
   } catch {
     if (current()) for (const targets of state.folderSizeTargets.values()) {
       for (const target of Array.isArray(targets) ? targets : [targets]) {
-        if (target.textContent === "Calculating…" || target.textContent === "En cola…") showFolderSize(target, {note:"Could not retrieve folder size. Refresh to try again."});
+        if (target.textContent === "Calculating…" || target.textContent === "Queued…") showFolderSize(target, {note:"Could not retrieve folder size. Refresh to try again."});
       }
     }
   }
@@ -4658,10 +4686,25 @@ async function noteJobLeftovers(job) {
   if (!found) return;
   notify(`Stopped. ${leftoverSummary(found)} from the encode ${found.files === 1 ? "was" : "were"} left beside the original. Archive the job to delete ${found.files === 1 ? "it" : "them"}.`);
 }
+// The row answers the touch at once: it dims and says what it is doing, since
+// the archive can take a few round trips before the list redraws.
+function markJobPending(id, text) {
+  document.querySelectorAll?.(".job-row").forEach?.(row => {
+    if (row.dataset.operationId !== id) return;
+    if (text) { row.dataset.pending = text; row.classList.add("job-pending"); row.setAttribute("aria-busy", "true"); }
+    else { delete row.dataset.pending; row.classList.remove("job-pending"); row.removeAttribute("aria-busy"); }
+  });
+}
+function markJobLeaving(id) {
+  document.querySelectorAll?.(".job-row").forEach?.(row => {
+    if (row.dataset.operationId === id) row.classList.add("job-leaving");
+  });
+}
 async function archiveJob(job, archived) {
   if (jobIsBusy(job.id)) return;
   const auth = state.authRevision;
   state.busyJobs.add(job.id);
+  markJobPending(job.id, archived ? "Archiving…" : "Restoring…");
   try {
     let found = null;
     if (archived && state.info?.allow_destructive) {
@@ -4688,9 +4731,16 @@ async function archiveJob(job, archived) {
     await api("archive", {id:job.id,archived});
     if (auth !== state.authRevision || $("workspace").hidden) return;
     if (state.detail === job.id) $("job-detail").close();
-    notify(archived ? "Job archived. Find it under Archived to restore it." : "Job restored to the queue.");
+    markJobLeaving(job.id);
+    // Archiving can be undone on the spot; the temporary files it may have
+    // deleted are not brought back, only the job.
+    notify(
+      archived ? "Job archived." : "Job restored to the queue.",
+      archived ? {action: {label: "Undo", run: () => archiveJob(job, false)}} : undefined,
+    );
     await loadJobs();
   } finally {
+    markJobPending(job.id, "");
     state.busyJobs.delete(job.id);
     setConnection(serverReachable);
   }
@@ -6172,6 +6222,33 @@ function skippedBatchOutcome(job) {
 function renderDecisionCount(data) {
   $("job-filter-decision").textContent = data.decision_count > 0 ? `Needs decision (${data.decision_count})` : "Needs decision";
 }
+const jobFilterNames = {pending:"queued", running:"running", waiting_external:"processing", waiting_decision:"waiting for a decision", completed:"finished", failed:"failed", cancelled:"cancelled", archived:"archived"};
+// An empty queue and an empty filter are different news, and each says what to do next.
+function emptyJobs() {
+  const status = $("job-filter").value;
+  const box = node("div", "", "empty");
+  if (status === "all") {
+    box.append(node("p", "Nothing in the queue yet."));
+    box.append(button("Choose files to process", () => selectTab("library"), "quiet"));
+  } else {
+    box.append(node("p", `No ${jobFilterNames[status] || status} jobs.`));
+    box.append(button("Show all jobs", () => { $("job-filter").value = "all"; $("job-filter").dispatchEvent(new Event("change")); }, "quiet"));
+  }
+  return box;
+}
+// A failed load is more than a toast that goes away in nine seconds: when there
+// is nothing on screen to fall back on, the list says so and offers a retry.
+// While the server is unreachable the connection banner already says it.
+function showJobsError(error) {
+  if (!serverReachable) return;
+  $("jobs-updated").textContent = "Could not refresh the queue";
+  if (state.operationJobs?.size) return;
+  const box = node("div", "", "empty load-error");
+  box.setAttribute("role", "alert");
+  box.append(node("p", `Could not load the queue: ${error.message}`));
+  box.append(button("Try again", () => safe(() => loadJobs()), "quiet"));
+  $("jobs-list").replaceChildren(box);
+}
 async function loadJobs(more = false) {
   if (
     $("workspace").hidden ||
@@ -6306,8 +6383,7 @@ async function loadJobs(more = false) {
       }
       $("jobs-list").append(row);
     }
-    if (!state.operationJobs.size)
-      $("jobs-list").append(node("p", "No jobs for this filter.", "empty"));
+    if (!state.operationJobs.size) $("jobs-list").append(emptyJobs());
     renderCommandIndicators();
     restoreCommandFocus(commandFocused);
     restoreActionMenu($("jobs-list"), menu);
@@ -6328,6 +6404,9 @@ async function loadJobs(more = false) {
       : "";
     $("jobs-updated").textContent =
       `Updated ${new Date().toLocaleTimeString("en")} · live`;
+  } catch (error) {
+    if (revision === state.jobsRevision) showJobsError(error);
+    throw error;
   } finally {
     if (revision === state.jobsRevision) {
       state.jobsLoading = false;

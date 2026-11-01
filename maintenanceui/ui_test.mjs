@@ -1711,6 +1711,88 @@ test("an archived job is announced before the list reloads", async () => {
   await archiving;
 });
 
+test("archiving answers at once: the row says so, leaves, and the notice offers Undo", async () => {
+  const h = harness(), order = [];
+  h.context.record = (...what) => order.push(what);
+  h.run('state.info = {}; api = async () => ({archived:true}); markJobPending = (id, text) => record("pending", id, text); markJobLeaving = (id) => record("leaving", id); notify = (m, o) => record("notify", m, o?.action?.label); loadJobs = async () => record("reload");');
+  await h.run('archiveJob({id:"done"}, true)');
+  assert.deepEqual(order, [
+    ["pending", "done", "Archiving…"],
+    ["leaving", "done"],
+    ["notify", "Job archived.", "Undo"],
+    ["reload"],
+    ["pending", "done", ""],
+  ]);
+});
+
+test("Undo on the archive notice restores the job; restoring offers no Undo", async () => {
+  const h = harness(), calls = [];
+  h.context.record = (...what) => calls.push(what);
+  h.run('var undo; state.info = {}; api = async (path, body) => { record("api", path, body.archived); return {}; }; markJobPending = () => {}; markJobLeaving = () => {}; loadJobs = async () => {}; notify = (m, o) => { record("notify", m, !!o); if (o?.action) undo = o.action.run; };');
+  await h.run('archiveJob({id:"done"}, true)');
+  await h.run("undo()");
+  assert.deepEqual(calls.filter((c) => c[0] === "api"), [["api", "archive", true], ["api", "archive", false]]);
+  assert.deepEqual(calls.filter((c) => c[0] === "notify"), [["notify", "Job archived.", true], ["notify", "Job restored to the queue.", false]]);
+});
+
+test("a failed archive clears the pending row and says why", async () => {
+  const h = harness(), calls = [];
+  h.context.record = (...what) => calls.push(what);
+  h.run('state.info = {}; api = async () => { throw new Error("database is locked"); }; markJobPending = (id, text) => record("pending", text);');
+  await assert.rejects(h.run('archiveJob({id:"done"}, true)'), /database is locked/);
+  assert.deepEqual(calls, [["pending", "Archiving…"], ["pending", ""]]);
+  assert.equal(h.run("state.busyJobs.size"), 0);
+});
+
+test("an empty queue and an empty filter say different things and offer a way on", () => {
+  const h = harness();
+  h.run('$("job-filter").value = "all";');
+  const all = h.run("emptyJobs()");
+  assert.equal(all.children[0].textContent, "Nothing in the queue yet.");
+  assert.equal(all.children[1].textContent, "Choose files to process");
+  h.run('$("job-filter").value = "failed";');
+  const failed = h.run("emptyJobs()");
+  assert.equal(failed.children[0].textContent, "No failed jobs.");
+  assert.equal(failed.children[1].textContent, "Show all jobs");
+});
+
+test("a failed queue load stays on screen with a retry when there is nothing else to show", () => {
+  const h = harness();
+  h.run('serverReachable = true; state.operationJobs = new Map();');
+  h.run('showJobsError(new Error("database is locked"))');
+  const box = h.elements.get("jobs-list").children[0];
+  assert.match(box.children[0].textContent, /Could not load the queue: database is locked/);
+  assert.equal(box.children[1].textContent, "Try again");
+  assert.equal(h.elements.get("jobs-updated").textContent, "Could not refresh the queue");
+  // With jobs already shown they stay; only the status line changes.
+  h.elements.get("jobs-list").replaceChildren("kept");
+  h.run('state.operationJobs = new Map([["a", {id:"a"}]]);');
+  h.run('showJobsError(new Error("x"))');
+  assert.deepEqual(h.elements.get("jobs-list").children, ["kept"]);
+});
+
+test("an empty library says whether a search, a folder or the service is empty", () => {
+  const h = harness();
+  h.run('$("search").value = "silo"; $("service").value = "sonarr";');
+  assert.match(h.run("emptyLibrary()").children[0].textContent, /Nothing matches “silo”\./);
+  h.run('$("search").value = ""; state.media = null;');
+  assert.equal(h.run("emptyLibrary()").children[0].textContent, "Sonarr has no series yet.");
+  h.run('$("service").value = "radarr";');
+  assert.equal(h.run("emptyLibrary()").children[0].textContent, "Radarr has no movies yet.");
+  h.run('$("service").value = "folder:/media";');
+  assert.equal(h.run("emptyLibrary()").children[0].textContent, "No videos or folders here.");
+});
+
+test("each view sets its own page title, and the page has a skip link to the content", () => {
+  const h = harness();
+  h.run('selectTab("stats");');
+  assert.equal(h.context.document.title, "Stats · Navigatorr");
+  h.run('selectTab("jobs");');
+  assert.equal(h.context.document.title, "Activity · Navigatorr");
+  assert.match(markup, /<a class="skip-link" href="#main-content">/);
+  assert.match(markup, /<main id="main-content" tabindex="-1">/);
+});
+
 test("inline retry controls retain the rendered job id", async () => {
   const h = harness(),
     calls = [];
@@ -2682,7 +2764,7 @@ test("folder measurements update every alias and resume on returning to Files", 
  assert.doesNotMatch(h.context.one.title,/Measured/);
  // A size that has not started says it waits; once it runs it says it measures.
  h.run('showFolderSize(one,{status:"calculating",queued:true,updating:true})');
- assert.equal(h.context.one.textContent,"En cola…");assert.equal(h.context.one.dataset.pending,"1");
+ assert.equal(h.context.one.textContent,"Queued…");assert.equal(h.context.one.dataset.pending,"1");
  h.run('showFolderSize(one,{status:"calculating",updating:true})');
  assert.equal(h.context.one.textContent,"Calculating…");
 });
