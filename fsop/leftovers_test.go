@@ -215,3 +215,68 @@ func TestScanLeftoversLimitAndBudget(t *testing.T) {
 		t.Errorf("budget: %v", scan.KeptCounts)
 	}
 }
+
+func TestKeepAndOwnedFollowSymlinks(t *testing.T) {
+	base := t.TempDir()
+	pool := filepath.Join(base, "pool", "downloads")
+	os.MkdirAll(filepath.Join(pool, "movies"), 0o755)
+	link := filepath.Join(base, "dl")
+	if err := os.Symlink(pool, link); err != nil {
+		t.Skip("symlinks unavailable")
+	}
+	r, err := NewResolver([]string{link}, []string{link})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageDirs(t, pool, 48*time.Hour)
+	real, _ := filepath.EvalSymlinks(filepath.Join(link, "movies"))
+	// The client names its folder through the link; the resolver's roots are
+	// resolved, so only the widened policy matches.
+	raw := LeftoverPolicy{Now: time.Now(), MinAge: time.Hour, Keep: []string{filepath.Join(link, "movies")}}
+	if rem := r.RemoveLeftover(real, true, false, raw.WithResolvedLinks()); rem.Status != "skipped" || rem.Reason != KeptClientFolder {
+		t.Errorf("keep path through a symlink: %+v", rem)
+	}
+	own := LeftoverPolicy{Now: time.Now(), MinAge: time.Hour, Owned: []string{filepath.Join(link, "movies")}}
+	if rem := r.RemoveLeftover(real, true, false, own.WithResolvedLinks()); rem.Status != "skipped" || rem.Reason != KeptOwned {
+		t.Errorf("owned path through a symlink: %+v", rem)
+	}
+	scan, _ := r.ScanLeftovers(link, raw.WithResolvedLinks(), 2, 10)
+	if len(scan.Found) != 0 {
+		t.Errorf("kept folder listed: %+v", scan.Found)
+	}
+}
+
+func TestRemoveLeftoverRefusesProtectedAncestors(t *testing.T) {
+	r, root, _ := testResolver(t)
+	for _, f := range []string{".voxsort-trash/Movie/a.nfo", "#recycle/x/a.nfo", "recovery/782/a.nfo", "@eaDir/x/a.nfo"} {
+		put(t, filepath.Join(root, f), 1, 48*time.Hour)
+	}
+	ageDirs(t, root, 48*time.Hour)
+	p := LeftoverPolicy{Now: time.Now(), MinAge: time.Hour}
+	for _, f := range []string{".voxsort-trash/Movie", "#recycle/x", "recovery/782", "@eaDir/x"} {
+		if rem := r.RemoveLeftover(filepath.Join(root, f), false, true, p); rem.Status != "skipped" || rem.Reason != KeptProtectedName {
+			t.Errorf("%s: %+v", f, rem)
+		}
+		if _, err := os.Stat(filepath.Join(root, f, "a.nfo")); err != nil {
+			t.Errorf("%s was touched: %v", f, err)
+		}
+	}
+}
+
+func TestRemoveLeftoverKeepsAFolderHoldingARoot(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, "incoming", "new")
+	os.MkdirAll(inner, 0o755)
+	ageDirs(t, base, 48*time.Hour)
+	r, err := NewResolver([]string{inner}, []string{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := LeftoverPolicy{Now: time.Now(), MinAge: time.Hour}
+	if rem := r.RemoveLeftover(filepath.Join(base, "incoming"), true, false, p); rem.Status != "skipped" || rem.Reason != KeptRoot {
+		t.Errorf("%+v", rem)
+	}
+	if _, err := os.Stat(inner); err != nil {
+		t.Errorf("a root was removed: %v", err)
+	}
+}

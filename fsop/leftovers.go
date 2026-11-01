@@ -176,15 +176,54 @@ func (p *LeftoverPolicy) blocked(dir string) string {
 	return ""
 }
 
-func (r *Resolver) isRoot(real string) bool {
+// WithResolvedLinks adds, for every Keep and Owned path, the name it has once
+// symlinks are followed, so a download client that names a folder through a
+// link still matches the real folder (the roots and every path here are
+// resolved the same way). Call it once per request.
+func (p LeftoverPolicy) WithResolvedLinks() LeftoverPolicy {
+	widen := func(in []string) []string {
+		out := make([]string, 0, len(in))
+		seen := map[string]bool{}
+		add := func(v string) {
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+		for _, v := range in {
+			if v == "" {
+				continue
+			}
+			add(filepath.Clean(v))
+			add(evalExistingSymlinks(filepath.Clean(v)))
+		}
+		return out
+	}
+	p.Keep = widen(p.Keep)
+	p.Owned = widen(p.Owned)
+	return p
+}
+
+// holdsRoot reports a folder that is, or contains, an allowed root.
+func (r *Resolver) holdsRoot(real string) bool {
 	for _, set := range [][]string{r.readRoots, r.writeRoots} {
 		for _, root := range set {
-			if strings.EqualFold(real, root) {
+			if foldUnder(root, real) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// writeRootOf returns the write root holding real.
+func (r *Resolver) writeRootOf(real string) (string, bool) {
+	for _, root := range r.writeRoots {
+		if real != root && strings.HasPrefix(real, root+string(os.PathSeparator)) {
+			return root, true
+		}
+	}
+	return "", false
 }
 
 func (p *LeftoverPolicy) maxEntries() int {
@@ -198,7 +237,7 @@ func (p *LeftoverPolicy) maxEntries() int {
 // kept. It reads only; the first thing that is not leftover ends the walk.
 func (r *Resolver) classifyDir(dir string, p *LeftoverPolicy) (Leftover, string) {
 	lf := Leftover{Path: dir}
-	if r.isRoot(dir) {
+	if r.holdsRoot(dir) {
 		return lf, KeptRoot
 	}
 	if reason := p.blocked(dir); reason != "" {
@@ -357,7 +396,8 @@ func (r *Resolver) ScanLeftovers(path string, p LeftoverPolicy, maxDepth, limit 
 // classified again here, immediately before, and everything inside is checked
 // again as it is removed: a file that appeared meanwhile stops the removal and
 // stays. Only junk files and empty folders are ever unlinked, through a handle
-// confined to the folder, so a symlink swapped in meanwhile leads nowhere.
+// confined to the write root, so a symlink swapped in meanwhile cannot lead
+// outside it.
 func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p LeftoverPolicy) LeftoverRemoval {
 	res := LeftoverRemoval{Path: path}
 	skip := func(reason string) LeftoverRemoval { res.Status, res.Reason = "skipped", reason; return res }
@@ -385,8 +425,20 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 	if !info.IsDir() {
 		return skip("not a directory")
 	}
-	if protectedName(filepath.Base(real)) {
-		return skip(KeptProtectedName)
+	wroot, ok := r.writeRootOf(real)
+	if !ok {
+		return skip("an allowed root cannot be removed")
+	}
+	rel, err := filepath.Rel(wroot, real)
+	if err != nil {
+		return skip(err.Error())
+	}
+	// Hidden and system folders are protected at any level of the path, not
+	// only at the end: nothing inside .voxsort-trash or #recycle is touched.
+	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+		if protectedName(part) {
+			return skip(KeptProtectedName)
+		}
 	}
 	lf, reason := r.classifyDir(real, &p)
 	if reason != "" {
@@ -399,13 +451,28 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 		return skip("has loose subtitles; pass include_subtitles=true to remove them too")
 	}
 
-	root, err := os.OpenRoot(real)
+	// Everything below is done through a handle on the write root, so no
+	// name, however it is swapped meanwhile, leads outside the allowed root.
+	now := p.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	parent, err := os.OpenRoot(wroot)
 	if err != nil {
 		return fail(err)
 	}
-	var removeTree func(rel string) error
-	removeTree = func(rel string) error {
-		f, err := root.Open(rel)
+	defer parent.Close()
+	if fi, err := parent.Lstat(rel); err != nil || !fi.IsDir() {
+		return skip("changed while removing; kept")
+	}
+	root, err := parent.OpenRoot(rel)
+	if err != nil {
+		return fail(err)
+	}
+	defer root.Close()
+	var removeTree func(sub string) error
+	removeTree = func(dirRel string) error {
+		f, err := root.Open(dirRel)
 		if err != nil {
 			return err
 		}
@@ -415,7 +482,7 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 			return err
 		}
 		for _, e := range entries {
-			sub := filepath.Join(rel, e.Name())
+			sub := filepath.Join(dirRel, e.Name())
 			fi, err := root.Lstat(sub)
 			if err != nil {
 				return err
@@ -434,8 +501,13 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 				res.Dirs++
 			case fi.Mode().IsRegular():
 				k := kindOf(e.Name())
-				if k == kindPartial || k == kindOther || (k == kindSubtitle && !withSubtitles) {
+				switch {
+				case onlyEmpty:
+					return fmt.Errorf("%s: a file appeared in an empty folder; kept", sub)
+				case k == kindPartial || k == kindOther || (k == kindSubtitle && !withSubtitles):
 					return fmt.Errorf("%s: not a leftover file; kept", sub)
+				case p.MinAge > 0 && now.Sub(fi.ModTime()) < p.MinAge:
+					return fmt.Errorf("%s: changed recently; kept", sub)
 				}
 				if err := root.Remove(sub); err != nil {
 					return err
@@ -448,13 +520,11 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 		}
 		return nil
 	}
-	err = removeTree(".")
-	root.Close()
-	if err != nil {
+	if err := removeTree("."); err != nil {
 		return fail(err)
 	}
-	// os.Remove on a folder succeeds only when it is empty.
-	if err := os.Remove(real); err != nil {
+	// Removing a folder succeeds only when it is empty.
+	if err := parent.Remove(rel); err != nil {
 		return fail(err)
 	}
 	res.Dirs++

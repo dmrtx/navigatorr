@@ -101,10 +101,10 @@ func registerCleanupLeftoversTool(s *server.MCPServer, d *Deps, qb *qbit.Client,
 				}
 				seen[p] = true
 				r := d.Fs.RemoveLeftover(p, onlyEmpty, withSubs, policy)
+				bytes += r.Bytes // what a failed removal already unlinked counts too
 				switch r.Status {
 				case "removed":
 					removed++
-					bytes += r.Bytes
 				case "failed":
 					failed++
 				case "skipped":
@@ -142,16 +142,11 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration) 
 	if err != nil {
 		return p, fmt.Errorf("listing torrents: %w", err)
 	}
-	cats, err := qb.CategorySavePaths(ctx)
+	keep, err := qb.KeepPaths(ctx)
 	if err != nil {
-		return p, fmt.Errorf("reading categories: %w", err)
+		return p, fmt.Errorf("reading categories and preferences: %w", err)
 	}
-	defaults, err := qb.DefaultPaths(ctx)
-	if err != nil {
-		return p, fmt.Errorf("reading preferences: %w", err)
-	}
-	p.Keep = append(p.Keep, cats...)
-	p.Keep = append(p.Keep, defaults...)
+	p.Keep = append(p.Keep, keep...)
 	for _, t := range torrents {
 		if t.SavePath != "" {
 			p.Keep = append(p.Keep, t.SavePath)
@@ -174,5 +169,5 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration) 
 			}
 		}
 	}
-	return p, nil
+	return p.WithResolvedLinks(), nil
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -192,5 +193,34 @@ func TestLeftoverRemoveRechecksAndAudits(t *testing.T) {
 	}
 	if !found {
 		t.Error("no audit entry for the removal")
+	}
+}
+
+func TestQbitKeepPathsCoverCategoriesWithoutAPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth/login"):
+			w.Write([]byte("Ok."))
+		case strings.HasSuffix(r.URL.Path, "/app/preferences"):
+			w.Write([]byte(`{"save_path":"/dl/","temp_path":"/dl/Incomplete","temp_path_enabled":true}`))
+		case strings.HasSuffix(r.URL.Path, "/torrents/categories"):
+			w.Write([]byte(`{"tv":{"name":"tv","savePath":""},"movies":{"name":"movies","savePath":"films"},"abs":{"name":"abs","savePath":"/elsewhere/abs","download_path":"/dl/tmp-abs"},"nodl":{"name":"nodl","savePath":"","download_path":false}}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+	got, err := qbit.NewClient(srv.URL, "u", "p").KeepPaths(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]bool{}
+	for _, p := range got {
+		have[p] = true
+	}
+	for _, want := range []string{"/dl/", "/dl/Incomplete", "/dl/tv", "/dl/films", "/elsewhere/abs", "/dl/tmp-abs", "/dl/Incomplete/tv", "/dl/nodl"} {
+		if !have[want] {
+			t.Errorf("missing %s in %v", want, got)
+		}
 	}
 }
