@@ -148,6 +148,8 @@ JSON
 			}}
 			e, st := setupTranscodeEngine(t, executor, probe, []string{dir}, []string{dir}, true)
 			defer st.Close()
+			// Two slots: the single encode keeps one while the batch's starts.
+			e.deps.Config.Transcode.MaxParallelJobs = 2
 			single, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": source, "mode": mode})
 			if err != nil || single.Status != StatusWaitingExternal {
 				t.Fatalf("single %+v %v", single, err)

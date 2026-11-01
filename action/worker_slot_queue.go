@@ -214,6 +214,8 @@ func markWaitingForWorker(ec *ExecutionContext) {
 	work := map[string]any{"phase": waitingForWorkerPhase, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if since := getString(ec.State, workerSlotWaitSinceKey); since != "" {
 		work["since"] = since
+	} else if since := getString(ec.State, transcodeQueueSinceKey); since != "" {
+		work["since"] = since
 	}
 	if position > 0 {
 		work["queue_position"] = position
@@ -301,11 +303,12 @@ func slotWaitPollDelay() time.Duration {
 	return slotWaitPollBase + rand.N(slotWaitPollJitter)
 }
 
-// slotWakeDue reports whether a slot waiter should be polled before its
-// scheduled time because a worker job ended after its last poll. The worker's
-// Retry-After (worker_busy_not_before) is still honoured.
+// slotWakeDue reports whether a slot waiter, or a conversion waiting in the
+// transcode queue, should be polled before its scheduled time because a
+// worker job ended after its last poll. The worker's Retry-After
+// (worker_busy_not_before) is still honoured.
 func (e *Engine) slotWakeDue(state map[string]any) bool {
-	if !hasSlotTicket(state) {
+	if !hasSlotTicket(state) && !transcodeQueueWaiting(state) {
 		return false
 	}
 	freed := e.slotFreedAt.Load()

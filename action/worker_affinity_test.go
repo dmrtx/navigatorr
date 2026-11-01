@@ -49,9 +49,9 @@ func TestWorkerAssignmentFillsFreeSlotsInConfigOrder(t *testing.T) {
 		m1Max int
 		want  []string
 	}{
-		{"equal pools alternate, m1 first on a tie", 0, []string{"m1", "m4", "m1", "m4", "m1"}},
-		// m1 capped at one job: never past it, so m4 queues the rest.
-		{"a worker cap is a hard cap", 1, []string{"m4", "m1", "m4", "m4", "m4"}},
+		{"equal pools alternate, m1 first on a tie", 0, []string{"m1", "m4", "m1", "m4"}},
+		// m1 capped at one job: never past it.
+		{"a worker cap is a hard cap", 1, []string{"m4", "m1", "m4"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: twoWorkers(t, poolWorker(2), poolWorker(2), tc.m1Max)})
@@ -65,6 +65,10 @@ func TestWorkerAssignmentFillsFreeSlotsInConfigOrder(t *testing.T) {
 			}
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("assigned %v, want %v", got, tc.want)
+			}
+			// Every slot is taken: no worker queues a job of its own.
+			if name, res, waiting := assignNew(t, e, "conv-full", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
+				t.Fatalf("with every slot taken: assigned %q, %+v", name, res)
 			}
 		})
 	}
@@ -127,11 +131,13 @@ func TestWorkerAssignmentSkipsAnOfflineWorkerAndWaitsWhenNoneIsReady(t *testing.
 		return nil
 	}
 	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: twoWorkers(t, m1, m4, 0)})
-	// m4 takes every job, even past its one slot: it queues them itself.
-	for i := range 3 {
-		if name, _, waiting := assignNew(t, e, fmt.Sprintf("conv-%d", i), "transcode_media"); waiting || name != "m4" {
-			t.Fatalf("conv-%d: assigned %q (waiting %v) while m1 is offline", i, name, waiting)
-		}
+	// m4 takes the job for its one slot; the next waits for a slot, not for
+	// the offline m1.
+	if name, _, waiting := assignNew(t, e, "conv-0", "transcode_media"); waiting || name != "m4" {
+		t.Fatalf("conv-0: assigned %q (waiting %v) while m1 is offline", name, waiting)
+	}
+	if name, res, waiting := assignNew(t, e, "conv-1", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("conv-1 with m4 full and m1 offline: assigned %q, %+v", name, res)
 	}
 	m4.doctorFunc = func(context.Context) error { return errors.New("connection refused") }
 	e.workerStateFor("m4").obs.CheckedAt = time.Time{}

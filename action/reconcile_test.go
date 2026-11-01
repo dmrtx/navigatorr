@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jakenesler/navigatorr/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -610,7 +611,8 @@ func TestReconcilerKeepsPollingWhileAnotherContinuationIsSlow(t *testing.T) {
 	final := func(context.Context, *ExecutionContext) (StepResult, error) {
 		return StepResult{Status: StepCompleted}, nil
 	}
-	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond})
+	// Room for every job, so only the reconciler limits the polls.
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 16}}})
 	registerReconcileTestFlow(e, final)
 	slow, err := e.Run(context.Background(), "transcode_media", nil)
 	if err != nil || slow.Status != StatusWaitingExternal {
@@ -665,7 +667,8 @@ func TestReconcilerPollsEveryJobWhenSlowContinuationsHoldMostSlots(t *testing.T)
 	final := func(context.Context, *ExecutionContext) (StepResult, error) {
 		return StepResult{Status: StepCompleted}, nil
 	}
-	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond})
+	// Room for every job, so only the reconciler limits the polls.
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, ReconcileInterval: 5 * time.Millisecond, Config: &config.Config{Transcode: config.TranscodeConfig{MaxParallelJobs: 16}}})
 	registerReconcileTestFlow(e, final)
 	const slowJobs, fastJobs = reconcileConcurrency - 2, 6
 	var fast []string

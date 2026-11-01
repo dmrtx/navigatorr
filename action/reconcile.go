@@ -270,7 +270,7 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 	if condition == drainWaitCondition && delay < drainPollDelay {
 		delay = drainPollDelay
 	}
-	if condition == "worker_busy" && hasSlotTicket(ec.State) {
+	if condition == "worker_busy" && (hasSlotTicket(ec.State) || transcodeQueueWaiting(ec.State)) {
 		// Waiting for a slot. When the worker refused with Retry-After, the
 		// next poll lands on that hint (+1 s, applied below). Otherwise (a
 		// queue-order wait, or no hint) poll every 30-60 s rather than every

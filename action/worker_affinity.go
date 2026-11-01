@@ -156,17 +156,24 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	if holdsWorkerJob(ec.State) {
 		return e.recordAssignedWorker(ctx, ec, e.legacyWorker())
 	}
-	// Podcast work has one worker, and with one worker there is no choice to
-	// make: its readiness is checked by the steps, as the jobs are sent.
-	if all := e.deps.Workers.All(); ec.ActionName == "clean_podcast_ads" || len(all) == 1 {
-		w := all[0]
-		if ec.ActionName == "clean_podcast_ads" {
-			w, _ = e.deps.Workers.Podcast()
-		}
+	// Podcast work has one worker: its readiness is checked by the steps, as
+	// the jobs are sent.
+	if ec.ActionName == "clean_podcast_ads" {
+		w, _ := e.deps.Workers.Podcast()
 		return e.recordAssignedWorker(ctx, ec, w.Name)
 	}
 	e.bindMu.Lock()
 	defer e.bindMu.Unlock()
+	// A conversion waits for its turn in the transcode queue (see
+	// transcode_queue.go) before it is given a worker.
+	if res, waiting := e.transcodeQueueTurn(ctx, ec); waiting {
+		return res, true
+	}
+	// With one worker there is no choice to make: its readiness is checked by
+	// the steps, as the jobs are sent.
+	if all := e.deps.Workers.All(); len(all) == 1 {
+		return e.recordAssignedWorker(ctx, ec, all[0].Name)
+	}
 	name, condition, err := e.pickVideoWorker(ctx)
 	if err != nil {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: condition, WaitingReason: err.Error()}, true
@@ -188,12 +195,10 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 }
 
 // pickVideoWorker chooses the ready worker with the most free video slots,
-// the first in config order on a tie. A worker's max_parallel_jobs is a hard
-// cap: a worker at it is never chosen. A worker without one can still be
-// chosen when it has no free slot and no other ready worker has one: it queues
-// the job itself. With nothing to choose it returns the waiting condition:
-// worker_unreachable when no worker is ready, worker_busy when every ready
-// worker is at its cap.
+// the first in config order on a tie. A worker with no free slot is never
+// chosen, so no worker holds a backlog: the transcode queue keeps the order.
+// With nothing to choose it returns the waiting condition: worker_unreachable
+// when no worker is ready, worker_busy when every ready worker is full.
 func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 	workers := e.deps.Workers.All()
 	ready := e.workersReady(ctx, workers)
@@ -211,10 +216,10 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 			continue
 		}
 		anyReady = true
-		if w.MaxParallelJobs > 0 && active[w.Name] >= w.MaxParallelJobs {
+		free := e.workerVideoCapacity(ctx, w) - active[w.Name]
+		if free <= 0 {
 			continue
 		}
-		free := e.workerVideoCapacity(ctx, w) - active[w.Name]
 		if best < 0 || free > bestFree {
 			best, bestFree = i, free
 		}
@@ -223,7 +228,7 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 	case best >= 0:
 		return workers[best].Name, "", nil
 	case anyReady:
-		return "", "worker_busy", fmt.Errorf("Every ready video worker is at its max_parallel_jobs; the job waits for a free one before it is assigned")
+		return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
 	}
 	return "", "worker_unreachable", fmt.Errorf("No video worker is ready; the job waits for one before it is assigned")
 }

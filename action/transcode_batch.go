@@ -865,6 +865,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 		pendingIndices = e.slotFairPending(ctx, ec.InstanceID, items, pendingIndices)
+		// New children only for the free slots older work does not wait for
+		// (see transcode_queue.go).
+		pendingIndices = queueOrderPending(items, pendingIndices, e.batchQueueAllowance(ctx, ec.InstanceID))
 
 		if len(pendingIndices) == 0 {
 			break
