@@ -1,13 +1,16 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
@@ -82,48 +85,67 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 			query = map[string]string{"movieId": id}
 		}
 	}
-	b, err := svc.Get(r.Context(), endpoint, query)
-	if err != nil {
-		fail(w, 502, "library service unavailable: "+err.Error())
-		return
+	timing := newServerTiming()
+	fetch := func() ([]map[string]any, error) {
+		began := time.Now()
+		ctx := r.Context()
+		if id == "" {
+			// The fetch is shared with whoever asks while it runs, so it must not die
+			// with the request that happened to start it.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), arrFetchTimeout)
+			defer cancel()
+		}
+		b, err := svc.Get(ctx, endpoint, query)
+		timing.since("arr", began)
+		if err != nil {
+			return nil, fmt.Errorf("library service unavailable: %w", err)
+		}
+		began = time.Now()
+		var records []map[string]any
+		if json.Unmarshal(b, &records) != nil {
+			return nil, fmt.Errorf("invalid library response")
+		}
+		projected := make([]map[string]any, len(records))
+		for i, rec := range records {
+			projected[i] = projectLibraryRecord(rec)
+		}
+		timing.since("parse", began)
+		return projected, nil
 	}
-	var records []map[string]any
-	if json.Unmarshal(b, &records) != nil {
-		fail(w, 502, "invalid library response")
+	var projected []map[string]any
+	if id == "" {
+		// The whole collection is the same for every page, search and order.
+		var hit bool
+		projected, hit, err = s.arrLists.get(name, r.URL.Query().Get("refresh") == "1", fetch)
+		if hit {
+			timing.note("arr", "cached")
+		}
+	} else {
+		projected, err = fetch()
+	}
+	if err != nil {
+		fail(w, 502, err.Error())
 		return
 	}
 	items := []map[string]any{}
 	seasonCounts := map[int]int{}
 	seasonFiles := map[int][]map[string]any{}
 	search := strings.ToLower(r.URL.Query().Get("q"))
-	for _, rec := range records {
+	began := time.Now()
+	for _, item := range projected {
 		// Declared seasons include empty specials and unaired episodes. Only
 		// episode files returned for this series can be selected for a batch.
 		if name == "sonarr" && id != "" {
-			path, _ := rec["path"].(string)
-			relative, _ := rec["relativePath"].(string)
-			if n, ok := rec["seasonNumber"].(float64); ok && n >= 0 && n == float64(int(n)) && (path != "" || relative != "") {
+			path, _ := item["path"].(string)
+			relative, _ := item["relativePath"].(string)
+			if n, ok := item["seasonNumber"].(float64); ok && n >= 0 && n == float64(int(n)) && (path != "" || relative != "") {
 				seasonCounts[int(n)]++
 			}
-		}
-		item := map[string]any{}
-		for _, key := range []string{"id", "title", "year", "path", "relativePath", "size", "seasonNumber", "seasons", "seriesType", "genres", "episodeCount", "hasFile", "movieId", "seriesId", "mediaInfo", "quality", "languages"} {
-			if val, ok := rec[key]; ok {
-				item[key] = val
-			}
-		}
-		if f, ok := rec["movieFile"].(map[string]any); ok {
-			item["size"] = f["size"]
-		}
-		if stat, ok := rec["statistics"].(map[string]any); ok {
-			item["size"] = stat["sizeOnDisk"]
-			item["episodeCount"] = stat["episodeFileCount"]
 		}
 		if search != "" && !strings.Contains(strings.ToLower(fmt.Sprint(item["title"], " ", item["path"], " ", item["relativePath"])), search) {
 			continue
 		}
-		// Local navigation does not claim that cached *arr mediaInfo was probed.
-		item["metadata_source"] = "arr"
 		if name == "sonarr" && id != "" {
 			n := libraryFileSeason(item)
 			seasonFiles[n] = append(seasonFiles[n], item)
@@ -134,6 +156,7 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		items = append(items, item)
 	}
 	sortLibraryItems(items, r.URL.Query().Get("sort"))
+	timing.since("list", began)
 	seasons := []map[string]int{}
 	for n, count := range seasonCounts {
 		seasons = append(seasons, map[string]int{"seasonNumber": n, "fileCount": count})
@@ -151,7 +174,31 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		offset = len(items)
 	}
 	end := min(offset+limit, len(items))
-	marks := s.fileStatuses()
+	if id == "" && r.URL.Query().Get("view") == "index" {
+		// Every title in one answer, for a client that holds the list and pages,
+		// searches and orders it on its own. q and sort still apply.
+		began = time.Now()
+		marks := s.fileStatuses()
+		timing.since("status", began)
+		all := make([]map[string]any, 0, len(items))
+		for _, shared := range items {
+			item := map[string]any{}
+			for _, key := range libraryIndexFields {
+				if value, ok := shared[key]; ok {
+					item[key] = value
+				}
+			}
+			if path, _ := shared["path"].(string); path != "" {
+				if mark := marks.under(path); mark != nil {
+					item["nav_status"] = mark
+				}
+			}
+			all = append(all, item)
+		}
+		timing.set(w)
+		writeJSONTagged(w, r, 200, map[string]any{"items": all, "total": len(all), "service": name, "view": "index"})
+		return
+	}
 	if r.URL.Query().Get("all") == "1" {
 		if id == "" {
 			fail(w, 400, "select a title before selecting files")
@@ -163,9 +210,15 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 		offset, end = 0, len(items)
 	}
+	began = time.Now()
+	marks := s.fileStatuses()
+	timing.since("status", began)
 	// A title's folder summarizes its files; a file shows its own state. The
-	// paths are the *arr's, the same ones a batch is created from.
-	for _, item := range items[offset:end] {
+	// paths are the *arr's, the same ones a batch is created from. The cached
+	// items are shared, so a page is copied before it is marked.
+	page := make([]map[string]any, 0, end-offset)
+	for _, shared := range items[offset:end] {
+		item := maps.Clone(shared)
 		path, _ := item["path"].(string)
 		var mark *fileStatusView
 		if id == "" {
@@ -176,6 +229,7 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		if mark != nil {
 			item["nav_status"] = mark
 		}
+		page = append(page, item)
 	}
 	groups := librarySeasonGroups(seasonFiles, r.URL.Query().Get("sort"))
 	for _, group := range groups {
@@ -192,7 +246,31 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 			group["nav_status"] = mark
 		}
 	}
-	writeJSON(w, 200, map[string]any{"items": items[offset:end], "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": groups})
+	timing.set(w)
+	writeJSONTagged(w, r, 200, map[string]any{"items": page, "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": groups})
+}
+
+// libraryIndexFields is what the whole-list view carries for each title.
+var libraryIndexFields = []string{"id", "title", "year", "path", "size", "episodeCount", "hasFile", "seriesType", "metadata_source"}
+
+// projectLibraryRecord keeps the fields the console shows from one *arr record.
+// Local navigation does not claim that cached *arr mediaInfo was probed.
+func projectLibraryRecord(rec map[string]any) map[string]any {
+	item := map[string]any{}
+	for _, key := range []string{"id", "title", "year", "path", "relativePath", "size", "seasonNumber", "seasons", "seriesType", "genres", "episodeCount", "hasFile", "movieId", "seriesId", "mediaInfo", "quality", "languages"} {
+		if val, ok := rec[key]; ok {
+			item[key] = val
+		}
+	}
+	if f, ok := rec["movieFile"].(map[string]any); ok {
+		item["size"] = f["size"]
+	}
+	if stat, ok := rec["statistics"].(map[string]any); ok {
+		item["size"] = stat["sizeOnDisk"]
+		item["episodeCount"] = stat["episodeFileCount"]
+	}
+	item["metadata_source"] = "arr"
+	return item
 }
 
 func libraryFileSeason(item map[string]any) int {

@@ -59,6 +59,8 @@ type Server struct {
 	nas             nasMeter
 	folderListings  folderListingCache
 	fileStatusCache fileStatusCache
+	// arrLists keeps the *arr collections the Files tab pages through.
+	arrLists arrListCache
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
 	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
 	classify action.SourceClassifier
@@ -215,6 +217,15 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		mux.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
+			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
+			// (Signing in or out changes nothing the listings show, and anyone can
+			// post to login, so it must not be a way to empty the caches.)
+			// Something may have changed: the next page reads fresh state instead
+			// of the short-lived copies that make listings fast.
+			s.fileStatusCache.invalidate()
+			s.arrLists.forget()
+		}
 	}))
 }
 
