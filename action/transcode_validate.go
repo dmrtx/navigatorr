@@ -118,21 +118,13 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 			CandidateSHA256        string `json:"candidate_sha256"`
 			PlanDigest             string `json:"plan_digest"`
 			BenchmarkRequestDigest string `json:"benchmark_request_digest"`
-			CompactChain           *struct {
-				ChainVersion string `json:"chain_version"`
-				TargetWidth  int    `json:"target_width"`
-				TargetHeight int    `json:"target_height"`
-			} `json:"compact_chain"`
-			CompactOutput *struct {
-				Verdict string `json:"verdict"`
-			} `json:"compact_output"`
 		}
 		encoded, err := json.Marshal(ec.State["quality_evidence"])
 		if err != nil || json.Unmarshal(encoded, &evidence) != nil || evidence.Verdict != "pass" || evidence.CandidateSHA256 == "" || evidence.CandidateSHA256 != getString(ec.State, "candidate_sha256") || evidence.PlanDigest != plan.PlanDigest || evidence.BenchmarkRequestDigest != plan.QualityValidation.BenchmarkRequestDigest {
 			return StepResult{Status: StepFailed, Error: "final quality validation evidence is missing or does not match the candidate and plan; original preserved"}, nil
 		}
-		if c := plan.Compact; c != nil && (evidence.CompactChain == nil || evidence.CompactChain.ChainVersion != c.ChainVersion || evidence.CompactChain.TargetWidth != c.TargetWidth || evidence.CompactChain.TargetHeight != c.TargetHeight || evidence.CompactOutput == nil || evidence.CompactOutput.Verdict != "pass") {
-			return StepResult{Status: StepFailed, Error: "compact conversion evidence (reference chain and SDR output check) is missing; original preserved"}, nil
+		if why := compactEvidenceError(plan.Compact, encoded); why != "" {
+			return StepResult{Status: StepFailed, Error: why}, nil
 		}
 	}
 	observedSize, err := e.verifyPublishedCandidateLight(ctx, ec, outputPath)
@@ -315,4 +307,36 @@ func (e *Engine) verifyPublishedCandidateLight(ctx context.Context, ec *Executio
 		return 0, fmt.Errorf("transcoded candidate file %q size %d != worker-attested size %d (fail closed)", p, fi.Size(), expected)
 	}
 	return fi.Size(), nil
+}
+
+// compactEvidenceError checks the worker's compact evidence against the plan:
+// the reference chain and a passing output check, and for a keep-HDR plan a
+// candidate measured through the same tone map carrying exactly the frozen
+// static metadata. Empty when the plan is not compact or the evidence holds.
+func compactEvidenceError(c *transcode.CompactPlan, encoded []byte) string {
+	if c == nil {
+		return ""
+	}
+	var evidence struct {
+		CompactChain *struct {
+			ChainVersion   string `json:"chain_version"`
+			TargetWidth    int    `json:"target_width"`
+			TargetHeight   int    `json:"target_height"`
+			CandidateChain string `json:"candidate_chain"`
+			AppliedTo      string `json:"applied_to"`
+		} `json:"compact_chain"`
+		CompactOutput *struct {
+			Verdict       string `json:"verdict"`
+			MasterDisplay string `json:"master_display"`
+			MaxCLL        int    `json:"max_cll"`
+			MaxFALL       int    `json:"max_fall"`
+		} `json:"compact_output"`
+	}
+	if json.Unmarshal(encoded, &evidence) != nil || evidence.CompactChain == nil || evidence.CompactChain.ChainVersion != c.ChainVersion || evidence.CompactChain.TargetWidth != c.TargetWidth || evidence.CompactChain.TargetHeight != c.TargetHeight || evidence.CompactOutput == nil || evidence.CompactOutput.Verdict != "pass" {
+		return "compact conversion evidence (reference chain and output check) is missing; original preserved"
+	}
+	if c.KeepsHDR() && (evidence.CompactChain.CandidateChain == "" || evidence.CompactChain.AppliedTo != "reference_and_candidate" || evidence.CompactOutput.MasterDisplay != c.HDR.MasterDisplay || evidence.CompactOutput.MaxCLL != c.HDR.MaxCLL || evidence.CompactOutput.MaxFALL != c.HDR.MaxFALL) {
+		return "keep-HDR evidence (candidate measurement chain and HDR metadata) is missing or does not match the plan; original preserved"
+	}
+	return ""
 }

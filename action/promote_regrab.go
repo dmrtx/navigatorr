@@ -9,11 +9,11 @@ import (
 )
 
 // CompactRegrabWarning is shown before any compact replacement is approved.
-// A compact file is SDR at a lower resolution than the release it replaces,
+// A compact file is usually SDR or at a lower resolution than the release it replaces,
 // so Sonarr or Radarr may treat it as an upgrade target and grab the
 // original release again. Navigatorr reports how the item is tracked but
 // never changes monitoring or quality profiles itself.
-const CompactRegrabWarning = "Compact replacements are SDR at a lower resolution than the original. Radarr or Sonarr may see the new file as below the quality profile's cutoff and download the original release again. Before approving, unmonitor the item or move it to a quality profile whose cutoff the compact file meets. Navigatorr does not change these settings."
+const CompactRegrabWarning = "Compact replacements are smaller re-encodes, usually SDR or at a lower resolution than the original. Radarr or Sonarr may see the new file as below the quality profile's cutoff and download the original release again. Before approving, unmonitor the item or move it to a quality profile whose cutoff the compact file meets. Navigatorr does not change these settings."
 
 // arrTracking is a read-only snapshot of how Sonarr or Radarr tracks an
 // item when a compact replacement is planned.

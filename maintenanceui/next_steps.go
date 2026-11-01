@@ -191,7 +191,8 @@ func formatSize(b int64) string {
 // Steps follow what the job measured: the media engine missing quality offers
 // x265, heavy audio offers Audio only, a missed saving offers a smaller one
 // (when the encode saved at least that) and a target size,
-// HDR or a picture taller than 1080p offers Shrink to 1080p SDR. Running the
+// HDR or a picture taller than 1080p offers Shrink to 1080p SDR, and HDR also
+// Shrink keeping HDR (Shrink keeping HDR that missed offers SDR). Running the
 // same settings again comes last, and only where something may change it.
 func nextStepsFor(r operationRecord) []nextStep {
 	if !endedWithoutResult(r) {
@@ -216,11 +217,22 @@ func nextStepsFor(r operationRecord) []nextStep {
 		}
 		add(nextStep{ID: "audio_only", Label: "Audio only", Detail: fmt.Sprintf("Keep the video as it is and convert only the audio: about %s smaller (%.0f%%).", formatSize(audioSaving), percentOf(audioSaving, split.total)), Inputs: map[string]any{"mode": "size", "audio_only": true}})
 	}
+	keptHDR := mode == "compact" && (r.inputs["keep_hdr"] == true || operationMap(operationMap(r.state["mode_policy"])["compact"])["keep_hdr"] == true)
+	keepHDRStep := func() {
+		if known && split.hdr && mode != "compact" {
+			add(nextStep{ID: "compact_hdr", Label: "Shrink keeping HDR", Detail: "Encode the picture at 1080p with x265 10-bit and keep HDR: Dolby Vision becomes HDR10. It saves less than SDR.", Inputs: map[string]any{"mode": "compact", "keep_hdr": true}})
+		}
+	}
 	compactStep := func() {
-		if mode == "compact" || !known || !(split.tall || split.hdr) {
+		if (mode == "compact" && !keptHDR) || !known || !(split.tall || split.hdr) {
 			return
 		}
-		add(nextStep{ID: "compact", Label: "Shrink to 1080p SDR", Detail: "Convert the picture to 1080p SDR, which saves far more than keeping it as it is.", Inputs: map[string]any{"mode": "compact"}})
+		detail := "Convert the picture to 1080p SDR, which saves far more than keeping it as it is."
+		if keptHDR {
+			detail = "Convert the picture to 1080p SDR instead of keeping HDR, which saves far more."
+		}
+		add(nextStep{ID: "compact", Label: "Shrink to 1080p SDR", Detail: detail, Inputs: map[string]any{"mode": "compact"}})
+		keepHDRStep()
 	}
 	tracksStep := func() {
 		if known && (split.audioTracks > 1 || split.subtitles > 0) {
@@ -234,6 +246,7 @@ func nextStepsFor(r operationRecord) []nextStep {
 	if remedy := remedyMode(r); remedy != "" {
 		if remedy == "compact" {
 			add(nextStep{ID: "compact", Label: "Convert to SDR 1080p", Detail: "Shrink to 1080p SDR converts HDR and Dolby Vision to SDR.", Inputs: map[string]any{"mode": "compact"}})
+			keepHDRStep()
 		} else {
 			add(nextStep{ID: "size", Label: "Make it smaller", Detail: "Save space re-encodes the video at its current resolution.", Inputs: map[string]any{"mode": "size"}})
 		}

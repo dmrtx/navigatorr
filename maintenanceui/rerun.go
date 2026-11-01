@@ -159,6 +159,9 @@ func rerunSummary(r operationRecord, rounds map[string]int) map[string]any {
 	if r.inputs["audio_only"] == true {
 		summary["audio_only"] = true
 	}
+	if r.inputs["keep_hdr"] == true {
+		summary["keep_hdr"] = true
+	}
 	if remedy := remedyMode(r); remedy != "" {
 		summary["remedy_mode"] = remedy
 	}

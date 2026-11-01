@@ -84,6 +84,8 @@ const segmentGroups = {
   "reconfigure-budget-limit": ["", "siblings", "fixed"],
   "compact-height": ["1080", "2160"],
   "reconfigure-height": ["1080", "2160"],
+  "compact-hdr": ["sdr", "keep"],
+  "reconfigure-hdr": ["sdr", "keep"],
 };
 function harness({ radios: withRadios = false, segments: withSegments = false } = {}) {
   const elements = new Map();
@@ -4321,7 +4323,7 @@ test("compact goal says in plain language what it drops and still needs approval
   assert.match(radio, /<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
   assert.match(radio, /Use it for HDR and Dolby Vision, or 4K you don't need\. Converted to SDR, at least 30% smaller; lossless audio becomes AAC\./);
   assert.match(markup, /<option value="compact">Shrink to SDR · At least 30% smaller, HDR removed/);
-  assert.match(source, /item\.mode === "compact" \? shrinkLabel\(item\.max_height\)/);
+  assert.match(source, /item\.mode === "compact" \? shrinkLabel\(item\.max_height, item\.keep_hdr\)/);
 });
 
 test("a source hash queued behind others reads as waiting, not stuck at zero bytes", () => {
@@ -7481,6 +7483,36 @@ test("Shrink offers 1080p or Keep 4K, and only Keep 4K names a height", async ()
   assert.equal(h.run("shrinkLabel(0)"), "Shrink to 1080p SDR");
 });
 
+test("Shrink converts HDR to SDR unless Keep HDR is picked, which sends keep_hdr", async () => {
+  const { h } = submissionHarness({ radios: true, segments: true });
+  const sent = [];
+  h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.status = "ready"; keepLanguages.saved = ["eng"]; setProcessingMode("compact"); setKeepHDR("compact-hdr", false); setShrinkHeight("compact-height", 1080);');
+  const pick = (name, value) => h.run(`{const r=shrinkRadios("${name}").find(r=>r.value==="${value}");shrinkRadios("${name}").forEach(x=>x.checked=x===r);r.listeners.get("change")();renderShrinkTitle();}`);
+  const title = () => h.elements.get("goal-title-compact").textContent;
+  const submit = () => h.run('$("path").value = "/media/one.mkv"; buildAndSubmitJob("encode")');
+  await submit();
+  assert.equal("keep_hdr" in sent[0], false);
+  pick("compact-hdr", "keep");
+  assert.equal(title(), "Shrink to 1080p, keeping HDR");
+  pick("compact-height", "2160");
+  assert.equal(title(), "Shrink to 4K, keeping HDR");
+  await submit();
+  assert.equal(sent[1].keep_hdr, true);
+  assert.equal(sent[1].max_height, 2160);
+  // Another goal never sends it.
+  h.run('setProcessingMode("size")');
+  await submit();
+  assert.equal("keep_hdr" in sent[2], false);
+  // An earlier Shrink that kept HDR picks it again.
+  h.run('setKeepHDR("compact-hdr", false); applyGoalSettings("/media/one.mkv", {mode:"compact", keep_hdr:true})');
+  assert.equal(h.run('keepsHDR("compact-hdr")'), true);
+  // Encode again keeps a batch file's choice; the batch row names it.
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"compact",settings:{keep_hdr:true}}).keep_hdr'), true);
+  assert.equal(h.run('"keep_hdr" in sameSettingsRequest({id:"b",item_key:"f",mode:"compact",settings:{}})'), false);
+  assert.equal(h.run("shrinkLabel(1080, true)"), "Shrink to 1080p, keeping HDR");
+});
+
 test("a file without audio takes subtitle picks alone", async () => {
   const { h, el, open, boxes, inputs } = keepHarness();
   h.context.tracks = { ...keepFixture(), audio: [] };
@@ -8522,7 +8554,7 @@ test("the Compression tab shows each goal from the server and what changed", asy
   await h.run('loadCompression()');
   assert.deepEqual(paths, ["compression"]);
   const cards = h.elements.get("compression-goals").children;
-  assert.deepEqual(cards.map(c => c.children[0].children[0].textContent), ["Save space", "Shrink to SDR"]);
+  assert.deepEqual(cards.map(c => c.children[0].children[0].textContent), ["Save space", "Shrink"]);
   assert.equal(cards[0].children[0].children[1].textContent, "Policy abc");
   // Only the facts a goal has are listed; quality and tracks are left out here.
   assert.deepEqual(cards[0].children[1].children.filter((_, i) => i % 2 === 0).map(n => n.textContent), ["Picture", "Video", "Audio", "Kept when"]);

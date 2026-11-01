@@ -104,6 +104,7 @@ function actionIcon(label) {
     "Run again": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     "Try with x265": "M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M18 18A8 8 0 0 1 4 12",
     "Convert to SDR 1080p": "M4 7h16M4 17h16M8 4v6M16 14v6",
+    "Shrink keeping HDR": "M4 7h16M4 17h16M8 4v6M16 14v6",
     "Make it smaller": "M4 7h16M4 17h16M8 4v6M16 14v6",
     Review: "M5 4h14v16H5ZM8 8h8M8 12h8",
     "Review preview": "M5 4h14v16H5ZM8 8h8M8 12h8",
@@ -2805,6 +2806,7 @@ function controls() {
   $("processing-goal").disabled = technical;
   $("hardware-option").hidden = processingMode() !== "size";
   $("compact-height-option").hidden = processingMode() !== "compact";
+  $("compact-hdr-option").hidden = processingMode() !== "compact";
   $("size-budget-option").hidden = processingMode() !== "size";
   updateSizeBudgetFields("size-budget");
   renderSegmented(["size-budget"]);
@@ -3085,8 +3087,11 @@ async function buildAndSubmitJob(mode = "encode") {
   const goal = processingMode();
   const inputs = simple ? {mode:goalMode(goal)} : { preserve_source_bit_depth: $("preserve-depth").checked };
   if (simple && goal === "audio_only") inputs.audio_only = true;
-  // 1080p is the goal's default, so only Keep 4K names a height.
-  else if (simple && goal === "compact" && shrinkHeight("compact-height") !== 1080) inputs.max_height = shrinkHeight("compact-height");
+  else if (simple && goal === "compact") {
+    // 1080p is the goal's default, so only Keep 4K names a height.
+    if (shrinkHeight("compact-height") !== 1080) inputs.max_height = shrinkHeight("compact-height");
+    if (keepsHDR("compact-hdr")) inputs.keep_hdr = true;
+  }
   else if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
@@ -4421,6 +4426,7 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     $("reconfigure-hardware").checked = plan.settings.allow_hardware !== false;
     // A batch frozen at 720 or 1440 shows neither until one is picked.
     setShrinkHeight("reconfigure-height", plan.settings.max_height || 1080);
+    setKeepHDR("reconfigure-hdr", plan.settings.keep_hdr === true);
     showSizeBudget("reconfigure-budget", plan.settings);
     updateReconfigureHardware();
     $("reconfigure-profile").closest("label").hidden = Boolean(plan.mode);
@@ -4463,7 +4469,7 @@ function sameSettingsRequest(plan) {
   const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true};
   if (!plan.mode) return {...body, profile:"same"};
   body.mode = plan.mode;
-  if (plan.mode === "compact" && s.max_height > 0) return {...body, max_height:s.max_height};
+  if (plan.mode === "compact") return {...body, ...(s.max_height > 0 ? {max_height:s.max_height} : {}), ...(s.keep_hdr ? {keep_hdr:true} : {})};
   if (plan.mode === "size" && s.audio_only) return {...body, audio_only:true};
   if (plan.mode !== "size") return body;
   body.allow_hardware = s.allow_hardware !== false;
@@ -4516,6 +4522,7 @@ function renderReconfigurePreview() {
 function updateReconfigureHardware() {
   $("reconfigure-hardware-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "size");
   $("reconfigure-height-option").hidden = !(state.reconfigurePlan?.mode && $("reconfigure-mode").value === "compact");
+  $("reconfigure-hdr-option").hidden = $("reconfigure-height-option").hidden;
   $("reconfigure-budget-option").hidden = $("reconfigure-hardware-option").hidden;
   updateSizeBudgetFields("reconfigure-budget");
   renderSegmented(["reconfigure-budget"]);
@@ -4624,7 +4631,10 @@ async function submitReconfiguredBatch() {
   };
   const body = {id:plan.id,scope:plan.scope,selection_version:plan.selection_version,...(plan.mode ? {mode:goalMode($("reconfigure-mode").value)} : {profile:$("reconfigure-profile").value,min_savings_percent:limit("reconfigure-savings"),max_size_increase_percent:limit("reconfigure-growth")})};
   if (plan.mode && $("reconfigure-mode").value === "audio_only") body.audio_only = true;
-  else if (plan.mode && body.mode === "compact" && shrinkHeight("reconfigure-height", plan.settings.max_height) !== 1080) body.max_height = shrinkHeight("reconfigure-height", plan.settings.max_height);
+  else if (plan.mode && body.mode === "compact") {
+    if (shrinkHeight("reconfigure-height", plan.settings.max_height) !== 1080) body.max_height = shrinkHeight("reconfigure-height", plan.settings.max_height);
+    if (keepsHDR("reconfigure-hdr")) body.keep_hdr = true;
+  }
   else if (plan.mode && body.mode === "size") {
     body.allow_hardware = $("reconfigure-hardware").checked;
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
@@ -4900,6 +4910,7 @@ function applyGoalSettings(path, goal) {
   // a carried 720 or 1440 leaves both unpicked, so either pick replaces it.
   if (goal.mode === "compact") {
     setShrinkHeight("compact-height", goal.max_height ?? 1080);
+    setKeepHDR("compact-hdr", goal.keep_hdr === true);
     if (shrinkOffers(goal.max_height ?? 1080)) delete inputs.max_height;
   }
   state.goalCarry = {path, mode: goalKeyOf(goal.mode, goal.audio_only === true), inputs};
@@ -4916,14 +4927,22 @@ function clearGoalCarry() {
 function renderShrinkTitle() {
   const carry = state.goalCarry;
   const carried = carry?.mode === "compact" && carry.path === $("path").value.trim() ? carry.inputs.max_height : null;
-  $("goal-title-compact").textContent = shrinkLabel(carried || shrinkHeight("compact-height"));
+  $("goal-title-compact").textContent = shrinkLabel(carried || shrinkHeight("compact-height"), keepsHDR("compact-hdr"));
 }
 // Shrink offers 1080p, the smallest, or 4K, for HDR kept at its resolution.
 function shrinkOffers(height) {
   return height === 1080 || height === 2160;
 }
-function shrinkLabel(height) {
-  return `Shrink to ${height >= 2160 ? "4K" : `${height || 1080}p`} SDR`;
+function shrinkLabel(height, keepHDR = false) {
+  const size = height >= 2160 ? "4K" : `${height || 1080}p`;
+  return keepHDR ? `Shrink to ${size}, keeping HDR` : `Shrink to ${size} SDR`;
+}
+// Shrink converts HDR to SDR unless Keep HDR is picked.
+function keepsHDR(name) {
+  return shrinkRadios(name).find(r => r.checked)?.value === "keep";
+}
+function setKeepHDR(name, keep) {
+  for (const radio of shrinkRadios(name)) radio.checked = radio.value === (keep ? "keep" : "sdr");
 }
 function shrinkRadios(name) {
   return [...document.querySelectorAll(`input[name="${name}"]`)];
@@ -4943,6 +4962,8 @@ for (const radio of shrinkRadios("compact-height"))
     controls();
   });
 for (const radio of shrinkRadios("reconfigure-height")) radio.addEventListener("change", updateReconfigureHardware);
+for (const radio of shrinkRadios("compact-hdr")) radio.addEventListener("change", renderShrinkTitle);
+for (const radio of shrinkRadios("reconfigure-hdr")) radio.addEventListener("change", updateReconfigureHardware);
 // The series or movie the earlier job was made for, so the new job is listed
 // and replaced the same way.
 function applyLibraryContext(context, goal) {
@@ -7489,7 +7510,7 @@ function batchFileRow(item, id) {
   const settled = item.candidate_ready || item.replaced || item.replacement_action_id;
   if (settled) {
     // Nothing to add.
-  } else if (item.mode && (item.mode !== job?.mode || item.audio_only)) body.append(node("p", `Goal: ${item.mode === "compact" ? shrinkLabel(item.max_height) : goalNames[goalKeyOf(item.mode, item.audio_only)] || item.mode}`, "metadata batch-file-profile"));
+  } else if (item.mode && (item.mode !== job?.mode || item.audio_only || item.keep_hdr)) body.append(node("p", `Goal: ${item.mode === "compact" ? shrinkLabel(item.max_height, item.keep_hdr) : goalNames[goalKeyOf(item.mode, item.audio_only)] || item.mode}`, "metadata batch-file-profile"));
   else if (item.requested_profile || item.profile) body.append(node("p", `${item.retry_pending ? "Next attempt" : "Profile"}: ${profileOptionLabel(item.requested_profile || item.profile)}`, "metadata batch-file-profile"));
   if (item.previous_attempts?.length) {
     const history = node("details", "", "batch-attempt-history");
@@ -8138,7 +8159,7 @@ function renderCompression(today) {
   goals.replaceChildren(...(today.goals || []).map(g => {
     const card = node("article", "", "compression-goal");
     const head = node("div", "", "compression-goal-head");
-    head.append(node("h3", g.goal === "compact" ? "Shrink to SDR" : goalNames[g.goal] || g.goal), node("span", g.digest ? `Policy ${g.digest}` : "", "metadata"));
+    head.append(node("h3", g.goal === "compact" ? "Shrink" : goalNames[g.goal] || g.goal), node("span", g.digest ? `Policy ${g.digest}` : "", "metadata"));
     const rows = node("dl", "", "compression-facts");
     for (const [key, label] of compressionRows) if (g[key]) rows.append(node("dt", label), node("dd", g[key]));
     card.append(head, rows);

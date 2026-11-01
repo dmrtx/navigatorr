@@ -283,8 +283,8 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 			return nil, fmt.Errorf("%s before encoding", errAudioObjectBedWorker)
 		}
 	}
-	if plan.Compact != nil && !caps.SupportsCompactTranscode() {
-		return nil, fmt.Errorf("worker does not support compact SDR conversion; upgrade the worker before encoding")
+	if err := compactPlanWorkerError(caps, plan.Compact); plan.Compact != nil && err != nil {
+		return nil, fmt.Errorf("%w before encoding", err)
 	}
 	if plan.Tracks != nil && !caps.TrackSelection {
 		return nil, fmt.Errorf("%s before encoding", errTrackSelectionWorker)

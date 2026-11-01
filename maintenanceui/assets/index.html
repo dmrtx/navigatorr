@@ -356,6 +356,14 @@
                       </div>
                       <p class="muted size-budget-help">Keep 4K converts HDR to SDR at 4K. An SDR file already in 4K is left as it is; Save space keeps it in 4K.</p>
                     </div>
+                    <div id="compact-hdr-option" class="goal-option" hidden>
+                      <span id="compact-hdr-label" class="goal-option-label">HDR</span>
+                      <div class="segmented" role="radiogroup" aria-labelledby="compact-hdr-label">
+                        <label><input type="radio" name="compact-hdr" value="sdr" checked /><span>Convert to SDR · smallest</span></label>
+                        <label><input type="radio" name="compact-hdr" value="keep" /><span>Keep HDR</span></label>
+                      </div>
+                      <p class="muted size-budget-help">Keep HDR encodes HDR10 and HLG with x265 10-bit and keeps their metadata; Dolby Vision becomes HDR10. It saves less than SDR and encodes slower.</p>
+                    </div>
                   </div>
                 </div>
                 <div class="goal-card">
@@ -1066,6 +1074,13 @@
           <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-height-label">
             <label><input type="radio" name="reconfigure-height" value="1080" checked /><span>1080p · smallest</span></label>
             <label><input type="radio" name="reconfigure-height" value="2160" /><span>Keep 4K</span></label>
+          </div>
+        </div>
+        <div id="reconfigure-hdr-option" class="goal-option" hidden>
+          <span id="reconfigure-hdr-label" class="goal-option-label">HDR</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-hdr-label">
+            <label><input type="radio" name="reconfigure-hdr" value="sdr" checked /><span>Convert to SDR · smallest</span></label>
+            <label><input type="radio" name="reconfigure-hdr" value="keep" /><span>Keep HDR</span></label>
           </div>
         </div>
         <div id="reconfigure-hardware-option" class="goal-option" hidden>

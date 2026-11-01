@@ -207,3 +207,42 @@ func TestRerunStartsAnOfferedStep(t *testing.T) {
 		t.Fatalf("child view %v", view)
 	}
 }
+
+// An HDR source is also offered Shrink keeping HDR, after Shrink to SDR; a
+// Shrink that kept HDR and missed is offered SDR, which saves more.
+func TestNextStepsOfferShrinkKeepingHDR(t *testing.T) {
+	hdr := heavyAudioReport(2160)
+	video := hdr["video"].([]any)[0].(map[string]any)
+	video["color_primaries"], video["color_transfer"], video["color_space"] = "bt2020", "smpte2084", "bt2020nc"
+	if !mediainspect.IsHDRorDolbyVisionReport(jobSourceReport(endedRecord("completed", nil, map[string]any{"source_report": hdr}))) {
+		t.Fatal("test report is not HDR")
+	}
+	r := endedRecord("completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "hdr_requires_compact", "source_report": hdr})
+	if got := stepIDs(nextStepsFor(r)); got != "compact,compact_hdr,audio_only,tracks" {
+		t.Fatalf("HDR under Save space: %s", got)
+	}
+	keep, _ := stepByID(r, "compact_hdr")
+	if keep.Inputs["mode"] != "compact" || keep.Inputs["keep_hdr"] != true {
+		t.Fatalf("keep-HDR step %+v", keep)
+	}
+
+	kept := endedRecord("completed", map[string]any{"path": "/a", "mode": "compact", "keep_hdr": true}, map[string]any{
+		"reason_code": "insufficient_savings", "original_size": float64(4_000_000_000), "candidate_size_bytes": float64(3_400_000_000),
+		"mode_policy": map[string]any{"mode": "compact", "min_savings_percent": float64(30), "compact": map[string]any{"keep_hdr": true}}, "source_report": hdr,
+	})
+	steps := stepIDs(nextStepsFor(kept))
+	if !strings.Contains(steps, "compact") || strings.Contains(steps, "compact_hdr") {
+		t.Fatalf("Shrink keeping HDR missed: %s", steps)
+	}
+	if sdr, _ := stepByID(kept, "compact"); sdr.Inputs["keep_hdr"] != nil || !strings.Contains(sdr.Detail, "instead of keeping HDR") {
+		t.Fatalf("SDR step after keep-HDR %+v", sdr)
+	}
+	// A plain Shrink that missed is not offered Shrink again either way.
+	plain := endedRecord("completed", map[string]any{"path": "/a", "mode": "compact"}, map[string]any{
+		"reason_code": "insufficient_savings", "original_size": float64(4_000_000_000), "candidate_size_bytes": float64(3_400_000_000),
+		"mode_policy": map[string]any{"mode": "compact", "min_savings_percent": float64(30)}, "source_report": hdr,
+	})
+	if steps := stepIDs(nextStepsFor(plain)); strings.Contains(steps, "compact") {
+		t.Fatalf("plain Shrink missed: %s", steps)
+	}
+}

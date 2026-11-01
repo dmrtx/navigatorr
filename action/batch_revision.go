@@ -176,7 +176,7 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 
 	if mode := getString(settings, "mode"); mode != "" {
 		allowed := 1
-		for _, key := range []string{"max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "accept_smaller_saving"} {
+		for _, key := range []string{"max_height", "keep_hdr", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "accept_smaller_saving"} {
 			if _, ok := settings[key]; ok {
 				allowed++
 			}
@@ -215,7 +215,11 @@ func (e *Engine) ReconfigureBatch(ctx context.Context, id, scope, selectionID, v
 		if err != nil {
 			return nil, err
 		}
-		policy, err := modePolicyGoal(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget, tracks, audioOnly, smallerSaving)
+		keepHDR, err := modeKeepHDRInput(mode, settings)
+		if err != nil {
+			return nil, err
+		}
+		policy, err := modePolicyGoal(mode, getBool(ec.State, "is_anime"), maxHeight, hardware, allowSlow, budget, tracks, audioOnly, smallerSaving, keepHDR)
 		if err != nil {
 			return nil, err
 		}

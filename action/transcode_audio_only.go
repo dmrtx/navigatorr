@@ -198,12 +198,27 @@ const errAudioOnlyGoalWorker = "worker does not run the audio-only goal; upgrade
 const (
 	errCompactAudioLevelsWorker = "worker does not run Shrink at the size goal's audio levels; upgrade the worker"
 	errSmallerSavingWorker      = "worker does not run a size goal that accepts a smaller saving; upgrade the worker"
+	// errCompactKeepHDRWorker is the failure of a keep-HDR compact plan on a
+	// worker without the compact_keep_hdr capability.
+	errCompactKeepHDRWorker = "worker does not run Shrink keeping HDR; upgrade the worker"
 )
 
 // workerRunsPolicyVersion reports, as an error, a plan version newer workers
 // add without a fingerprint change, which this worker does not run. Older
 // workers refuse those versions at their first gate, so the coordinator checks
 // before it submits one.
+// compactPlanWorkerError reports a worker that cannot run this compact plan:
+// the compact chain itself, and a keep-HDR plan's HDR chain.
+func compactPlanWorkerError(caps transcode.WorkerCapabilities, p *transcode.CompactPlan) error {
+	switch {
+	case !caps.SupportsCompactTranscode():
+		return errors.New("worker does not support compact SDR conversion; upgrade the worker")
+	case !caps.SupportsCompactPlan(p):
+		return errors.New(errCompactKeepHDRWorker)
+	}
+	return nil
+}
+
 func workerRunsPolicyVersion(caps transcode.WorkerCapabilities, version string) error {
 	switch {
 	case version == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal:

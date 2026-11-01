@@ -415,3 +415,53 @@ func TestGoalChangeCarriesAndShowsTheShrinkHeight(t *testing.T) {
 		t.Fatalf("height not carried: %+v", command)
 	}
 }
+
+// Keep HDR given with a Shrink goal change reaches the command, and the dialog
+// shows it only when every selected file was frozen with it.
+func TestGoalChangeCarriesAndShowsKeepHDR(t *testing.T) {
+	s, h := testUI(t)
+	seedFailedBatch(t, s, false)
+	st := s.engine.Deps().Store
+	batch, _ := st.GetActionInstance("failed-batch")
+	inputs := decodeOperationJSON(batch.InputsJSON)
+	delete(inputs, "profile_config")
+	inputs["mode"] = "compact"
+	batch.InputsJSON = mustJSON(t, inputs)
+	read := func(state map[string]any) (map[string]any, string) {
+		batch.StateJSON = mustJSON(t, state)
+		if err := st.UpdateActionInstance(*batch); err != nil {
+			t.Fatal(err)
+		}
+		w := request(h, "GET", "/api/maintenance/batch-settings?id=failed-batch&scope=all", "", true)
+		var plan struct {
+			Settings map[string]any `json:"settings"`
+			Version  string         `json:"selection_version"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &plan) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return plan.Settings, plan.Version
+	}
+	keep := map[string]any{"mode": "compact", "compact": map[string]any{"keep_hdr": true}}
+	if got, _ := read(map[string]any{"mode_policy": keep}); got["keep_hdr"] != true {
+		t.Fatalf("frozen keep-HDR not shown: %v", got)
+	}
+	mixed := map[string]any{"mode_policy": keep, "batch_item_settings": map[string]any{"epfile-101": map[string]any{"mode": "compact", "mode_policy": map[string]any{"mode": "compact", "compact": map[string]any{}}}}}
+	if got, _ := read(mixed); got["keep_hdr"] != false {
+		t.Fatalf("mixed keep-HDR shown as kept: %v", got)
+	}
+	_, version := read(map[string]any{})
+	bad := map[string]any{"id": "failed-batch", "scope": "all", "selection_version": version, "key": "goal-bad", "mode": "size", "keep_hdr": true}
+	if w := request(h, "POST", "/api/maintenance/batch-settings", mustJSON(t, bad), true); w.Code != 400 {
+		t.Fatalf("keep_hdr with Save space: %d %s", w.Code, w.Body.String())
+	}
+	body := mustJSON(t, map[string]any{"id": "failed-batch", "scope": "all", "selection_version": version, "key": "goal-hdr", "mode": "compact", "keep_hdr": true})
+	w := request(h, "POST", "/api/maintenance/batch-settings", body, true)
+	var receipt map[string]string
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &receipt) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if command, _ := st.GetActionInstance(receipt["command_id"]); command == nil || !strings.Contains(command.InputsJSON, `"keep_hdr":true`) {
+		t.Fatalf("keep_hdr not carried: %+v", command)
+	}
+}

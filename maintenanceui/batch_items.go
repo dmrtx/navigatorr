@@ -49,6 +49,8 @@ type batchItemView struct {
 	// MaxHeight is the frozen compact output height, so the goal label
 	// names the size actually produced.
 	MaxHeight int `json:"max_height,omitempty"`
+	// KeepHDR marks the compact goal frozen as Shrink keeping HDR.
+	KeepHDR bool `json:"keep_hdr,omitempty"`
 	// AudioOnly marks the size goal frozen as Audio only.
 	AudioOnly bool `json:"audio_only,omitempty"`
 	// Explanation and NextSteps are the child job's, as a single job shows
@@ -125,6 +127,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			}
 			if view.Mode == "compact" {
 				view.MaxHeight = compactMaxHeight(policy)
+				view.KeepHDR = operationMap(operationMap(policy)["compact"])["keep_hdr"] == true
 			}
 			view.AudioOnly = view.Mode == "size" && operationMap(operationMap(policy)["size"])["audio_only"] == true
 			reserved, err := s.engine.BatchItemReplacementReserved(item)
