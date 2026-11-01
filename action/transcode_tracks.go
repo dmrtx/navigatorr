@@ -321,15 +321,15 @@ func trackSelectionOf(state map[string]any) *transcode.TrackSelection {
 }
 
 // applyTrackSelection puts the selection on a plan: the kept indexes, policy
-// v6 (which an older worker refuses; the audio-only goal's v7 carries a
-// selection as it is), and subtitle actions for the kept subtitles only. A nil
-// selection leaves the plan as it is.
+// v6 (which an older worker refuses; v7, v8 and v9 carry a selection as they
+// are), and subtitle actions for the kept subtitles only. A nil selection
+// leaves the plan as it is.
 func applyTrackSelection(plan *transcode.Plan, sel *transcode.TrackSelection) error {
 	if sel == nil {
 		return nil
 	}
 	plan.Tracks = &transcode.TrackSelection{KeepAudio: slices.Clone(sel.KeepAudio), KeepSubtitles: slices.Clone(sel.KeepSubtitles)}
-	if plan.ModePolicyVersion != transcode.ModePolicyV7 {
+	if !transcode.SelectsTracksItself(plan.ModePolicyVersion) {
 		plan.ModePolicyVersion = transcode.ModePolicyV6
 	}
 	plan.SubtitleActions = keptSubtitleActions(plan.SubtitleActions, sel)
@@ -368,9 +368,10 @@ func trackSelectionMatches(snapshot *ModePolicySnapshot, state map[string]any, p
 	if err != nil || !plan.Tracks.Equal(want) || !trackSelectionOf(state).Equal(want) {
 		return false
 	}
-	// The audio-only goal's plans are v7 with or without a selection; every
-	// other plan is v6 exactly when streams are removed.
-	if v7 := snapshot.workerVersion() == transcode.ModePolicyV7; v7 != (plan.ModePolicyVersion == transcode.ModePolicyV7) || !v7 && (want != nil) != (plan.ModePolicyVersion == transcode.ModePolicyV6) {
+	// Plans of v7, v8 and v9 keep their version with or without a selection;
+	// every other plan is v6 exactly when streams are removed.
+	version := snapshot.workerVersion()
+	if own := transcode.SelectsTracksItself(version); own && plan.ModePolicyVersion != version || !own && (transcode.SelectsTracksItself(plan.ModePolicyVersion) || (want != nil) != (plan.ModePolicyVersion == transcode.ModePolicyV6)) {
 		return false
 	}
 	if want == nil {

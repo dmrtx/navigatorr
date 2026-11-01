@@ -58,7 +58,7 @@ func CompressionPolicyToday() (CompressionToday, error) {
 			}
 			hardware = rules
 		}
-		snapshot, err := modePolicyGoal(g.mode, false, 0, hardware, false, nil, nil, g.audioOnly)
+		snapshot, err := modePolicyGoal(g.mode, false, 0, hardware, false, nil, nil, g.audioOnly, false)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", g.goal, err)
 		}
@@ -100,6 +100,9 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 		d.Keeps = "Kept if it comes out smaller at all, then waits for your approval before replacing the original."
 	case p.MinSavingsPercent > 0:
 		d.Keeps = fmt.Sprintf("Kept only if it is at least %g%% smaller, then waits for your approval before replacing the original.", p.MinSavingsPercent)
+		if goal == "size" {
+			d.Keeps += fmt.Sprintf(" A file that saves less can run again accepting a %d%% saving.", transcode.SizeSmallerSavingPercent)
+		}
 	default:
 		d.Keeps = "Kept if it does not grow, then waits for your approval before replacing the original."
 	}
@@ -172,9 +175,6 @@ func describeAudio(mode string) string {
 		return text + " Every other track, a lossy one of unknown bitrate included, is copied with its objects."
 	case mode == transcode.AudioModeCompactLossless:
 		return "Lossless audio becomes AAC; lossy audio is copied."
-	case mode == "compact":
-		mono, stereo, surround, wide, _, _ := transcode.AudioLevelTargetsKbps(false)
-		return fmt.Sprintf("Lossless, DTS and PCM audio up to 7.1, in a layout AAC keeps, becomes AAC-LC (mono %d, stereo %d, 5.1 %d, 7.1 %d kbps); TrueHD Atmos and DTS:X keep their channel bed and lose their objects. Other audio, lossy Atmos included, is copied.", mono, stereo, surround, wide)
 	}
 	return "Audio is copied as it is."
 }

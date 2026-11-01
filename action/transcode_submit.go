@@ -117,6 +117,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if transcode.IsObjectBedAudioLevelMode(plan.AudioMode) && !caps.SizeAudioObjectBed {
 			return StepResult{Status: StepFailed, Error: errAudioObjectBedWorker + " before encoding"}, nil
 		}
+		if err := workerRunsPolicyVersion(caps, plan.ModePolicyVersion); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error() + " before encoding"}, nil
+		}
 	}
 	if plan.Tracks != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
@@ -135,8 +138,8 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if !caps.SizeAudioOnly {
 			return StepResult{Status: StepFailed, Error: "worker cannot prove a copied video stream; upgrade the worker before encoding"}, nil
 		}
-		if plan.ModePolicyVersion == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal {
-			return StepResult{Status: StepFailed, Error: errAudioOnlyGoalWorker + " before encoding"}, nil
+		if err := workerRunsPolicyVersion(caps, plan.ModePolicyVersion); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error() + " before encoding"}, nil
 		}
 	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {

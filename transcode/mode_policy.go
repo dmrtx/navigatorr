@@ -34,11 +34,34 @@ const ModePolicyV6 = "transcode-modes-v6"
 // source, so a worker that predates it refuses it at its first gate.
 const ModePolicyV7 = "transcode-modes-v7"
 
+// ModePolicyV8 is the plan version of a compact goal whose audio is one of
+// the size goal's levels instead of v2's compact audio. The plan may keep
+// only some tracks (Plan.Tracks) without becoming v6, and otherwise follows
+// v2's compact rules, so a worker that predates it refuses it at its first
+// gate.
+const ModePolicyV8 = "transcode-modes-v8"
+
+// ModePolicyV9 is the plan version of a size goal that accepts a smaller
+// saving: v5's rules with SizeSmallerSavingPercent as the minimum instead of
+// 15%. The plan may keep only some tracks (Plan.Tracks) without becoming v6.
+const ModePolicyV9 = "transcode-modes-v9"
+
+// SizeSmallerSavingPercent is the minimum saving of a size goal that accepts
+// a smaller saving (policy v9).
+const SizeSmallerSavingPercent = 5
+
 // IsSizePolicyVersion reports a size mode policy version: v3, v5 which adds
-// the audio levels, v6 which adds the track selection, or v7 the audio-only
-// goal.
+// the audio levels, v6 which adds the track selection, v7 the audio-only
+// goal, or v9 which accepts a smaller saving.
 func IsSizePolicyVersion(version string) bool {
-	return version == ModePolicyV3 || version == ModePolicyV5 || version == ModePolicyV6 || version == ModePolicyV7
+	return version == ModePolicyV3 || version == ModePolicyV5 || version == ModePolicyV6 || version == ModePolicyV7 || version == ModePolicyV9
+}
+
+// SelectsTracksItself reports a plan version that may carry a track
+// selection or not (v7, v8, v9); under the others a selection makes the plan
+// v6.
+func SelectsTracksItself(version string) bool {
+	return version == ModePolicyV7 || version == ModePolicyV8 || version == ModePolicyV9
 }
 
 // CompactMinimumSavingsPercent is the measured savings compact mode requires.
@@ -72,6 +95,15 @@ func ModeSizeAllowedVersion(mode string, source, candidate int64, version string
 func ModeMinimumSavings(mode, version string) (int, bool) {
 	if version == ModePolicyV7 {
 		return 0, mode == "size"
+	}
+	if version == ModePolicyV8 && mode == "compact" {
+		return CompactMinimumSavingsPercent, true
+	}
+	if version == ModePolicyV9 && mode == "size" {
+		return SizeSmallerSavingPercent, true
+	}
+	if version == ModePolicyV8 || version == ModePolicyV9 {
+		return 0, false
 	}
 	if version == ModePolicyV6 {
 		switch mode {

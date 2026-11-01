@@ -32,21 +32,21 @@ type VideoCopyEvidence struct {
 	ReasonCodes      []string `json:"reason_codes,omitempty"`
 }
 
-// IsSizeAudioOnlyPlan reports a size plan (v3, v5, v6 or v7) that copies the
+// IsSizeAudioOnlyPlan reports a size plan (v3, v5, v6, v7 or v9) that copies the
 // video stream.
 func IsSizeAudioOnlyPlan(p *Plan) bool {
 	return p != nil && p.Mode == "size" && IsSizePolicyVersion(p.ModePolicyVersion) && strings.EqualFold(strings.TrimSpace(p.VideoCodec), VideoCodecCopy)
 }
 
 // SizeAudioMode reports the audio mode a size plan of this policy version
-// carries: compact_lossless under v3, one of the audio levels under v5 and v7,
+// carries: compact_lossless under v3, one of the audio levels under v5, v7 and v9,
 // either under v6 (which version the goal's snapshot extends is the
 // coordinator's to check).
 func SizeAudioMode(version, audioMode string) bool {
 	switch version {
 	case ModePolicyV3:
 		return audioMode == AudioModeCompactLossless
-	case ModePolicyV5, ModePolicyV7:
+	case ModePolicyV5, ModePolicyV7, ModePolicyV9:
 		return IsAudioLevelMode(audioMode)
 	case ModePolicyV6:
 		return audioMode == AudioModeCompactLossless || IsAudioLevelMode(audioMode)

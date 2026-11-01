@@ -4440,7 +4440,8 @@ function sameSettingsRequest(plan) {
   if (plan.mode !== "size") return body;
   body.allow_hardware = s.allow_hardware !== false;
   if (s.hardware_margin_percent > 0) body.hardware_margin_percent = s.hardware_margin_percent;
-  if (s.size_budget_percent > 0) body.size_budget_percent = s.size_budget_percent;
+  if (s.accept_smaller_saving) body.accept_smaller_saving = true;
+  else if (s.size_budget_percent > 0) body.size_budget_percent = s.size_budget_percent;
   else if (s.size_budget_bytes > 0) body.size_budget_bytes = s.size_budget_bytes;
   else if (s.size_budget_source === "siblings") Object.assign(body, {size_budget_source:"siblings", size_budget_sibling_multiplier:s.size_budget_sibling_multiplier || 1.5});
   return body;
@@ -4800,6 +4801,10 @@ async function applyBatchStep(batchID, itemKey, step) {
     if (step.id === "x265") {
       body = {...sameSettingsRequest(plan), allow_hardware: false};
       delete body.hardware_margin_percent;
+    } else if (step.id === "smaller" && plan.mode === "size") {
+      // The same encodes again, keeping the file's encoder choice; only the
+      // minimum saving changes.
+      body = {...sameSettingsRequest(plan), ...step.inputs};
     } else {
       body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
       // A new budget keeps the goal, so it keeps the file's encoder choice.

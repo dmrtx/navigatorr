@@ -215,6 +215,7 @@ func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
 		allow     any
 		margin    any
 		maxHeight any
+		smaller   any
 	}
 	sizeParent := map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(25)}
 	compactParent := map[string]any{"mode": "compact", "max_height": float64(720)}
@@ -231,6 +232,7 @@ func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
 		{"size, engine off", sizeParent, map[string]any{"mode": "size", "allow_hardware": false}, want{mode: "size", allow: false}},
 		{"size, new margin", sizeParent, map[string]any{"mode": "size", "allow_hardware": true, "hardware_margin_percent": float64(30)}, want{mode: "size", allow: true, margin: float64(30)}},
 		{"size, default", sizeParent, map[string]any{"mode": "size"}, want{mode: "size", allow: true, margin: float64(15)}},
+		{"size, smaller saving", sizeParent, map[string]any{"mode": "size", "accept_smaller_saving": true}, want{mode: "size", allow: true, margin: float64(15), smaller: true}},
 		// The parent's 720p height is its own goal's: another goal does not take it
 		// and compact without a height takes the default, not the parent's.
 		{"compact parent to quality", compactParent, map[string]any{"mode": "quality"}, want{mode: "quality"}},
@@ -258,7 +260,7 @@ func TestGoalChangeChildInputsAgreeWithTheFrozenPolicy(t *testing.T) {
 			if compact, _ := boundPolicy["compact"].(map[string]any); tc.want.maxHeight != nil && compact["max_height"] != tc.want.maxHeight {
 				t.Fatalf("child policy %v does not carry the %v height", state["mode_policy"], tc.want.maxHeight)
 			}
-			if inputs["mode"] != tc.want.mode || inputs["allow_hardware"] != tc.want.allow || inputs["hardware_margin_percent"] != tc.want.margin || inputs["max_height"] != tc.want.maxHeight {
+			if inputs["mode"] != tc.want.mode || inputs["allow_hardware"] != tc.want.allow || inputs["hardware_margin_percent"] != tc.want.margin || inputs["max_height"] != tc.want.maxHeight || inputs["accept_smaller_saving"] != tc.want.smaller {
 				t.Fatalf("child inputs %v do not match the frozen policy, want %+v", inputs, tc.want)
 			}
 			// The child runs under the item's policy, not the parent's.

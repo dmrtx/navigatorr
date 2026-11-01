@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -162,8 +163,8 @@ func (e *Engine) commitAudioOnlyPlan(ctx context.Context, ec *ExecutionContext, 
 	if err != nil {
 		return workerCapabilityLookupResult(err, "size audio-only"), true
 	}
-	if base.ModePolicyVersion == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal {
-		return StepResult{Status: StepFailed, Error: errAudioOnlyGoalWorker + " before encoding"}, true
+	if err := workerRunsPolicyVersion(caps, base.ModePolicyVersion); err != nil {
+		return StepResult{Status: StepFailed, Error: err.Error() + " before encoding"}, true
 	}
 	if !caps.SizeAudioOnly {
 		return skipAudioOnly(ec, outputs, "audio_only_worker_unsupported")
@@ -191,6 +192,29 @@ func (e *Engine) commitAudioOnlyPlan(ctx context.Context, ec *ExecutionContext, 
 // errAudioOnlyGoalWorker is the failure of an audio-only goal on a worker that
 // does not run policy v7.
 const errAudioOnlyGoalWorker = "worker does not run the audio-only goal; upgrade the worker"
+
+// errCompactAudioLevelsWorker and errSmallerSavingWorker are the failures of a
+// policy v8 or v9 plan on a worker that does not run it.
+const (
+	errCompactAudioLevelsWorker = "worker does not run Shrink at the size goal's audio levels; upgrade the worker"
+	errSmallerSavingWorker      = "worker does not run a size goal that accepts a smaller saving; upgrade the worker"
+)
+
+// workerRunsPolicyVersion reports, as an error, a plan version newer workers
+// add without a fingerprint change, which this worker does not run. Older
+// workers refuse those versions at their first gate, so the coordinator checks
+// before it submits one.
+func workerRunsPolicyVersion(caps transcode.WorkerCapabilities, version string) error {
+	switch {
+	case version == transcode.ModePolicyV7 && !caps.SizeAudioOnlyGoal:
+		return errors.New(errAudioOnlyGoalWorker)
+	case version == transcode.ModePolicyV8 && !caps.CompactAudioLevels:
+		return errors.New(errCompactAudioLevelsWorker)
+	case version == transcode.ModePolicyV9 && !caps.SizeSmallerSaving:
+		return errors.New(errSmallerSavingWorker)
+	}
+	return nil
+}
 
 // startAudioOnlyGoal plans the size goal "audio only" (RecipeAudioOnly): the
 // video is copied unchanged and the audio converted at the goal's level, with

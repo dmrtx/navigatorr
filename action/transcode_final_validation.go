@@ -289,6 +289,9 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if plan.Tracks != nil && !caps.TrackSelection {
 		return nil, fmt.Errorf("%s before encoding", errTrackSelectionWorker)
 	}
+	if err := workerRunsPolicyVersion(caps, plan.ModePolicyVersion); err != nil {
+		return nil, fmt.Errorf("%w before encoding", err)
+	}
 	return req, nil
 }
 

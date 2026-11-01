@@ -1029,6 +1029,7 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	delete(inputs, "size_budget_sibling_multiplier")
 	delete(inputs, "max_height")
 	delete(inputs, "audio_only")
+	delete(inputs, "accept_smaller_saving")
 	var policy ModePolicySnapshot
 	b, err := json.Marshal(rawPolicy)
 	if err != nil || json.Unmarshal(b, &policy) != nil {
@@ -1042,6 +1043,9 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	}
 	if policy.Size.AudioOnly {
 		inputs["audio_only"] = true
+	}
+	if policy.Size.SmallerSaving {
+		inputs["accept_smaller_saving"] = true
 	}
 	if rules := policy.Size.AutomaticSearch; rules != nil && slices.Contains(rules.QualityFallbackPresets, "slow") {
 		inputs["allow_slow_preset"] = true
@@ -1146,7 +1150,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "audio_only"} {
+		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "audio_only", "accept_smaller_saving"} {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}

@@ -6,6 +6,8 @@ import "github.com/jakenesler/navigatorr/transcode"
 // first. Every policy version a job can freeze has an entry (see the test), so
 // a new version cannot ship without saying what it changed.
 var compressionChanges = []CompressionChange{
+	{Date: "2026-10-31", Version: transcode.ModePolicyV9, Text: "A Save space file that saved less than 15% can run again accepting a 5% saving."},
+	{Date: "2026-10-31", Version: transcode.ModePolicyV8, Text: "Shrink converts audio like Save space: any lossy track well above its AAC target, lossy Atmos included, not only lossless audio."},
 	{Date: "2026-10-31", Text: "Shrink can keep 4K: HDR becomes SDR at 4K. SDR 4K files are recommended Save space, which keeps their resolution."},
 	{Date: "2026-10-31", Text: "A file that ends without a result says what happened and offers next steps from what it measured: Audio only, a size limit, x265 or Shrink."},
 	{Date: "2026-10-31", Version: transcode.ModePolicyV7, Text: "Audio only: the video is copied unchanged, 4K and HDR included, and only the audio is converted; any smaller file is kept."},

@@ -15,7 +15,7 @@ func TestCompactModePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.MinSavingsPercent != 30 || p.Compact == nil || p.Compact.MaxHeight != 1080 || p.Compact.ChainVersion != transcode.CompactChainVersion || p.Profile.Audio.Mode != "compact" {
+	if p.MinSavingsPercent != 30 || p.Compact == nil || p.Compact.MaxHeight != 1080 || p.Compact.ChainVersion != transcode.CompactChainVersion || p.Profile.Audio.Mode != transcode.AudioModeSizeAACBed {
 		t.Fatalf("compact policy %+v", p)
 	}
 	size, _ := modePolicyFor("size", false, 0)

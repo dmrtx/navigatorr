@@ -78,8 +78,11 @@ func TestNewSizeGoalFreezesAudioLevelOne(t *testing.T) {
 			}
 		})
 	}
-	// The other goals keep their audio.
-	for mode, audio := range map[string]string{"quality": "copy", "x265_preserve": "copy", "compact": "compact"} {
+	// The other goals keep their audio; Shrink converts at the size goal's level 1.
+	if p := freezeFresh(t, map[string]any{"mode": "compact"}); p.Profile.Audio.Mode != transcode.AudioModeSizeAACBed || p.workerVersion() != transcode.ModePolicyV8 {
+		t.Errorf("compact: audio %q version %s", p.Profile.Audio.Mode, p.workerVersion())
+	}
+	for mode, audio := range map[string]string{"quality": "copy", "x265_preserve": "copy"} {
 		if p := freezeFresh(t, map[string]any{"mode": mode}); p.Profile.Audio.Mode != audio || p.workerVersion() != ModePolicyVersion {
 			t.Errorf("%s: audio %q version %s", mode, p.Profile.Audio.Mode, p.workerVersion())
 		}

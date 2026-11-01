@@ -16,7 +16,11 @@ func TestModeMinimumSavingsByPolicy(t *testing.T) {
 		{"compact", "", 0, false},
 		{"size", ModePolicyV3, 15, true},
 		{"quality", ModePolicyV3, 0, false},
-		{"size", "transcode-modes-v9", 0, false},
+		{"compact", ModePolicyV8, CompactMinimumSavingsPercent, true},
+		{"size", ModePolicyV8, 0, false},
+		{"size", ModePolicyV9, SizeSmallerSavingPercent, true},
+		{"compact", ModePolicyV9, 0, false},
+		{"size", "transcode-modes-v99", 0, false},
 		{"unknown", "", 0, false},
 	} {
 		got, valid := ModeMinimumSavings(tc.mode, tc.version)

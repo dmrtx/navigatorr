@@ -6891,6 +6891,9 @@ test("Change goal offers Audio only, shows a saved one and sends it as the size 
   // Encoding one file again keeps its goal.
   assert.equal(h.run('JSON.stringify(sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true,allow_hardware:true}}))').includes('"audio_only":true'), true);
   assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{audio_only:true}}).allow_hardware'), undefined);
+  // A file that accepted the smaller saving keeps it, with no budget beside it.
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{accept_smaller_saving:true,size_budget_percent:80}}).accept_smaller_saving'), true);
+  assert.equal(h.run('sameSettingsRequest({id:"b",item_key:"f",mode:"size",settings:{accept_smaller_saving:true,size_budget_percent:80}}).size_budget_percent'), undefined);
 });
 
 test("one file's Change goal previews its streams under the goal picked", async () => {
@@ -8387,12 +8390,15 @@ test("a batch file applies a next step as a goal change for that file", async ()
   h.run('reviewAction=async()=>true;api=async()=>({id:"batch-a",item_key:"k",mode:"size",selection_version:"v",decision_version:"d",settings:{allow_hardware:false}})');
   await h.run('applyBatchStep("batch-a","k",{id:"budget",label:"Aim",detail:"d",inputs:{mode:"size",size_budget_percent:60}})');
   assert.deepEqual([sent[2][1].size_budget_percent, sent[2][1].allow_hardware], [60, false]);
+  // A smaller saving runs the same encodes: x265 stays x265.
+  await h.run('applyBatchStep("batch-a","k",{id:"smaller",label:"Accept",detail:"d",inputs:{mode:"size",accept_smaller_saving:true}})');
+  assert.deepEqual([sent[3][1].mode, sent[3][1].accept_smaller_saving, sent[3][1].allow_hardware, sent[3][1].scope], ["size", true, false, "file"]);
   // x265 under another goal opens the goal form for the file instead.
   const opened = [];
   h.context.opened = opened;
   h.run('api=async()=>({id:"batch-a",item_key:"k",mode:"quality",selection_version:"v",decision_version:"d",settings:{}});reconfigureBatch=async(...a)=>{opened.push(a)}');
   await h.run('applyBatchStep("batch-a","k",{id:"x265",label:"Try with x265",detail:"d"})');
-  assert.equal(sent.length, 3);
+  assert.equal(sent.length, 4);
   assert.equal(JSON.stringify(opened[0]), JSON.stringify(["batch-a", false, {item_key: "k"}]));
 });
 
