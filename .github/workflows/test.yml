@@ -15,10 +15,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decides which of the slower jobs a change needs. It reads the changed file
+  # list from the API (no checkout), and falls back to running everything when
+  # it cannot tell. Skipped jobs count as passed for branch protection.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      layout: ${{ steps.diff.outputs.layout }}
+      worker: ${{ steps.diff.outputs.worker }}
+
+    steps:
+      - name: Select the jobs this change needs
+        id: diff
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          everything() {
+            echo "layout=true" >> "$GITHUB_OUTPUT"
+            echo "worker=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          [ "$EVENT" = workflow_dispatch ] && everything
+          case "$BASE" in ''|0000000000000000000000000000000000000000) everything ;; esac
+          files=$(gh api "repos/$GITHUB_REPOSITORY/compare/$BASE...$HEAD" --paginate --jq '.files[].filename') || everything
+          [ -n "$files" ] || everything
+          # The real-browser layout checks only read the console assets and
+          # their own harness.
+          layout=false
+          if grep -Eq '^(maintenanceui/(layout|assets)/|\.github/workflows/test\.yml$)' <<<"$files"; then layout=true; fi
+          # The native macOS run covers the darwin-only files and every package
+          # the worker binary links. The Linux job below cross-vets the whole
+          # module for darwin on every change.
+          worker=false
+          if grep -Eq '(_darwin(_test)?\.go$|^go\.(mod|sum)$|^(cmd/navigatorr-transcode|internal/(transcodeworker|smbdirect|importguard)|transcode|mediafile|mediainspect|podcast)/|^\.github/workflows/test\.yml$)' <<<"$files"; then worker=true; fi
+          echo "layout=$layout" >> "$GITHUB_OUTPUT"
+          echo "worker=$worker" >> "$GITHUB_OUTPUT"
+          echo "layout=$layout worker=$worker"
+
   # The server ships as a Linux container: run the whole module there.
   server:
     name: server (linux)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -47,12 +90,47 @@ jobs:
         env:
           CGO_ENABLED: "0"
 
+  # Compiles and vets the whole module for the worker's platform on a cheap
+  # Linux runner, so a darwin-only break shows up on every change even when the
+  # native macOS run below is skipped.
+  darwin-cross:
+    name: worker (darwin cross-compile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Vet (darwin/arm64)
+        run: go vet ./...
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+
+      - name: Build worker binary (darwin/arm64)
+        run: go build -trimpath -o "$RUNNER_TEMP/navigatorr-transcode" ./cmd/navigatorr-transcode
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+
   # The job detail is laid out in a real browser at every phone, tablet and
   # desktop size, in both themes, at 150% zoom and with long, unbroken and CJK
   # names (maintenanceui/layout). The report is uploaded when it fails.
   layout:
     name: layout (browser)
+    needs: changes
+    if: needs.changes.outputs.layout == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -90,7 +168,10 @@ jobs:
   # commit, promote rename) that the Linux job never compiles.
   worker:
     name: worker (macos arm64)
+    needs: changes
+    if: needs.changes.outputs.worker == 'true'
     runs-on: macos-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
