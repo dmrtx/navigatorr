@@ -335,11 +335,27 @@ func compactMeasurementChains(p *transcode.CompactPlan) (reference, candidate st
 	if p == nil {
 		return "", "", errors.New("compact plan missing")
 	}
-	if reference, err = compactFilterForRun(p.MeasurementPlan()); err != nil || !p.KeepsHDR() {
+	if !p.KeepsHDR() {
+		reference, err = compactFilterForRun(p.MeasurementPlan())
 		return reference, "", err
 	}
-	candidate, err = compactFilterForRun(compactCandidateMeasurementPlan(p))
-	return reference, candidate, err
+	return compactKeepHDRMeasurementChains(p, escapeFFmpegFilterPath(compactLUTPath(p)))
+}
+
+// compactKeepHDRMeasurementChains builds a keep-HDR plan's measurement
+// chains with the LUT reference lut. The reference first takes the encode's
+// own picture chain (scaled to the target as 10-bit 4:2:0), so both sides
+// reach the tone map at the same size and chroma resolution and only the
+// encode differs.
+func compactKeepHDRMeasurementChains(p *transcode.CompactPlan, lut string) (reference, candidate string, err error) {
+	encode, err := compactVideoFilter(p, "")
+	if err != nil {
+		return "", "", err
+	}
+	if candidate, err = compactVideoFilter(compactCandidateMeasurementPlan(p), lut); err != nil {
+		return "", "", err
+	}
+	return encode + "," + candidate, candidate, nil
 }
 
 // compactEncoderArgs are the video args a compact plan adds to an encode:
@@ -428,7 +444,13 @@ func compactChainEvidence(p *transcode.CompactPlan, lutDigest string) (*transcod
 	if p.ToneMap != nil {
 		ref = "compact.cube"
 	}
-	chain, err := compactVideoFilter(p.MeasurementPlan(), ref)
+	chain, candidate := "", ""
+	var err error
+	if p.KeepsHDR() {
+		chain, candidate, err = compactKeepHDRMeasurementChains(p, ref)
+	} else {
+		chain, err = compactVideoFilter(p.MeasurementPlan(), ref)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -444,10 +466,7 @@ func compactChainEvidence(p *transcode.CompactPlan, lutDigest string) (*transcod
 		AppliedTo:        "encoder_input_and_reference",
 	}
 	if p.KeepsHDR() {
-		if e.CandidateChain, err = compactVideoFilter(compactCandidateMeasurementPlan(p), ref); err != nil {
-			return nil, err
-		}
-		e.MeasurementSpace, e.AppliedTo = compactHDRMeasurementSpace, "reference_and_candidate"
+		e.CandidateChain, e.MeasurementSpace, e.AppliedTo = candidate, compactHDRMeasurementSpace, "reference_and_candidate"
 	}
 	if t := p.ToneMap; t != nil {
 		e.ToneMapMethod, e.SourcePeakNits, e.TargetPeakNits = t.Method, t.SourcePeakNits, t.TargetPeakNits
@@ -479,24 +498,44 @@ func probeCompactChain(ctx context.Context, ffmpegPath string) error {
 	return nil
 }
 
-// probeCompactHDRChain proves the worker FFmpeg encodes one synthetic frame
-// through the keep-HDR chain with libx265 and its HDR10 parameters.
-func probeCompactHDRChain(ctx context.Context, ffmpegPath string) error {
-	p := compactHDRProbePlan()
-	args, params, err := compactEncoderArgs(p, libX265Encoder)
+// probeCompactHDRChain proves the worker encodes one synthetic frame through
+// the production keep-HDR arguments (BuildVideoEncoderArgs) with libx265, and
+// that the decoded frame carries the planned BT.2020 PQ tags and exactly the
+// probe plan's mastering display and light levels.
+func probeCompactHDRChain(ctx context.Context, ffmpegPath, scratchRoot string) error {
+	plan := &transcode.Plan{VideoCodec: libX265Encoder, Quality: 28, Preset: "ultrafast", VideoProfile: "main10", PixelFormat: "p010le", ExpectedBitDepth: 10, Compact: compactHDRProbePlan()}
+	args, err := BuildVideoEncoderArgs(plan)
 	if err != nil {
 		return err
 	}
+	dir, err := os.MkdirTemp(scratchRoot, "compact-hdr-probe-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	argv := append([]string{"-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc2=s=1440x1080:r=24:d=1,format=yuv420p10le", "-frames:v", "1",
-		"-c:v", libX265Encoder, "-preset", "ultrafast", "-profile:v", "main10", "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error:" + params}, args...)
-	out, err := exec.CommandContext(ctx, ffmpegPath, append(argv, "-f", "null", "-")...).CombinedOutput()
-	if err != nil {
+	tail := func(out []byte) []byte {
 		if len(out) > 240 {
-			out = out[len(out)-240:]
+			return out[len(out)-240:]
 		}
-		return fmt.Errorf("compact keep-HDR probe failed: %v: %s", err, bytes.TrimSpace(out))
+		return out
+	}
+	out := filepath.Join(dir, "probe.hevc")
+	argv := append([]string{"-hide_banner", "-nostats", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1440x1080:r=24:d=1,format=yuv420p10le", "-frames:v", "1"}, args...)
+	if b, err := exec.CommandContext(ctx, ffmpegPath, append(argv, "-f", "hevc", out)...).CombinedOutput(); err != nil {
+		return fmt.Errorf("compact keep-HDR probe failed: %v: %s", err, bytes.TrimSpace(tail(b)))
+	}
+	info, err := exec.CommandContext(ctx, ffmpegPath, "-hide_banner", "-nostats", "-i", out, "-vf", "showinfo", "-f", "null", "-").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("compact keep-HDR probe decode failed: %v: %s", err, bytes.TrimSpace(tail(info)))
+	}
+	for _, want := range []string{"color_space:bt2020nc color_primaries:bt2020 color_trc:smpte2084",
+		"Mastering display metadata: has_primaries:1 has_luminance:1 r(0.6800,0.3200) g(0.2650,0.6900) b(0.1500 0.0600) wp(0.3127, 0.3290) min_luminance=0.005000, max_luminance=1000.000000",
+		"Content light level metadata: MaxCLL=1000, MaxFALL=400"} {
+		if !bytes.Contains(info, []byte(want)) {
+			return fmt.Errorf("compact keep-HDR probe output lacks %q", want)
+		}
 	}
 	return nil
 }

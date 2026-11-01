@@ -79,15 +79,19 @@ func TestCompactKeepHDRChainArgsAndEvidence(t *testing.T) {
 		t.Fatalf("PQ10 params %s", got)
 	}
 
-	// Measurement: the reference through the SDR chain of the source, the
-	// candidate through the same LUT at its own size.
+	// Measurement: the reference takes the encode's own picture chain (the
+	// target size in 4:2:0), then both sides the same tone map at that size.
 	ref, cand, err := compactMeasurementChains(p)
 	if err != nil {
 		t.Fatal(err)
 	}
+	encodeChain, err := compactVideoFilter(p, "")
+	if err != nil || ref != encodeChain+","+cand {
+		t.Fatalf("reference chain %s, want %s,%s (%v)", ref, encodeChain, cand, err)
+	}
 	sdrRef, err := compactFilterForRun(compactPQPlan())
-	if err != nil || ref != sdrRef {
-		t.Fatalf("reference chain %s, want %s (%v)", ref, sdrRef, err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	lut := "lut3d=file=" + escapeFFmpegFilterPath(compactLUTPath(p)) + ":interp"
 	if !strings.Contains(cand, lut) || !strings.Contains(cand, "scale=w=1920:h=1080:in_color_matrix=bt2020") || !strings.HasSuffix(cand, "range=tv"+sideData) {
@@ -101,7 +105,7 @@ func TestCompactKeepHDRChainArgsAndEvidence(t *testing.T) {
 	if err != nil || e.ChainVersion != transcode.CompactHDRChainVersion || e.AppliedTo != "reference_and_candidate" || e.MeasurementSpace != compactHDRMeasurementSpace || e.ToneMapMethod != transcode.CompactToneMapPQ {
 		t.Fatalf("evidence %+v %v", e, err)
 	}
-	if !strings.Contains(e.ReferenceChain, "lut3d=file=compact.cube:") || !strings.Contains(e.CandidateChain, "lut3d=file=compact.cube:") || strings.Contains(e.CandidateChain+e.ReferenceChain, compactLUTDir()) {
+	if !strings.HasSuffix(e.ReferenceChain, ","+e.CandidateChain) || !strings.HasPrefix(e.ReferenceChain, encodeChain) || !strings.Contains(e.CandidateChain, "lut3d=file=compact.cube:") || strings.Contains(e.CandidateChain+e.ReferenceChain, compactLUTDir()) {
 		t.Fatalf("evidence chains %s / %s", e.ReferenceChain, e.CandidateChain)
 	}
 	if e, _ := compactChainEvidence(compactPQPlan(), "sha256:abc"); e.CandidateChain != "" || e.AppliedTo != "encoder_input_and_reference" {
@@ -211,7 +215,7 @@ func TestRealCompactKeepHDREncode(t *testing.T) {
 	if ok, err := libX265HasDolbyVisionOption(ctx, ffmpeg); err != nil || !ok {
 		t.Skipf("libx265 without -dolbyvision: %v", err)
 	}
-	if err := probeCompactHDRChain(ctx, ffmpeg); err != nil {
+	if err := probeCompactHDRChain(ctx, ffmpeg, t.TempDir()); err != nil {
 		t.Fatalf("keep-HDR probe: %v", err)
 	}
 	encode := func(t *testing.T, dir, source string, maxHeight int) (*transcode.CompactPlan, mediainspect.DynamicRange, string, mediainspect.DetailedReport) {

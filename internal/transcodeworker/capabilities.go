@@ -300,7 +300,7 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// A failed probe only withholds the flag: it is not a fingerprint input.
 	if caps.CompactTranscode && caps.Encoders[libX265Encoder] {
 		if ok, _ := libX265HasDolbyVisionOption(ctx, ffmpegPath); ok {
-			caps.CompactKeepHDR = probeCompactHDRChain(ctx, ffmpegPath) == nil
+			caps.CompactKeepHDR = probeCompactHDRChain(ctx, ffmpegPath, scratchRoot) == nil
 		}
 	}
 	if probeQuality && caps.Filters["libvmaf"] {
