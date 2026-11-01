@@ -92,6 +92,14 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 			item, err = e.deps.Store.GetTranscodeBatchItem(parentID, itemKey)
 		} else {
 			item, err = e.deps.Store.FindTranscodeBatchItemByChildActionID(ec.InstanceID)
+			if err == nil && item == nil {
+				// A profile batch's child is linked to its item only after its
+				// first run; its idempotency key names the item until then.
+				var key string
+				if key, err = e.childIdempotencyKey(ec.InstanceID); err == nil {
+					item, err = e.deps.Store.FindTranscodeBatchItemByChildKey(key)
+				}
+			}
 		}
 		if err != nil {
 			return "", err
@@ -195,6 +203,14 @@ func (e *Engine) readyForQueue(ctx context.Context, workers []transcode.NamedWor
 func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
 	if e.deps.Store == nil || ec.InstanceID == "" {
 		return StepResult{}, false
+	}
+	// A child of a paused, decision-waiting or cancelled batch takes no
+	// worker: its submit would stop at the parent check while the worker
+	// counted it, holding a slot every other conversion waits for.
+	if parentID := getString(ec.Inputs, "parent_action_id"); parentID != "" {
+		if policy, err := e.parentPolicy(parentID); err == nil && policy != "" {
+			return e.parentBlockedResult("worker assignment", policy), true
+		}
 	}
 	key, err := e.ensureQueueOrder(ec)
 	if err != nil {

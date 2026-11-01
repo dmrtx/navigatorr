@@ -504,3 +504,50 @@ func TestSlotWaitBackoffHonoursRetryAfterAndFreedSlot(t *testing.T) {
 		t.Fatal("a freed slot overrode the worker's Retry-After")
 	}
 }
+
+// Regression: an earlier file queued again (Try again on a failed file) while
+// a later file of the same batch waits for a worker was held behind it, and
+// the waiting file counted the requeued one ahead of itself: both waited for
+// each other and every newer conversion behind them. The requeued file may
+// start; files after the waiting one may not.
+func TestBatchStartsARequeuedEarlierFileWhileALaterOneWaits(t *testing.T) {
+	e, st, _, srv, _ := setupBatchTestEnv(t, newSlotWorker(1).executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	items := []store.TranscodeBatchItem{
+		{ID: 2, ItemKey: "two", Status: "queued"},
+		{ID: 5, ItemKey: "five", Status: "waiting_for_slot"},
+		{ID: 7, ItemKey: "seven", Status: "queued"},
+	}
+	got := e.slotFairPending(context.Background(), "batch-x", items, []int{0, 2})
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("pending %v, want only the requeued earlier file [0]", got)
+	}
+}
+
+// A child of a paused batch is given no worker: it would hold a slot every
+// other conversion waits for while its submit stops at the parent check.
+func TestPausedBatchChildTakesNoWorker(t *testing.T) {
+	worker := newSlotWorker(1)
+	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	e.deps.Registry = nil
+	ctx := context.Background()
+
+	a1 := writeSparseMedia(t, root, "Paused One.mkv")
+	batch, err := e.Run(ctx, "transcode_batch", map[string]any{"paths": []string{a1}, "profile": "general-hevc", "media_type": "movie", "dry_run": false, "paused": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := e.Run(ctx, "transcode_media", map[string]any{"path": a1, "profile": "general-hevc", "parent_action_id": batch.ID})
+	if err != nil || child.WaitingCondition != "parent_paused" {
+		t.Fatalf("child of a paused batch: %+v %v", child, err)
+	}
+	if w := getString(actionState(t, st, child.ID), workerStateKey); w != "" {
+		t.Fatalf("child of a paused batch was assigned worker %q", w)
+	}
+	if got := worker.acceptedSources(); len(got) != 0 {
+		t.Fatalf("worker accepted %v", got)
+	}
+}

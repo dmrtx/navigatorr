@@ -208,7 +208,9 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 		if err != nil {
 			return "", "worker_unreachable", fmt.Errorf("Could not count the jobs assigned to each worker: %v", err)
 		}
-		active = counts
+		for name, n := range counts {
+			active[e.resolveWorker(name)] += n
+		}
 	}
 	best, bestFree, anyReady := -1, 0, false
 	for i, w := range workers {

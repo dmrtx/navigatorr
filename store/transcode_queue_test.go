@@ -59,3 +59,25 @@ func TestTranscodeQueueListsOnlyWorkThatCanStart(t *testing.T) {
 		t.Fatalf("waiters: %+v", waiters)
 	}
 }
+
+// A child its paused or decision-waiting batch holds before it sent anything
+// uses no slot on its worker; once it holds a job it does.
+func TestActiveWorkerCountLeavesOutChildrenHeldBeforeSubmit(t *testing.T) {
+	s := openTest(t)
+	add := func(id, condition, state string) {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusWaitingExternal, WaitingCondition: condition, StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("running", "transcode_complete", `{"worker":"node-a","job_id":"j1"}`)
+	add("held", "parent_paused", `{"worker":"node-a"}`)
+	add("held-decision", "parent_waiting_decision", `{"worker":"node-a"}`)
+	add("held-with-job", "parent_paused", `{"worker":"node-a","job_id":"j2"}`)
+	counts, err := s.CountActiveWorkerActions("transcode_media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["node-a"] != 2 {
+		t.Fatalf("counts %v, want node-a=2", counts)
+	}
+}

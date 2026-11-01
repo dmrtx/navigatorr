@@ -122,7 +122,9 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 }
 
 // CountActiveWorkerActions counts the unfinished actions of one kind by the
-// worker they were assigned. Actions without a worker yet are not counted.
+// worker they were assigned. Actions without a worker yet are not counted,
+// nor a child held by its paused or decision-waiting batch before it sent
+// anything to its worker: it uses no slot there.
 func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,6 +134,11 @@ func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, err
 		AND action_name = ?
 		AND json_valid(state_json)
 		AND json_type(state_json, '$.worker') = 'text'
+		AND NOT (COALESCE(waiting_condition, '') IN ('parent_paused', 'parent_waiting_decision')
+			AND COALESCE(json_extract(state_json, '$.job_id'), '') = ''
+			AND COALESCE(json_extract(state_json, '$.external_reference'), '') = ''
+			AND COALESCE(json_extract(state_json, '$.transcode_submitted'), 0) NOT IN (1, 'true')
+			AND COALESCE(json_extract(state_json, '$.transcode_reconcile'), 0) NOT IN (1, 'true'))
 		GROUP BY 1`, actionName)
 	if err != nil {
 		return nil, err
