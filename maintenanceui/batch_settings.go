@@ -25,6 +25,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		AudioOnly        *bool    `json:"audio_only"`
 		SmallerSaving    *bool    `json:"accept_smaller_saving"`
 		MaxHeight        *float64 `json:"max_height"`
+		KeepHDR          *bool    `json:"keep_hdr"`
 		ID               string   `json:"id"`
 		Scope            string   `json:"scope"`
 		CandidateID      string   `json:"candidate_id"`
@@ -85,7 +86,7 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 	itemSettings := operationMap(state["batch_item_settings"])
 	var hardware action.HardwareChoice
 	var budgets []frozenBudget
-	audioOnly, smaller := 0, 0
+	audioOnly, smaller, keepHDR := 0, 0, 0
 	heights := map[int]bool{}
 	profiles := map[string]int{}
 	damaged := 0
@@ -116,6 +117,9 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 			smaller++
 		}
 		heights[itemFrozenMaxHeight(state, item.ItemKey)] = true
+		if itemFrozenKeepHDR(state, item.ItemKey) {
+			keepHDR++
+		}
 		if body.Scope == "file" {
 			// The file itself, so the goal dialog can preview its streams.
 			plan["item_key"], plan["source_path"] = item.ItemKey, item.FilePath
@@ -224,6 +228,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settingsView["audio_only"], settingsView["audio_only_mixed"] = audioOnly == selected, audioOnly > 0 && audioOnly < selected
 		// Whether they all accept the smaller saving, so encoding again keeps it.
 		settingsView["accept_smaller_saving"] = smaller == selected
+		// Whether every file was frozen with Shrink keeping HDR, or only some.
+		settingsView["keep_hdr"], settingsView["keep_hdr_mixed"] = keepHDR == selected, keepHDR > 0 && keepHDR < selected
 	}
 	// The Shrink height the files were frozen with, when they agree on one.
 	if len(heights) == 1 {
@@ -296,6 +302,13 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			settings["max_height"] = *body.MaxHeight
+		}
+		if body.KeepHDR != nil && *body.KeepHDR {
+			if body.Mode != "compact" {
+				fail(w, 400, "keep_hdr is only supported with mode=compact")
+				return
+			}
+			settings["keep_hdr"] = true
 		}
 		if err := action.ValidateHardwareInputs(body.Mode, settings); err != nil {
 			fail(w, 400, err.Error())
@@ -386,6 +399,16 @@ func itemFrozenMaxHeight(state map[string]any, itemKey string) int {
 		return 0
 	}
 	return compactMaxHeight(policy)
+}
+
+// itemFrozenKeepHDR reports whether the item's Shrink goal keeps HDR, from its
+// own goal-change policy when it has one, else the batch's.
+func itemFrozenKeepHDR(state map[string]any, itemKey string) bool {
+	holder := state
+	if row := operationMap(operationMap(state["batch_item_settings"])[itemKey]); operationMap(row["mode_policy"]) != nil {
+		holder = row
+	}
+	return operationMap(operationMap(holder["mode_policy"])["compact"])["keep_hdr"] == true
 }
 
 func containsMode(mode string) bool {

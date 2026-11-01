@@ -159,8 +159,8 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact capability: %v", err)}, nil
 		}
-		if !caps.SupportsCompactTranscode() {
-			return StepResult{Status: StepFailed, Error: "worker does not support compact SDR conversion; upgrade the worker before encoding"}, nil
+		if err := compactPlanWorkerError(caps, plan.Compact); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error() + " before encoding"}, nil
 		}
 	}
 	// Where the candidate waits for its promotion. Nothing is asked of the

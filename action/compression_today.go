@@ -58,7 +58,7 @@ func CompressionPolicyToday() (CompressionToday, error) {
 			}
 			hardware = rules
 		}
-		snapshot, err := modePolicyGoal(g.mode, false, 0, hardware, false, nil, nil, g.audioOnly, false)
+		snapshot, err := modePolicyGoal(g.mode, false, 0, hardware, false, nil, nil, g.audioOnly, false, false)
 		if err != nil {
 			return out, fmt.Errorf("%s: %w", g.goal, err)
 		}
@@ -75,7 +75,7 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 	switch {
 	case p.Compact != nil:
 		height := fmt.Sprintf("%dp", p.Compact.MaxHeight)
-		d.Picture = fmt.Sprintf("HDR10, HLG and Dolby Vision 7/8 are tone-mapped to SDR (BT.709) and the picture is scaled to at most %s; Keep 4K converts to SDR at 4K. An SDR file that already fits is left as it is; Dolby Vision 5 is refused.", height)
+		d.Picture = fmt.Sprintf("HDR10, HLG and Dolby Vision 7/8 are tone-mapped to SDR (BT.709) and the picture is scaled to at most %s; Keep 4K converts to SDR at 4K. Keep HDR instead encodes HDR10 and HLG with x265 10-bit and keeps their mastering and light-level metadata; Dolby Vision 7/8 and HDR10+ come out as HDR10. An SDR file that already fits is left as it is; Dolby Vision 5 is refused.", height)
 	case p.Size != nil && p.Size.AudioOnly:
 		d.Picture = "The video is copied and proven unchanged: 4K, HDR and Dolby Vision included."
 	default:

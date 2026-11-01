@@ -190,10 +190,15 @@ func sizeModeV3Policy(allowSlow bool) *ModeSizePolicy {
 }
 
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no
-// taller than MaxHeight, through the named worker chain.
+// taller than MaxHeight, through the named worker chain. With KeepHDR an HDR
+// or Dolby Vision 7/8 source keeps HDR instead (transcode.CompactHDRChainVersion:
+// HDR10 or HLG with the source's static metadata, the dynamic layer dropped);
+// an SDR source is planned as without it. Goals frozen before keep_hdr have
+// no such field and keep their digest.
 type ModeCompactPolicy struct {
 	MaxHeight    int    `json:"max_height"`
 	ChainVersion string `json:"chain_version"`
+	KeepHDR      bool   `json:"keep_hdr,omitempty"`
 }
 
 // Hardware search (size mode, on unless the operation turns it off). The ladder
@@ -299,6 +304,9 @@ func ValidateHardwareInputs(mode string, inputs map[string]any) error {
 	if _, err := modeSmallerSavingInput(mode, inputs); err != nil {
 		return err
 	}
+	if _, err := modeKeepHDRInput(mode, inputs); err != nil {
+		return err
+	}
 	if _, err := modeSlowPresetInput(mode, inputs); err != nil {
 		return err
 	}
@@ -379,6 +387,24 @@ func modeAudioOnlyInput(mode string, inputs map[string]any) (bool, error) {
 	return true, nil
 }
 
+// modeKeepHDRInput reads keep_hdr, the Shrink goal that keeps HDR and Dolby
+// Vision 7/8 sources as HDR10 or HLG instead of converting them to SDR:
+// compact mode only, off unless the operation says true.
+func modeKeepHDRInput(mode string, inputs map[string]any) (bool, error) {
+	raw, has := inputs["keep_hdr"]
+	if !has || raw == nil {
+		return false, nil
+	}
+	b, ok := raw.(bool)
+	if !ok {
+		return false, inputErr("keep_hdr", "keep_hdr must be true or false")
+	}
+	if b && mode != "compact" {
+		return false, inputErr("keep_hdr", "keep_hdr is only supported with mode=compact")
+	}
+	return b, nil
+}
+
 // modeSmallerSavingInput reads accept_smaller_saving, the size goal that keeps
 // a file saving transcode.SizeSmallerSavingPercent instead of 15%: size mode
 // only, off unless the operation says true, and not with audio_only (which
@@ -413,14 +439,17 @@ func modeSmallerSavingInput(mode string, inputs map[string]any) (bool, error) {
 // only). It is frozen with the goal, so a later change of the global list never
 // reaches a job already planned.
 func modePolicyWithTracks(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy) (ModePolicySnapshot, error) {
-	return modePolicyGoal(mode, anime, maxHeight, hardware, allowSlow, budget, tracks, false, false)
+	return modePolicyGoal(mode, anime, maxHeight, hardware, allowSlow, budget, tracks, false, false, false)
 }
 
 // modePolicyGoal also freezes the audio-only size goal (audioOnly), which
 // drops the media engine and the minimum saving and plans one audio-only
-// encode (RecipeAudioOnly), and the size goal that accepts a smaller saving
-// (smallerSaving).
-func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy, audioOnly, smallerSaving bool) (ModePolicySnapshot, error) {
+// encode (RecipeAudioOnly), the size goal that accepts a smaller saving
+// (smallerSaving), and the Shrink goal that keeps HDR (keepHDR).
+func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.HardwareSearchRules, allowSlow bool, budget *SizeBudgetPolicy, tracks *transcode.TrackPolicy, audioOnly, smallerSaving, keepHDR bool) (ModePolicySnapshot, error) {
+	if keepHDR && mode != "compact" {
+		return ModePolicySnapshot{}, inputErr("keep_hdr", "keep_hdr is only supported with mode=compact")
+	}
 	if smallerSaving {
 		switch {
 		case mode != "size":
@@ -446,6 +475,9 @@ func modePolicyGoal(mode string, anime bool, maxHeight int, hardware *transcode.
 	snapshot, err := modePolicyContent(mode, anime, maxHeight, hardware, allowSlow, budget)
 	if err != nil {
 		return snapshot, err
+	}
+	if keepHDR {
+		snapshot.Compact.KeepHDR = true
 	}
 	if tracks != nil {
 		if mode != "size" && mode != "compact" {
@@ -639,6 +671,9 @@ func validateModeInputs(inputs map[string]any) error {
 		if _, err := modeSmallerSavingInput("", inputs); err != nil {
 			return err
 		}
+		if _, err := modeKeepHDRInput("", inputs); err != nil {
+			return err
+		}
 		return nil
 	}
 	mode, ok := raw.(string)
@@ -673,13 +708,17 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
+	keepHDR, err := modeKeepHDRInput(mode, inputs)
+	if err != nil {
+		return err
+	}
 	// Whether the global list or the job's own is in force is decided when the
 	// goal freezes; here the inputs only have to be well formed.
 	trackPolicy, err := trackPolicyFor(mode, tracks, nil)
 	if err != nil {
 		return attributeInput(inputKeepLanguages, err)
 	}
-	if _, err := modePolicyGoal(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, trackPolicy, audioOnly, smallerSaving); err != nil {
+	if _, err := modePolicyGoal(mode, getBool(inputs, "is_anime") || getString(inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, trackPolicy, audioOnly, smallerSaving, keepHDR); err != nil {
 		return attributeInput("mode", err)
 	}
 	for _, key := range []string{"profile", "profile_config", "priority", "metric", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "expected_video_codec", "shared_calibration", "calibration_items", "batch_fixed_quality", "batch_calibration_digest"} {
@@ -780,7 +819,11 @@ func freezeModePolicy(ec *ExecutionContext) (*ModePolicySnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	p, err := modePolicyGoal(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, tracks, audioOnly, smallerSaving)
+	keepHDR, err := modeKeepHDRInput(mode, ec.Inputs)
+	if err != nil {
+		return nil, err
+	}
+	p, err := modePolicyGoal(mode, getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime", maxHeight, hardware, slow, budget, tracks, audioOnly, smallerSaving, keepHDR)
 	if err != nil {
 		return nil, err
 	}
@@ -997,7 +1040,13 @@ func compactSourcePlanWith(ctx context.Context, rep *mediainspect.DetailedReport
 	if err != nil {
 		return nil, "compact_frame_evidence_unavailable"
 	}
-	plan, err := transcode.NewCompactPlan(d, video[0], p.Compact.MaxHeight)
+	// Keep HDR applies to an HDR picture only; an SDR one, Dolby Vision 8.2
+	// (an SDR base layer) included, is planned exactly as without it.
+	chain := transcode.CompactChainVersion
+	if p.Compact.KeepHDR && d.Signal() != mediainspect.SignalSDR {
+		chain = transcode.CompactHDRChainVersion
+	}
+	plan, err := transcode.NewCompactPlanForChain(chain, d, video[0], p.Compact.MaxHeight)
 	if err != nil {
 		return nil, err.Error()
 	}

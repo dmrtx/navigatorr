@@ -6,6 +6,7 @@ import "github.com/jakenesler/navigatorr/transcode"
 // first. Every policy version a job can freeze has an entry (see the test), so
 // a new version cannot ship without saying what it changed.
 var compressionChanges = []CompressionChange{
+	{Date: "2026-11-01", Text: "Shrink can keep HDR: HDR10 and HLG are encoded with x265 10-bit keeping their metadata, and Dolby Vision 7/8 and HDR10+ come out as HDR10. It needs a worker that reports keep-HDR support."},
 	{Date: "2026-10-31", Version: transcode.ModePolicyV9, Text: "A Save space file that saved less than 15% can run again accepting a 5% saving."},
 	{Date: "2026-10-31", Version: transcode.ModePolicyV8, Text: "Shrink converts audio like Save space: any lossy track well above its AAC target, lossy Atmos included, not only lossless audio."},
 	{Date: "2026-10-31", Text: "Shrink can keep 4K: HDR becomes SDR at 4K. SDR 4K files are recommended Save space, which keeps their resolution."},
