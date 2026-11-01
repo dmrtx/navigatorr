@@ -681,7 +681,7 @@ function option(select, value, text = value) {
   select.append(o);
   return o;
 }
-const routeTabs = {files:"library",queue:"jobs",profiles:"recipes",compression:"recipes",stats:"stats",settings:"advanced",more:"advanced"};
+const routeTabs = {files:"library",queue:"jobs",review:"review",profiles:"recipes",compression:"recipes",stats:"stats",settings:"advanced",more:"advanced"};
 const routeStatuses = ["all","pending","running","waiting_external","waiting_decision","completed","failed","cancelled","archived"];
 function navigationRoute(search = "") {
   const q = new URLSearchParams(search);
@@ -822,6 +822,7 @@ async function applyNavigation(route) {
     if (tab === "recipes" && route.profile && !(recipeIsDirty() && route.profile === state.recipe?.name)) await readRecipe(route.profile);
     if (tab === "advanced" && route.copies) await loadBackups();
     if (tab === "jobs" || tab === "stats") await loadJobs();
+    if (tab === "review") await loadReview();
     if (tab === "stats") void safe(loadStorage);
     if (current() && route.job) await openJob(route.job);
   } finally {
@@ -840,7 +841,7 @@ function rememberJobsScroll() {
   state.jobsScrollFilter = $("job-filter").value;
 }
 if (typeof window !== "undefined") window.addEventListener("scroll", rememberJobsScroll, {passive: true});
-const tabTitles = {library: "Files", jobs: "Activity", recipes: "Compression", stats: "Stats", advanced: "Settings"};
+const tabTitles = {library: "Files", jobs: "Activity", review: "Review", recipes: "Compression", stats: "Stats", advanced: "Settings"};
 function selectTab(tab, fromRoute = false) {
   if (!fromRoute && state.applyingNavigation) { state.routeRevision++; state.applyingNavigation=false; }
   // Leaving Activity remembers how far down it was, so coming back (the Back
@@ -862,6 +863,7 @@ function selectTab(tab, fromRoute = false) {
   if (typeof window !== "undefined") window.scrollTo({ top: state.jobsRestore || 0 });
   writeNavigation();
   if (["jobs", "stats"].includes(tab) && !fromRoute) safe(loadJobs);
+  if (tab === "review" && !fromRoute) safe(loadReview);
   if (tab !== "stats") clearTimeout(state.storageTimer);
   else if (!fromRoute) safe(loadStorage);
   // The node's job settings come from the worker activity report.
@@ -6959,6 +6961,131 @@ async function refreshWorkerActivity(force) {
     if (auth === state.authRevision) renderWorkerActivity(null);
   } finally { state.activityRequest = false; }
 }
+
+// Review: the maintenance queue of entries a model or the owner keeps adding
+// (files worth converting, titles missing a language). Each knows its folder, so
+// one tap shows it in Files; the owner can mark one processed or drop it.
+const reviewKinds = {oversized: "Large file", missing_accessible_language: "Language", dangerous_media: "Unsafe", possible_media_mismatch: "Mismatch"};
+const reviewStatusWords = {researching: "Researching", candidate_found: "Candidate found", downloading: "Downloading", downloaded: "Downloaded", verifying: "Verifying", importing: "Importing", replacing: "Replacing", blocked: "Blocked"};
+const reviewIcons = {
+  files: "M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3Z",
+  done: "M5 12.5l4.5 4.5L19 7.5",
+  drop: "M6 6l12 12M18 6L6 18",
+  undo: "M9 7L4 12l5 5M4 12h10a6 6 0 0 1 0 12",
+};
+function reviewIcon(name) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.8");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", reviewIcons[name]);
+  svg.append(path);
+  return svg;
+}
+function reviewButton(name, label, run) {
+  const b = node("button", "", "review-action");
+  b.type = "button";
+  b.setAttribute("aria-label", label);
+  b.title = label;
+  b.append(reviewIcon(name));
+  b.addEventListener("click", (e) => { e.stopPropagation(); void safe(async () => { b.disabled = true; try { await run(); } finally { b.disabled = false; } }); });
+  return b;
+}
+function reviewRow(item) {
+  const li = node("li", "", "review-row");
+  li.dataset.reviewId = item.id;
+  const open = item.in_files && item.folder;
+  // A real link to the folder in Files, so it also opens in a new tab.
+  const route = open ? filesRouteFor(item.folder, {folder: true}) : null;
+  const main = node(route ? "a" : "div", "", "review-main");
+  if (route) {
+    main.href = `?${route}`;
+    main.title = "Show in Files";
+    main.addEventListener("click", (e) => {
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+      e.preventDefault();
+      showInFiles(item.folder, {folder: true});
+    });
+  }
+  const head = node("div", "", "review-head");
+  const title = node("span", item.title, "review-title");
+  if (item.year) title.append(node("span", ` (${item.year})`, "review-year"));
+  head.append(title);
+  if (item.size_bytes != null) head.append(node("span", bytes(item.size_bytes), "review-size"));
+  main.append(head);
+  const where = node("span", item.folder || "Folder not found in " + (item.service === "radarr" ? "Radarr" : "Sonarr"), "review-path");
+  if (item.folder) where.title = item.folder;
+  main.append(where);
+  const tags = node("span", "", "review-tags");
+  tags.append(node("span", reviewKinds[item.issue_type] || item.issue_type, "review-tag"));
+  if (item.state === "open" && reviewStatusWords[item.status]) tags.append(node("span", reviewStatusWords[item.status], "review-tag active"));
+  if (item.state !== "open") tags.append(node("span", item.state === "processed" ? "Processed" : "Dropped", "review-tag"));
+  if (item.folder && !item.in_files) tags.append(node("span", "Outside the media folders", "review-tag"));
+  main.append(tags);
+  if (item.notes) {
+    const note = node("span", item.notes, "review-note");
+    note.title = item.notes;
+    main.append(note);
+  }
+  li.append(main);
+  const actions = node("div", "", "review-actions");
+  if (item.state === "open") {
+    actions.append(reviewButton("done", `Mark ${item.title} as processed`, () => reviewAct(item, "processed")));
+    actions.append(reviewButton("drop", `Drop ${item.title}`, () => reviewAct(item, "dismiss")));
+  } else if (item.closed_by === "console") {
+    actions.append(reviewButton("undo", `Put ${item.title} back to review`, () => reviewAct(item, "restore")));
+  }
+  li.append(actions);
+  return li;
+}
+function renderReview() {
+  const data = state.review;
+  const counts = data.counts || {};
+  for (const [value, label, n] of [["open", "To do", counts.open], ["processed", "Processed", counts.processed], ["dismissed", "Dropped", counts.dismissed]]) {
+    const o = $("review-state").querySelector(`option[value="${value}"]`);
+    if (o) o.textContent = n != null ? `${label} (${n})` : label;
+  }
+  const list = $("review-list");
+  const items = data.items || [];
+  if (!items.length) {
+    const word = {open: "Nothing waits for review.", processed: "Nothing marked processed yet.", dismissed: "Nothing dropped."}[$("review-state").value];
+    list.replaceChildren(node("li", word, "empty"));
+    $("review-summary").textContent = "";
+    return;
+  }
+  const sized = items.filter(i => i.size_bytes != null);
+  const total = sized.reduce((sum, i) => sum + i.size_bytes, 0);
+  $("review-summary").textContent = `${items.length} ${items.length === 1 ? "entry" : "entries"}${sized.length ? ` · ${bytes(total)} on disk` : ""}`;
+  list.replaceChildren(...items.map(reviewRow));
+}
+async function loadReview() {
+  const auth = state.authRevision;
+  const query = new URLSearchParams({state: $("review-state").value});
+  if ($("review-kind").value) query.set("issue_type", $("review-kind").value);
+  const data = await api(`maintenance-queue?${query}`);
+  if (auth !== state.authRevision || $("workspace").hidden) return;
+  state.review = data;
+  renderReview();
+}
+async function reviewAct(item, action) {
+  const done = await api("maintenance-queue", {id: item.id, action});
+  if (done.counts) state.review.counts = done.counts;
+  state.review.items = (state.review.items || []).filter(i => i.id !== item.id);
+  renderReview();
+  const undo = {run: async () => { await api("maintenance-queue", {id: item.id, action: "restore"}); await loadReview(); }};
+  if (action === "processed") notify(`${item.title} marked as processed.`, {action: {label: "Undo", ...undo}});
+  else if (action === "dismiss") notify(`${item.title} dropped. It will not be queued again.`, {action: {label: "Undo", ...undo}});
+  else notify(`${item.title} is back in To do.`);
+}
+state.review = {items: [], counts: {}};
+$("refresh-review").addEventListener("click", () => safe(loadReview));
+$("review-state").addEventListener("change", () => safe(loadReview));
+$("review-kind").addEventListener("change", () => safe(loadReview));
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
 $("storage-refresh").addEventListener("click", () => void safe(measureStorage));
 // A chosen filter lights the filter button, since the select itself is only an icon.

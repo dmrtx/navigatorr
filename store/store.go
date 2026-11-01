@@ -609,6 +609,13 @@ func (s *Store) AddItem(it MaintenanceItem) (MaintenanceItem, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A candidate the owner dropped from the console stays dropped: adding it
+	// again returns that item, not a new pending one.
+	if it.MediaID != "" {
+		if dropped, ok := s.consoleDismissedLocked(it); ok {
+			return dropped, nil
+		}
+	}
 	now := nowStr()
 	res, err := s.db.Exec(`INSERT INTO maintenance_items
 		(media_type, service, media_id, title, issue_type, priority, status,
