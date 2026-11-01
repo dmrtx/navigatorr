@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os/exec"
@@ -90,19 +91,100 @@ func probeVideoPackets(ctx context.Context, ffprobePath, path string) ([]videoPa
 }
 
 func probeVideoStreamFacts(ctx context.Context, ffprobePath, path string) (videoStreamFacts, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_data_hash", "sha256",
-		"-show_entries", "stream=extradata_hash,sample_aspect_ratio,r_frame_rate,avg_frame_rate", "-of", "compact=p=0", path)
+	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_data",
+		"-show_entries", "stream=codec_name,extradata,sample_aspect_ratio,r_frame_rate,avg_frame_rate", "-of", "json", path)
 	out, err := cmd.Output()
 	chargeCPU(ctx, cmd)
 	if err != nil {
 		return videoStreamFacts{}, fmt.Errorf("reading video stream fields: %w", err)
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) != 1 {
+	var probe struct {
+		Streams []struct {
+			Codec        string `json:"codec_name"`
+			Extradata    string `json:"extradata"`
+			Aspect       string `json:"sample_aspect_ratio"`
+			RFrameRate   string `json:"r_frame_rate"`
+			AvgFrameRate string `json:"avg_frame_rate"`
+		} `json:"streams"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return videoStreamFacts{}, fmt.Errorf("reading video stream fields: %w", err)
+	}
+	if len(probe.Streams) != 1 {
 		return videoStreamFacts{}, fmt.Errorf("reading video stream fields: expected one main video stream")
 	}
-	f := compactFields(lines[0])
-	return videoStreamFacts{extradata: strings.ToLower(f["extradata_hash"]), aspect: f["sample_aspect_ratio"], rFrameRate: f["r_frame_rate"], avgFrameRate: f["avg_frame_rate"]}, nil
+	st := probe.Streams[0]
+	extradata, err := parseFFprobeHexDump(st.Extradata)
+	if err != nil {
+		return videoStreamFacts{}, fmt.Errorf("reading video extradata: %w", err)
+	}
+	if norm(st.Codec) == "hevc" {
+		extradata = normalizeHVCC(extradata)
+	}
+	sum := sha256.Sum256(extradata)
+	return videoStreamFacts{extradata: "sha256:" + hex.EncodeToString(sum[:]), aspect: st.Aspect, rFrameRate: st.RFrameRate, avgFrameRate: st.AvgFrameRate}, nil
+}
+
+// parseFFprobeHexDump decodes ffprobe's -show_data dump: lines of an
+// 8-digit offset, a colon, then up to 16 bytes as 4-digit groups in a fixed
+// 40-column field before the ASCII column.
+func parseFFprobeHexDump(dump string) ([]byte, error) {
+	var data []byte
+	for _, line := range strings.Split(dump, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) < 10 || line[8:10] != ": " {
+			return nil, fmt.Errorf("unexpected hex dump line %q", line)
+		}
+		field := line[10:]
+		if len(field) > 40 {
+			field = field[:40]
+		}
+		b, err := hex.DecodeString(strings.ReplaceAll(field, " ", ""))
+		if err != nil {
+			return nil, fmt.Errorf("unexpected hex dump line %q: %w", line, err)
+		}
+		if offset, err := strconv.ParseUint(line[:8], 16, 32); err != nil || int(offset) != len(data) {
+			return nil, fmt.Errorf("hex dump offset %q out of order", line[:8])
+		}
+		data = append(data, b...)
+	}
+	return data, nil
+}
+
+// normalizeHVCC clears the array_completeness bit of each parameter-set
+// array in an HEVC decoder configuration record. The bit only says whether
+// every parameter set of that type is in the record or may also be in-band;
+// FFmpeg's Matroska muxer writes it as 0, so a plain remux of an mkvmerge
+// file otherwise reads as a changed record although every VPS, SPS and PPS
+// byte (and every packet) is the source's. A record that does not parse is
+// returned unchanged and compared as is.
+func normalizeHVCC(rec []byte) []byte {
+	const header = 23 // 22 fixed bytes, then numOfArrays
+	if len(rec) < header || rec[0] != 1 {
+		return rec
+	}
+	out := append([]byte(nil), rec...)
+	pos := header
+	for range int(rec[header-1]) {
+		if pos+3 > len(out) {
+			return rec
+		}
+		out[pos] &^= 0x80
+		n := int(out[pos+1])<<8 | int(out[pos+2])
+		pos += 3
+		for range n {
+			if pos+2 > len(out) {
+				return rec
+			}
+			pos += 2 + (int(out[pos])<<8 | int(out[pos+1]))
+		}
+	}
+	if pos != len(out) {
+		return rec
+	}
+	return out
 }
 
 // videoPacketDigest binds the packet sequence: count, order, sizes,
