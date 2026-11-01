@@ -28,6 +28,14 @@ var PlexWriteGroups = []string{
 // ValidateServicePolicy rejects an unknown policy or write group so a typo
 // fails at load time instead of silently leaving writes off or on.
 func ValidateServicePolicy(name string, svc ServiceConfig) error {
+	// A policy is chosen by name, so a Plex called something else would run
+	// with full admin access. Refuse that instead of guessing.
+	if svc.Policy == "" && strings.Contains(strings.ToLower(name), "plex") {
+		return fmt.Errorf("service %q looks like Plex: set policy: %s (Plex's token is an admin token)", name, PolicyPlex)
+	}
+	if svc.Policy == PolicyPlex && svc.AuthMethod != "" && svc.AuthMethod != "header" {
+		return fmt.Errorf("service %q: policy %s authenticates with the X-Plex-Token header; auth_method %q would put the token in the URL", name, PolicyPlex, svc.AuthMethod)
+	}
 	switch svc.Policy {
 	case "":
 		if len(svc.AllowWrites) > 0 {

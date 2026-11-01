@@ -989,6 +989,12 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	for name, svc := range cfg.Services {
+		if svc.Policy == "" {
+			svc.Policy = DefaultPolicies[name]
+		}
+		if err := ValidateServicePolicy(name, svc); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		}
 		if svc.AuthMethod == "" {
 			if m, ok := DefaultAuthMethods[name]; ok {
 				svc.AuthMethod = m
@@ -999,15 +1005,11 @@ func Load(path string) (*Config, error) {
 		if svc.AuthHeader == "" {
 			if h, ok := DefaultAuthHeaders[name]; ok {
 				svc.AuthHeader = h
+			} else if svc.Policy == PolicyPlex {
+				svc.AuthHeader = DefaultAuthHeaders[PolicyPlex]
 			} else if svc.AuthMethod == "header" {
 				svc.AuthHeader = "X-Api-Key"
 			}
-		}
-		if svc.Policy == "" {
-			svc.Policy = DefaultPolicies[name]
-		}
-		if err := ValidateServicePolicy(name, svc); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", path, err)
 		}
 		if svc.AuthPrefix == "" {
 			if p, ok := DefaultAuthPrefixes[name]; ok {

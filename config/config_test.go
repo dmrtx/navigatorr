@@ -818,3 +818,35 @@ func TestServicePolicyValidation(t *testing.T) {
 		t.Errorf("valid writes rejected: %v", err)
 	}
 }
+
+func TestPlexLookalikeNamesFailClosed(t *testing.T) {
+	for _, name := range []string{"plex2", "Plex", "my_plex"} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		body := "services:\n  " + name + ":\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"k\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("%s without a policy must be rejected", name)
+		}
+		body += "    policy: plex\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s with policy: %v", name, err)
+		}
+		if cfg.Services[name].AuthHeader != "X-Plex-Token" {
+			t.Errorf("%s auth header %q", name, cfg.Services[name].AuthHeader)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "services:\n  plex:\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"k\"\n    auth_method: query\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Error("query auth would put the Plex token in the URL")
+	}
+}

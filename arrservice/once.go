@@ -3,6 +3,7 @@ package arrservice
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 // DoRequestOnce sends a mutation exactly once. Workflows which persist an
@@ -13,6 +14,7 @@ func (s *Service) DoRequestOnce(ctx context.Context, method, path string, query 
 	// 307/308 preserve POST and its body. Following either would violate the
 	// caller's one-attempt journal even though no explicit retry ran here.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	method = strings.ToUpper(strings.TrimSpace(method))
 	data, code, err := s.doRequest(ctx, &client, method, path, query, body, "")
 	if s.Snapshots != nil && method != "GET" {
 		s.Snapshots.Invalidate(s.Name)

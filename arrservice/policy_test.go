@@ -176,3 +176,55 @@ func TestPlexServiceBlocksBeforeTheNetwork(t *testing.T) {
 		t.Errorf("token %q accept %q", gotToken, gotAccept)
 	}
 }
+
+func TestPolicyAppliesToEveryEntryPoint(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	svc := NewService("plex", config.ServiceConfig{URL: srv.URL, APIKey: "tok-12345678", AuthMethod: "header", AuthHeader: "X-Plex-Token", Policy: config.PolicyPlex})
+	ctx := context.Background()
+
+	if _, _, err := svc.DoRequestOnce(ctx, "DELETE", "/library/sections/1", nil, nil); err == nil {
+		t.Error("DoRequestOnce must go through the policy")
+	}
+	if _, _, err := svc.DoRequest(ctx, "put", "/library/sections/1", nil, nil); err == nil {
+		t.Error("a lower-case method must be judged as the upper-case one")
+	}
+	if _, _, err := svc.DoRequestWithContentType(ctx, " delete ", "/library/sections/1", nil, nil, ""); err == nil {
+		t.Error("a padded lower-case method must be judged as the upper-case one")
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("blocked requests reached the server %d times", hits.Load())
+	}
+	if _, _, err := svc.DoRequest(ctx, "get", "/library/sections", nil, nil); err != nil || hits.Load() != 1 {
+		t.Errorf("a lower-case read should pass: %v hits %d", err, hits.Load())
+	}
+}
+
+// Go would forward X-Plex-Token to wherever a redirect points.
+func TestTokenIsNotForwardedToAnotherHost(t *testing.T) {
+	var leaked atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Plex-Token") != "" {
+			leaked.Store(true)
+		}
+	}))
+	defer other.Close()
+	// 127.0.0.1 vs localhost: the same machine, a different host name.
+	target := "http://localhost:" + other.Listener.Addr().String()[len("127.0.0.1:"):] + "/x"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	defer srv.Close()
+	svc := NewService("plex", config.ServiceConfig{URL: srv.URL, APIKey: "tok-12345678", AuthMethod: "header", AuthHeader: "X-Plex-Token", Policy: config.PolicyPlex})
+	_, code, _ := svc.DoRequest(context.Background(), "GET", "/library/sections", nil, nil)
+	if leaked.Load() {
+		t.Fatal("token was forwarded to another host")
+	}
+	if code != http.StatusFound {
+		t.Errorf("want the 302 back, got %d", code)
+	}
+}
