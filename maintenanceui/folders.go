@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jakenesler/navigatorr/fsop"
 )
 
 func videoPath(path string) bool {
@@ -80,61 +84,104 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"path": path, "paths": paths})
 		return
 	}
+	timing := newServerTiming()
 	q := strings.ToLower(r.URL.Query().Get("q"))
 	order := r.URL.Query().Get("sort")
 	listing := r.URL.Query().Get("listing")
-	var items []folderItem
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	offset = max(0, offset)
+	// window is the page's items; total counts every entry the folder lists.
+	var window []folderItem
+	var total int
 	pending := false
+	began := time.Now()
 	if listing != "" {
 		list, err := s.folderListings.load(listing, path, q, order)
 		if err != nil {
 			fail(w, 400, err.Error())
 			return
 		}
-		items, pending = list.Items, list.Pending
+		pending = list.Pending
+		total = len(list.Items)
+		offset = min(offset, total)
+		window = list.Items[offset:min(offset+folderPageSize, total)]
 	} else {
 		entries, err := os.ReadDir(path)
 		if err != nil {
 			fail(w, 400, err.Error())
 			return
 		}
-		items = []folderItem{}
+		timing.since("readdir", began)
+		began = time.Now()
+		sized := order == "size_desc" || order == "size_asc"
+		candidates := make([]folderCandidate, 0, len(entries))
 		for _, d := range entries {
 			if strings.HasPrefix(d.Name(), ".") || (!d.IsDir() && !videoPath(d.Name())) || (q != "" && !strings.Contains(strings.ToLower(d.Name()), q)) {
 				continue
 			}
-			// Skip escaped links and nonregular files. Stat supplies measured bytes.
-			stat, err := resolver.FileStat(filepath.Join(path, d.Name()))
-			if err != nil {
+			c := folderCandidate{entry: d, key: strings.ToLower(filepath.Join(path, d.Name()))}
+			switch {
+			case sized || d.Type()&fs.ModeSymlink != 0:
+				// Sizes order the whole folder, and a link has to be followed to know
+				// where it leads: both need the entry's own stat now.
+				stat, ok := folderEntryStat(resolver, path, d)
+				if !ok {
+					continue
+				}
+				c.stat, c.resolved, c.key = stat, true, strings.ToLower(stat.Path)
+			case !d.IsDir() && !d.Type().IsRegular():
 				continue
 			}
-			info, err := os.Stat(stat.Path)
-			if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
-				continue
-			}
-			item := folderItem{Stat: stat}
-			if stat.IsDir && (order == "size_desc" || order == "size_asc") {
-				size := s.folderSizes.get(stat.Path, resolver, s.engine.Deps().Store, s.nasMeter())
-				item.FolderSize = &size
-				pending = pending || size.Status != "ready" || size.Updating
-			}
-			items = append(items, item)
+			candidates = append(candidates, c)
 		}
-		sortFolderItems(items, order)
-		if order == "size_desc" || order == "size_asc" {
+		total = len(candidates)
+		offset = min(offset, total)
+		if sized {
+			items := make([]folderItem, 0, len(candidates))
+			for _, c := range candidates {
+				item := folderItem{Stat: c.stat}
+				if c.stat.IsDir {
+					size := s.folderSizes.get(c.stat.Path, resolver, s.engine.Deps().Store, s.nasMeter())
+					item.FolderSize = &size
+					pending = pending || size.Status != "ready" || size.Updating
+				}
+				items = append(items, item)
+			}
+			sortFolderItems(items, order)
 			listing, err = s.folderListings.save(folderListing{Path: path, Query: q, Order: order, Items: items, Pending: pending})
 			if err != nil {
 				fail(w, 400, err.Error())
 				return
 			}
+			window = items[offset:min(offset+folderPageSize, total)]
+		} else {
+			// Names alone put the entries in order, so only the page's entries are
+			// asked about their size and time; on a NAS mount every stat is a round trip.
+			sort.SliceStable(candidates, func(i, j int) bool {
+				if order == "name_desc" {
+					return candidates[i].key > candidates[j].key
+				}
+				return candidates[i].key < candidates[j].key
+			})
+			for _, c := range candidates[offset:min(offset+folderPageSize, total)] {
+				if !c.resolved {
+					stat, ok := folderEntryStat(resolver, path, c.entry)
+					if !ok {
+						continue
+					}
+					c.stat = stat
+				}
+				window = append(window, folderItem{Stat: c.stat})
+			}
 		}
+		timing.since("entries", began)
 	}
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	offset = max(0, min(offset, len(items)))
-	end := min(offset+100, len(items))
-	page := make([]folderItem, 0, end-offset)
+	began = time.Now()
 	marks := s.fileStatuses()
-	for _, item := range items[offset:end] {
+	timing.since("status", began)
+	began = time.Now()
+	page := make([]folderItem, 0, len(window))
+	for _, item := range window {
 		if item.IsDir {
 			item.Status = marks.under(item.Path)
 		} else {
@@ -146,5 +193,46 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 		}
 		page = append(page, item)
 	}
-	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": len(items), "has_more": end < len(items), "listing": listing, "size_order_pending": pending})
+	timing.since("sizes", began)
+	timing.set(w)
+	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": total, "has_more": offset+folderPageSize < total, "listing": listing, "size_order_pending": pending})
+}
+
+// folderPageSize is how many entries one page of a folder lists.
+const folderPageSize = 100
+
+type folderCandidate struct {
+	entry fs.DirEntry
+	// key orders the entries: the lower-cased path, which for a link is where it leads.
+	key      string
+	stat     fsop.Stat
+	resolved bool
+}
+
+// folderEntryStat describes one entry the way the listing shows it, or says it
+// must not be shown: a link that leads outside the read roots, to nothing, or
+// to something that is neither a folder nor a regular file. An entry that is
+// not a link lies where it is listed, inside the folder that was already
+// resolved, so one stat of its own is all it takes.
+func folderEntryStat(resolver *fsop.Resolver, dir string, d fs.DirEntry) (fsop.Stat, bool) {
+	p := filepath.Join(dir, d.Name())
+	if d.Type()&fs.ModeSymlink != 0 {
+		stat, err := resolver.FileStat(p)
+		if err != nil {
+			return fsop.Stat{}, false
+		}
+		info, err := os.Stat(stat.Path)
+		if err != nil || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return fsop.Stat{}, false
+		}
+		return stat, true
+	}
+	if !d.IsDir() && !d.Type().IsRegular() {
+		return fsop.Stat{}, false
+	}
+	info, err := d.Info()
+	if err != nil {
+		return fsop.Stat{}, false
+	}
+	return fsop.Stat{Path: p, Size: info.Size(), IsDir: d.IsDir(), ModTime: info.ModTime().UTC().Format(time.RFC3339)}, true
 }

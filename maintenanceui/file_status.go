@@ -174,15 +174,68 @@ func (x *fileStatusIndex) among(paths []string) *fileStatusView {
 	return summarizeFileStates(counts)
 }
 
-// fileStatusCache keeps the index for a few seconds, so a page of folders or
-// titles reads the store once however many rows it shows.
+// fileStatusCache keeps the index so a page of folders or titles reads the
+// store once however many rows it shows, and so a page does not wait for the
+// read at all once there is an index to show.
+//
+// Reading every batch item ever run is not cheap (about 0.4 s for ten thousand
+// files, with the store locked all the while), and the Files tab asks on every
+// page. So:
+//   - an index younger than fileStatusTTL is used as it is;
+//   - an older one, up to fileStatusStale, is used as well while a single
+//     refresh runs in the background, and the refresh is not started again
+//     until ten times its own cost has passed, so the read never takes more
+//     than a tenth of the store's time however often the tab is polled;
+//   - after something is changed through the console the index is dropped and
+//     the next page waits for a new one, so a retry shows at once.
 type fileStatusCache struct {
-	mu    sync.Mutex
-	at    time.Time
-	index *fileStatusIndex
+	mu      sync.Mutex
+	at      time.Time
+	index   *fileStatusIndex
+	cost    time.Duration
+	gen     uint64 // moves when the console changed something
+	validAt uint64 // the generation index was read in
+	loading chan struct{}
 }
 
-const fileStatusTTL = 3 * time.Second
+const (
+	fileStatusTTL   = 3 * time.Second
+	fileStatusStale = time.Minute
+)
+
+// invalidate says the console changed something the index may show.
+func (c *fileStatusCache) invalidate() {
+	c.mu.Lock()
+	c.gen++
+	c.mu.Unlock()
+}
+
+// refreshLocked starts the read if none is running and returns the channel that
+// closes when it ends. c.mu must be held.
+func (c *fileStatusCache) refreshLocked(st *store.Store) chan struct{} {
+	if c.loading != nil {
+		return c.loading
+	}
+	done := make(chan struct{})
+	c.loading = done
+	gen := c.gen
+	go func() {
+		began := time.Now()
+		rows, err := st.ListFileStatusRows()
+		var index *fileStatusIndex
+		if err == nil {
+			index = buildFileStatusIndex(rows)
+		}
+		c.mu.Lock()
+		if err == nil {
+			c.index, c.at, c.cost, c.validAt = index, time.Now(), time.Since(began), gen
+		}
+		c.loading = nil
+		c.mu.Unlock()
+		close(done)
+	}()
+	return done
+}
 
 // fileStatuses is the current index, or nil when the store cannot be read: the
 // Files tab then simply shows no marks.
@@ -193,14 +246,28 @@ func (s *Server) fileStatuses() *fileStatusIndex {
 	}
 	c := &s.fileStatusCache
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.index != nil && time.Since(c.at) < fileStatusTTL {
-		return c.index
+	age := time.Since(c.at)
+	if c.index != nil && c.validAt == c.gen {
+		if age < max(fileStatusTTL, 10*c.cost) {
+			defer c.mu.Unlock()
+			return c.index
+		}
+		if age < fileStatusStale {
+			c.refreshLocked(st)
+			defer c.mu.Unlock()
+			return c.index
+		}
 	}
-	rows, err := st.ListFileStatusRows()
-	if err != nil {
-		return nil
+	// A read that began before the last change shows the state before it, so
+	// wait for one that began after (a second read at most).
+	for attempt := 0; ; attempt++ {
+		done := c.refreshLocked(st)
+		c.mu.Unlock()
+		<-done
+		c.mu.Lock()
+		if c.validAt == c.gen || attempt >= 1 {
+			defer c.mu.Unlock()
+			return c.index
+		}
 	}
-	c.index, c.at = buildFileStatusIndex(rows), time.Now()
-	return c.index
 }
