@@ -98,6 +98,9 @@ type LeftoverRemoval struct {
 	Bytes  int64  `json:"bytes,omitempty"`
 }
 
+// beforeOpenHook lets a test swap a folder between classifying and opening it.
+var beforeOpenHook func()
+
 var junkExt = map[string]bool{
 	".nfo": true, ".png": true, ".jpg": true, ".jpeg": true, ".txt": true,
 	".sfv": true, ".m3u": true, ".m3u8": true, ".url": true, ".md5": true,
@@ -218,12 +221,13 @@ func (r *Resolver) holdsRoot(real string) bool {
 
 // writeRootOf returns the write root holding real.
 func (r *Resolver) writeRootOf(real string) (string, bool) {
+	best := ""
 	for _, root := range r.writeRoots {
-		if real != root && strings.HasPrefix(real, root+string(os.PathSeparator)) {
-			return root, true
+		if real != root && strings.HasPrefix(real, root+string(os.PathSeparator)) && len(root) > len(best) {
+			best = root
 		}
 	}
-	return "", false
+	return best, best != ""
 }
 
 func (p *LeftoverPolicy) maxEntries() int {
@@ -462,19 +466,26 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 		return fail(err)
 	}
 	defer parent.Close()
-	if fi, err := parent.Lstat(rel); err != nil || !fi.IsDir() {
-		return skip("changed while removing; kept")
+	if beforeOpenHook != nil {
+		beforeOpenHook()
 	}
 	root, err := parent.OpenRoot(rel)
 	if err != nil {
-		return fail(err)
+		return skip("changed while removing; kept")
 	}
 	defer root.Close()
-	var removeTree func(sub string) error
-	removeTree = func(dirRel string) error {
+	// OpenRoot follows a symlink that stays inside the write root, so the
+	// folder it opened must be the very one classified above. A mismatch
+	// means it was swapped meanwhile: nothing is removed.
+	var removeTree func(dirRel string, want os.FileInfo) error
+	removeTree = func(dirRel string, want os.FileInfo) error {
 		f, err := root.Open(dirRel)
 		if err != nil {
 			return err
+		}
+		if st, err := f.Stat(); err != nil || !os.SameFile(want, st) {
+			f.Close()
+			return fmt.Errorf("%s: changed while removing; kept", dirRel)
 		}
 		entries, err := f.ReadDir(-1)
 		f.Close()
@@ -492,7 +503,7 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 				if protectedName(e.Name()) {
 					return fmt.Errorf("%s: protected folder appeared", sub)
 				}
-				if err := removeTree(sub); err != nil {
+				if err := removeTree(sub, fi); err != nil {
 					return err
 				}
 				if err := root.Remove(sub); err != nil {
@@ -520,7 +531,7 @@ func (r *Resolver) RemoveLeftover(path string, onlyEmpty, withSubtitles bool, p 
 		}
 		return nil
 	}
-	if err := removeTree("."); err != nil {
+	if err := removeTree(".", info); err != nil {
 		return fail(err)
 	}
 	// Removing a folder succeeds only when it is empty.

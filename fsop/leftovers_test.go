@@ -280,3 +280,40 @@ func TestRemoveLeftoverKeepsAFolderHoldingARoot(t *testing.T) {
 		t.Errorf("a root was removed: %v", err)
 	}
 }
+
+func TestRemoveLeftoverDetectsAFolderSwappedForASymlink(t *testing.T) {
+	r, root, _ := testResolver(t)
+	day := 48 * time.Hour
+	put(t, filepath.Join(root, "Old", "a.nfo"), 1, day)
+	put(t, filepath.Join(root, "Peli", "info.nfo"), 1, day)
+	os.MkdirAll(filepath.Join(root, "Peli", "Subs"), 0o755)
+	ageDirs(t, root, day)
+	beforeOpenHook = func() {
+		os.RemoveAll(filepath.Join(root, "Old"))
+		os.Symlink("Peli", filepath.Join(root, "Old"))
+	}
+	defer func() { beforeOpenHook = nil }()
+	rem := r.RemoveLeftover(filepath.Join(root, "Old"), false, false, LeftoverPolicy{Now: time.Now(), MinAge: time.Hour})
+	if rem.Status == "removed" {
+		t.Errorf("a swapped folder was removed: %+v", rem)
+	}
+	for _, f := range []string{"Peli/info.nfo", "Peli/Subs"} {
+		if _, err := os.Stat(filepath.Join(root, f)); err != nil {
+			t.Errorf("%s was removed through the swapped symlink: %v", f, err)
+		}
+	}
+}
+
+func TestWriteRootOfPicksTheLongestRoot(t *testing.T) {
+	base := t.TempDir()
+	inner := filepath.Join(base, ".dl")
+	os.MkdirAll(filepath.Join(inner, "Old"), 0o755)
+	ageDirs(t, base, 48*time.Hour)
+	r, err := NewResolver([]string{base, inner}, []string{base, inner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rem := r.RemoveLeftover(filepath.Join(inner, "Old"), true, false, LeftoverPolicy{Now: time.Now(), MinAge: time.Hour}); rem.Status != "removed" {
+		t.Errorf("%+v", rem)
+	}
+}
