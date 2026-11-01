@@ -109,6 +109,15 @@ services:
     api_key: "imaginary-abs-token"
     auth_header: "Authorization"
     auth_prefix: "Bearer "
+  # Plex: read-only by default. The token is an admin token Plex cannot scope, so
+  # Navigatorr itself only lets listed read routes through (a library refresh is a
+  # GET in Plex, so "every GET" is not read-only). Deletes, trash and account routes
+  # are never allowed. Switch on write groups one by one if you want them:
+  #   refresh, library_new, library_edit, match, metadata_edit
+  plex:
+    url: "http://localhost:32400"
+    api_key: "imaginary-plex-token"   # sent as X-Plex-Token
+    allow_writes: []
 
 # ==============================================================================
 # 4. DOWNLOAD CLIENTS

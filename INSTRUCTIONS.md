@@ -507,6 +507,24 @@ services:
     openapi_url: "https://example.com/spec.json"
 ```
 
+### Plex
+
+`plex` is a service like the others (`url`, `api_key`, sent as `X-Plex-Token`) with a built-in
+request policy, `policy: plex`, which a service called `plex` gets by default. Plex's token is an
+admin token that cannot be scoped, so the limit is enforced in Navigatorr for every call:
+
+- Reads are an allowlist of routes (libraries and their contents, item metadata and children,
+  match candidates, search, sessions, agents and scanners). A library refresh is a GET in Plex, so
+  "every GET" would not be read-only.
+- Routes that echo the account token or server settings, deletes, `emptyTrash` and everything else
+  are blocked, whatever `allow_destructive` says. Responses never carry the configured token.
+- Writes are off. `allow_writes` switches on groups one at a time: `refresh` (scan a library,
+  refresh an item), `library_new` (create a library), `library_edit` (agent, scanner, language),
+  `match` (match or unmatch an item), `metadata_edit` (edit an item's fields).
+
+Changing a library's agent can lose matches and watch state; prefer creating a new library.
+`search_api` has no Plex spec, so call `call_api` with the Plex path directly.
+
 ---
 
 ## Tips for LLM Users

@@ -15,6 +15,7 @@ type Service struct {
 	StatusPath string // cheap authenticated endpoint for Ping, may be empty
 	Pool       *resilience.ServicePool
 	Snapshots  *snapshot.Store
+	Policy     Policy // nil allows every request
 }
 
 // NewService creates a Service from config.
@@ -24,6 +25,7 @@ func NewService(name string, cfg config.ServiceConfig) *Service {
 		Config:     cfg,
 		BaseURL:    cfg.URL + cfg.APIVersion,
 		StatusPath: config.DefaultStatusPaths[name],
+		Policy:     newPolicy(name, cfg),
 	}
 
 	switch cfg.AuthMethod {

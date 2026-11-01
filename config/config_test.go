@@ -774,3 +774,47 @@ transcode:
 		}
 	})
 }
+
+func TestPlexServiceDefaultsToReadOnlyPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	body := "services:\n  plex:\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"imaginary-plex-token\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := cfg.Services["plex"]
+	if svc.Policy != PolicyPlex || len(svc.AllowWrites) != 0 {
+		t.Errorf("policy %q writes %v", svc.Policy, svc.AllowWrites)
+	}
+	if svc.AuthHeader != "X-Plex-Token" || svc.AuthMethod != "header" || svc.APIVersion != "" {
+		t.Errorf("auth %q %q version %q", svc.AuthHeader, svc.AuthMethod, svc.APIVersion)
+	}
+}
+
+func TestServicePolicyValidation(t *testing.T) {
+	for name, body := range map[string]string{
+		"unknown group":  "services:\n  plex:\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"k\"\n    allow_writes: [delete_library]\n",
+		"unknown policy": "services:\n  plex:\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"k\"\n    policy: nope\n",
+		"writes alone":   "services:\n  other:\n    url: \"http://192.0.2.10:1\"\n    api_key: \"k\"\n    allow_writes: [match]\n",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("%s: config should be rejected", name)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	ok := "services:\n  plex:\n    url: \"http://192.0.2.10:32400\"\n    api_key: \"k\"\n    allow_writes: [refresh, match]\n"
+	if err := os.WriteFile(path, []byte(ok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Errorf("valid writes rejected: %v", err)
+	}
+}

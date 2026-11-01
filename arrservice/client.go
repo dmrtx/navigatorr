@@ -92,6 +92,12 @@ func (s *Service) DoRequestWithContentType(ctx context.Context, method, path str
 	var statusCode int
 	var err error
 
+	if s.Policy != nil {
+		if perr := s.Policy.Check(method, path, query); perr != nil {
+			return nil, 0, perr
+		}
+	}
+
 	if s.Pool != nil {
 		retryCfg := resilience.DefaultRetryConfig()
 		if method == "POST" || method == "PATCH" {

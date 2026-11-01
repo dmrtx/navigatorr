@@ -280,6 +280,12 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		return mcp.NewToolResultError(fmt.Sprintf("request failed: %s", cleanErrMsg)), nil
 	}
 
+	// A service can echo its own token in a body (Plex does on a few routes);
+	// it must not reach the model.
+	if key := svc.Config.APIKey; len(key) >= 8 {
+		respBody = bytes.ReplaceAll(respBody, []byte(key), []byte("***REDACTED***"))
+	}
+
 	if statusCode < 200 || statusCode > 299 {
 		structErr := resilience.ClassifyError(svcName, statusCode, respBody)
 		cleanResp := sanitizeErrorMessage(truncate(string(respBody), 2000), svc.Config.APIKey)
