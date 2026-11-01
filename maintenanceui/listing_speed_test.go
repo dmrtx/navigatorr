@@ -342,3 +342,54 @@ func TestFailedRefreshKeepsTheLastGoodListAndLoginDoesNotEmptyTheCaches(t *testi
 		t.Fatal("the last good list was lost", w.Code)
 	}
 }
+
+func TestUnreadableStoreIsNotReadAgainOnEveryPage(t *testing.T) {
+	s, _ := testUI(t)
+	s.engine.Deps().Store.Close()
+	if s.fileStatuses() != nil {
+		t.Fatal("an unreadable store has no marks")
+	}
+	c := &s.fileStatusCache
+	c.mu.Lock()
+	first := c.failedAt
+	c.mu.Unlock()
+	if first.IsZero() {
+		t.Fatal("the failure was not noted")
+	}
+	if s.fileStatuses() != nil {
+		t.Fatal("still no marks")
+	}
+	c.mu.Lock()
+	again := c.failedAt
+	c.mu.Unlock()
+	if !again.Equal(first) {
+		t.Fatal("the store was read again inside the retry interval")
+	}
+}
+
+func TestARefreshThatWaitedBehindAFetchDoesNotFetchAgain(t *testing.T) {
+	s, h := testUI(t)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(300 * time.Millisecond)
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "title": "A", "path": "/media/a"}})
+	}))
+	defer upstream.Close()
+	s.registry = arrservice.NewRegistry(&config.Config{Services: map[string]config.ServiceConfig{"radarr": {URL: upstream.URL, APIVersion: "/api/v3"}}})
+	done := make(chan int, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			done <- request(h, "GET", "/api/maintenance/library?service=radarr&refresh=1", "", true).Code
+		}()
+		time.Sleep(50 * time.Millisecond)
+	}
+	for i := 0; i < 3; i++ {
+		if code := <-done; code != 200 {
+			t.Fatal(code)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("three refreshes that overlapped asked the *arr %d times", calls.Load())
+	}
+}

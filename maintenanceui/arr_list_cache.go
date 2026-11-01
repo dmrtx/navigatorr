@@ -53,11 +53,16 @@ func (c *arrListCache) entry(service string) *arrListEntry {
 // A failed fetch is an error for this call and leaves the last good list as it was.
 func (c *arrListCache) get(service string, refresh bool, fetch func() ([]map[string]any, error)) (items []map[string]any, hit bool, err error) {
 	e := c.entry(service)
+	asked := time.Now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	generation := c.generation.Load()
-	if !refresh && e.items != nil && e.generation == generation && time.Since(e.at) < arrListTTL {
-		return e.items, true, nil
+	if e.items != nil && e.generation == generation {
+		// A refresh that waited behind a fetch already got what it asked for: the
+		// list was read after the refresh was requested.
+		if e.at.After(asked) || (!refresh && time.Since(e.at) < arrListTTL) {
+			return e.items, true, nil
+		}
 	}
 	items, err = fetch()
 	if err != nil {

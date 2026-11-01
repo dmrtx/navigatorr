@@ -196,11 +196,15 @@ type fileStatusCache struct {
 	gen     uint64 // moves when the console changed something
 	validAt uint64 // the generation index was read in
 	loading chan struct{}
+	// failedAt is when the store last could not be read; reads are not repeated
+	// for fileStatusRetry after that, so an unreadable store costs one read, not two per page.
+	failedAt time.Time
 }
 
 const (
 	fileStatusTTL   = 3 * time.Second
 	fileStatusStale = time.Minute
+	fileStatusRetry = 2 * time.Second
 	// fileStatusFreshCap keeps a slow read from making the index "fresh" for
 	// longer than it may be shown stale, which would leave nothing to refresh it.
 	fileStatusFreshCap = 30 * time.Second
@@ -231,11 +235,15 @@ func (c *fileStatusCache) refreshLocked(st *store.Store) chan struct{} {
 		}
 		c.mu.Lock()
 		if err == nil {
-			c.index, c.at, c.cost, c.validAt = index, time.Now(), time.Since(began), gen
-		} else if c.index != nil {
-			// The store could not be read: keep showing what there is, and try again
-			// after the usual interval instead of on every request.
-			c.at, c.validAt = time.Now(), gen
+			c.index, c.at, c.cost, c.validAt, c.failedAt = index, time.Now(), time.Since(began), gen, time.Time{}
+		} else {
+			c.failedAt = time.Now()
+			if c.index != nil {
+				// The store could not be read: keep showing what there is (a read
+				// that cannot succeed has nothing better to wait for), and try again
+				// after the usual interval instead of on every request.
+				c.at, c.validAt = time.Now(), gen
+			}
 		}
 		c.loading = nil
 		c.mu.Unlock()
@@ -264,6 +272,10 @@ func (s *Server) fileStatuses() *fileStatusIndex {
 			defer c.mu.Unlock()
 			return c.index
 		}
+	}
+	if !c.failedAt.IsZero() && time.Since(c.failedAt) < fileStatusRetry {
+		defer c.mu.Unlock()
+		return c.index
 	}
 	// A read that began before the last change shows the state before it, so
 	// wait for one that began after (a second read at most).
