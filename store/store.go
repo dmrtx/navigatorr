@@ -672,7 +672,7 @@ func (s *Store) getItemLocked(id int64) (MaintenanceItem, error) {
 	err := s.db.QueryRow(`SELECT `+maintColumns+` FROM maintenance_items WHERE id=?`, id).
 		Scan(maintScan(&it)...)
 	if err == sql.ErrNoRows {
-		return MaintenanceItem{}, fmt.Errorf("no such maintenance item %d", id)
+		return MaintenanceItem{}, fmt.Errorf("%w %d", ErrMaintNotFound, id)
 	}
 	return it, err
 }

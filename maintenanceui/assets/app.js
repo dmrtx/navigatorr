@@ -7018,7 +7018,8 @@ function reviewRow(item) {
   head.append(title);
   if (item.size_bytes != null) head.append(node("span", bytes(item.size_bytes), "review-size"));
   main.append(head);
-  const where = node("span", item.folder || "Folder not found in " + (item.service === "radarr" ? "Radarr" : "Sonarr"), "review-path");
+  const manager = item.service === "radarr" ? "Radarr" : "Sonarr";
+  const where = node("span", item.folder || (item.folder_unavailable ? `${manager} is not answering` : `Folder not found in ${manager}`), "review-path");
   if (item.folder) where.title = item.folder;
   main.append(where);
   const tags = node("span", "", "review-tags");
@@ -7037,7 +7038,7 @@ function reviewRow(item) {
   if (item.state === "open") {
     actions.append(reviewButton("done", `Mark ${item.title} as processed`, () => reviewAct(item, "processed")));
     actions.append(reviewButton("drop", `Drop ${item.title}`, () => reviewAct(item, "dismiss")));
-  } else if (item.closed_by === "console") {
+  } else if (item.can_restore) {
     actions.append(reviewButton("undo", `Put ${item.title} back to review`, () => reviewAct(item, "restore")));
   }
   li.append(actions);
@@ -7060,15 +7061,17 @@ function renderReview() {
   }
   const sized = items.filter(i => i.size_bytes != null);
   const total = sized.reduce((sum, i) => sum + i.size_bytes, 0);
-  $("review-summary").textContent = `${items.length} ${items.length === 1 ? "entry" : "entries"}${sized.length ? ` · ${bytes(total)} on disk` : ""}`;
+  $("review-summary").textContent = `${items.length} ${items.length === 1 ? "entry" : "entries"}${data.truncated ? " shown (more exist)" : ""}${sized.length ? ` · ${bytes(total)} on disk` : ""}`;
   list.replaceChildren(...items.map(reviewRow));
 }
 async function loadReview() {
   const auth = state.authRevision;
+  // Only the newest request may draw: a slow answer to an earlier filter must not replace it.
+  const request = state.reviewRequest = (state.reviewRequest || 0) + 1;
   const query = new URLSearchParams({state: $("review-state").value});
   if ($("review-kind").value) query.set("issue_type", $("review-kind").value);
   const data = await api(`maintenance-queue?${query}`);
-  if (auth !== state.authRevision || $("workspace").hidden) return;
+  if (auth !== state.authRevision || $("workspace").hidden || request !== state.reviewRequest) return;
   state.review = data;
   renderReview();
 }

@@ -3,12 +3,14 @@ package maintenanceui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -18,6 +20,9 @@ import (
 // The console shows them and lets the owner close one by hand. An entry knows
 // its title and the *arr's id for it, not a path, so the folder is looked up
 // in Sonarr or Radarr, the same list Files browses.
+
+// maintenanceQueueLimit is how many entries one answer holds; "truncated" says there are more.
+const maintenanceQueueLimit = 1000
 
 type maintenanceQueueItem struct {
 	ID        int64    `json:"id"`
@@ -32,13 +37,17 @@ type maintenanceQueueItem struct {
 	// State is what the console says: open, processed or dismissed.
 	State string `json:"state"`
 	// ClosedBy is "console" when the owner closed it, "workflow" for a verified replacement.
-	ClosedBy  string `json:"closed_by,omitempty"`
-	SizeBytes *int64 `json:"size_bytes,omitempty"`
-	Notes     string `json:"notes"`
-	Folder    string `json:"folder,omitempty"`
-	InFiles   bool   `json:"in_files"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at"`
+	ClosedBy string `json:"closed_by,omitempty"`
+	// CanRestore says Undo applies: a dropped entry, or one the owner marked processed.
+	CanRestore bool   `json:"can_restore"`
+	SizeBytes  *int64 `json:"size_bytes,omitempty"`
+	Notes      string `json:"notes"`
+	Folder     string `json:"folder,omitempty"`
+	InFiles    bool   `json:"in_files"`
+	// FolderUnavailable: Sonarr or Radarr did not answer, so the folder is unknown, not missing.
+	FolderUnavailable bool   `json:"folder_unavailable,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 func maintenanceState(it store.MaintenanceItem) (state, closedBy string) {
@@ -60,14 +69,16 @@ func maintenanceState(it store.MaintenanceItem) (state, closedBy string) {
 // libraryFolders maps each service's title ids to the folder and year *arr knows.
 // A service that does not answer leaves its entries without a folder; the page
 // still loads.
-func (s *Server) libraryFolders(ctx context.Context, services map[string]bool) map[string]map[string]map[string]any {
-	out := map[string]map[string]map[string]any{}
+func (s *Server) libraryFolders(services map[string]bool) (out map[string]map[string]map[string]any, unavailable map[string]bool) {
+	out = map[string]map[string]map[string]any{}
+	unavailable = map[string]bool{}
 	for name := range services {
 		if name != "sonarr" && name != "radarr" {
 			continue
 		}
 		svc, err := s.registry.Get(name)
 		if err != nil {
+			unavailable[name] = true
 			continue
 		}
 		endpoint := "/api/v3/series"
@@ -94,6 +105,7 @@ func (s *Server) libraryFolders(ctx context.Context, services map[string]bool) m
 			return projected, nil
 		})
 		if err != nil {
+			unavailable[name] = true
 			continue
 		}
 		byID := make(map[string]map[string]any, len(list))
@@ -104,7 +116,7 @@ func (s *Server) libraryFolders(ctx context.Context, services map[string]bool) m
 		}
 		out[name] = byID
 	}
-	return out
+	return out, unavailable
 }
 
 // underRoots reports whether path is inside a folder the Files tab can browse.
@@ -119,12 +131,12 @@ func underRoots(path string, roots []string) bool {
 	return false
 }
 
-func (s *Server) maintenanceQueueItems(ctx context.Context, items []store.MaintenanceItem) []maintenanceQueueItem {
+func (s *Server) maintenanceQueueItems(items []store.MaintenanceItem) []maintenanceQueueItem {
 	services := map[string]bool{}
 	for _, it := range items {
 		services[it.Service] = true
 	}
-	titles := s.libraryFolders(ctx, services)
+	titles, unavailable := s.libraryFolders(services)
 	roots := s.cfg.Media.AllowedReadRoots
 	out := make([]maintenanceQueueItem, 0, len(items))
 	for _, it := range items {
@@ -133,6 +145,8 @@ func (s *Server) maintenanceQueueItems(ctx context.Context, items []store.Mainte
 			ID: it.ID, Title: it.Title, Service: it.Service, MediaType: it.MediaType, MediaID: it.MediaID,
 			IssueType: it.IssueType, Priority: it.Priority, Status: it.Status, State: state, ClosedBy: closedBy,
 			SizeBytes: it.CurrentSize, Notes: it.Notes, CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
+			CanRestore:        it.Status == store.MaintFailed || it.ConsoleClosed() == "processed",
+			FolderUnavailable: unavailable[it.Service],
 		}
 		if title := titles[it.Service][it.MediaID]; title != nil {
 			if folder, _ := title["path"].(string); strings.HasPrefix(folder, "/") {
@@ -167,8 +181,7 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 	var statuses []string
 	switch r.URL.Query().Get("state") {
 	case "", "open":
-		statuses = []string{store.MaintPending, store.MaintResearching, store.MaintCandidate, store.MaintDownloading,
-			store.MaintDownloaded, store.MaintVerifying, store.MaintImporting, store.MaintReplacing, store.MaintBlocked}
+		statuses = store.OpenStatuses()
 	case "processed":
 		statuses = []string{store.MaintDone}
 	case "dismissed":
@@ -179,10 +192,14 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue := r.URL.Query().Get("issue_type")
-	items, err := st.ListItemsForConsole(statuses, issue, 0)
+	items, err := st.ListItemsForConsole(statuses, issue, maintenanceQueueLimit+1)
 	if err != nil {
 		fail(w, 500, "read the maintenance queue")
 		return
+	}
+	truncated := len(items) > maintenanceQueueLimit
+	if truncated {
+		items = items[:maintenanceQueueLimit]
 	}
 	counts, err := st.CountItemsForConsole(issue)
 	if err != nil {
@@ -190,11 +207,11 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	began := time.Now()
-	rows := s.maintenanceQueueItems(r.Context(), items)
+	rows := s.maintenanceQueueItems(items)
 	timing := newServerTiming()
 	timing.since("library", began)
 	timing.set(w)
-	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": len(rows)})
+	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": len(rows), "truncated": truncated})
 }
 
 func (s *Server) maintenanceQueueAct(w http.ResponseWriter, r *http.Request, st *store.Store) {
@@ -207,11 +224,11 @@ func (s *Server) maintenanceQueueAct(w http.ResponseWriter, r *http.Request, st 
 		fail(w, 400, "provide an id and an action: processed, dismiss or restore")
 		return
 	}
-	if len(input.Note) > 500 {
+	if utf8.RuneCountInString(input.Note) > store.MaxConsoleNoteRunes {
 		fail(w, 400, "note is limited to 500 characters")
 		return
 	}
-	note := strings.TrimSpace(input.Note)
+	note := input.Note
 	var (
 		it  store.MaintenanceItem
 		err error
@@ -228,16 +245,23 @@ func (s *Server) maintenanceQueueAct(w http.ResponseWriter, r *http.Request, st 
 		return
 	}
 	if err != nil {
-		if strings.Contains(err.Error(), "no such maintenance item") {
+		switch {
+		case errors.Is(err, store.ErrMaintNotFound):
 			fail(w, 404, "maintenance entry not found")
-		} else {
+		case errors.Is(err, store.ErrMaintConflict):
 			fail(w, 409, err.Error())
+		default:
+			fail(w, 500, "save the maintenance entry")
 		}
 		return
 	}
 	_ = st.LogAction("maintenance_console", it.Service, it.Title,
 		fmt.Sprintf(`{"id":%d,"action":%q}`, it.ID, input.Action), "item "+strconv.FormatInt(it.ID, 10)+" status="+it.Status)
-	counts, _ := st.CountItemsForConsole("")
-	rows := s.maintenanceQueueItems(r.Context(), []store.MaintenanceItem{it})
-	writeJSON(w, 200, map[string]any{"item": rows[0], "counts": counts})
+	rows := s.maintenanceQueueItems([]store.MaintenanceItem{it})
+	answer := map[string]any{"item": rows[0]}
+	// Counts ride along when they can be read; a client that finds none asks again.
+	if counts, err := st.CountItemsForConsole(""); err == nil {
+		answer["counts"] = counts
+	}
+	writeJSON(w, 200, answer)
 }

@@ -12,9 +12,10 @@ import (
 )
 
 type queuePage struct {
-	Items  []maintenanceQueueItem  `json:"items"`
-	Counts store.MaintenanceCounts `json:"counts"`
-	Total  int                     `json:"total"`
+	Items     []maintenanceQueueItem  `json:"items"`
+	Counts    store.MaintenanceCounts `json:"counts"`
+	Total     int                     `json:"total"`
+	Truncated bool                    `json:"truncated"`
 }
 
 func TestMaintenanceQueueShowsFoldersAndClosesByHand(t *testing.T) {
@@ -113,6 +114,18 @@ func TestMaintenanceQueueShowsFoldersAndClosesByHand(t *testing.T) {
 	if code, _ := post(`{"id":` + itoa(a.ID) + `,"action":"dismiss"}`); code != 409 {
 		t.Fatal("a processed entry cannot be dismissed", code)
 	}
+	busy := add("55", "Being downloaded", 1)
+	for _, to := range []string{store.MaintResearching, store.MaintCandidate, store.MaintDownloading} {
+		if _, err := st.Transition(busy.ID, to, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, _ := post(`{"id":` + itoa(busy.ID) + `,"action":"dismiss"}`); code != 409 {
+		t.Fatal("an entry a worker is downloading cannot be closed from the console", code)
+	}
+	if page := read("?state=dismissed"); len(page.Items) != 0 || page.Truncated {
+		t.Fatalf("nothing dropped yet: %+v", page)
+	}
 	if w := request(h, "GET", "/api/maintenance/maintenance-queue?state=bogus", "", true); w.Code != 400 {
 		t.Fatal(w.Code)
 	}
@@ -134,7 +147,7 @@ func TestMaintenanceQueueSurvivesAnUnreachableLibrary(t *testing.T) {
 	}
 	w := request(h, "GET", "/api/maintenance/maintenance-queue", "", true)
 	var page queuePage
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Total != 1 || page.Items[0].Folder != "" {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || page.Total != 1 || page.Items[0].Folder != "" || !page.Items[0].FolderUnavailable {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
