@@ -517,3 +517,21 @@ func TestFolderListingFallsBackToTheMountWhenTheHelperCannotList(t *testing.T) {
 		t.Fatal(meter.listed)
 	}
 }
+
+func TestFileStatusIndexCanBeWarmedBeforeTheFirstPage(t *testing.T) {
+	s, _ := testUI(t)
+	s.WarmFileStatuses()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.fileStatusCache.mu.Lock()
+		warm := s.fileStatusCache.index != nil
+		s.fileStatusCache.mu.Unlock()
+		if warm {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the index was not read in the background")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
