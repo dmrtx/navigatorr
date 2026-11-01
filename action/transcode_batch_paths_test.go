@@ -140,6 +140,10 @@ func TestFilesystemBatchPauseResumeUsesExistingScheduler(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Status != "completed" || items[0].ChildActionID == "" || items[0].CandidatePath == "" {
 		t.Fatalf("candidate tracking missing: %+v %v", items, err)
 	}
+	// The file's size is on record from the moment the batch planned it.
+	if items[0].SourceBytes != 1400000000 {
+		t.Fatalf("planned size not recorded: %d", items[0].SourceBytes)
+	}
 	child, err := e.Status(context.Background(), items[0].ChildActionID)
 	if err != nil || child.Inputs["media_type"] != "movie" || child.Inputs["parent_action_id"] != r.ID {
 		t.Fatalf("child context lost: %+v %v", child, err)

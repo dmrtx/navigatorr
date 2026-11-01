@@ -25,8 +25,10 @@ type TranscodeBatchItem struct {
 	CandidatePath string `json:"candidate_path"`
 	Error         string `json:"error"`
 	Attempts      int    `json:"attempts"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	// SourceBytes is the file's size when the batch planned it; 0 when unknown.
+	SourceBytes int64  `json:"source_bytes,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 // CreateTranscodeBatchItem inserts a new batch item record into the database.
@@ -50,11 +52,11 @@ func (s *Store) CreateTranscodeBatchItem(item TranscodeBatchItem) error {
 	_, err := s.db.Exec(`INSERT INTO transcode_batch_items (
 		batch_id, item_key, file_path, display_label, episode_info,
 		decision, profile, reasons_json, status, child_action_id, job_id, worker,
-		candidate_path, error, attempts, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		candidate_path, error, attempts, source_bytes, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.BatchID, item.ItemKey, item.FilePath, item.DisplayLabel, item.EpisodeInfo,
 		item.Decision, item.Profile, string(reasonsJSON), item.Status, item.ChildActionID, item.JobID, item.Worker,
-		item.CandidatePath, item.Error, item.Attempts, item.CreatedAt, item.UpdatedAt)
+		item.CandidatePath, item.Error, item.Attempts, item.SourceBytes, item.CreatedAt, item.UpdatedAt)
 	return err
 }
 
@@ -94,12 +96,12 @@ func (s *Store) GetTranscodeBatchItem(batchID, itemKey string) (*TranscodeBatchI
 	var reasonsJSON string
 	err := s.db.QueryRow(`SELECT id, batch_id, item_key, file_path, display_label,
 		episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
-		candidate_path, error, attempts, created_at, updated_at
+		candidate_path, error, attempts, source_bytes, created_at, updated_at
 		FROM transcode_batch_items WHERE batch_id = ? AND item_key = ?`,
 		batchID, itemKey).Scan(
 		&item.ID, &item.BatchID, &item.ItemKey, &item.FilePath, &item.DisplayLabel,
 		&item.EpisodeInfo, &item.Decision, &item.Profile, &reasonsJSON, &item.Status,
-		&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts,
+		&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts, &item.SourceBytes,
 		&item.CreatedAt, &item.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -118,7 +120,7 @@ func (s *Store) ListTranscodeBatchItems(batchID string) ([]TranscodeBatchItem, e
 
 	rows, err := s.db.Query(`SELECT id, batch_id, item_key, file_path, display_label,
 		episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
-		candidate_path, error, attempts, created_at, updated_at
+		candidate_path, error, attempts, source_bytes, created_at, updated_at
 		FROM transcode_batch_items WHERE batch_id = ? ORDER BY id ASC`, batchID)
 	if err != nil {
 		return nil, err
@@ -139,7 +141,7 @@ func (s *Store) FindTranscodeBatchItemByChildActionID(childActionID string) (*Tr
 	return s.findTranscodeBatchItemLocked(
 		`SELECT id, batch_id, item_key, file_path, display_label,
 			episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
-			candidate_path, error, attempts, created_at, updated_at
+			candidate_path, error, attempts, source_bytes, created_at, updated_at
 			FROM transcode_batch_items WHERE child_action_id = ? LIMIT 2`, childActionID)
 }
 
@@ -156,7 +158,7 @@ func (s *Store) FindTranscodeBatchItemByChildKey(childKey string) (*TranscodeBat
 	return s.findTranscodeBatchItemLocked(
 		`SELECT id, batch_id, item_key, file_path, display_label,
 			episode_info, decision, profile, reasons_json, status, child_action_id, job_id, worker,
-			candidate_path, error, attempts, created_at, updated_at
+			candidate_path, error, attempts, source_bytes, created_at, updated_at
 			FROM transcode_batch_items
 			WHERE ? = 'batch-' || batch_id || '-' || item_key LIMIT 2`, childKey)
 }
@@ -188,7 +190,7 @@ func scanTranscodeBatchItems(rows *sql.Rows) ([]TranscodeBatchItem, error) {
 		if err := rows.Scan(
 			&item.ID, &item.BatchID, &item.ItemKey, &item.FilePath, &item.DisplayLabel,
 			&item.EpisodeInfo, &item.Decision, &item.Profile, &reasonsJSON, &item.Status,
-			&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts,
+			&item.ChildActionID, &item.JobID, &item.Worker, &item.CandidatePath, &item.Error, &item.Attempts, &item.SourceBytes,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -196,4 +198,36 @@ func scanTranscodeBatchItems(rows *sql.Rows) ([]TranscodeBatchItem, error) {
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+// BatchSourceTotal is the size of the files a batch planned: the files it
+// listed, how many of them have a size on record, and their sum.
+type BatchSourceTotal struct {
+	Items int
+	Sized int
+	Bytes int64
+}
+
+// BatchSourceTotals returns the totals of every batch that has items, by batch
+// id, in one query. Items planned before the size was recorded count as
+// unsized.
+func (s *Store) BatchSourceTotals() (map[string]BatchSourceTotal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT batch_id, COUNT(*), SUM(CASE WHEN source_bytes > 0 THEN 1 ELSE 0 END), COALESCE(SUM(source_bytes), 0)
+		FROM transcode_batch_items GROUP BY batch_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]BatchSourceTotal{}
+	for rows.Next() {
+		var id string
+		var t BatchSourceTotal
+		if err := rows.Scan(&id, &t.Items, &t.Sized, &t.Bytes); err != nil {
+			return nil, err
+		}
+		out[id] = t
+	}
+	return out, rows.Err()
 }

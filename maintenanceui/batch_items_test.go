@@ -82,3 +82,48 @@ func TestBatchItemsOfferTryAgainForAnEncodeThatWasNotSaved(t *testing.T) {
 		t.Fatalf("other waiting files keep their goal change: %+v", got)
 	}
 }
+
+// A batch says what its selection weighs from the moment its files are planned,
+// before any of them is encoded: each file's size, and the sum with how many
+// files have a size on record.
+func TestBatchReportsTheSizeOfItsSelectionBeforeEncoding(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "sized", "transcode_batch", "running", nil, nil, nil)
+	for i, size := range []int64{4_000_000_000, 2_500_000_000, 0} {
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "sized", ItemKey: fmt.Sprintf("file-%d", i), FilePath: fmt.Sprintf("/media/%d.mkv", i), Status: "queued", Decision: "transcode", SourceBytes: size}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/operations?id=sized", "", true)
+	var page struct {
+		Jobs []struct {
+			ID        string `json:"id"`
+			Selection *struct {
+				SourceBytes int64 `json:"source_bytes"`
+				Files       int   `json:"files"`
+				SizedFiles  int   `json:"sized_files"`
+			} `json:"selection"`
+		} `json:"jobs"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 || page.Jobs[0].Selection == nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if sel := page.Jobs[0].Selection; sel.SourceBytes != 6_500_000_000 || sel.Files != 3 || sel.SizedFiles != 2 {
+		t.Fatalf("%+v", sel)
+	}
+	w = request(h, "GET", "/api/maintenance/batch-items?id=sized", "", true)
+	var items struct {
+		Items []batchItemView `json:"items"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &items) != nil || len(items.Items) != 3 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	got := []int64{}
+	for _, item := range items.Items {
+		got = append(got, item.SourceBytes)
+	}
+	if !slices.Equal(got, []int64{4_000_000_000, 2_500_000_000, 0}) {
+		t.Fatal(got)
+	}
+}

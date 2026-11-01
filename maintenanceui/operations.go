@@ -635,6 +635,12 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	aggregateBatchSavings(records)
+	// What each batch's selection weighed when it was planned. Not being able
+	// to read it only leaves the batches without that figure.
+	batchTotals, err := s.engine.Deps().Store.BatchSourceTotals()
+	if err != nil {
+		batchTotals = nil
+	}
 	rounds := noWinnerRounds(records)
 	recordsByID := make(map[string]operationRecord, len(records))
 	existingReplacements := queueReplacementLinks(records)
@@ -812,6 +818,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			if r.inst.ActionName == "transcode_batch" {
+				if t, ok := batchTotals[r.inst.ID]; ok && t.Items > 0 {
+					job["selection"] = map[string]any{"source_bytes": t.Bytes, "files": t.Items, "sized_files": t.Sized}
+				}
+			}
 			if endedWithoutResult(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
 				if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
 					full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}

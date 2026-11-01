@@ -166,3 +166,40 @@ func TestMigrationV4ToV5(t *testing.T) {
 		t.Errorf("expected job_id job-new-migrated, got %q", it2.JobID)
 	}
 }
+
+func TestBatchSourceTotalsCountOnlySizedFiles(t *testing.T) {
+	s := openTestTB(t)
+	for _, id := range []string{"b1", "b2"} {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_batch", Status: ActionStatusRunning, InputsJSON: "{}", OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(batch, key string, size int64) {
+		t.Helper()
+		if err := s.CreateTranscodeBatchItem(TranscodeBatchItem{BatchID: batch, ItemKey: key, FilePath: "/m/" + key, Status: "queued", SourceBytes: size}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("b1", "a", 100)
+	add("b1", "b", 0)
+	add("b2", "c", 50)
+	totals, err := s.BatchSourceTotals()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals["b1"] != (BatchSourceTotal{Items: 2, Sized: 1, Bytes: 100}) || totals["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
+		t.Fatalf("%+v", totals)
+	}
+	// The size survives the item being read back and updated.
+	item, err := s.GetTranscodeBatchItem("b1", "a")
+	if err != nil || item == nil || item.SourceBytes != 100 {
+		t.Fatalf("%+v %v", item, err)
+	}
+	item.Status = "running"
+	if err := s.UpdateTranscodeBatchItem(*item); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := s.GetTranscodeBatchItem("b1", "a"); again == nil || again.SourceBytes != 100 {
+		t.Fatalf("size lost on update: %+v", again)
+	}
+}
