@@ -93,7 +93,7 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 			// The fetch is shared with whoever asks while it runs, so it must not die
 			// with the request that happened to start it.
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), arrFetchTimeout)
+			ctx, cancel = context.WithTimeout(context.Background(), arrFetchTimeout)
 			defer cancel()
 		}
 		b, err := svc.Get(ctx, endpoint, query)

@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,8 @@ const (
 	arrListStale = 10 * time.Minute
 	// arrFetchTimeout bounds one fetch of a collection, however many requests wait on it.
 	arrFetchTimeout = time.Minute
+	// arrRefreshRetry is how long to wait before a failed background read is tried again.
+	arrRefreshRetry = 10 * time.Second
 )
 
 type arrListCache struct {
@@ -41,6 +44,8 @@ type arrListEntry struct {
 	generation uint64
 	items      []map[string]any
 	refreshing bool
+	// retryAfter keeps a failed background read from being tried on every request.
+	retryAfter time.Time
 }
 
 func (c *arrListCache) entry(service string) *arrListEntry {
@@ -76,11 +81,13 @@ func (c *arrListCache) get(service string, refresh bool, timing *serverTiming, f
 		}
 		if age < arrListStale {
 			items = e.items
-			start := !e.refreshing
-			e.refreshing = true
+			start := !e.refreshing && time.Now().After(e.retryAfter)
+			if start {
+				e.refreshing = true
+			}
 			e.mu.Unlock()
 			if start {
-				go c.refresh(e, fetch)
+				go c.refresh(e, service, asked, generation, fetch)
 			}
 			return items, true, nil
 		}
@@ -110,21 +117,32 @@ func (c *arrListCache) get(service string, refresh bool, timing *serverTiming, f
 }
 
 // refresh reads the list again for the requests that were shown an old one. A
-// failure keeps the old list, which is then read again by the next request.
-func (c *arrListCache) refresh(e *arrListEntry, fetch func(*serverTiming) ([]map[string]any, error)) {
+// failure keeps the old list, which is then read again after a few seconds; once
+// the list is too old to show, the next request waits for a read and sees the error.
+// A list that was renewed, or ended by a change, while this waited is left as it is.
+func (c *arrListCache) refresh(e *arrListEntry, service string, scheduled time.Time, generation uint64, fetch func(*serverTiming) ([]map[string]any, error)) {
 	e.fetchMu.Lock()
 	defer e.fetchMu.Unlock()
-	generation := c.generation.Load()
+	defer func() {
+		e.mu.Lock()
+		e.refreshing = false
+		e.mu.Unlock()
+	}()
+	e.mu.Lock()
+	renewed := e.at.After(scheduled) || e.generation != generation
+	e.mu.Unlock()
+	if renewed || c.generation.Load() != generation {
+		return
+	}
 	items, err := fetch(newServerTiming())
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.refreshing = false
-	if err == nil {
-		e.items, e.at, e.generation = items, time.Now(), generation
-	} else {
-		// Try again in a few seconds instead of on every request.
-		e.at = time.Now().Add(-arrListTTL + 10*time.Second)
+	if err != nil {
+		e.retryAfter = time.Now().Add(arrRefreshRetry)
+		log.Printf("library: reading the %s list again in the background: %v", service, err)
+		return
 	}
+	e.items, e.at, e.generation, e.retryAfter = items, time.Now(), generation, time.Time{}
 }
 
 // forget ends every list, such as after something was changed through the console.
