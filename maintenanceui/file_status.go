@@ -201,6 +201,9 @@ type fileStatusCache struct {
 const (
 	fileStatusTTL   = 3 * time.Second
 	fileStatusStale = time.Minute
+	// fileStatusFreshCap keeps a slow read from making the index "fresh" for
+	// longer than it may be shown stale, which would leave nothing to refresh it.
+	fileStatusFreshCap = 30 * time.Second
 )
 
 // invalidate says the console changed something the index may show.
@@ -229,6 +232,10 @@ func (c *fileStatusCache) refreshLocked(st *store.Store) chan struct{} {
 		c.mu.Lock()
 		if err == nil {
 			c.index, c.at, c.cost, c.validAt = index, time.Now(), time.Since(began), gen
+		} else if c.index != nil {
+			// The store could not be read: keep showing what there is, and try again
+			// after the usual interval instead of on every request.
+			c.at, c.validAt = time.Now(), gen
 		}
 		c.loading = nil
 		c.mu.Unlock()
@@ -248,7 +255,7 @@ func (s *Server) fileStatuses() *fileStatusIndex {
 	c.mu.Lock()
 	age := time.Since(c.at)
 	if c.index != nil && c.validAt == c.gen {
-		if age < max(fileStatusTTL, 10*c.cost) {
+		if age < min(max(fileStatusTTL, 10*c.cost), fileStatusFreshCap) {
 			defer c.mu.Unlock()
 			return c.index
 		}

@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -87,7 +88,15 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	timing := newServerTiming()
 	fetch := func() ([]map[string]any, error) {
 		began := time.Now()
-		b, err := svc.Get(r.Context(), endpoint, query)
+		ctx := r.Context()
+		if id == "" {
+			// The fetch is shared with whoever asks while it runs, so it must not die
+			// with the request that happened to start it.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), arrFetchTimeout)
+			defer cancel()
+		}
+		b, err := svc.Get(ctx, endpoint, query)
 		timing.since("arr", began)
 		if err != nil {
 			return nil, fmt.Errorf("library service unavailable: %w", err)

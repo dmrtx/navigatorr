@@ -309,3 +309,36 @@ func TestLibraryIndexViewAndETag(t *testing.T) {
 		t.Fatal("per-title requests keep their own form", w.Code)
 	}
 }
+
+func TestFailedRefreshKeepsTheLastGoodListAndLoginDoesNotEmptyTheCaches(t *testing.T) {
+	s, h := testUI(t)
+	var down atomic.Bool
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if down.Load() {
+			http.Error(w, "down", 500)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 1, "title": "A", "path": "/media/a"}})
+	}))
+	defer upstream.Close()
+	s.registry = arrservice.NewRegistry(&config.Config{Services: map[string]config.ServiceConfig{"radarr": {URL: upstream.URL, APIVersion: "/api/v3"}}})
+	if w := request(h, "GET", "/api/maintenance/library?service=radarr", "", true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	// Anyone may post to login; that must not make the next page ask again.
+	request(h, "POST", "/api/maintenance/login", `{"token":"wrong"}`, false)
+	request(h, "POST", "/api/maintenance/logout", ``, false)
+	if w := request(h, "GET", "/api/maintenance/library?service=radarr", "", true); w.Code != 200 || calls.Load() != 1 {
+		t.Fatal("login emptied the cache", w.Code, calls.Load())
+	}
+	// An explicit refresh that fails is an error, but the good list is still there.
+	down.Store(true)
+	if w := request(h, "GET", "/api/maintenance/library?service=radarr&refresh=1", "", true); w.Code != 502 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "GET", "/api/maintenance/library?service=radarr", "", true); w.Code != 200 || !strings.Contains(w.Body.String(), `"A"`) {
+		t.Fatal("the last good list was lost", w.Code)
+	}
+}

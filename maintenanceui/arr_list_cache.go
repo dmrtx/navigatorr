@@ -11,7 +11,11 @@ import (
 // list is kept for a short while so paging, searching and sorting read memory
 // instead of asking again. The entries are shared and must not be modified;
 // a caller copies an item before adding anything to it.
-const arrListTTL = 45 * time.Second
+const (
+	arrListTTL = 45 * time.Second
+	// arrFetchTimeout bounds one fetch of a collection, however many requests wait on it.
+	arrFetchTimeout = time.Minute
+)
 
 type arrListCache struct {
 	mu      sync.Mutex
@@ -46,7 +50,7 @@ func (c *arrListCache) entry(service string) *arrListEntry {
 
 // get returns the service's list, fetching it when there is none, it is older
 // than the TTL, or refresh asks for a new one. hit says it came from memory.
-// A failed fetch keeps nothing.
+// A failed fetch is an error for this call and leaves the last good list as it was.
 func (c *arrListCache) get(service string, refresh bool, fetch func() ([]map[string]any, error)) (items []map[string]any, hit bool, err error) {
 	e := c.entry(service)
 	e.mu.Lock()
@@ -57,7 +61,7 @@ func (c *arrListCache) get(service string, refresh bool, fetch func() ([]map[str
 	}
 	items, err = fetch()
 	if err != nil {
-		e.items = nil
+		// The last good list stays for the next request that can use it.
 		return nil, false, err
 	}
 	e.items, e.at, e.generation = items, time.Now(), generation
