@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -11,8 +12,9 @@ import (
 // List returns every entry of a directory with its type, size and modification
 // time. Each entry is looked at relative to the directory's descriptor and
 // without following links, so a link is reported as a link and nothing outside
-// the root is ever opened. An entry that vanished since it was listed is left
-// out; a directory with more than MaxListEntries entries is refused.
+// the root is ever opened. An entry that vanished since it was listed, or that
+// cannot be looked at, is left out; a name that is not valid UTF-8 refuses the
+// listing; a directory with more than MaxListEntries entries is refused.
 func (r *Roots) List(ctx context.Context, path string) (ListResponse, error) {
 	dir, err := r.OpenDir(path)
 	if err != nil {
@@ -34,10 +36,14 @@ func (r *Roots) List(ctx context.Context, path string) (ListResponse, error) {
 			}
 			var st unix.Stat_t
 			if serr := unix.Fstatat(int(dir.Fd()), name, &st, unix.AT_SYMLINK_NOFOLLOW); serr != nil {
-				if errors.Is(serr, unix.ENOENT) {
-					continue
-				}
-				return ListResponse{}, serr
+				// An entry that vanished or cannot be looked at is left out, as the
+				// mount leaves out an entry it cannot describe.
+				continue
+			}
+			if !utf8.ValidString(name) {
+				// JSON would carry it as U+FFFD, a name that does not exist on disk:
+				// the caller lists this folder through the mount instead.
+				return ListResponse{}, errBadName
 			}
 			if len(res.Entries) >= MaxListEntries {
 				return ListResponse{}, errTooMany

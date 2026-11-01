@@ -199,6 +199,7 @@ var (
 	errNotDir   = &Error{Code: CodeNotDir, Message: "path is not a directory"}
 	errDenied   = &Error{Code: CodeDenied, Message: "permission denied"}
 	errTooMany  = &Error{Code: CodeBadInput, Message: "the directory has more entries than one listing carries"}
+	errBadName  = &Error{Code: CodeBadInput, Message: "an entry name is not valid UTF-8, which a JSON listing cannot carry"}
 	errChanged  = &Error{Code: CodeChanged, Message: "the file changed while it was read"}
 )
 

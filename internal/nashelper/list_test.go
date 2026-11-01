@@ -124,3 +124,40 @@ func TestAListingCanBeCancelled(t *testing.T) {
 		t.Fatal("a cancelled listing returned")
 	}
 }
+
+func TestListRefusesANameJSONCannotCarry(t *testing.T) {
+	f := newFixture(t, 2)
+	dir := filepath.Join(f.root, "odd")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ok.mkv"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bad\xff.mkv"), nil, 0o600); err != nil {
+		t.Skip("this filesystem refuses names that are not UTF-8")
+	}
+	status, _, raw := f.list(dir)
+	var e struct{ Error *Error }
+	_ = json.Unmarshal(raw, &e)
+	// Not an answer about the folder: the caller lists it through the mount, where the name is real.
+	if status != http.StatusBadRequest || e.Error == nil || !ShouldFallBack(e.Error) {
+		t.Fatal(status, string(raw))
+	}
+}
+
+func TestListsDoNotWaitBehindFolderSizeWalks(t *testing.T) {
+	f := newFixture(t, 2)
+	f.tree()
+	for range cap(f.srv.foldSem) {
+		f.srv.foldSem <- struct{}{}
+	}
+	defer func() {
+		for range cap(f.srv.foldSem) {
+			<-f.srv.foldSem
+		}
+	}()
+	if status, resp, raw := f.list(f.root); status != http.StatusOK || len(resp.Entries) == 0 {
+		t.Fatal(status, string(raw))
+	}
+}

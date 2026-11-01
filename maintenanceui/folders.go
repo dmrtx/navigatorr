@@ -208,7 +208,12 @@ func (s *Server) folderCandidates(ctx context.Context, resolver *fsop.Resolver, 
 	fromHelper := false
 	if meter := s.nasMeter(); meter != nil {
 		if _, mapped := meter.Remote(path); mapped {
-			if res, err := meter.List(ctx, path); err == nil {
+			res, err := meter.List(ctx, path)
+			if err != nil && ctx.Err() != nil {
+				// The person left: listing the folder again through the mount is for no one.
+				return nil, ctx.Err()
+			}
+			if err == nil {
 				fromHelper = true
 				raw = make([]folderCandidate, 0, len(res.Entries))
 				for _, e := range res.Entries {
