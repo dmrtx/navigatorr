@@ -74,8 +74,10 @@ func (s *Server) libraryFolders(ctx context.Context, services map[string]bool) m
 		if name == "radarr" {
 			endpoint = "/api/v3/movie"
 		}
-		list, _, err := s.arrLists.get(name, false, func() ([]map[string]any, error) {
-			fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), arrFetchTimeout)
+		list, _, err := s.arrLists.get(name, false, newServerTiming(), func(*serverTiming) ([]map[string]any, error) {
+			// The read is shared with whoever asks while it runs, and a stale list
+			// may be read again after this request is over.
+			fetchCtx, cancel := context.WithTimeout(context.Background(), arrFetchTimeout)
 			defer cancel()
 			b, err := svc.Get(fetchCtx, endpoint, nil)
 			if err != nil {
