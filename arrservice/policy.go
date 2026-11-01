@@ -7,8 +7,8 @@ import (
 )
 
 // Plex's token is an admin token that cannot be scoped. A service called plex
-// may read and write like any other, but never delete, and never reach the
-// routes that hand out the account token. Everything else passes.
+// may read, write and delete library content (DELETE only under /library), and
+// never reach the routes that hand out the account token. Everything else passes.
 var plexBlockedRoots = map[string]bool{"myplex": true, "security": true, "accounts": true}
 
 // PolicyError is returned when a request is refused by a service's policy.
@@ -25,9 +25,7 @@ type plexPolicy struct{ service string }
 
 func (p plexPolicy) Check(method, path string, query map[string]string) error {
 	deny := func(reason string) error { return &PolicyError{Service: p.service, Reason: reason} }
-	if strings.ToUpper(strings.TrimSpace(method)) == "DELETE" {
-		return deny("DELETE is not allowed on Plex")
-	}
+	method = strings.ToUpper(strings.TrimSpace(method))
 	// A deny-list only holds if the path cannot be spelled another way, so
 	// refuse anything Plex might read differently from this check.
 	route := path
@@ -64,8 +62,12 @@ func (p plexPolicy) Check(method, path string, query map[string]string) error {
 			return deny("empty or dot segments are not allowed in the path")
 		}
 	}
-	if plexBlockedRoots[strings.ToLower(segs[0])] {
-		return deny(fmt.Sprintf("/%s hands out the account token", strings.ToLower(segs[0])))
+	root := strings.ToLower(segs[0])
+	if plexBlockedRoots[root] {
+		return deny(fmt.Sprintf("/%s hands out the account token", root))
+	}
+	if method == "DELETE" && root != "library" {
+		return deny("DELETE is only allowed under /library")
 	}
 	return nil
 }

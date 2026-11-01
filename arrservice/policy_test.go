@@ -21,15 +21,19 @@ func TestPlexPolicy(t *testing.T) {
 		{"POST", "/library/sections"},
 		{"PUT", "/library/metadata/9/match"},
 		{"get", "library/sections/"},
+		{"DELETE", "/library/metadata/9"},
+		{"delete", "/library/sections/3"},
 	} {
 		if err := p.Check(c[0], c[1], nil); err != nil {
 			t.Errorf("%s %s should pass: %v", c[0], c[1], err)
 		}
 	}
 	for _, c := range [][2]string{
-		{"DELETE", "/library/sections/3"},
-		{"delete", "/library/metadata/9"},
-		{" Delete ", "/library/metadata/9"},
+		{"DELETE", "/status/sessions/1"},
+		{" Delete ", "/playlists/9"},
+		{"DELETE", "/"},
+		{"DELETE", "/myplex/account"},
+		{"DELETE", "/library/../playlists/9"},
 		{"GET", "/myplex/account"},
 		{"GET", "/MyPlex/account"},
 		{"GET", "/security/token"},
@@ -62,11 +66,11 @@ func TestPlexServiceNeverSendsBlockedRequests(t *testing.T) {
 	svc := NewService("plex", config.ServiceConfig{URL: srv.URL, APIKey: key, AuthMethod: "header", AuthHeader: "X-Plex-Token"})
 	ctx := context.Background()
 
-	if _, _, err := svc.DoRequest(ctx, "DELETE", "/library/sections/1", nil, nil); err == nil {
-		t.Error("DoRequest DELETE must be blocked")
+	if _, _, err := svc.DoRequest(ctx, "DELETE", "/playlists/1", nil, nil); err == nil {
+		t.Error("DoRequest DELETE outside /library must be blocked")
 	}
-	if _, _, err := svc.DoRequestOnce(ctx, "delete", "/library/sections/1", nil, nil); err == nil {
-		t.Error("DoRequestOnce delete must be blocked")
+	if _, _, err := svc.DoRequestOnce(ctx, "delete", "/playlists/1", nil, nil); err == nil {
+		t.Error("DoRequestOnce delete outside /library must be blocked")
 	}
 	if _, _, err := svc.DoRequest(ctx, "GET", "/myplex/account", nil, nil); err == nil {
 		t.Error("/myplex must be blocked")
@@ -76,6 +80,9 @@ func TestPlexServiceNeverSendsBlockedRequests(t *testing.T) {
 	}
 	if _, _, err := svc.DoRequest(ctx, "PUT", "/library/metadata/9/match", nil, nil); err != nil || hits.Load() != 1 {
 		t.Errorf("a write should pass: %v hits %d", err, hits.Load())
+	}
+	if _, _, err := svc.DoRequest(ctx, "DELETE", "/library/metadata/9", nil, nil); err != nil || hits.Load() != 2 {
+		t.Errorf("a library delete should pass: %v hits %d", err, hits.Load())
 	}
 	// Other services are untouched.
 	other := NewService("sonarr", config.ServiceConfig{URL: srv.URL, AuthMethod: "header"})

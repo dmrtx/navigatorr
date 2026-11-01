@@ -511,8 +511,10 @@ services:
 
 `plex` is configured like any other service (`url`, `api_key`, sent as `X-Plex-Token`) and used
 through `call_api` with `service: plex`; there are no Plex tools. Plex's token is an admin token,
-so a service named `plex` refuses `DELETE` (whatever `allow_destructive` says) and the routes
-that hand out the account token (`/myplex`, `/security`, `/accounts`). Everything else passes.
+so a service named `plex` allows `DELETE` only under `/library` (series, seasons, episodes,
+libraries) and refuses the routes that hand out the account token (`/myplex`, `/security`,
+`/accounts`). Everything else passes. Whether a delete also removes files from disk is Plex's own
+setting (Settings > Library > Allow media deletion) and what its media mount permits.
 Changing a library's agent can lose matches and watch state; prefer creating a new library.
 
 ---
