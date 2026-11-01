@@ -27,6 +27,15 @@ var SidecarSubExtensions = map[string]bool{
 	"srt": true, "ass": true, "ssa": true, "vtt": true, "sub": true, "idx": true,
 }
 
+// InertExtensions are text, image and subtitle formats that cannot run
+// anything. A name such as "YTSProxies.com.txt" (an advert shipped with many
+// releases) carries "com" in the middle of its name but is not an executable.
+var InertExtensions = map[string]bool{
+	"txt": true, "nfo": true, "jpg": true, "jpeg": true, "png": true,
+	"gif": true, "sfv": true, "md5": true, "srt": true, "ass": true,
+	"ssa": true, "vtt": true, "sub": true, "idx": true,
+}
+
 // IsDangerousFilename reports whether a filename must reject a release:
 // a blocked extension, or a double extension hiding an executable behind a
 // video suffix (Episode.mkv.exe).
@@ -44,7 +53,11 @@ func IsDangerousFilename(name string) bool {
 	if innerExt != "" && VideoExtensions[innerExt] && BlockedExtensions[ext] {
 		return true
 	}
-	// Any blocked extension anywhere in a multi-suffix name is suspicious.
+	// Any blocked extension anywhere in a multi-suffix name is suspicious,
+	// unless the final extension is an inert text/image/subtitle one.
+	if InertExtensions[ext] {
+		return false
+	}
 	for _, part := range strings.Split(base, ".")[1:] {
 		if BlockedExtensions[strings.ToLower(part)] {
 			return true
