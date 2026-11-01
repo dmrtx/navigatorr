@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 )
 
 func videoPath(path string) bool {
@@ -106,34 +108,13 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 		offset = min(offset, total)
 		window = list.Items[offset:min(offset+folderPageSize, total)]
 	} else {
-		entries, err := os.ReadDir(path)
+		sized := order == "size_desc" || order == "size_asc"
+		candidates, err := s.folderCandidates(r.Context(), resolver, path, q, sized, timing)
 		if err != nil {
 			fail(w, 400, err.Error())
 			return
 		}
-		timing.since("readdir", began)
 		began = time.Now()
-		sized := order == "size_desc" || order == "size_asc"
-		candidates := make([]folderCandidate, 0, len(entries))
-		for _, d := range entries {
-			if strings.HasPrefix(d.Name(), ".") || (!d.IsDir() && !videoPath(d.Name())) || (q != "" && !strings.Contains(strings.ToLower(d.Name()), q)) {
-				continue
-			}
-			c := folderCandidate{entry: d, key: strings.ToLower(filepath.Join(path, d.Name()))}
-			switch {
-			case sized || d.Type()&fs.ModeSymlink != 0:
-				// Sizes order the whole folder, and a link has to be followed to know
-				// where it leads: both need the entry's own stat now.
-				stat, ok := folderEntryStat(resolver, path, d)
-				if !ok {
-					continue
-				}
-				c.stat, c.resolved, c.key = stat, true, strings.ToLower(stat.Path)
-			case !d.IsDir() && !d.Type().IsRegular():
-				continue
-			}
-			candidates = append(candidates, c)
-		}
 		total = len(candidates)
 		offset = min(offset, total)
 		if sized {
@@ -165,7 +146,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 			})
 			for _, c := range candidates[offset:min(offset+folderPageSize, total)] {
 				if !c.resolved {
-					stat, ok := folderEntryStat(resolver, path, c.entry)
+					stat, ok := folderEntryStat(resolver, path, c)
 					if !ok {
 						continue
 					}
@@ -202,6 +183,10 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 const folderPageSize = 100
 
 type folderCandidate struct {
+	name string
+	// kind of the entry itself; a link is never followed to tell.
+	link, dir, regular bool
+	// entry is the mount's listing entry, when the listing came from the mount.
 	entry fs.DirEntry
 	// key orders the entries: the lower-cased path, which for a link is where it leads.
 	key      string
@@ -209,14 +194,81 @@ type folderCandidate struct {
 	resolved bool
 }
 
+// folderCandidates lists the folder's entries that the listing may show. The
+// NAS helper reads the folder where it lives, with type, size and time in one
+// answer; without it (not configured, not mapped, too many entries, an older
+// helper, unreachable) the folder is listed through the mount. A link is
+// followed through the mount either way, since only the mount's read roots
+// decide where a link may lead. When the order needs every size (sized), or a
+// link has to be followed, the entry's stat is taken now; otherwise it is left
+// for the entries of the page.
+func (s *Server) folderCandidates(ctx context.Context, resolver *fsop.Resolver, path, q string, sized bool, timing *serverTiming) ([]folderCandidate, error) {
+	began := time.Now()
+	var raw []folderCandidate
+	fromHelper := false
+	if meter := s.nasMeter(); meter != nil {
+		if _, mapped := meter.Remote(path); mapped {
+			if res, err := meter.List(ctx, path); err == nil {
+				fromHelper = true
+				raw = make([]folderCandidate, 0, len(res.Entries))
+				for _, e := range res.Entries {
+					c := folderCandidate{name: e.Name, link: e.Type == nashelper.EntrySymlink, dir: e.Type == nashelper.EntryDir, regular: e.Type == nashelper.EntryFile}
+					if c.dir || c.regular {
+						c.stat = fsop.Stat{Path: filepath.Join(path, e.Name), Size: e.Size, IsDir: c.dir, ModTime: time.Unix(0, e.MtimeNs).UTC().Format(time.RFC3339)}
+						c.resolved = true
+					}
+					raw = append(raw, c)
+				}
+			}
+		}
+	}
+	if !fromHelper {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return nil, err
+		}
+		raw = make([]folderCandidate, 0, len(entries))
+		for _, d := range entries {
+			raw = append(raw, folderCandidate{name: d.Name(), link: d.Type()&fs.ModeSymlink != 0, dir: d.IsDir(), regular: d.Type().IsRegular(), entry: d})
+		}
+	}
+	if fromHelper {
+		timing.note("list", "helper")
+	} else {
+		timing.note("list", "mount")
+	}
+	timing.since("readdir", began)
+	began = time.Now()
+	candidates := make([]folderCandidate, 0, len(raw))
+	for _, c := range raw {
+		if strings.HasPrefix(c.name, ".") || (!c.dir && !videoPath(c.name)) || (q != "" && !strings.Contains(strings.ToLower(c.name), q)) {
+			continue
+		}
+		c.key = strings.ToLower(filepath.Join(path, c.name))
+		switch {
+		case c.link || (sized && !c.resolved):
+			stat, ok := folderEntryStat(resolver, path, c)
+			if !ok {
+				continue
+			}
+			c.stat, c.resolved, c.key = stat, true, strings.ToLower(stat.Path)
+		case !c.dir && !c.regular:
+			continue
+		}
+		candidates = append(candidates, c)
+	}
+	timing.since("stat", began)
+	return candidates, nil
+}
+
 // folderEntryStat describes one entry the way the listing shows it, or says it
 // must not be shown: a link that leads outside the read roots, to nothing, or
 // to something that is neither a folder nor a regular file. An entry that is
 // not a link lies where it is listed, inside the folder that was already
 // resolved, so one stat of its own is all it takes.
-func folderEntryStat(resolver *fsop.Resolver, dir string, d fs.DirEntry) (fsop.Stat, bool) {
-	p := filepath.Join(dir, d.Name())
-	if d.Type()&fs.ModeSymlink != 0 {
+func folderEntryStat(resolver *fsop.Resolver, dir string, c folderCandidate) (fsop.Stat, bool) {
+	p := filepath.Join(dir, c.name)
+	if c.link {
 		stat, err := resolver.FileStat(p)
 		if err != nil {
 			return fsop.Stat{}, false
@@ -227,12 +279,12 @@ func folderEntryStat(resolver *fsop.Resolver, dir string, d fs.DirEntry) (fsop.S
 		}
 		return stat, true
 	}
-	if !d.IsDir() && !d.Type().IsRegular() {
+	if (!c.dir && !c.regular) || c.entry == nil {
 		return fsop.Stat{}, false
 	}
-	info, err := d.Info()
+	info, err := c.entry.Info()
 	if err != nil {
 		return fsop.Stat{}, false
 	}
-	return fsop.Stat{Path: p, Size: info.Size(), IsDir: d.IsDir(), ModTime: info.ModTime().UTC().Format(time.RFC3339)}, true
+	return fsop.Stat{Path: p, Size: info.Size(), IsDir: c.dir, ModTime: info.ModTime().UTC().Format(time.RFC3339)}, true
 }

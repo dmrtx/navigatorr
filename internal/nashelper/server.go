@@ -141,6 +141,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/hash", s.startHash)
 	mux.HandleFunc("GET /v1/volumes", s.volumes)
 	mux.HandleFunc("POST /v1/usage", s.startUsage)
+	mux.HandleFunc("POST /v1/list", s.list)
 	mux.HandleFunc("GET /v1/jobs/{id}", s.getJob)
 	mux.HandleFunc("DELETE /v1/jobs/{id}", s.cancelJob)
 	return s.authenticated(mux)
@@ -250,6 +251,30 @@ func decodePath(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, Health{Version: Version, InstanceID: s.instance, Roots: s.roots.Paths(), Resolver: s.roots.Resolver()})
+}
+
+// list answers with every entry of one directory in one reply. It is a plain
+// metadata read, bounded by the same lanes as the folder walks someone is
+// waiting on, so a burst of listings cannot crowd the NAS.
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+	path, ok := decodePath(w, r)
+	if !ok {
+		return
+	}
+	select {
+	case s.foldSem <- struct{}{}:
+		defer func() { <-s.foldSem }()
+	case <-r.Context().Done():
+		writeError(w, &Error{Code: CodeCancelled, Message: "the request was cancelled"})
+		return
+	}
+	res, err := s.roots.List(r.Context(), path)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	res.InstanceID = s.instance
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) identity(w http.ResponseWriter, r *http.Request) {

@@ -17,6 +17,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
+	"github.com/jakenesler/navigatorr/internal/nashelper"
 	"github.com/jakenesler/navigatorr/store"
 )
 
@@ -391,5 +392,128 @@ func TestARefreshThatWaitedBehindAFetchDoesNotFetchAgain(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("three refreshes that overlapped asked the *arr %d times", calls.Load())
+	}
+}
+
+// With the NAS helper mapped to the folder, the listing comes from the helper
+// in one call: same names, order, totals and page as the mount gives, links are
+// still followed through the mount and refused outside the read roots, and no
+// entry that is not a link is stat'ed through the mount.
+func TestFolderListingFromTheHelperMatchesTheMount(t *testing.T) {
+	s, h := testUI(t)
+	root := t.TempDir()
+	var entries []nashelper.ListEntry
+	for i := 0; i < 130; i++ {
+		name := fmt.Sprintf("film%03d.mkv", i)
+		// Nothing exists on the mount for these: the sizes can only come from the helper.
+		entries = append(entries, nashelper.ListEntry{Name: name, Type: nashelper.EntryFile, Size: int64(1000 + i), MtimeNs: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixNano()})
+	}
+	entries = append(entries,
+		nashelper.ListEntry{Name: "Extras", Type: nashelper.EntryDir, MtimeNs: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixNano()},
+		nashelper.ListEntry{Name: "target.mkv", Type: nashelper.EntryFile, Size: 5},
+		nashelper.ListEntry{Name: "notes.txt", Type: nashelper.EntryFile, Size: 1},
+		nashelper.ListEntry{Name: ".hidden.mkv", Type: nashelper.EntryFile, Size: 1},
+		nashelper.ListEntry{Name: "pipe.mkv", Type: nashelper.EntryOther},
+		nashelper.ListEntry{Name: "escaped.mkv", Type: nashelper.EntrySymlink},
+		nashelper.ListEntry{Name: "inside.mkv", Type: nashelper.EntrySymlink},
+		nashelper.ListEntry{Name: "broken.mkv", Type: nashelper.EntrySymlink},
+	)
+	target := filepath.Join(root, "target.mkv")
+	os.WriteFile(target, []byte("12345"), 0600)
+	outside := filepath.Join(t.TempDir(), "outside.mkv")
+	os.WriteFile(outside, []byte("x"), 0600)
+	os.Symlink(outside, filepath.Join(root, "escaped.mkv"))
+	os.Symlink(target, filepath.Join(root, "inside.mkv"))
+	os.Symlink(filepath.Join(root, "missing.mkv"), filepath.Join(root, "broken.mkv"))
+	deps := s.engine.Deps()
+	deps.Fs, _ = fsop.NewResolver([]string{root}, nil)
+	s.engine = action.NewEngine(deps)
+	canonical := deps.Fs.ReadRoots()[0]
+	meter := &fakeMeter{prefix: filepath.Dir(canonical), list: map[string]nashelper.ListResponse{canonical: {InstanceID: "test", Entries: entries}}}
+	s.nas = meter
+
+	type page struct {
+		Items []struct {
+			Path    string `json:"path"`
+			Size    int64  `json:"size"`
+			IsDir   bool   `json:"is_dir"`
+			ModTime string `json:"mod_time"`
+		} `json:"items"`
+		Total   int  `json:"total"`
+		HasMore bool `json:"has_more"`
+	}
+	read := func(query string) (page, http.Header) {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/folder?path="+url.QueryEscape(canonical)+query, "", true)
+		var p page
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &p) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return p, w.Header()
+	}
+	first, header := read("")
+	// 130 films, Extras, the target and the link that leads to it; the escaped and broken links, the note, the hidden file and the pipe are not listed.
+	if first.Total != 133 || len(first.Items) != 100 || !first.HasMore {
+		t.Fatal(first.Total, len(first.Items), first.HasMore)
+	}
+	if !strings.Contains(header.Get("Server-Timing"), `list;dur=0;desc="helper"`) {
+		t.Fatal(header.Get("Server-Timing"))
+	}
+	if filepath.Base(first.Items[0].Path) != "Extras" || !first.Items[0].IsDir || first.Items[1].Size != 1000 || first.Items[1].ModTime != "2026-01-02T03:04:05Z" {
+		t.Fatalf("%+v", first.Items[:2])
+	}
+	rest, _ := read("&offset=100")
+	if len(rest.Items) != 33 || rest.HasMore {
+		t.Fatal(len(rest.Items), rest.HasMore)
+	}
+	names := map[string]int{}
+	for _, p := range []page{first, rest} {
+		for _, item := range p.Items {
+			names[filepath.Base(item.Path)]++
+			if strings.Contains(item.Path, "escaped") || strings.Contains(item.Path, "broken") || strings.Contains(item.Path, "pipe") || strings.Contains(item.Path, "notes") {
+				t.Fatal("listed", item.Path)
+			}
+		}
+	}
+	// The link resolves to its target, as through the mount, so the target shows twice.
+	if names["target.mkv"] != 2 || names["inside.mkv"] != 0 || len(names) != 132 {
+		t.Fatal(names["target.mkv"], names["inside.mkv"], len(names))
+	}
+	if len(meter.listed) != 2 {
+		t.Fatal("helper asked", meter.listed)
+	}
+
+	// Sizes order the whole folder from the helper's sizes, without a stat of each entry.
+	bySize, _ := read("&sort=size_desc")
+	largest := ""
+	for _, item := range bySize.Items {
+		if !item.IsDir {
+			largest = filepath.Base(item.Path)
+			break
+		}
+	}
+	if bySize.Total != 133 || largest != "film129.mkv" {
+		t.Fatal(bySize.Total, largest)
+	}
+}
+
+// A helper that cannot answer (older release, unreachable, too many entries)
+// leaves the listing to the mount, with the same result.
+func TestFolderListingFallsBackToTheMountWhenTheHelperCannotList(t *testing.T) {
+	s, h := testUI(t)
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "a.mkv"), []byte("abc"), 0600)
+	deps := s.engine.Deps()
+	deps.Fs, _ = fsop.NewResolver([]string{root}, nil)
+	s.engine = action.NewEngine(deps)
+	canonical := deps.Fs.ReadRoots()[0]
+	meter := &fakeMeter{prefix: filepath.Dir(canonical)}
+	s.nas = meter
+	w := request(h, "GET", "/api/maintenance/folder?path="+url.QueryEscape(canonical), "", true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"size":3`) || !strings.Contains(w.Header().Get("Server-Timing"), `list;dur=0;desc="mount"`) {
+		t.Fatal(w.Code, w.Body.String(), w.Header())
+	}
+	if len(meter.listed) != 1 {
+		t.Fatal(meter.listed)
 	}
 }

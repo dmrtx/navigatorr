@@ -135,6 +135,40 @@ type UsageResult struct {
 // MaxUsageStamps bounds how many directories a usage result stamps.
 const MaxUsageStamps = 1024
 
+// MaxListEntries bounds one listing, which the client reads whole. A folder with
+// more entries is refused, and the caller lists it through the mount.
+const MaxListEntries = 5000
+
+// Entry types in a ListEntry. Only what the entry itself is: a link is reported
+// as a link and never followed.
+const (
+	EntryFile    = "file"
+	EntryDir     = "dir"
+	EntrySymlink = "symlink"
+	EntryOther   = "other"
+)
+
+// ListEntry is one name in a directory as the library's own filesystem
+// reports it: type, apparent size and modification time. The size is the
+// entry's own (a directory's is not the size of what is inside it).
+type ListEntry struct {
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Size    int64  `json:"size,string"`
+	MtimeNs int64  `json:"mtime_ns,string"`
+}
+
+// ListResponse is the answer to POST /v1/list: every entry of one directory in
+// one reply, taken with local reads instead of one round trip per entry over a
+// network mount. DirMtimeNs is the directory's own modification time taken
+// before its entries were read, which moves when an entry is added, removed or
+// renamed (not when a file's contents change).
+type ListResponse struct {
+	InstanceID string      `json:"instance_id"`
+	DirMtimeNs int64       `json:"dir_mtime_ns,string"`
+	Entries    []ListEntry `json:"entries"`
+}
+
 // Error codes.
 const (
 	CodeNotFound  = "not_found"
@@ -164,6 +198,7 @@ var (
 	errNotFile  = &Error{Code: CodeNotFile, Message: "path is not a regular file"}
 	errNotDir   = &Error{Code: CodeNotDir, Message: "path is not a directory"}
 	errDenied   = &Error{Code: CodeDenied, Message: "permission denied"}
+	errTooMany  = &Error{Code: CodeBadInput, Message: "the directory has more entries than one listing carries"}
 	errChanged  = &Error{Code: CodeChanged, Message: "the file changed while it was read"}
 )
 

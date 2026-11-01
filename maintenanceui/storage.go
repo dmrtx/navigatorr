@@ -44,6 +44,9 @@ type nasMeter interface {
 	Remote(local string) (string, bool)
 	Volumes(ctx context.Context) (nashelper.VolumeResponse, error)
 	Usage(ctx context.Context, local string, progress nashelper.UsageProgress, opts ...nashelper.UsageOption) (nashelper.UsageResult, error)
+	// List is one directory with every entry's type, size and time, read on the
+	// NAS in one request. An error means the caller lists through the mount.
+	List(ctx context.Context, local string) (nashelper.ListResponse, error)
 }
 
 func (s *Server) nasMeter() nasMeter {

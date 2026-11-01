@@ -180,6 +180,21 @@ func (c *Client) Identity(ctx context.Context, local string) (IdentityResponse, 
 	return resp, nil
 }
 
+// List returns every entry of a directory as the NAS's own filesystem reports
+// it, in one request. A directory the helper cannot list (too many entries, not
+// mapped, an older helper without the route) is an unavailability, and the
+// caller lists it through the mount.
+func (c *Client) List(ctx context.Context, local string) (ListResponse, error) {
+	var resp ListResponse
+	if err := c.pathCall(ctx, c.timeout, "/v1/list", local, &resp); err != nil {
+		return ListResponse{}, err
+	}
+	if resp.InstanceID == "" {
+		return ListResponse{}, fmt.Errorf("%w: answer without an instance", ErrUnavailable)
+	}
+	return resp, nil
+}
+
 // Sample returns the sampled-range digest of the file and the identity it was
 // taken under. It may wait behind running hashes, so it is bounded by the
 // caller's deadline or sampleTimeout, whichever is shorter.

@@ -25,6 +25,9 @@ type fakeMeter struct {
 	usageErr   error
 	children   map[string][]nashelper.UsageChild
 	walked     []string
+	// list answers List for a folder; without an entry the helper is unavailable.
+	list   map[string]nashelper.ListResponse
+	listed []string
 }
 
 func (f *fakeMeter) Remote(local string) (string, bool) {
@@ -47,6 +50,14 @@ func (f *fakeMeter) Usage(_ context.Context, local string, _ nashelper.UsageProg
 		return nashelper.UsageResult{}, f.usageErr
 	}
 	return nashelper.UsageResult{Bytes: f.usage[local], Files: 3, Dirs: 1, Children: f.children[local]}, nil
+}
+
+func (f *fakeMeter) List(_ context.Context, local string) (nashelper.ListResponse, error) {
+	f.listed = append(f.listed, local)
+	if res, ok := f.list[local]; ok {
+		return res, nil
+	}
+	return nashelper.ListResponse{}, nashelper.ErrUnavailable
 }
 
 // storageRoots makes two served roots and a UI that serves them.
