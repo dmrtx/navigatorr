@@ -83,11 +83,13 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil || len(candidateVideoStreams) != 1 {
 		return fail("quality_final_candidate_probe_failed", probeFailure("candidate video probe", err, len(candidateVideoStreams)))
 	}
-	var compactChain string
+	var compactChain, compactCandidateChain string
 	if plan.Compact != nil {
 		// Compact converts HDR/DV to SDR, so the source may be HDR, but only
 		// exactly as frozen; the candidate must be clean SDR at the target size
-		// and is measured against the source through the identical chain.
+		// and is measured against the source through the identical chain. A
+		// keep-HDR candidate must carry exactly the frozen HDR signalling, and
+		// both pictures are measured through the same tone map.
 		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
 		dr, err := classifySourceDynamicRange(ctx, w.ffprobePath, source, &sourceRep)
 		if err != nil {
@@ -111,7 +113,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		if e.CompactChain, err = compactChainEvidence(plan.Compact, digest); err != nil {
 			return fail("quality_compact_chain_unavailable", err)
 		}
-		if compactChain, err = compactFilterForRun(plan.Compact); err != nil {
+		if compactChain, compactCandidateChain, err = compactMeasurementChains(plan.Compact); err != nil {
 			return fail("quality_compact_chain_unavailable", err)
 		}
 	} else if plan.Mode != "" {
@@ -198,6 +200,9 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			args := BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, item.firstFrame, from, to)
 			if compactChain != "" && item.out == refPath {
 				args = withReferenceChain(args, compactChain)
+			}
+			if compactCandidateChain != "" && item.out == candPath {
+				args = withReferenceChain(args, compactCandidateChain)
 			}
 			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
 				return bad("quality_final_sample_extract_failed", err)

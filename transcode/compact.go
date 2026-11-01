@@ -3,6 +3,7 @@ package transcode
 import (
 	"errors"
 	"fmt"
+	"regexp"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
@@ -13,6 +14,15 @@ import (
 // encoder input and to the metric reference, so VMAF/CAMBI measure only the
 // encode, never the intended tone map or downscale.
 const CompactChainVersion = "compact-sdr-v1"
+
+// CompactHDRChainVersion keeps an HDR source HDR: the picture is only
+// rescaled and re-encoded as x265 Main10 with the source's transfer (PQ or
+// HLG), BT.2020 and its static HDR10 metadata. A Dolby Vision 7/8 source is
+// encoded from its base layer and an HDR10+ source loses its dynamic
+// metadata, so both come out as HDR10 (or HLG). The tone map of the SDR chain
+// is still frozen: the worker measures VMAF/CAMBI with both the reference and
+// the candidate tone mapped by it, so the SDR thresholds keep their meaning.
+const CompactHDRChainVersion = "compact-hdr-v1"
 
 // Tone map methods, by source signal. Changing the curve, LUT size or
 // interpolation requires a new identifier.
@@ -34,7 +44,17 @@ const CompactDefaultMaxHeight = 1080
 // inside a 16:9 box of that height without upscaling.
 var CompactMaxHeights = []int{720, 1080, 1440, 2160}
 
-// SDR BT.709 signalling written by every compact encode.
+// HDR signalling written by every keep-HDR compact encode, besides the
+// transfer of CompactHDROutput.
+const (
+	CompactHDRColorPrimaries = "bt2020"
+	CompactHDRColorMatrix    = "bt2020nc"
+	CompactHDRColorRange     = "tv"
+	CompactHDRTransferPQ     = "smpte2084"
+	CompactHDRTransferHLG    = "arib-std-b67"
+)
+
+// SDR BT.709 signalling written by every SDR compact encode.
 const (
 	CompactColorPrimaries = "bt709"
 	CompactColorTransfer  = "bt709"
@@ -60,6 +80,23 @@ type CompactPlan struct {
 	TargetWidth        int             `json:"target_width" yaml:"target_width"`
 	TargetHeight       int             `json:"target_height" yaml:"target_height"`
 	ToneMap            *CompactToneMap `json:"tone_map,omitempty" yaml:"tone_map,omitempty"`
+	// HDR is the output signalling of a keep-HDR plan (CompactHDRChainVersion)
+	// and is absent from every SDR plan.
+	HDR *CompactHDROutput `json:"hdr,omitempty" yaml:"hdr,omitempty"`
+}
+
+// CompactHDROutput freezes what a keep-HDR encode signals: the source's
+// transfer and, for PQ, its static metadata as x265 writes them. HLG carries
+// no static metadata.
+type CompactHDROutput struct {
+	Transfer string `json:"transfer" yaml:"transfer"`
+	// MasterDisplay is the source's SMPTE ST 2086 metadata in x265's
+	// master-display notation; empty when the source has none.
+	MasterDisplay string `json:"master_display,omitempty" yaml:"master_display,omitempty"`
+	// MaxCLL and MaxFALL are the source's CTA-861.3 content light levels in
+	// cd/m², both zero when the source has none.
+	MaxCLL  int `json:"max_cll,omitempty" yaml:"max_cll,omitempty"`
+	MaxFALL int `json:"max_fall,omitempty" yaml:"max_fall,omitempty"`
 }
 
 // CompactToneMap parameterizes the HDR to SDR tone map.
@@ -72,21 +109,25 @@ type CompactToneMap struct {
 // CompactChainEvidence records the exact transform applied to the encoder
 // input and, identically, to the metric reference.
 type CompactChainEvidence struct {
-	ChainVersion     string `json:"chain_version"`
-	SourceSignal     string `json:"source_signal"`
-	ToneMapMethod    string `json:"tone_map_method,omitempty"`
-	SourcePeakNits   int    `json:"source_peak_nits,omitempty"`
-	TargetPeakNits   int    `json:"target_peak_nits,omitempty"`
-	LUTSHA256        string `json:"lut_sha256,omitempty"`
-	TargetWidth      int    `json:"target_width"`
-	TargetHeight     int    `json:"target_height"`
-	Scaler           string `json:"scaler"`
-	ReferenceChain   string `json:"reference_chain"`
+	ChainVersion   string `json:"chain_version"`
+	SourceSignal   string `json:"source_signal"`
+	ToneMapMethod  string `json:"tone_map_method,omitempty"`
+	SourcePeakNits int    `json:"source_peak_nits,omitempty"`
+	TargetPeakNits int    `json:"target_peak_nits,omitempty"`
+	LUTSHA256      string `json:"lut_sha256,omitempty"`
+	TargetWidth    int    `json:"target_width"`
+	TargetHeight   int    `json:"target_height"`
+	Scaler         string `json:"scaler"`
+	ReferenceChain string `json:"reference_chain"`
+	// CandidateChain is the tone map a keep-HDR candidate is measured
+	// through; SDR candidates are measured as encoded.
+	CandidateChain   string `json:"candidate_chain,omitempty"`
 	MeasurementSpace string `json:"measurement_space"`
 	AppliedTo        string `json:"applied_to"`
 }
 
-// CompactOutputEvidence records the post-encode SDR signalling check.
+// CompactOutputEvidence records the post-encode signalling check: clean SDR
+// BT.709, or for a keep-HDR plan exactly the frozen HDR signalling.
 type CompactOutputEvidence struct {
 	Verdict        string   `json:"verdict"`
 	ReasonCodes    []string `json:"reason_codes,omitempty"`
@@ -97,6 +138,9 @@ type CompactOutputEvidence struct {
 	ColorMatrix    string   `json:"color_matrix,omitempty"`
 	ColorRange     string   `json:"color_range,omitempty"`
 	HDRSideData    []string `json:"hdr_side_data,omitempty"`
+	MasterDisplay  string   `json:"master_display,omitempty"`
+	MaxCLL         int      `json:"max_cll,omitempty"`
+	MaxFALL        int      `json:"max_fall,omitempty"`
 	FramesProbed   int      `json:"frames_probed"`
 }
 
@@ -155,15 +199,32 @@ func compactSourcePeak(d mediainspect.DynamicRange) int {
 	return min(max(peak, 200), 10000)
 }
 
-// NewCompactPlan derives the compact plan from a classified source. Server
-// and worker both call it, so the frozen transform is reproducible.
+// NewCompactPlan derives the SDR compact plan from a classified source.
+// Server and worker both call it, so the frozen transform is reproducible.
 func NewCompactPlan(d mediainspect.DynamicRange, v mediainspect.DetailedStream, maxHeight int) (*CompactPlan, error) {
+	return NewCompactPlanForChain(CompactChainVersion, d, v, maxHeight)
+}
+
+// ValidCompactChain reports a known compact chain version.
+func ValidCompactChain(chain string) bool {
+	return chain == CompactChainVersion || chain == CompactHDRChainVersion
+}
+
+// NewCompactPlanForChain derives the compact plan of a chain version from a
+// classified source.
+func NewCompactPlanForChain(chain string, d mediainspect.DynamicRange, v mediainspect.DetailedStream, maxHeight int) (*CompactPlan, error) {
+	if !ValidCompactChain(chain) {
+		return nil, errors.New("unsupported compact chain")
+	}
 	signal := d.Signal()
 	if signal == "" {
 		if d.Reason != "" {
 			return nil, errors.New(d.Reason)
 		}
 		return nil, errors.New("compact_source_unrecognized")
+	}
+	if chain == CompactHDRChainVersion && signal == mediainspect.SignalSDR {
+		return nil, errors.New("compact_keep_hdr_requires_hdr")
 	}
 	switch v.SampleAspect {
 	case "", "1:1", "0:1", "N/A":
@@ -174,7 +235,7 @@ func NewCompactPlan(d mediainspect.DynamicRange, v mediainspect.DetailedStream, 
 	if err != nil {
 		return nil, err
 	}
-	p := &CompactPlan{ChainVersion: CompactChainVersion, SourceClass: d.Class, SourceSignal: signal, SourceWidth: v.Width, SourceHeight: v.Height, MaxHeight: maxHeight, TargetWidth: tw, TargetHeight: th}
+	p := &CompactPlan{ChainVersion: chain, SourceClass: d.Class, SourceSignal: signal, SourceWidth: v.Width, SourceHeight: v.Height, MaxHeight: maxHeight, TargetWidth: tw, TargetHeight: th}
 	if d.Class == mediainspect.DynamicRangeDolbyVision && d.DolbyVision != nil {
 		p.DolbyVisionProfile = d.DolbyVision.Profile
 	}
@@ -193,10 +254,34 @@ func NewCompactPlan(d mediainspect.DynamicRange, v mediainspect.DetailedStream, 
 			return nil, errors.New("compact_not_needed")
 		}
 	}
+	if chain == CompactHDRChainVersion {
+		if p.HDR, err = compactHDROutput(signal, d); err != nil {
+			return nil, err
+		}
+	}
 	if err := p.Validate(); err != nil {
 		return nil, err
 	}
 	return p, nil
+}
+
+// compactHDROutput freezes the HDR signalling a keep-HDR encode writes.
+func compactHDROutput(signal string, d mediainspect.DynamicRange) (*CompactHDROutput, error) {
+	if signal == mediainspect.SignalHLG {
+		return &CompactHDROutput{Transfer: CompactHDRTransferHLG}, nil
+	}
+	o := &CompactHDROutput{Transfer: CompactHDRTransferPQ}
+	if d.MasteringDisplay != nil {
+		md, err := mediainspect.X265MasterDisplay(d.MasteringDisplay)
+		if err != nil {
+			return nil, errors.New("hdr_mastering_display_invalid")
+		}
+		o.MasterDisplay = md
+	}
+	if cll := d.ContentLightLevel; cll != nil && (cll.MaxCLL > 0 || cll.MaxFALL > 0) {
+		o.MaxCLL, o.MaxFALL = cll.MaxCLL, cll.MaxFALL
+	}
+	return o, nil
 }
 
 // Validate fails closed on anything but a well-formed compact plan.
@@ -204,7 +289,7 @@ func (p *CompactPlan) Validate() error {
 	if p == nil {
 		return nil
 	}
-	if p.ChainVersion != CompactChainVersion || p.SourceClass == "" {
+	if !ValidCompactChain(p.ChainVersion) || p.SourceClass == "" {
 		return errors.New("unsupported compact chain")
 	}
 	tw, th, err := CompactTargetSize(p.SourceWidth, p.SourceHeight, p.MaxHeight)
@@ -237,8 +322,58 @@ func (p *CompactPlan) Validate() error {
 	if p.DolbyVisionProfile != 0 && (p.SourceClass != mediainspect.DynamicRangeDolbyVision || p.DolbyVisionProfile != 7 && p.DolbyVisionProfile != 8) {
 		return errors.New("invalid compact Dolby Vision profile")
 	}
+	if p.ChainVersion != CompactHDRChainVersion {
+		if p.HDR != nil {
+			return errors.New("SDR compact plans carry no HDR output")
+		}
+		return nil
+	}
+	return p.HDR.validate(p.SourceSignal)
+}
+
+// KeepsHDR reports a plan that keeps the source HDR.
+func (p *CompactPlan) KeepsHDR() bool { return p != nil && p.ChainVersion == CompactHDRChainVersion }
+
+// MeasurementPlan is the SDR plan whose tone map a keep-HDR encode is
+// measured through: the same source, size and tone map, tone mapped instead
+// of kept. An SDR plan is its own measurement plan.
+func (p *CompactPlan) MeasurementPlan() *CompactPlan {
+	if !p.KeepsHDR() {
+		return p
+	}
+	m := p.Clone()
+	m.ChainVersion, m.HDR = CompactChainVersion, nil
+	return m
+}
+
+func (o *CompactHDROutput) validate(signal string) error {
+	if o == nil {
+		return errors.New("keep-HDR compact plan without HDR output")
+	}
+	switch signal {
+	case mediainspect.SignalPQ:
+		if o.Transfer != CompactHDRTransferPQ {
+			return errors.New("keep-HDR PQ plan must signal PQ")
+		}
+	case mediainspect.SignalHLG:
+		if o.Transfer != CompactHDRTransferHLG || o.MasterDisplay != "" || o.MaxCLL != 0 || o.MaxFALL != 0 {
+			return errors.New("keep-HDR HLG plan must signal HLG without static metadata")
+		}
+	default:
+		return errors.New("compact_keep_hdr_requires_hdr")
+	}
+	// The values go to x265 inside -x265-params, so only the exact notation
+	// X265MasterDisplay writes is accepted.
+	if o.MasterDisplay != "" && !compactMasterDisplayPattern.MatchString(o.MasterDisplay) {
+		return errors.New("invalid keep-HDR master display")
+	}
+	if o.MaxCLL < 0 || o.MaxFALL < 0 || o.MaxCLL > 10000 || o.MaxFALL > 10000 {
+		return errors.New("invalid keep-HDR content light level")
+	}
 	return nil
 }
+
+var compactMasterDisplayPattern = regexp.MustCompile(`^G\(\d{1,5},\d{1,5}\)B\(\d{1,5},\d{1,5}\)R\(\d{1,5},\d{1,5}\)WP\(\d{1,5},\d{1,5}\)L\(\d{1,9},\d{1,9}\)$`)
 
 // Clone returns an independent copy.
 func (p *CompactPlan) Clone() *CompactPlan {
@@ -250,6 +385,10 @@ func (p *CompactPlan) Clone() *CompactPlan {
 		t := *p.ToneMap
 		cp.ToneMap = &t
 	}
+	if p.HDR != nil {
+		h := *p.HDR
+		cp.HDR = &h
+	}
 	return &cp
 }
 
@@ -259,11 +398,11 @@ func (p *CompactPlan) Equal(o *CompactPlan) bool {
 		return p == o
 	}
 	a, b := *p, *o
-	a.ToneMap, b.ToneMap = nil, nil
-	if a != b || (p.ToneMap == nil) != (o.ToneMap == nil) {
+	a.ToneMap, b.ToneMap, a.HDR, b.HDR = nil, nil, nil, nil
+	if a != b || (p.ToneMap == nil) != (o.ToneMap == nil) || (p.HDR == nil) != (o.HDR == nil) {
 		return false
 	}
-	return p.ToneMap == nil || *p.ToneMap == *o.ToneMap
+	return (p.ToneMap == nil || *p.ToneMap == *o.ToneMap) && (p.HDR == nil || *p.HDR == *o.HDR)
 }
 
 // MatchSource fails closed unless the frozen plan is exactly the plan the
@@ -272,7 +411,7 @@ func (p *CompactPlan) MatchSource(d mediainspect.DynamicRange, v mediainspect.De
 	if p == nil {
 		return errors.New("compact plan missing")
 	}
-	want, err := NewCompactPlan(d, v, p.MaxHeight)
+	want, err := NewCompactPlanForChain(p.ChainVersion, d, v, p.MaxHeight)
 	if err != nil {
 		return err
 	}

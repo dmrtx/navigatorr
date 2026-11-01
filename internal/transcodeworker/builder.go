@@ -38,11 +38,11 @@ func BuildVideoEncoderArgs(plan *transcode.Plan) ([]string, error) {
 	if err != nil || plan.Compact == nil {
 		return args, err
 	}
-	compact, err := compactEncoderArgs(plan.Compact, plan.VideoCodec)
+	compact, x265Params, err := compactEncoderArgs(plan.Compact, plan.VideoCodec)
 	if err != nil {
 		return nil, err
 	}
-	return append(args, compact...), nil
+	return mergeX265Params(append(args, compact...), x265Params), nil
 }
 
 // buildVideoToolboxArgs builds hevc_videotoolbox args. Rate control occupies a
@@ -524,7 +524,8 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 	}
 	if execPlan.Plan.Compact != nil {
 		// The source title often names the dropped format ("... Dolby
-		// Vision", "... HDR10"); it may not survive on the SDR stream.
+		// Vision", "... HDR10"); it may not survive on the SDR stream, nor
+		// on a kept-HDR stream that lost its Dolby Vision or HDR10+ layer.
 		args = append(args, "-metadata:s:v:0", "title=")
 	}
 	if execPlan.Plan.Compact != nil || norm(execPlan.Plan.VideoCodec) != transcode.VideoCodecCopy {

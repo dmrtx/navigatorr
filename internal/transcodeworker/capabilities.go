@@ -296,6 +296,13 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 			caps.CompactTranscode = true
 		}
 	}
+	// Keeping HDR is x265 only and needs -dolbyvision to switch RPU coding off.
+	// A failed probe only withholds the flag: it is not a fingerprint input.
+	if caps.CompactTranscode && caps.Encoders[libX265Encoder] {
+		if ok, _ := libX265HasDolbyVisionOption(ctx, ffmpegPath); ok {
+			caps.CompactKeepHDR = probeCompactHDRChain(ctx, ffmpegPath, scratchRoot) == nil
+		}
+	}
 	if probeQuality && caps.Filters["libvmaf"] {
 		qualityCaps := cachedQualityCapabilities(ctx, ffmpegPath, scratchRoot)
 		caps.Quality = &qualityCaps
