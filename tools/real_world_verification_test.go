@@ -615,11 +615,11 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		}
 	}
 
-	if toolsTotal != 74 {
-		t.Errorf("expected exactly 74 tools total, got %d", toolsTotal)
+	if toolsTotal != 75 {
+		t.Errorf("expected exactly 75 tools total, got %d", toolsTotal)
 	}
-	if len(baseToolsList) != 54 {
-		t.Errorf("expected exactly 54 base tools, got %d", len(baseToolsList))
+	if len(baseToolsList) != 55 {
+		t.Errorf("expected exactly 55 base tools, got %d", len(baseToolsList))
 	}
 	if len(newToolsList) != 20 {
 		t.Errorf("expected exactly 20 new tools, got %d", len(newToolsList))

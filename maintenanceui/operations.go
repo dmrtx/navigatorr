@@ -613,6 +613,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		fail(w, 503, "maintenance store is required")
 		return
 	}
+	timing := newServerTiming()
+	began := time.Now()
 	instances, err := s.engine.Deps().Store.ListMaintenanceActionSnapshot()
 	if err != nil {
 		fail(w, 500, "read maintenance history")
@@ -623,6 +625,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read archive state")
 		return
 	}
+	timing.since("snapshot", began)
+	began = time.Now()
 	now := time.Now().UTC()
 	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ObservedAt: now.Format(time.RFC3339Nano)}
 	page.Savings.Measurement = "verified_content_bytes_after_replacement_cleanup; not filesystem free space"
@@ -782,6 +786,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	page.Savings.EstimatedSavedBytes = page.Savings.EstimatedBytes
 	page.Savings.CandidateSavedBytes = page.Savings.CandidateBytes
+	timing.since("records", began)
+	began = time.Now()
 	page.Total = len(filtered)
 	end := min(offset, len(filtered)) + min(limit, max(0, len(filtered)-offset))
 	page.HasMore = end < len(filtered)
@@ -1087,5 +1093,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	if len(page.History) > 25 {
 		page.History = page.History[len(page.History)-25:]
 	}
+	timing.since("jobs", began)
+	timing.set(w)
 	writeJSON(w, http.StatusOK, page)
 }

@@ -93,6 +93,8 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		fail(w, 503, "maintenance store is required")
 		return
 	}
+	timing := newServerTiming()
+	began := time.Now()
 	inst, err := st.GetActionInstanceIfExists(id)
 	if err != nil {
 		fail(w, 500, "read batch")
@@ -110,6 +112,8 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read batch items")
 		return
 	}
+	timing.since("items", began)
+	began = time.Now()
 	inputs := decodeOperationJSON(inst.InputsJSON)
 	state := decodeOperationJSON(inst.StateJSON)
 	settings := operationMap(state["batch_item_settings"])
@@ -225,6 +229,8 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			views = append(views, view)
 		}
 	}
+	timing.since("views", began)
+	timing.set(w)
 	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})
 }
 

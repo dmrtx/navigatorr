@@ -415,6 +415,8 @@ Separate from the request queue, Navigatorr persists maintenance state in SQLite
 
 **Cleanup:** `cleanup_imported_downloads` defaults to `list`. Removal needs explicit `hashes` + `confirmed_imported=true` (+ `confirm=true` for data, + `allow_destructive`); 100% progress alone never deletes.
 
+**Download leftovers:** `cleanup_download_leftovers` clears folders a finished download left in a downloads folder. `mode=list` (default, read-only, needs `path`) returns the exact folders that can go (`empty`, `junk_only`, `junk_with_subtitles`) and why the top-level others stay. `remove_empty_dirs` / `remove_junk_dirs` need the exact folders from list in `paths` (max 50) + `confirm=true` + `allow_destructive`, re-check each one right before removing it, and report removed / already_absent / skipped (reason) / failed per folder. It never touches media, unknown files, partial downloads (`.!qB`, `.parts`), symlinks, hidden or system folders, a folder qBittorrent owns or saves into, or anything changed in the last `min_age_minutes` (default 60); loose subtitles go only with `include_subtitles=true`. If qBittorrent cannot be read it refuses. Orphan partials and library-duplicate detection are not part of it.
+
 **Scoped filesystem:** `fs_stat`, `fs_list`, `fs_hash`, `fs_safe_move` work inside `allowed_read_roots`/`allowed_write_roots`; `fs_safe_delete` additionally needs the authorizing job in `replacing`. There is no shell tool and no unrestricted file read — do not ask for one.
 
 ---

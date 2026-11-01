@@ -215,17 +215,24 @@ func (s *Store) RunRetention(ctx context.Context, logf func(format string, args 
 		case <-time.After(wait):
 		}
 		wait = retentionEvery
+		began := time.Now()
 		merged, err := s.CollapseOldPolls(ctx, time.Now().Add(-pollRetention))
 		if err != nil {
 			logf("step log retention: %v", err)
 		} else if merged > 0 {
 			logf("step log retention: merged %d repeated poll records", merged)
 		}
+		collapsed := time.Since(began)
+		began = time.Now()
 		freed, err := s.ReclaimSpace(ctx)
 		if err != nil {
 			logf("step log retention: reclaiming space: %v", err)
 		} else if freed > 0 {
 			logf("step log retention: returned %d MiB to the filesystem", freed>>20)
+		}
+		// A pass holds the store for moments, or for as long as a vacuum takes: say so.
+		if reclaimed := time.Since(began); collapsed+reclaimed > 2*time.Second {
+			logf("step log retention: pass took %s (merging %s, reclaiming %s)", (collapsed + reclaimed).Round(time.Millisecond), collapsed.Round(time.Millisecond), reclaimed.Round(time.Millisecond))
 		}
 	}
 }
