@@ -273,7 +273,19 @@ func (s *Server) accessAuthorized(r *http.Request) bool {
 		return false
 	}
 	values := r.Header.Values("Cf-Access-Jwt-Assertion")
-	return len(values) == 1 && s.access.verify(r.Context(), values[0]) == nil
+	if len(values) != 1 {
+		// Token and Bearer clients never carry one; only the page's first call
+		// and a duplicated header say something about a browser's Access sign-in.
+		if len(values) > 1 || r.URL.Path == "/api/maintenance/auth-info" {
+			s.access.rejected(fmt.Sprintf("%d assertion headers on %s", len(values), r.URL.Path))
+		}
+		return false
+	}
+	if err := s.access.verify(r.Context(), values[0]); err != nil {
+		s.access.rejected(err.Error())
+		return false
+	}
+	return true
 }
 
 func (s *Server) authorized(r *http.Request) bool {
