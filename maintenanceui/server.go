@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -216,7 +217,12 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 		}
+		served := time.Now()
 		mux.ServeHTTP(w, r)
+		if d := time.Since(served); d > slowRequest && strings.HasPrefix(r.URL.Path, "/api/") {
+			// Only the path: a query can carry file names.
+			log.Printf("slow request: %s %s took %s", r.Method, r.URL.Path, d.Round(time.Millisecond))
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
 			// (Signing in or out changes nothing the listings show, and anyone can
@@ -228,6 +234,9 @@ func (s *Server) Handler() http.Handler {
 		}
 	}))
 }
+
+// slowRequest is how long an API answer may take before it is written to the log.
+const slowRequest = 2 * time.Second
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
