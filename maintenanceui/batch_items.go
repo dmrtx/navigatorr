@@ -21,6 +21,8 @@ type batchItemView struct {
 	CandidateReady   bool     `json:"candidate_ready,omitempty"`
 	// SavedBytes is how much smaller the finished candidate is than the original.
 	SavedBytes int64 `json:"saved_bytes,omitempty"`
+	// SourceBytes is the file's size when the batch planned it (0 when unknown).
+	SourceBytes int64 `json:"source_bytes,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -119,7 +121,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 			var previous []store.TranscodeBatchItem
 			data, _ := json.Marshal(history[item.ItemKey])
 			_ = json.Unmarshal(data, &previous)
-			view := batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons}
+			view := batchItemView{RequestedProfile: operationString(operationMap(settings[item.ItemKey])["profile"]), PreviousAttempts: previous, RetryPending: pending[item.ItemKey] == true, ItemKey: item.ItemKey, FilePath: item.FilePath, DisplayLabel: item.DisplayLabel, Status: item.Status, ChildActionID: item.ChildActionID, Decision: item.Decision, Error: batchReasonText(item.Error, true), Profile: item.Profile, Reasons: item.Reasons, SourceBytes: item.SourceBytes}
 			view.Mode = operationString(inputs["mode"])
 			policy := state["mode_policy"]
 			if mode := operationString(operationMap(settings[item.ItemKey])["mode"]); mode != "" {

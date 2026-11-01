@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"slices"
@@ -785,6 +786,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	end := min(offset, len(filtered)) + min(limit, max(0, len(filtered)-offset))
 	page.HasMore = end < len(filtered)
 	if offset < len(filtered) {
+		// What each batch on this page listed weighed when it was planned. Not
+		// being able to read it only leaves the batches without that figure.
+		var batchIDs []string
+		for _, r := range filtered[offset:end] {
+			if r.inst.ActionName == "transcode_batch" {
+				batchIDs = append(batchIDs, r.inst.ID)
+			}
+		}
+		batchTotals, totalsErr := s.engine.Deps().Store.BatchSourceTotals(batchIDs)
+		if totalsErr != nil {
+			log.Printf("maintenanceui: read batch selection sizes: %v", totalsErr)
+			batchTotals = nil
+		}
 		for _, r := range filtered[offset:end] {
 			if err := req.Context().Err(); err != nil {
 				return
@@ -812,6 +826,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			job["savings"] = r.savings
+			if r.inst.ActionName == "transcode_batch" {
+				if t, ok := batchTotals[r.inst.ID]; ok && t.Items > 0 {
+					job["selection"] = map[string]any{"source_bytes": t.Bytes, "files": t.Items, "sized_files": t.Sized}
+				}
+			}
 			if endedWithoutResult(r) && !rerunHasResult(r, existingReplacements) && !remedyTaken(r, records) {
 				if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
 					full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}

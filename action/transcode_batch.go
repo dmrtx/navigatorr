@@ -385,7 +385,8 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			}
 		}
 
-		if _, err := os.Stat(cleanPath); err != nil {
+		info, err := os.Stat(cleanPath)
+		if err != nil {
 			item := store.TranscodeBatchItem{
 				BatchID:      ec.InstanceID,
 				ItemKey:      itemKey,
@@ -416,6 +417,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 				Decision:     "review",
 				Status:       "review",
 				Reasons:      []string{reason},
+				SourceBytes:  info.Size(),
 			}
 			_ = e.deps.Store.CreateTranscodeBatchItem(item)
 			batchItems = append(batchItems, item)
@@ -489,6 +491,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			Reasons:      itemReasons,
 			Status:       itemStatus,
 			Attempts:     0,
+			SourceBytes:  info.Size(),
 		}
 		_ = e.deps.Store.CreateTranscodeBatchItem(item)
 		batchItems = append(batchItems, item)

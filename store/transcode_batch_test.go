@@ -166,3 +166,53 @@ func TestMigrationV4ToV5(t *testing.T) {
 		t.Errorf("expected job_id job-new-migrated, got %q", it2.JobID)
 	}
 }
+
+func TestBatchSourceTotalsCountOnlySizedFiles(t *testing.T) {
+	s := openTestTB(t)
+	for _, id := range []string{"b1", "b2"} {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_batch", Status: ActionStatusRunning, InputsJSON: "{}", OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add := func(batch, key string, size int64) {
+		t.Helper()
+		if err := s.CreateTranscodeBatchItem(TranscodeBatchItem{BatchID: batch, ItemKey: key, FilePath: "/m/" + key, Status: "queued", SourceBytes: size}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("b1", "a", 100)
+	add("b1", "b", 0)
+	add("b2", "c", 50)
+	// The same file under a second key counts once.
+	add("b1", "a-again", 100)
+	if err := s.CreateTranscodeBatchItem(TranscodeBatchItem{BatchID: "b1", ItemKey: "a-again2", FilePath: "/m/a-again", Status: "review", SourceBytes: 100}); err != nil {
+		t.Fatal(err)
+	}
+	// Only the batches asked for are read.
+	only, err := s.BatchSourceTotals([]string{"b2", "none"})
+	if err != nil || len(only) != 1 || only["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
+		t.Fatalf("%+v %v", only, err)
+	}
+	if none, err := s.BatchSourceTotals(nil); err != nil || len(none) != 0 {
+		t.Fatalf("%+v %v", none, err)
+	}
+	totals, err := s.BatchSourceTotals([]string{"b1", "b2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals["b1"] != (BatchSourceTotal{Items: 3, Sized: 2, Bytes: 200}) || totals["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
+		t.Fatalf("%+v", totals)
+	}
+	// The size survives the item being read back and updated.
+	item, err := s.GetTranscodeBatchItem("b1", "a")
+	if err != nil || item == nil || item.SourceBytes != 100 {
+		t.Fatalf("%+v %v", item, err)
+	}
+	item.Status = "running"
+	if err := s.UpdateTranscodeBatchItem(*item); err != nil {
+		t.Fatal(err)
+	}
+	if again, _ := s.GetTranscodeBatchItem("b1", "a"); again == nil || again.SourceBytes != 100 {
+		t.Fatalf("size lost on update: %+v", again)
+	}
+}

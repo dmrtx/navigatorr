@@ -20,7 +20,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 19
+const SchemaVersion = 20
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -413,6 +413,11 @@ var migrations = []migration{
 			source TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX idx_storage_samples_series ON storage_samples(scope, path, taken_at)`,
+	}},
+	{version: 20, statements: []string{
+		// The file's size when the batch planned it, so the size of a selection
+		// is known before any of its files is encoded. 0 on earlier rows.
+		`ALTER TABLE transcode_batch_items ADD COLUMN source_bytes INTEGER NOT NULL DEFAULT 0`,
 	}},
 }
 
