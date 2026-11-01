@@ -1,8 +1,9 @@
 name: Gitleaks
 
+# Every commit is scanned when it is pushed, so a pull_request run would scan the
+# same commits a second time.
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 permissions:

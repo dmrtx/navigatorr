@@ -21,8 +21,11 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # One job builds both images: the second reuses the Go build stage that the
+  # first just compiled, so it costs seconds instead of a second billed runner.
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -61,25 +64,8 @@ jobs:
           provenance: mode=max
           sbom: true
 
-  publish-nas-helper:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image metadata
-        id: meta
+      - name: Extract NAS helper image metadata
+        id: meta-nas-helper
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}-nas-helper
@@ -88,16 +74,15 @@ jobs:
             type=sha,prefix=sha-
             type=ref,event=tag
 
-      - name: Build and push image
+      - name: Build and push NAS helper image
         uses: docker/build-push-action@v7
         with:
           context: .
           target: nas-helper
           push: true
           platforms: linux/amd64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=nas-helper
-          cache-to: type=gha,mode=max,scope=nas-helper
+          tags: ${{ steps.meta-nas-helper.outputs.tags }}
+          labels: ${{ steps.meta-nas-helper.outputs.labels }}
+          cache-from: type=gha
           provenance: mode=max
           sbom: true
