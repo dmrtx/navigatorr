@@ -165,6 +165,31 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		offset = len(items)
 	}
 	end := min(offset+limit, len(items))
+	if id == "" && r.URL.Query().Get("view") == "index" {
+		// Every title in one answer, for a client that holds the list and pages,
+		// searches and orders it on its own. q and sort still apply.
+		began = time.Now()
+		marks := s.fileStatuses()
+		timing.since("status", began)
+		all := make([]map[string]any, 0, len(items))
+		for _, shared := range items {
+			item := map[string]any{}
+			for _, key := range libraryIndexFields {
+				if value, ok := shared[key]; ok {
+					item[key] = value
+				}
+			}
+			if path, _ := shared["path"].(string); path != "" {
+				if mark := marks.under(path); mark != nil {
+					item["nav_status"] = mark
+				}
+			}
+			all = append(all, item)
+		}
+		timing.set(w)
+		writeJSONTagged(w, r, 200, map[string]any{"items": all, "total": len(all), "service": name, "view": "index"})
+		return
+	}
 	if r.URL.Query().Get("all") == "1" {
 		if id == "" {
 			fail(w, 400, "select a title before selecting files")
@@ -213,8 +238,11 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	timing.set(w)
-	writeJSON(w, 200, map[string]any{"items": page, "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": groups})
+	writeJSONTagged(w, r, 200, map[string]any{"items": page, "total": len(items), "offset": offset, "has_more": end < len(items), "service": name, "seasons": seasons, "season_groups": groups})
 }
+
+// libraryIndexFields is what the whole-list view carries for each title.
+var libraryIndexFields = []string{"id", "title", "year", "path", "size", "episodeCount", "hasFile", "seriesType", "metadata_source"}
 
 // projectLibraryRecord keeps the fields the console shows from one *arr record.
 // Local navigation does not claim that cached *arr mediaInfo was probed.

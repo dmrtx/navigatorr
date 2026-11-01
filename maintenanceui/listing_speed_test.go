@@ -225,3 +225,87 @@ func TestFolderListingPagesByNameWithoutStattingTheRest(t *testing.T) {
 		t.Fatal(desc.Items[0].Path)
 	}
 }
+
+func TestLibraryIndexViewAndETag(t *testing.T) {
+	s, h := testUI(t)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		var movies []map[string]any
+		for i := 0; i < 250; i++ {
+			movies = append(movies, map[string]any{"id": i + 1, "title": fmt.Sprintf("Movie %03d", i), "year": 2000 + i%20, "path": fmt.Sprintf("/media/movies/%03d", i), "overview": "dropped", "statistics": map[string]any{"sizeOnDisk": 1000 + i}})
+		}
+		_ = json.NewEncoder(w).Encode(movies)
+	}))
+	defer upstream.Close()
+	s.registry = arrservice.NewRegistry(&config.Config{Services: map[string]config.ServiceConfig{"radarr": {URL: upstream.URL, APIVersion: "/api/v3"}}})
+	get := func(query, ifNoneMatch string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/maintenance/library?service=radarr&"+query, nil)
+		r.Header.Set("Authorization", "Bearer "+testToken)
+		if ifNoneMatch != "" {
+			r.Header.Set("If-None-Match", ifNoneMatch)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	first := get("view=index", "")
+	var body struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+		View  string           `json:"view"`
+	}
+	if first.Code != 200 || json.Unmarshal(first.Body.Bytes(), &body) != nil || body.Total != 250 || len(body.Items) != 250 || body.View != "index" {
+		t.Fatal(first.Code, first.Body.Len())
+	}
+	if body.Items[0]["title"] != "Movie 000" || body.Items[0]["size"] != float64(1000) || body.Items[0]["overview"] != nil || body.Items[0]["year"] != float64(2000) {
+		t.Fatalf("compact item: %+v", body.Items[0])
+	}
+	tag := first.Header().Get("ETag")
+	if !strings.HasPrefix(tag, `W/"`) || first.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("tag", tag, first.Header())
+	}
+	// Same list, same tag: no body.
+	again := get("view=index", tag)
+	if again.Code != http.StatusNotModified || again.Body.Len() != 0 || again.Header().Get("ETag") != tag {
+		t.Fatal("expected 304", again.Code, again.Body.Len())
+	}
+	if get("view=index", `"other", `+tag).Code != http.StatusNotModified || get("view=index", "*").Code != http.StatusNotModified {
+		t.Fatal("a listed tag or * must match")
+	}
+	if get("view=index", `W/"stale"`).Code != 200 {
+		t.Fatal("a stale tag must get the list")
+	}
+	if calls.Load() != 1 {
+		t.Fatal("the *arr was asked", calls.Load())
+	}
+	// A change in a mark changes the tag, so a 304 never hides it.
+	st := s.engine.Deps().Store
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "batch", ActionName: "transcode_batch", Status: store.ActionStatusRunning, InputsJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "a", FilePath: "/media/movies/000/film.mkv", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
+	s.fileStatusCache.invalidate()
+	changed := get("view=index", tag)
+	if changed.Code != 200 || changed.Header().Get("ETag") == tag || !strings.Contains(changed.Body.String(), `"nav_status"`) {
+		t.Fatal("a new mark must give a new tag", changed.Code)
+	}
+	// The paged form is unchanged for older clients, and also carries a tag.
+	paged := get("offset=0", "")
+	var page struct {
+		Items   []map[string]any `json:"items"`
+		HasMore bool             `json:"has_more"`
+	}
+	if paged.Code != 200 || json.Unmarshal(paged.Body.Bytes(), &page) != nil || len(page.Items) != 100 || !page.HasMore || paged.Header().Get("ETag") == "" {
+		t.Fatal(paged.Code)
+	}
+	if get("offset=0", paged.Header().Get("ETag")).Code != http.StatusNotModified {
+		t.Fatal("a page must revalidate too")
+	}
+	// A title is not an index view; a missing service stays an error.
+	if w := get("view=index&id=3", ""); w.Code != 200 || strings.Contains(w.Body.String(), `"view":"index"`) {
+		t.Fatal("per-title requests keep their own form", w.Code)
+	}
+}

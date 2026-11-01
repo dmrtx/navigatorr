@@ -195,7 +195,7 @@ func (s *Server) folder(w http.ResponseWriter, r *http.Request) {
 	}
 	timing.since("sizes", began)
 	timing.set(w)
-	writeJSON(w, 200, map[string]any{"path": path, "items": page, "total": total, "has_more": offset+folderPageSize < total, "listing": listing, "size_order_pending": pending})
+	writeJSONTagged(w, r, 200, map[string]any{"path": path, "items": page, "total": total, "has_more": offset+folderPageSize < total, "listing": listing, "size_order_pending": pending})
 }
 
 // folderPageSize is how many entries one page of a folder lists.
