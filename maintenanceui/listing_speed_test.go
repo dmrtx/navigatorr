@@ -73,10 +73,14 @@ func TestLibraryAsksTheArrOncePerCollectionAndKeepsPagesIndependent(t *testing.T
 	if marked, _, _ := page("offset=0"); marked[0]["nav_status"] == nil {
 		t.Fatal("the first title is not marked")
 	}
-	if _, hit, _ := s.arrLists.get("radarr", false, nil); !hit {
+	if _, hit, _ := s.arrLists.get("radarr", false, newServerTiming(), nil); !hit {
 		t.Fatal("expected a cached list")
 	}
-	for _, item := range s.arrLists.entry("radarr").items {
+	radarr := s.arrLists.entry("radarr")
+	radarr.mu.Lock()
+	shared := radarr.items
+	radarr.mu.Unlock()
+	for _, item := range shared {
 		if _, leaked := item["nav_status"]; leaked {
 			t.Fatal("a mark leaked into the shared list")
 		}
