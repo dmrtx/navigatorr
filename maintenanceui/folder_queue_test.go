@@ -51,6 +51,10 @@ func (m *queueMeter) started() []string {
 	return append([]string(nil), m.order...)
 }
 
+func (m *queueMeter) List(context.Context, string) (nashelper.ListResponse, error) {
+	return nashelper.ListResponse{}, nashelper.ErrUnavailable
+}
+
 func eventually(t *testing.T, what string, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

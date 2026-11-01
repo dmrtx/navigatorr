@@ -43,6 +43,7 @@ true on the NAS's own filesystem and does local reads there.
 | `POST /v1/identity` `{path}` | `{fsid, fs_type, subvol, generation, ino, size, mtime_ns, ctime_ns, complete}` taken from an open descriptor (stat the descriptor, `FS_IOC_GETVERSION` for the generation). `fsid` is `statfs` `f_fsid`, which on btrfs is the UUID folded with the subvolume id, so it is compared as an opaque value; `complete` is false when the generation or the subvolume could not be read |
 | `POST /v1/hash` `{path}` → job; `GET /v1/jobs/{id}` | SHA-256 and byte count of a file read from local disk, with progress; identity is taken from the descriptor before and after the read and the result is refused if it moved. The helper is never given the expected value |
 | `POST /v1/sample` `{path}` | the same sampled-range digest as `promotionSampleDigest` (1 MiB head, tail and 6 interior ranges), for a cross-check against the same digest taken over SMB |
+| `POST /v1/list` `{path}` | the entries of one folder read where it lives: name, type (`file`, `dir`, `symlink`, `other`), size and mtime of each (a link is described, never followed), plus the folder's own mtime. Up to 5000 entries; more is refused and the coordinator lists through the mount. Takes the same lane as folder sizes. Read-only, so it needs no new capability |
 
 The coordinator keeps every mutation: rename, delete, import, the library
 service calls. Those are metadata operations over SMB, already audited.
