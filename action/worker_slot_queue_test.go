@@ -116,9 +116,10 @@ func actionState(t *testing.T, st *store.Store, id string) map[string]any {
 }
 
 // Two batches share a worker with two slots. Batch A fills both; batch B's
-// only file waits. When one of A's files finishes, A must not start its third
-// file: the freed slot belongs to B's file, which has waited longer.
-func TestWorkerSlotQueueGivesFreedSlotToLongestWaitingBatch(t *testing.T) {
+// only file stays queued without being probed. When one of A's files
+// finishes, A starts its third file: A was asked for first. B's file starts
+// once A has nothing left to start.
+func TestTranscodeQueueRunsBatchesInTheOrderTheyWereAsked(t *testing.T) {
 	worker := newSlotWorker(2)
 	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 2)
 	defer st.Close()
@@ -145,72 +146,99 @@ func TestWorkerSlotQueueGivesFreedSlotToLongestWaitingBatch(t *testing.T) {
 	if err != nil || batchB.Status != StatusWaitingExternal {
 		t.Fatalf("batch B: %+v %v", batchB, err)
 	}
-	waiter := batchItemByPath(t, e, st, batchB.ID, b1)
-	if waiter.Status != "waiting_for_slot" || waiter.ChildActionID == "" {
-		t.Fatalf("batch B's file should wait for a slot: %+v", waiter)
-	}
-	state := actionState(t, st, waiter.ChildActionID)
-	if !hasSlotTicket(state) {
-		t.Fatalf("a refused file must hold a queue ticket: %v", state)
-	}
-	if work, _ := state["work_progress"].(map[string]any); getString(work, "phase") != waitingForWorkerPhase {
-		t.Fatalf("waiting file should show waiting_for_worker, got %v", state["work_progress"])
+	if it := batchItemByPath(t, e, st, batchB.ID, b1); it.Status != "queued" || it.ChildActionID != "" {
+		t.Fatalf("batch B's file must stay queued, unprobed, while the slots are taken: %+v", it)
 	}
 
-	// One of A's files finishes; A resumes first (it owns the finished job).
-	first := worker.acceptedSources()[0]
-	worker.finish(first)
+	// One of A's files finishes: A's third file takes the slot.
+	worker.finish(worker.acceptedSources()[0])
 	if _, err := e.Resume(ctx, batchA.ID, "", nil); err != nil {
-		t.Fatal(err)
-	}
-	if got := worker.acceptedSources(); len(got) != 2 {
-		t.Fatalf("batch A took the freed slot out of turn: accepted %v", got)
-	}
-	third := ""
-	started := map[string]bool{}
-	for _, src := range worker.acceptedSources() {
-		started[src] = true
-	}
-	for _, p := range []string{a1, a2, a3} {
-		if !started[mustResolve(t, e, p)] {
-			third = p
-		}
-	}
-	if it := batchItemByPath(t, e, st, batchA.ID, third); it.Status != "queued" {
-		t.Fatalf("batch A started another file while batch B's file waits: %+v", it)
-	}
-
-	// B's waiter now gets the slot.
-	if _, err := e.Resume(ctx, batchB.ID, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	got := worker.acceptedSources()
-	if len(got) != 3 || got[2] != mustResolve(t, e, b1) {
-		t.Fatalf("batch B's waiting file should get the freed slot next, accepted %v", got)
+	aFiles := map[string]bool{mustResolve(t, e, a1): true, mustResolve(t, e, a2): true, mustResolve(t, e, a3): true}
+	if len(got) != 3 || !aFiles[got[2]] || got[2] == got[0] || got[2] == got[1] {
+		t.Fatalf("batch A's third file should get the freed slot, accepted %v", got)
 	}
-	state = actionState(t, st, waiter.ChildActionID)
-	if hasSlotTicket(state) {
-		t.Fatalf("an accepted job must leave the queue: %v", state[workerSlotWaitSinceKey])
+	if _, err := e.Resume(ctx, batchB.ID, "", nil); err != nil {
+		t.Fatal(err)
 	}
-	if work, _ := state["work_progress"].(map[string]any); getString(work, "phase") == waitingForWorkerPhase {
-		t.Fatalf("accepted job still shows waiting_for_worker: %v", work)
+	if it := batchItemByPath(t, e, st, batchB.ID, b1); it.Status != "queued" {
+		t.Fatalf("batch B started out of turn: %+v", it)
 	}
 
-	// With B's file running, A's next file may try again (and waits on the
-	// full worker in its own turn).
+	// Another of A's files finishes; A has nothing left to start, so B's file
+	// goes next.
+	worker.finish(got[1])
 	if _, err := e.Resume(ctx, batchA.ID, "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if it := batchItemByPath(t, e, st, batchA.ID, third); it.Status != "waiting_for_slot" {
-		t.Fatalf("batch A's next file should now queue for a slot: %+v", it)
+	if _, err := e.Resume(ctx, batchB.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := worker.acceptedSources(); len(got) != 4 || got[3] != mustResolve(t, e, b1) {
+		t.Fatalf("batch B's file should start once A has none queued, accepted %v", got)
+	}
+}
+
+// A single file waits behind the batches asked before it; with queue_priority
+// it goes before them and takes the next free slot.
+func TestTranscodeQueuePriorityGoesFirst(t *testing.T) {
+	worker := newSlotWorker(1)
+	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	e.deps.Registry = nil
+	ctx := context.Background()
+
+	a1 := writeSparseMedia(t, root, "Batch A One.mkv")
+	a2 := writeSparseMedia(t, root, "Batch A Two.mkv")
+	plain := writeSparseMedia(t, root, "Plain One.mkv")
+	urgent := writeSparseMedia(t, root, "Urgent One.mkv")
+	batchA, err := e.Run(ctx, "transcode_batch", map[string]any{"paths": []string{a1, a2}, "profile": "general-hevc", "media_type": "movie", "dry_run": false})
+	if err != nil || batchA.Status != StatusWaitingExternal {
+		t.Fatalf("batch A: %+v %v", batchA, err)
+	}
+	queued, err := e.Run(ctx, "transcode_media", map[string]any{"path": plain, "profile": "general-hevc"})
+	if err != nil || queued.WaitingCondition != "worker_busy" {
+		t.Fatalf("a plain single file should wait in the queue: %+v %v", queued, err)
+	}
+	if pos := getInt(actionState(t, st, queued.ID), workerSlotPositionKey); pos != 2 {
+		t.Fatalf("plain file behind batch A's queued file: position %d, want 2", pos)
+	}
+	first, err := e.Run(ctx, "transcode_media", map[string]any{"path": urgent, "profile": "general-hevc", "queue_priority": true})
+	if err != nil || first.WaitingCondition != "worker_busy" {
+		t.Fatalf("a priority file still waits for the running job: %+v %v", first, err)
+	}
+	if pos := getInt(actionState(t, st, first.ID), workerSlotPositionKey); pos != 1 {
+		t.Fatalf("priority file: position %d, want 1", pos)
+	}
+
+	// A's file finishes: A does not start its next one, the priority file
+	// takes the slot.
+	worker.finish(worker.acceptedSources()[0])
+	if _, err := e.Resume(ctx, batchA.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if it := batchItemByPath(t, e, st, batchA.ID, a2); it.Status != "queued" {
+		t.Fatalf("batch A started its next file ahead of the priority file: %+v", it)
+	}
+	if res, err := e.Resume(ctx, queued.ID, "", nil); err != nil || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("the plain file went ahead of the priority one: %+v %v", res, err)
+	}
+	accepted, err := e.Resume(ctx, first.ID, "", nil)
+	if err != nil || accepted.WaitingCondition != "transcode_complete" {
+		t.Fatalf("the priority file should take the free slot: %+v %v", accepted, err)
+	}
+	if got := worker.acceptedSources(); len(got) != 2 || got[1] != mustResolve(t, e, urgent) {
+		t.Fatalf("accepted %v", got)
 	}
 }
 
 // Regression: on reconciler polls a batch left its own not-yet-due slot
 // waiters alone and then started another queued file on every poll, so a
 // max_parallel_jobs=1 batch ended up with every file probed, hashed and
-// holding a ticket. While any of its files waits for a slot, a batch starts
-// no new file.
+// holding a ticket. While the worker is full, a batch starts no file.
 func TestBatchStartsNoNewFileWhileItsOwnFileWaitsForSlot(t *testing.T) {
 	worker := newSlotWorker(1)
 	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
@@ -249,16 +277,16 @@ func TestBatchStartsNoNewFileWhileItsOwnFileWaitsForSlot(t *testing.T) {
 		}
 		return
 	}
-	if w, q, c := count(); w != 1 || q != 3 || c != 1 {
-		t.Fatalf("after run: waiting=%d queued=%d children=%d, want 1/3/1", w, q, c)
+	if w, q, c := count(); w != 0 || q != 4 || c != 0 {
+		t.Fatalf("after run: waiting=%d queued=%d children=%d, want 0/4/0", w, q, c)
 	}
 	for i := range 3 {
 		clock.Advance(10 * time.Second)
 		if _, err := e.resume(ctx, b.ID, "", nil, true); err != nil {
 			t.Fatal(err)
 		}
-		if w, q, c := count(); w != 1 || q != 3 || c != 1 {
-			t.Fatalf("automatic poll %d started another file: waiting=%d queued=%d children=%d", i+1, w, q, c)
+		if w, q, c := count(); w != 0 || q != 4 || c != 0 {
+			t.Fatalf("automatic poll %d started a file: waiting=%d queued=%d children=%d", i+1, w, q, c)
 		}
 	}
 	if got := worker.acceptedSources(); len(got) != 1 {
@@ -474,5 +502,52 @@ func TestSlotWaitBackoffHonoursRetryAfterAndFreedSlot(t *testing.T) {
 	state[workerBusyNotBeforeKey] = clock.Now().Add(5 * time.Second).Format(time.RFC3339Nano)
 	if e.slotWakeDue(state) {
 		t.Fatal("a freed slot overrode the worker's Retry-After")
+	}
+}
+
+// Regression: an earlier file queued again (Try again on a failed file) while
+// a later file of the same batch waits for a worker was held behind it, and
+// the waiting file counted the requeued one ahead of itself: both waited for
+// each other and every newer conversion behind them. The requeued file may
+// start; files after the waiting one may not.
+func TestBatchStartsARequeuedEarlierFileWhileALaterOneWaits(t *testing.T) {
+	e, st, _, srv, _ := setupBatchTestEnv(t, newSlotWorker(1).executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	items := []store.TranscodeBatchItem{
+		{ID: 2, ItemKey: "two", Status: "queued"},
+		{ID: 5, ItemKey: "five", Status: "waiting_for_slot"},
+		{ID: 7, ItemKey: "seven", Status: "queued"},
+	}
+	got := e.slotFairPending(context.Background(), "batch-x", items, []int{0, 2})
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("pending %v, want only the requeued earlier file [0]", got)
+	}
+}
+
+// A child of a paused batch is given no worker: it would hold a slot every
+// other conversion waits for while its submit stops at the parent check.
+func TestPausedBatchChildTakesNoWorker(t *testing.T) {
+	worker := newSlotWorker(1)
+	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	e.deps.Registry = nil
+	ctx := context.Background()
+
+	a1 := writeSparseMedia(t, root, "Paused One.mkv")
+	batch, err := e.Run(ctx, "transcode_batch", map[string]any{"paths": []string{a1}, "profile": "general-hevc", "media_type": "movie", "dry_run": false, "paused": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := e.Run(ctx, "transcode_media", map[string]any{"path": a1, "profile": "general-hevc", "parent_action_id": batch.ID})
+	if err != nil || child.WaitingCondition != "parent_paused" {
+		t.Fatalf("child of a paused batch: %+v %v", child, err)
+	}
+	if w := getString(actionState(t, st, child.ID), workerStateKey); w != "" {
+		t.Fatalf("child of a paused batch was assigned worker %q", w)
+	}
+	if got := worker.acceptedSources(); len(got) != 0 {
+		t.Fatalf("worker accepted %v", got)
 	}
 }

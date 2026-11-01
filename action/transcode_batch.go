@@ -865,6 +865,9 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			}
 		}
 		pendingIndices = e.slotFairPending(ctx, ec.InstanceID, items, pendingIndices)
+		// New children only for the free slots older work does not wait for
+		// (see transcode_queue.go).
+		pendingIndices = queueOrderPending(items, pendingIndices, e.batchQueueAllowance(ctx, ec.InstanceID))
 
 		if len(pendingIndices) == 0 {
 			break
@@ -948,6 +951,18 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		}
 		if active > 0 {
 			return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_running", WaitingReason: "Independent encodes are still active", Outputs: batchOutputs}, nil
+		}
+		// Files still queued wait their turn in the transcode queue; a file
+		// waiting for a decision must not stop the batch from being polled
+		// to start them.
+		queued := 0
+		for _, it := range latest {
+			if it.Status == "queued" {
+				queued++
+			}
+		}
+		if queued > 0 {
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "queued", WaitingReason: fmt.Sprintf("%d item(s) queued for transcode", queued), Outputs: batchOutputs}, nil
 		}
 	}
 	// Check if any item is waiting for decision

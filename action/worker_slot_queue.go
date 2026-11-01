@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"math"
 	"math/rand/v2"
 	"sort"
 	"time"
@@ -214,6 +215,8 @@ func markWaitingForWorker(ec *ExecutionContext) {
 	work := map[string]any{"phase": waitingForWorkerPhase, "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
 	if since := getString(ec.State, workerSlotWaitSinceKey); since != "" {
 		work["since"] = since
+	} else if since := getString(ec.State, transcodeQueueSinceKey); since != "" {
+		work["since"] = since
 	}
 	if position > 0 {
 		work["queue_position"] = position
@@ -253,9 +256,12 @@ func (e *Engine) foreignSlotWaiter(batchID string) bool {
 
 // slotFairPending narrows a batch's dispatch candidates to what it may start
 // without taking a freed worker slot out of turn:
-//   - no new child (a queued item) while one of this batch's own children
-//     waits for a slot, due or not: the worker is full, and a new child would
-//     only be probed, hashed and queued behind it, past max_parallel_jobs;
+//   - no new child (a queued item) after one of this batch's own children
+//     that waits for a slot, due or not: the worker is full, and a new child
+//     would only be probed, hashed and queued behind it, past
+//     max_parallel_jobs. An item queued again before the waiting child (a
+//     retried earlier file) may start: it is ahead of that child in the
+//     transcode queue, and holding it would leave both waiting for each other;
 //   - no new child while an action outside this batch waits for a slot; the
 //     batch's own waiting children still try, in queue order;
 //   - on a reconciler poll, a waiting child is left to its own backoff
@@ -264,20 +270,21 @@ func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []st
 	if len(pending) == 0 {
 		return pending
 	}
-	hasQueued, ownWaiting := false, false
+	hasQueued := false
+	firstWaiting := int64(math.MaxInt64)
 	for _, it := range items {
 		switch it.Status {
 		case "queued":
 			hasQueued = true
 		case "waiting_for_slot":
-			ownWaiting = true
+			firstWaiting = min(firstWaiting, it.ID)
 		}
 	}
-	holdQueued := hasQueued && (ownWaiting || e.foreignSlotWaiter(batchID))
+	foreign := hasQueued && e.foreignSlotWaiter(batchID)
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if holdQueued && it.Status == "queued" {
+		if it.Status == "queued" && (foreign || it.ID > firstWaiting) {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {
@@ -301,11 +308,12 @@ func slotWaitPollDelay() time.Duration {
 	return slotWaitPollBase + rand.N(slotWaitPollJitter)
 }
 
-// slotWakeDue reports whether a slot waiter should be polled before its
-// scheduled time because a worker job ended after its last poll. The worker's
-// Retry-After (worker_busy_not_before) is still honoured.
+// slotWakeDue reports whether a slot waiter, or a conversion waiting in the
+// transcode queue, should be polled before its scheduled time because a
+// worker job ended after its last poll. The worker's Retry-After
+// (worker_busy_not_before) is still honoured.
 func (e *Engine) slotWakeDue(state map[string]any) bool {
-	if !hasSlotTicket(state) {
+	if !hasSlotTicket(state) && !transcodeQueueWaiting(state) {
 		return false
 	}
 	freed := e.slotFreedAt.Load()
