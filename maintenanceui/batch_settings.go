@@ -228,8 +228,8 @@ func (s *Server) batchSettings(w http.ResponseWriter, r *http.Request) {
 		settingsView["audio_only"], settingsView["audio_only_mixed"] = audioOnly == selected, audioOnly > 0 && audioOnly < selected
 		// Whether they all accept the smaller saving, so encoding again keeps it.
 		settingsView["accept_smaller_saving"] = smaller == selected
-		// Whether every file was frozen with Shrink keeping HDR.
-		settingsView["keep_hdr"] = keepHDR == selected
+		// Whether every file was frozen with Shrink keeping HDR, or only some.
+		settingsView["keep_hdr"], settingsView["keep_hdr_mixed"] = keepHDR == selected, keepHDR > 0 && keepHDR < selected
 	}
 	// The Shrink height the files were frozen with, when they agree on one.
 	if len(heights) == 1 {

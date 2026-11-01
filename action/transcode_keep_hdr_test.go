@@ -97,10 +97,14 @@ func TestShrinkKeepHDRPlansHDRSourcesOnly(t *testing.T) {
 	if reason != "" || plan.ChainVersion != transcode.CompactChainVersion || plan.KeepsHDR() {
 		t.Fatalf("SDR plan %+v %q", plan, reason)
 	}
-	keptSDR, reason := compactSourcePlanWith(context.Background(), rep, keep, classify(sdr))
-	plainSDR, plainReason := compactSourcePlanWith(context.Background(), rep, &plain, classify(sdr))
-	if reason != plainReason || (keptSDR == nil) != (plainSDR == nil) || keptSDR != nil && (!keptSDR.Equal(plainSDR) || keptSDR.KeepsHDR()) {
-		t.Fatalf("SDR source with keep_hdr %+v %q, without %+v %q", keptSDR, reason, plainSDR, plainReason)
+	// Dolby Vision 8.2 has an SDR base layer: an SDR picture, planned as one.
+	dv82 := mediainspect.DynamicRange{Class: mediainspect.DynamicRangeDolbyVision, BaseLayer: mediainspect.DynamicRangeSDR, Primaries: "bt709", Matrix: "bt709", DolbyVision: &mediainspect.DolbyVisionInfo{Profile: 8, BLCompatibilityID: 2}}
+	for name, d := range map[string]mediainspect.DynamicRange{"SDR": sdr, "Dolby Vision 8.2": dv82} {
+		keptSDR, reason := compactSourcePlanWith(context.Background(), rep, keep, classify(d))
+		plainSDR, plainReason := compactSourcePlanWith(context.Background(), rep, &plain, classify(d))
+		if reason != plainReason || (keptSDR == nil) != (plainSDR == nil) || keptSDR != nil && (!keptSDR.Equal(plainSDR) || keptSDR.KeepsHDR()) {
+			t.Fatalf("%s source with keep_hdr %+v %q, without %+v %q", name, keptSDR, reason, plainSDR, plainReason)
+		}
 	}
 }
 

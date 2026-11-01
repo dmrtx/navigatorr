@@ -1040,10 +1040,10 @@ func compactSourcePlanWith(ctx context.Context, rep *mediainspect.DetailedReport
 	if err != nil {
 		return nil, "compact_frame_evidence_unavailable"
 	}
-	// Keep HDR applies to an HDR or Dolby Vision source only; an SDR one is
-	// planned exactly as without it.
+	// Keep HDR applies to an HDR picture only; an SDR one, Dolby Vision 8.2
+	// (an SDR base layer) included, is planned exactly as without it.
 	chain := transcode.CompactChainVersion
-	if p.Compact.KeepHDR && d.IsHDR() {
+	if p.Compact.KeepHDR && d.Signal() != mediainspect.SignalSDR {
 		chain = transcode.CompactHDRChainVersion
 	}
 	plan, err := transcode.NewCompactPlanForChain(chain, d, video[0], p.Compact.MaxHeight)

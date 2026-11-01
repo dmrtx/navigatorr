@@ -447,7 +447,7 @@ func TestGoalChangeCarriesAndShowsKeepHDR(t *testing.T) {
 		t.Fatalf("frozen keep-HDR not shown: %v", got)
 	}
 	mixed := map[string]any{"mode_policy": keep, "batch_item_settings": map[string]any{"epfile-101": map[string]any{"mode": "compact", "mode_policy": map[string]any{"mode": "compact", "compact": map[string]any{}}}}}
-	if got, _ := read(mixed); got["keep_hdr"] != false {
+	if got, _ := read(mixed); got["keep_hdr"] != false || got["keep_hdr_mixed"] != true {
 		t.Fatalf("mixed keep-HDR shown as kept: %v", got)
 	}
 	_, version := read(map[string]any{})

@@ -35,7 +35,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "paths", "service", "series_id",
+			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "keep_hdr", "audio_only", "accept_smaller_saving", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
