@@ -390,8 +390,9 @@ func readMetricLogFile(logPath string) ([]byte, error) {
 	return data, nil
 }
 
-// withReferenceChain inserts the compact picture chain into reference
-// extraction args, ahead of the lossless FFV1 encode. Args that already
+// withReferenceChain inserts a compact picture chain into sample extraction
+// args (the reference's, or a keep-HDR candidate's tone map), ahead of the
+// lossless FFV1 encode. Args that already
 // filter the video (the window selection) run the chain after that filter.
 func withReferenceChain(args []string, chain string) []string {
 	for i, a := range args {

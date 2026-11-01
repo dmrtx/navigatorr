@@ -37,6 +37,12 @@ import (
 //
 // The LUT replaces zscale+tonemap, which need libzimg that the worker FFmpeg
 // may lack, and swscale linearization, which clips above reference white.
+//
+// A keep-HDR plan (compact-hdr-v1) only rescales: its encoder input keeps
+// the source's BT.2020 PQ/HLG Y'CbCr, every frame side data type above is
+// still deleted, and x265 writes the frozen static metadata itself. Its
+// metrics compare SDR pictures: the reference through the SDR chain of the
+// same source, the candidate through the same LUT at its own size.
 const compactLUTSize = 33
 
 const (
@@ -60,6 +66,10 @@ const compactScaleFlags = "lanczos+accurate_rnd+full_chroma_int"
 
 // compactMeasurementSpace describes the pictures VMAF/CAMBI compare.
 const compactMeasurementSpace = "bt709-sdr-limited-target-size"
+
+// compactHDRMeasurementSpace is the measurement space of a keep-HDR plan:
+// reference and candidate both tone mapped by the frozen LUT.
+const compactHDRMeasurementSpace = "bt709-sdr-tone-mapped-reference-and-candidate-target-size"
 
 // compactStrippedSideData are the frame side data types removed from every
 // compact frame before encoding.
@@ -257,7 +267,7 @@ func ensureCompactLUT(p *transcode.CompactPlan) (string, error) {
 
 // compactVideoFilter is the deterministic picture chain of a compact plan.
 // lutRef names the LUT in the filter; evidence passes a placeholder so no
-// worker path is recorded.
+// worker path is recorded. A keep-HDR plan's chain uses no LUT.
 func compactVideoFilter(p *transcode.CompactPlan, lutRef string) (string, error) {
 	if p == nil {
 		return "", errors.New("compact plan missing")
@@ -269,8 +279,15 @@ func compactVideoFilter(p *transcode.CompactPlan, lutRef string) (string, error)
 	resize := p.TargetWidth != p.SourceWidth || p.TargetHeight != p.SourceHeight
 	out := "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
 	var chain string
-	switch p.SourceSignal {
-	case "pq", "hlg":
+	switch {
+	case p.KeepsHDR():
+		tag := "setparams=color_primaries=" + transcode.CompactHDRColorPrimaries + ":color_trc=" + p.HDR.Transfer + ":colorspace=" + transcode.CompactHDRColorMatrix + ":range=" + transcode.CompactHDRColorRange
+		chain = tag + ","
+		if resize {
+			chain += "scale=" + size + ":flags=" + compactScaleFlags + ","
+		}
+		chain += "format=yuv420p10le," + tag
+	case p.SourceSignal == "pq" || p.SourceSignal == "hlg":
 		trc := "smpte2084"
 		if p.SourceSignal == "hlg" {
 			trc = "arib-std-b67"
@@ -280,7 +297,7 @@ func compactVideoFilter(p *transcode.CompactPlan, lutRef string) (string, error)
 			"lut3d=file=" + lutRef + ":interp=tetrahedral," +
 			"setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=pc," +
 			"scale=in_color_matrix=bt709:out_color_matrix=bt709:in_range=pc:out_range=tv:flags=accurate_rnd+full_chroma_int,format=yuv420p10le," + out
-	case "sdr":
+	case p.SourceSignal == "sdr":
 		chain = out
 		if resize {
 			chain = "scale=" + size + ":flags=" + compactScaleFlags + "," + out
@@ -297,24 +314,61 @@ func compactVideoFilter(p *transcode.CompactPlan, lutRef string) (string, error)
 // compactFilterForRun returns the chain bound to the worker LUT file.
 func compactFilterForRun(p *transcode.CompactPlan) (string, error) {
 	ref := ""
-	if p != nil && p.ToneMap != nil {
+	if p != nil && p.ToneMap != nil && !p.KeepsHDR() {
 		ref = escapeFFmpegFilterPath(compactLUTPath(p))
 	}
 	return compactVideoFilter(p, ref)
 }
 
-// compactEncoderArgs are the video args a compact plan adds to an encode:
-// the picture chain on the first output video stream and explicit SDR
-// BT.709 stream signalling.
-func compactEncoderArgs(p *transcode.CompactPlan, videoCodec string) ([]string, error) {
+// compactCandidateMeasurementPlan tone maps a keep-HDR candidate, which is
+// already at the target size, onto the reference's measurement space.
+func compactCandidateMeasurementPlan(p *transcode.CompactPlan) *transcode.CompactPlan {
+	m := p.MeasurementPlan().Clone()
+	m.SourceWidth, m.SourceHeight = m.TargetWidth, m.TargetHeight
+	return m
+}
+
+// compactMeasurementChains are the chains the final validation applies to
+// the reference and the candidate extracts, bound to the worker LUT file. An
+// SDR candidate is measured as encoded (empty candidate chain).
+func compactMeasurementChains(p *transcode.CompactPlan) (reference, candidate string, err error) {
 	if p == nil {
-		return nil, nil
+		return "", "", errors.New("compact plan missing")
+	}
+	if reference, err = compactFilterForRun(p.MeasurementPlan()); err != nil || !p.KeepsHDR() {
+		return reference, "", err
+	}
+	candidate, err = compactFilterForRun(compactCandidateMeasurementPlan(p))
+	return reference, candidate, err
+}
+
+// compactEncoderArgs are the video args a compact plan adds to an encode:
+// the picture chain on the first output video stream and explicit stream
+// signalling, SDR BT.709 or the frozen HDR. A keep-HDR plan also returns the
+// x265 parameters BuildVideoEncoderArgs merges into -x265-params.
+func compactEncoderArgs(p *transcode.CompactPlan, videoCodec string) (args []string, x265Params string, err error) {
+	if p == nil {
+		return nil, "", nil
 	}
 	chain, err := compactFilterForRun(p)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	args := []string{
+	if p.KeepsHDR() {
+		if norm(videoCodec) != libX265Encoder {
+			return nil, "", errors.New("keep-HDR compact encodes need libx265 (fail closed)")
+		}
+		args = []string{
+			"-filter:v:0", chain,
+			"-color_primaries:v:0", transcode.CompactHDRColorPrimaries,
+			"-color_trc:v:0", p.HDR.Transfer,
+			"-colorspace:v:0", transcode.CompactHDRColorMatrix,
+			"-color_range:v:0", transcode.CompactHDRColorRange,
+			"-dolbyvision:v:0", "0",
+		}
+		return args, compactX265Params(p.HDR), nil
+	}
+	args = []string{
 		"-filter:v:0", chain,
 		"-color_primaries:v:0", transcode.CompactColorPrimaries,
 		"-color_trc:v:0", transcode.CompactColorTransfer,
@@ -326,17 +380,55 @@ func compactEncoderArgs(p *transcode.CompactPlan, videoCodec string) ([]string, 
 		// survives the chain; "auto" would re-emit Dolby Vision signalling.
 		args = append(args, "-dolbyvision:v:0", "0")
 	}
-	return args, nil
+	return args, "", nil
+}
+
+// compactX265Params are the x265 parameters of a keep-HDR encode: SEI on
+// every keyframe and, for PQ, HDR10 coding with the frozen static metadata.
+// The frame side data was deleted, so these are the only HDR metadata x265
+// sees.
+func compactX265Params(o *transcode.CompactHDROutput) string {
+	params := "repeat-headers=1"
+	if o.Transfer != transcode.CompactHDRTransferPQ {
+		return params
+	}
+	params += ":hdr10=1:hdr10-opt=1"
+	if o.MasterDisplay != "" {
+		params += ":master-display=" + o.MasterDisplay
+	}
+	if o.MaxCLL > 0 || o.MaxFALL > 0 {
+		params += ":max-cll=" + strconv.Itoa(o.MaxCLL) + "," + strconv.Itoa(o.MaxFALL)
+	}
+	return params
+}
+
+// mergeX265Params appends extra to the encoder's -x265-params, or adds the
+// option, since FFmpeg keeps only the last one given.
+func mergeX265Params(args []string, extra string) []string {
+	if extra == "" {
+		return args
+	}
+	for i, a := range args {
+		if a == "-x265-params" && i+1 < len(args) {
+			out := append([]string(nil), args...)
+			out[i+1] += ":" + extra
+			return out
+		}
+	}
+	return append(args, "-x265-params", extra)
 }
 
 // compactChainEvidence records the transform for the final validation
 // evidence. lutDigest is the value ensureCompactLUT returned.
 func compactChainEvidence(p *transcode.CompactPlan, lutDigest string) (*transcode.CompactChainEvidence, error) {
+	if p == nil {
+		return nil, errors.New("compact plan missing")
+	}
 	ref := ""
-	if p != nil && p.ToneMap != nil {
+	if p.ToneMap != nil {
 		ref = "compact.cube"
 	}
-	chain, err := compactVideoFilter(p, ref)
+	chain, err := compactVideoFilter(p.MeasurementPlan(), ref)
 	if err != nil {
 		return nil, err
 	}
@@ -350,6 +442,12 @@ func compactChainEvidence(p *transcode.CompactPlan, lutDigest string) (*transcod
 		ReferenceChain:   chain,
 		MeasurementSpace: compactMeasurementSpace,
 		AppliedTo:        "encoder_input_and_reference",
+	}
+	if p.KeepsHDR() {
+		if e.CandidateChain, err = compactVideoFilter(compactCandidateMeasurementPlan(p), ref); err != nil {
+			return nil, err
+		}
+		e.MeasurementSpace, e.AppliedTo = compactHDRMeasurementSpace, "reference_and_candidate"
 	}
 	if t := p.ToneMap; t != nil {
 		e.ToneMapMethod, e.SourcePeakNits, e.TargetPeakNits = t.Method, t.SourcePeakNits, t.TargetPeakNits
@@ -379,6 +477,36 @@ func probeCompactChain(ctx context.Context, ffmpegPath string) error {
 		return fmt.Errorf("compact chain probe failed: %v: %s", err, bytes.TrimSpace(out))
 	}
 	return nil
+}
+
+// probeCompactHDRChain proves the worker FFmpeg encodes one synthetic frame
+// through the keep-HDR chain with libx265 and its HDR10 parameters.
+func probeCompactHDRChain(ctx context.Context, ffmpegPath string) error {
+	p := compactHDRProbePlan()
+	args, params, err := compactEncoderArgs(p, libX265Encoder)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	argv := append([]string{"-hide_banner", "-nostats", "-f", "lavfi", "-i", "testsrc2=s=1440x1080:r=24:d=1,format=yuv420p10le", "-frames:v", "1",
+		"-c:v", libX265Encoder, "-preset", "ultrafast", "-profile:v", "main10", "-pix_fmt", "yuv420p10le", "-x265-params", "log-level=error:" + params}, args...)
+	out, err := exec.CommandContext(ctx, ffmpegPath, append(argv, "-f", "null", "-")...).CombinedOutput()
+	if err != nil {
+		if len(out) > 240 {
+			out = out[len(out)-240:]
+		}
+		return fmt.Errorf("compact keep-HDR probe failed: %v: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}
+
+// compactHDRProbePlan is the fixed keep-HDR plan of the capability probe.
+func compactHDRProbePlan() *transcode.CompactPlan {
+	p := compactProbePlan()
+	p.ChainVersion = transcode.CompactHDRChainVersion
+	p.HDR = &transcode.CompactHDROutput{Transfer: transcode.CompactHDRTransferPQ, MasterDisplay: "G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,50)", MaxCLL: 1000, MaxFALL: 400}
+	return p
 }
 
 // compactProbePlan is the fixed plan of the capability probe.

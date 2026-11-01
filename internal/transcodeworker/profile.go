@@ -60,6 +60,11 @@ func ValidatePlan(p *transcode.Plan) error {
 	if p.Compact != nil && p.Mode != "compact" {
 		return fmt.Errorf("compact plan requires compact mode")
 	}
+	// A kept HDR picture is x265 Main10 only: the media engine path is not
+	// proven to write the frozen static metadata.
+	if p.Compact.KeepsHDR() && (norm(p.VideoCodec) != libX265Encoder || p.ExpectedBitDepth != 10) {
+		return fmt.Errorf("keep-HDR compact plans require libx265 Main10 (fail closed)")
+	}
 	if p.Mode != "" {
 		minimum, valid := transcode.ModeMinimumSavings(p.Mode, p.ModePolicyVersion)
 		if !valid {

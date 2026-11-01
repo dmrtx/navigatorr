@@ -139,6 +139,14 @@ type WorkerCapabilities struct {
 	// submits one. Like TrackSelection, it is not part of the pinned
 	// capability fingerprint.
 	SizeSmallerSaving bool `json:"size_smaller_saving,omitempty"`
+	// CompactKeepHDR reports a worker that runs keep-HDR compact plans
+	// (CompactHDRChainVersion): an x265 Main10 encode with the source's HDR
+	// signalling, measured through the SDR tone map on both sides. It proved
+	// the chain and libx265's HDR10 parameters on a synthetic frame. Older
+	// workers refuse the chain version, so the coordinator checks this before
+	// it submits one. Like TrackSelection, it is not part of the pinned
+	// capability fingerprint.
+	CompactKeepHDR bool `json:"compact_keep_hdr,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
@@ -372,6 +380,12 @@ func (c WorkerCapabilities) SupportsQualityFPS(fps float64, fieldOrder string) b
 // proven SDR chain plus compact audio.
 func (c WorkerCapabilities) SupportsCompactTranscode() bool {
 	return c.CompactTranscode && c.CompactAudio
+}
+
+// SupportsCompactPlan reports a worker that can run a compact plan of this
+// chain version.
+func (c WorkerCapabilities) SupportsCompactPlan(p *CompactPlan) bool {
+	return c.SupportsCompactTranscode() && (!p.KeepsHDR() || c.CompactKeepHDR)
 }
 
 // Both metrics must have executed on native 10-bit synthetic inputs without
