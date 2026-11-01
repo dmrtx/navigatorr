@@ -122,3 +122,49 @@ func (c *Client) GetTransferInfo(ctx context.Context) (*TransferInfo, error) {
 	}
 	return &info, nil
 }
+
+// CategorySavePaths returns the save path of every category that sets one.
+func (c *Client) CategorySavePaths(ctx context.Context) ([]string, error) {
+	data, err := c.do(ctx, "GET", "/api/v2/torrents/categories", nil)
+	if err != nil {
+		return nil, err
+	}
+	var cats map[string]struct {
+		SavePath string `json:"savePath"`
+	}
+	if err := json.Unmarshal(data, &cats); err != nil {
+		return nil, fmt.Errorf("decoding categories: %w", err)
+	}
+	var out []string
+	for _, cat := range cats {
+		if cat.SavePath != "" {
+			out = append(out, cat.SavePath)
+		}
+	}
+	return out, nil
+}
+
+// DefaultPaths returns the default save path and, when enabled, the folder for
+// incomplete downloads.
+func (c *Client) DefaultPaths(ctx context.Context) ([]string, error) {
+	data, err := c.do(ctx, "GET", "/api/v2/app/preferences", nil)
+	if err != nil {
+		return nil, err
+	}
+	var p struct {
+		SavePath        string `json:"save_path"`
+		TempPath        string `json:"temp_path"`
+		TempPathEnabled bool   `json:"temp_path_enabled"`
+	}
+	if err := json.Unmarshal(data, &p); err != nil {
+		return nil, fmt.Errorf("decoding preferences: %w", err)
+	}
+	var out []string
+	if p.SavePath != "" {
+		out = append(out, p.SavePath)
+	}
+	if p.TempPathEnabled && p.TempPath != "" {
+		out = append(out, p.TempPath)
+	}
+	return out, nil
+}

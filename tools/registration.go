@@ -65,6 +65,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerMaintenanceTools(s, d)
 	registerMediaTools(s, d, registry, qbClient)
 	registerSafeReplaceTools(s, d, registry, qbClient, cfg.AllowDestructive)
+	registerCleanupLeftoversTool(s, d, qbClient, cfg.AllowDestructive)
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
 
