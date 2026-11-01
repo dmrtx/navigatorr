@@ -224,7 +224,6 @@ func main() {
 		// stops before the store closes, like the retention pass.
 		storageCtx, stopStorage := context.WithCancel(context.Background())
 		webUI.SetStorageContext(storageCtx)
-		webUI.WarmFileStatuses()
 		storageDone := make(chan struct{})
 		go func() {
 			defer close(storageDone)

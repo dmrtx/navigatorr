@@ -290,10 +290,3 @@ func (s *Server) fileStatuses() *fileStatusIndex {
 		}
 	}
 }
-
-// WarmFileStatuses reads the index once in the background, so the first
-// Files page after a start does not wait for it (about 0.3 s on a library of
-// ten thousand files).
-func (s *Server) WarmFileStatuses() {
-	go s.fileStatuses()
-}
