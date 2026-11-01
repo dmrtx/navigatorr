@@ -183,11 +183,24 @@ func TestBatchSourceTotalsCountOnlySizedFiles(t *testing.T) {
 	add("b1", "a", 100)
 	add("b1", "b", 0)
 	add("b2", "c", 50)
-	totals, err := s.BatchSourceTotals()
+	// The same file under a second key counts once.
+	add("b1", "a-again", 100)
+	if err := s.CreateTranscodeBatchItem(TranscodeBatchItem{BatchID: "b1", ItemKey: "a-again2", FilePath: "/m/a-again", Status: "review", SourceBytes: 100}); err != nil {
+		t.Fatal(err)
+	}
+	// Only the batches asked for are read.
+	only, err := s.BatchSourceTotals([]string{"b2", "none"})
+	if err != nil || len(only) != 1 || only["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
+		t.Fatalf("%+v %v", only, err)
+	}
+	if none, err := s.BatchSourceTotals(nil); err != nil || len(none) != 0 {
+		t.Fatalf("%+v %v", none, err)
+	}
+	totals, err := s.BatchSourceTotals([]string{"b1", "b2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if totals["b1"] != (BatchSourceTotal{Items: 2, Sized: 1, Bytes: 100}) || totals["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
+	if totals["b1"] != (BatchSourceTotal{Items: 3, Sized: 2, Bytes: 200}) || totals["b2"] != (BatchSourceTotal{Items: 1, Sized: 1, Bytes: 50}) {
 		t.Fatalf("%+v", totals)
 	}
 	// The size survives the item being read back and updated.

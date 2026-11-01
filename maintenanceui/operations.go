@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"slices"
@@ -635,12 +636,6 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	aggregateBatchSavings(records)
-	// What each batch's selection weighed when it was planned. Not being able
-	// to read it only leaves the batches without that figure.
-	batchTotals, err := s.engine.Deps().Store.BatchSourceTotals()
-	if err != nil {
-		batchTotals = nil
-	}
 	rounds := noWinnerRounds(records)
 	recordsByID := make(map[string]operationRecord, len(records))
 	existingReplacements := queueReplacementLinks(records)
@@ -791,6 +786,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	end := min(offset, len(filtered)) + min(limit, max(0, len(filtered)-offset))
 	page.HasMore = end < len(filtered)
 	if offset < len(filtered) {
+		// What each batch on this page listed weighed when it was planned. Not
+		// being able to read it only leaves the batches without that figure.
+		var batchIDs []string
+		for _, r := range filtered[offset:end] {
+			if r.inst.ActionName == "transcode_batch" {
+				batchIDs = append(batchIDs, r.inst.ID)
+			}
+		}
+		batchTotals, totalsErr := s.engine.Deps().Store.BatchSourceTotals(batchIDs)
+		if totalsErr != nil {
+			log.Printf("maintenanceui: read batch selection sizes: %v", totalsErr)
+			batchTotals = nil
+		}
 		for _, r := range filtered[offset:end] {
 			if err := req.Context().Err(); err != nil {
 				return
