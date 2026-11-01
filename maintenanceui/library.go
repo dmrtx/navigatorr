@@ -86,14 +86,14 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	timing := newServerTiming()
-	fetch := func() ([]map[string]any, error) {
+	fetch := func(timing *serverTiming) ([]map[string]any, error) {
 		began := time.Now()
 		ctx := r.Context()
 		if id == "" {
 			// The fetch is shared with whoever asks while it runs, so it must not die
 			// with the request that happened to start it.
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), arrFetchTimeout)
+			ctx, cancel = context.WithTimeout(context.Background(), arrFetchTimeout)
 			defer cancel()
 		}
 		b, err := svc.Get(ctx, endpoint, query)
@@ -117,12 +117,12 @@ func (s *Server) library(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		// The whole collection is the same for every page, search and order.
 		var hit bool
-		projected, hit, err = s.arrLists.get(name, r.URL.Query().Get("refresh") == "1", fetch)
+		projected, hit, err = s.arrLists.get(name, r.URL.Query().Get("refresh") == "1", timing, fetch)
 		if hit {
 			timing.note("arr", "cached")
 		}
 	} else {
-		projected, err = fetch()
+		projected, err = fetch(timing)
 	}
 	if err != nil {
 		fail(w, 502, err.Error())

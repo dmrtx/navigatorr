@@ -1,20 +1,29 @@
 package maintenanceui
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // A library page is 100 titles, but Radarr and Sonarr only answer for the whole
-// collection: hundreds of titles and several megabytes each time. The projected
-// list is kept for a short while so paging, searching and sorting read memory
-// instead of asking again. The entries are shared and must not be modified;
-// a caller copies an item before adding anything to it.
+// collection: hundreds of titles and several megabytes each time (about half a
+// second for Radarr and a second for Sonarr on a large library). The projected
+// list is kept so paging, searching and sorting read memory instead of asking
+// again. Past the TTL a list that is not too old is still shown at once while
+// one request in the background asks again, so no one waits for the *arr to
+// find out that nothing changed. A change made through the console, or refresh=1,
+// is never answered from an old list. The entries are shared and must not be
+// modified; a caller copies an item before adding anything to it.
 const (
 	arrListTTL = 45 * time.Second
+	// arrListStale is how old a list may be and still be shown while a new one is read.
+	arrListStale = 10 * time.Minute
 	// arrFetchTimeout bounds one fetch of a collection, however many requests wait on it.
 	arrFetchTimeout = time.Minute
+	// arrRefreshRetry is how long to wait before a failed background read is tried again.
+	arrRefreshRetry = 10 * time.Second
 )
 
 type arrListCache struct {
@@ -26,12 +35,17 @@ type arrListCache struct {
 }
 
 type arrListEntry struct {
-	// mu is held while the list is fetched, so requests that arrive together
+	// fetchMu is held while the list is fetched, so requests that arrive together
 	// share one fetch instead of each starting their own.
+	fetchMu sync.Mutex
+	// mu guards the fields below and is never held across a fetch.
 	mu         sync.Mutex
 	at         time.Time
 	generation uint64
 	items      []map[string]any
+	refreshing bool
+	// retryAfter keeps a failed background read from being tried on every request.
+	retryAfter time.Time
 }
 
 func (c *arrListCache) entry(service string) *arrListEntry {
@@ -48,29 +62,87 @@ func (c *arrListCache) entry(service string) *arrListEntry {
 	return e
 }
 
-// get returns the service's list, fetching it when there is none, it is older
-// than the TTL, or refresh asks for a new one. hit says it came from memory.
+// get returns the service's list, fetching it when there is none, it is too old
+// to show, or refresh asks for a new one. hit says it came from memory. A list
+// past the TTL but within arrListStale is returned at once and read again in
+// the background (with a timing of its own, since the request will be over).
 // A failed fetch is an error for this call and leaves the last good list as it was.
-func (c *arrListCache) get(service string, refresh bool, fetch func() ([]map[string]any, error)) (items []map[string]any, hit bool, err error) {
+func (c *arrListCache) get(service string, refresh bool, timing *serverTiming, fetch func(*serverTiming) ([]map[string]any, error)) (items []map[string]any, hit bool, err error) {
 	e := c.entry(service)
 	asked := time.Now()
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	generation := c.generation.Load()
-	if e.items != nil && e.generation == generation {
-		// A refresh that waited behind a fetch already got what it asked for: the
-		// list was read after the refresh was requested.
-		if e.at.After(asked) || (!refresh && time.Since(e.at) < arrListTTL) {
-			return e.items, true, nil
+	e.mu.Lock()
+	if !refresh && e.items != nil && e.generation == generation {
+		age := time.Since(e.at)
+		if age < arrListTTL {
+			items = e.items
+			e.mu.Unlock()
+			return items, true, nil
+		}
+		if age < arrListStale {
+			items = e.items
+			start := !e.refreshing && time.Now().After(e.retryAfter)
+			if start {
+				e.refreshing = true
+			}
+			e.mu.Unlock()
+			if start {
+				go c.refresh(e, service, asked, generation, fetch)
+			}
+			return items, true, nil
 		}
 	}
-	items, err = fetch()
+	e.mu.Unlock()
+
+	e.fetchMu.Lock()
+	defer e.fetchMu.Unlock()
+	// A request that waited behind a fetch already got what it asked for when the
+	// list was read after it asked.
+	e.mu.Lock()
+	if e.items != nil && e.generation == generation && (e.at.After(asked) || (!refresh && time.Since(e.at) < arrListTTL)) {
+		items = e.items
+		e.mu.Unlock()
+		return items, true, nil
+	}
+	e.mu.Unlock()
+	items, err = fetch(timing)
 	if err != nil {
 		// The last good list stays for the next request that can use it.
 		return nil, false, err
 	}
+	e.mu.Lock()
 	e.items, e.at, e.generation = items, time.Now(), generation
+	e.mu.Unlock()
 	return items, false, nil
+}
+
+// refresh reads the list again for the requests that were shown an old one. A
+// failure keeps the old list, which is then read again after a few seconds; once
+// the list is too old to show, the next request waits for a read and sees the error.
+// A list that was renewed, or ended by a change, while this waited is left as it is.
+func (c *arrListCache) refresh(e *arrListEntry, service string, scheduled time.Time, generation uint64, fetch func(*serverTiming) ([]map[string]any, error)) {
+	e.fetchMu.Lock()
+	defer e.fetchMu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.refreshing = false
+		e.mu.Unlock()
+	}()
+	e.mu.Lock()
+	renewed := e.at.After(scheduled) || e.generation != generation
+	e.mu.Unlock()
+	if renewed || c.generation.Load() != generation {
+		return
+	}
+	items, err := fetch(newServerTiming())
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if err != nil {
+		e.retryAfter = time.Now().Add(arrRefreshRetry)
+		log.Printf("library: reading the %s list again in the background: %v", service, err)
+		return
+	}
+	e.items, e.at, e.generation, e.retryAfter = items, time.Now(), generation, time.Time{}
 }
 
 // forget ends every list, such as after something was changed through the console.
