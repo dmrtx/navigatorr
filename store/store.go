@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -84,7 +83,7 @@ func CanTransition(from, to string) bool {
 // Store wraps the SQLite database.
 type Store struct {
 	maintenanceMemo map[string]maintenanceMemo
-	mu              sync.Mutex
+	mu              watchedMutex
 	db              *sql.DB
 }
 
