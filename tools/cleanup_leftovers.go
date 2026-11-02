@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jakenesler/navigatorr/fsop"
@@ -68,7 +69,11 @@ func registerCleanupLeftoversTool(s *server.MCPServer, d *Deps, qb *qbit.Client,
 				return toolErr("path is required: the downloads folder to scan"), nil
 			}
 
-			policy, err := leftoverPolicy(ctx, qb, time.Duration(age)*time.Minute)
+			scope := []string{argString(args, "path", "")}
+			if mode != "list" {
+				scope = argStrings(args, "paths")
+			}
+			policy, err := leftoverPolicy(ctx, qb, time.Duration(age)*time.Minute, scope)
 			if err != nil {
 				return toolErr("cannot tell which folders qBittorrent still owns, so nothing was scanned or removed: %v", err), nil
 			}
@@ -131,9 +136,19 @@ func policyNote(qb *qbit.Client) string {
 	return "folders qBittorrent owns or saves into were kept"
 }
 
+// leftoverFileLookups is how many torrent file lists are read side by side.
+const leftoverFileLookups = 8
+
 // leftoverPolicy asks qBittorrent what it owns. With no client configured
 // nothing is owned; with one that cannot be read, the caller must stop.
-func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration) (fsop.LeftoverPolicy, error) {
+//
+// A torrent without a folder of its own keeps its files straight in its save
+// path, so each file is owned by name, which takes one request per such
+// torrent. With scope (the folders being looked at) only torrents saving
+// where the scope is are asked, side by side; without it every one is.
+// Listing every torrent's files one after another is what once made a
+// downloads scan outlast the 60 s the gateway allows.
+func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration, scope []string) (fsop.LeftoverPolicy, error) {
 	p := fsop.LeftoverPolicy{Now: time.Now(), MinAge: minAge}
 	if qb == nil {
 		return p, nil
@@ -147,6 +162,23 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration) 
 		return p, fmt.Errorf("reading categories and preferences: %w", err)
 	}
 	p.Keep = append(p.Keep, keep...)
+	inScope := func(dir string) bool {
+		var any bool
+		for _, s := range scope {
+			if s == "" {
+				continue
+			}
+			any = true
+			if fsop.PathsOverlap(dir, s) {
+				return true
+			}
+		}
+		return !any // no scope given: everything counts
+	}
+	type lookup struct {
+		hash, save string
+	}
+	var lookups []lookup
 	for _, t := range torrents {
 		if t.SavePath != "" {
 			p.Keep = append(p.Keep, t.SavePath)
@@ -157,16 +189,31 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration) 
 		case content == "":
 		case content != save:
 			p.Owned = append(p.Owned, content)
-		default:
-			// A torrent without its own folder keeps its files straight in the
-			// save path: own each file by name so subfolders it fills stay.
-			files, err := qb.ListFiles(ctx, t.Hash)
-			if err != nil {
-				return p, fmt.Errorf("listing files of a torrent: %w", err)
-			}
-			for _, f := range files {
-				p.Owned = append(p.Owned, path.Join(save, f.Name))
-			}
+		case inScope(save):
+			lookups = append(lookups, lookup{hash: t.Hash, save: save})
+		}
+	}
+	// A torrent saving outside the scope cannot own anything inside it.
+	files := make([][]qbit.TorrentFile, len(lookups))
+	errs := make([]error, len(lookups))
+	sem := make(chan struct{}, leftoverFileLookups)
+	var wg sync.WaitGroup
+	for i, l := range lookups {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, l lookup) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			files[i], errs[i] = qb.ListFiles(ctx, l.hash)
+		}(i, l)
+	}
+	wg.Wait()
+	for i, l := range lookups {
+		if errs[i] != nil {
+			return p, fmt.Errorf("listing files of a torrent: %w", errs[i])
+		}
+		for _, f := range files[i] {
+			p.Owned = append(p.Owned, path.Join(l.save, f.Name))
 		}
 	}
 	return p.WithResolvedLinks(), nil

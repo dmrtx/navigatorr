@@ -68,6 +68,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerCleanupLeftoversTool(s, d, qbClient, cfg.AllowDestructive)
 	registerScanTools(s, d, registry)
 	registerFsTools(s, d)
+	registerFsManageTools(s, d, registry, qbClient, cfg.AllowDestructive)
 
 	var workers *transcode.WorkerSet
 	if len(transcodeWorkers) > 0 {
