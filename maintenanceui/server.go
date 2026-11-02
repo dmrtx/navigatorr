@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -62,6 +63,8 @@ type Server struct {
 	fileStatusCache fileStatusCache
 	// arrLists keeps the *arr collections the Files tab pages through.
 	arrLists arrListCache
+	// inFlight counts the requests being served, for the slow-request log.
+	inFlight atomic.Int64
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
 	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
 	classify action.SourceClassifier
@@ -220,10 +223,18 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		served := time.Now()
-		mux.ServeHTTP(w, r)
+		// Requests already being served when this one began (not counting itself).
+		others := s.inFlight.Add(1) - 1
+		func() {
+			defer s.inFlight.Add(-1)
+			mux.ServeHTTP(w, r)
+		}()
 		if d := time.Since(served); d > slowRequest && strings.HasPrefix(r.URL.Path, "/api/") {
-			// Only the path: a query can carry file names.
-			log.Printf("slow request: %s %s took %s", r.Method, r.URL.Path, d.Round(time.Millisecond))
+			// Only the path: a query can carry file names. The timing says which
+			// step waited, and the count whether other requests were in the way.
+			// The Server-Timing parts are fixed step names and numbers; never put a
+			// file name or request value in one, since it is logged here as it is.
+			log.Printf("slow request: %s %s took %s (%d other requests in flight when it began) %s", r.Method, r.URL.Path, d.Round(time.Millisecond), others, w.Header().Get("Server-Timing"))
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
