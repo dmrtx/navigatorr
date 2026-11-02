@@ -1284,3 +1284,40 @@ func TestLeftoverOriginalChangedStaysSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A replacement that was cancelled while it still waited for approval never
+// touched its candidate, so it must not keep that candidate on the disk for
+// good. One that had been approved may have started, so it still does.
+func TestDiscardLeftoverCandidateIgnoresReplacementCancelledBeforeApproval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		approved bool
+		removed  bool
+	}{
+		{name: "cancelled before approval", removed: true},
+		{name: "cancelled after approval", approved: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := candidateRoot(t)
+			st := setupTestStore(t)
+			e := discardEngine(t, st, root)
+			original := filepath.Join(root, "Sample Show", "Season 1", "sample-episode-01.mkv")
+			writeCandidateFile(t, original, "original")
+			candidate := seedCandidateAttempt(t, st, "attempt", StatusFailed, original, "job-attempt", nil, nil)
+			writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+			seedActionInstance(t, st, "replacement", "promote_transcode_candidate", StatusCancelled, 1, "promote:filesystem:attempt", map[string]any{"transcode_action_id": "attempt"}, map[string]any{"promotion": map[string]any{"approved": tc.approved}})
+
+			_, err := e.DiscardLeftoverCandidate(context.Background(), "attempt")
+			_, statErr := os.Lstat(candidate)
+			if tc.removed && (err != nil || !os.IsNotExist(statErr)) {
+				t.Fatalf("candidate kept by a replacement that never started: %v %v", err, statErr)
+			}
+			if !tc.removed && (err == nil || statErr != nil) {
+				t.Fatalf("candidate of an approved replacement removed: %v %v", err, statErr)
+			}
+			if _, err := os.Stat(original); err != nil {
+				t.Fatalf("original touched: %v", err)
+			}
+		})
+	}
+}
