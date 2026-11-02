@@ -223,13 +223,18 @@ func (s *Server) Handler() http.Handler {
 			}
 		}
 		served := time.Now()
-		busy := s.inFlight.Add(1)
-		mux.ServeHTTP(w, r)
-		s.inFlight.Add(-1)
+		// Requests already being served when this one began (not counting itself).
+		others := s.inFlight.Add(1) - 1
+		func() {
+			defer s.inFlight.Add(-1)
+			mux.ServeHTTP(w, r)
+		}()
 		if d := time.Since(served); d > slowRequest && strings.HasPrefix(r.URL.Path, "/api/") {
 			// Only the path: a query can carry file names. The timing says which
 			// step waited, and the count whether other requests were in the way.
-			log.Printf("slow request: %s %s took %s (%d in flight when it began; %s)", r.Method, r.URL.Path, d.Round(time.Millisecond), busy, w.Header().Get("Server-Timing"))
+			// The Server-Timing parts are fixed step names and numbers; never put a
+			// file name or request value in one, since it is logged here as it is.
+			log.Printf("slow request: %s %s took %s (%d other requests in flight when it began) %s", r.Method, r.URL.Path, d.Round(time.Millisecond), others, w.Header().Get("Server-Timing"))
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
