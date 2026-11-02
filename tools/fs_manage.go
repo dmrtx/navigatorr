@@ -148,7 +148,7 @@ func arrClaims(ctx context.Context, registry *arrservice.Registry, real string) 
 		if !radarr && !sonarr {
 			// Sonarr and Radarr speak /api/v3. A service on that API under
 			// another name could track library files this check would miss.
-			if svc.Config.APIVersion == "/api/v3" {
+			if strings.Contains(strings.ToLower(svc.BaseURL+"/"), "/api/v3/") {
 				return nil, fmt.Errorf("service %q uses the Sonarr/Radarr API but is not named sonarr or radarr, so its tracked files cannot be checked", name)
 			}
 			continue

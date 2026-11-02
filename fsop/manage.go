@@ -206,6 +206,11 @@ func (r *Resolver) Mkdir(path string) (MkdirResult, error) {
 		}
 		made = append(made, cur)
 	}
+	// Nothing may have been swapped for a link inside the root meanwhile.
+	if again, rerr := r.ResolveWrite(real); rerr != nil || again != real {
+		undo()
+		return res, fmt.Errorf("%q now resolves somewhere else", real)
+	}
 	if len(made) == 0 {
 		res.Existed = true
 		return res, nil

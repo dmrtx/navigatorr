@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -163,6 +164,9 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration, 
 	}
 	p.Keep = append(p.Keep, keep...)
 	inScope := func(dir string) bool {
+		if !filepath.IsAbs(dir) {
+			return true // cannot be placed against the scope: ask, the safe side
+		}
 		var any bool
 		for _, s := range scope {
 			if s == "" {
@@ -200,6 +204,8 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration, 
 	defer cancel()
 	sem := make(chan struct{}, leftoverFileLookups)
 	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
 launch:
 	for i, l := range lookups {
 		select {
@@ -213,7 +219,8 @@ launch:
 			defer func() { <-sem }()
 			files[i], errs[i] = qb.ListFiles(lctx, l.hash)
 			if errs[i] != nil {
-				cancel() // one failure ends the whole read: nothing is guessed
+				once.Do(func() { firstErr = errs[i] }) // the cause, not the cancellations it triggers
+				cancel()                               // one failure ends the whole read: nothing is guessed
 			}
 		}(i, l)
 	}
@@ -221,10 +228,10 @@ launch:
 	if err := ctx.Err(); err != nil {
 		return p, fmt.Errorf("listing files of a torrent: %w", err)
 	}
+	if firstErr != nil {
+		return p, fmt.Errorf("listing files of a torrent: %w", firstErr)
+	}
 	for i, l := range lookups {
-		if errs[i] != nil {
-			return p, fmt.Errorf("listing files of a torrent: %w", errs[i])
-		}
 		if files[i] == nil && errs[i] == nil && lctx.Err() != nil {
 			return p, fmt.Errorf("listing files of a torrent: %w", lctx.Err())
 		}
