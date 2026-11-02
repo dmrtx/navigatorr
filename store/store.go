@@ -97,27 +97,23 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
 	// Settings that belong to a connection are given in the DSN, so every
-	// connection the pool opens has them. Applied with db.Exec below they only
+	// connection the pool opens has them. Applied once with db.Exec they only
 	// reached whichever connection ran the statement, and the pool hands out its
 	// idle connections in turn: a commit on any other one waited for the disk
-	// to flush (synchronous=FULL) and gave up at once on a busy database.
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=journal_mode(WAL)")
+	// to flush (synchronous=FULL), gave up at once on a busy database and did not
+	// cascade a delete (foreign_keys is off in a new connection).
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", path, err)
 	}
-	// A small pool is enough for an MCP server, and a single writer avoids
-	// SQLITE_BUSY surprises between the two processes that may share the file.
+	// A small pool is enough for an MCP server; every call also takes Store.mu,
+	// so one writer at a time reaches the file.
 	db.SetMaxOpenConns(4)
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=NORMAL",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("applying %s: %w", pragma, err)
-		}
+	// A first statement makes the driver open a connection now, so a database
+	// that cannot be opened fails here.
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("opening database %s: %w", path, err)
 	}
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {

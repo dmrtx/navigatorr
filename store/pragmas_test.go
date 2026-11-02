@@ -15,14 +15,13 @@ func TestEveryPooledConnectionHasTheSamePragmas(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	var conns []interface{ Close() error }
 	for i := 0; i < 4; i++ {
 		c, err := s.db.Conn(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		conns = append(conns, c)
-		var sync, busy int
+		t.Cleanup(func() { c.Close() })
+		var sync, busy, fk int
 		var mode string
 		if err := c.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&sync); err != nil {
 			t.Fatal(err)
@@ -33,11 +32,11 @@ func TestEveryPooledConnectionHasTheSamePragmas(t *testing.T) {
 		if err := c.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&mode); err != nil {
 			t.Fatal(err)
 		}
-		if sync != 1 || busy != 5000 || mode != "wal" {
-			t.Fatalf("connection %d: synchronous=%d busy_timeout=%d journal_mode=%s", i, sync, busy, mode)
+		if err := c.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk); err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, c := range conns {
-		c.Close()
+		if sync != 1 || busy != 5000 || mode != "wal" || fk != 1 {
+			t.Fatalf("connection %d: synchronous=%d busy_timeout=%d journal_mode=%s foreign_keys=%d", i, sync, busy, mode, fk)
+		}
 	}
 }
