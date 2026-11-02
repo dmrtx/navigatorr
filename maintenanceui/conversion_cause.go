@@ -132,6 +132,16 @@ func failureCause(r operationRecord) *conversionCause {
 // summaryLimit is the longest line a cause or an explanation says.
 const summaryLimit = 140
 
+// happenedLine is a cause line as one sentence of at most summaryLimit
+// characters, its closing period included.
+func happenedLine(summary string) string {
+	s := firstLine(summary)
+	if r := []rune(s); len(r) >= summaryLimit {
+		s = strings.TrimSuffix(string(r[:summaryLimit-2]), "…") + "…"
+	}
+	return s + "."
+}
+
 // firstLine is the first line of a text, at most summaryLimit characters.
 func firstLine(text string) string {
 	text, _, _ = strings.Cut(strings.TrimSpace(text), "\n")
@@ -183,8 +193,13 @@ func resultCause(r operationRecord, streams *action.ConversionStreams) *conversi
 			break
 		}
 		c.Kind = "below_min_savings"
-		c.Summary = fmt.Sprintf("%s %s vs original %s: %.0f%% smaller, below the %.0f%% minimum", what, formatSize(candidate), formatSize(original), saved, minimum)
-		c.numbers(saved, minimum, "percent")
+		if minimum > 0 {
+			c.Summary = fmt.Sprintf("%s %s vs original %s: %.0f%% smaller, below the %.0f%% minimum", what, formatSize(candidate), formatSize(original), saved, minimum)
+			c.numbers(saved, minimum, "percent")
+		} else {
+			c.Summary = fmt.Sprintf("%s %s vs original %s: only %.0f%% smaller", what, formatSize(candidate), formatSize(original), saved)
+			c.Measured, c.Unit = &saved, "percent"
+		}
 	case "size_budget_exceeded":
 		target := int64(operationNumber(operationMap(operationValue(r, "size_budget"))["budget_bytes"]))
 		c.Kind = "over_size_target"
@@ -259,8 +274,10 @@ func blameStream(c *conversionCause, streams *action.ConversionStreams, candidat
 		tail := ""
 		switch c.Kind {
 		case "over_size_target":
-			tail = fmt.Sprintf("; the target was %s", formatSize(target))
-			if video+streams.Totals.SubtitlesAfter <= target {
+			if target > 0 {
+				tail = fmt.Sprintf("; the target was %s", formatSize(target))
+			}
+			if target > 0 && video+streams.Totals.SubtitlesAfter <= target {
 				tail = fmt.Sprintf("; the video alone (%s) met the %s target", formatSize(video), formatSize(target))
 			}
 		case "not_smaller":
@@ -378,22 +395,34 @@ func qualityCause(r operationRecord) *conversionCause {
 			c.Summary = fmt.Sprintf("%s %.1f VMAF%s, below this goal's floor", window, *m.VMAFWorstWindow, at)
 			c.Measured, c.Unit = m.VMAFWorstWindow, "vmaf"
 		}
-	case m.VMAFMean != nil && (meanMissed || !failed("quality_vmaf_p5_below_minimum")):
+	case m.VMAFMean != nil && (meanMissed || l.VMAFMean == nil && len(final.FailedChecks) == 0 && len(final.Failures) == 0):
+		// Only a mean that missed is named; a job from before limits were
+		// recorded has its mean and no other reason.
 		if l.VMAFMean != nil {
 			c.Summary = fmt.Sprintf("Quality %.1f VMAF%s, below the %.1f target", *m.VMAFMean, at, *l.VMAFMean)
-			if !meanMissed && worstMissed && m.VMAFWorstWindow != nil && l.VMAFWorstWindow != nil {
-				c.Summary = fmt.Sprintf("Quality %.1f VMAF%s; worst window %.1f, below the %.1f floor", *m.VMAFMean, at, *m.VMAFWorstWindow, *l.VMAFWorstWindow)
-			}
 			c.numbers(*m.VMAFMean, *l.VMAFMean, "vmaf")
 		} else {
 			c.Summary = fmt.Sprintf("Quality %.1f VMAF%s, below this goal's minimum", *m.VMAFMean, at)
 			c.Measured, c.Unit = m.VMAFMean, "vmaf"
 		}
-	case m.VMAFP5 != nil && l.VMAFP5 != nil:
+	case m.VMAFP5 != nil && l.VMAFP5 != nil && (failed("quality_vmaf_p5_below_minimum") || *m.VMAFP5 < *l.VMAFP5):
 		c.Summary = fmt.Sprintf("VMAF p5 %.1f%s, below the %.1f minimum", *m.VMAFP5, at, *l.VMAFP5)
 		c.numbers(*m.VMAFP5, *l.VMAFP5, "vmaf")
 	case len(final.Failures) > 0:
 		c.Summary = strings.Join(final.Failures, "; ") + at
+	case len(final.FailedChecks) > 0:
+		checks := make([]string, 0, len(final.FailedChecks))
+		for _, code := range final.FailedChecks {
+			checks = append(checks, strings.ReplaceAll(strings.TrimPrefix(code, "quality_"), "_", " "))
+		}
+		c.Summary = "Failed the " + strings.Join(checks, ", ") + " check" + at
+		if m.VMAFMean != nil {
+			c.Summary += fmt.Sprintf(" (quality %.1f VMAF", *m.VMAFMean)
+			if l.VMAFMean != nil {
+				c.Summary += fmt.Sprintf(" met the %.1f target", *l.VMAFMean)
+			}
+			c.Summary += ")"
+		}
 	default:
 		c.Summary = "The new file missed this goal's quality limits" + at + "; no scores were reported"
 	}

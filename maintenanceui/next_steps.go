@@ -142,7 +142,7 @@ func explainResult(r operationRecord) resultExplanation {
 		}
 	case "quality_not_met", "no_suitable_candidate", "search_budget_exhausted":
 		// Replaced below by the measured score and its limit when known.
-		e.Happened = qualityCause(r).Summary + "."
+		e.Happened = happenedLine(qualityCause(r).Summary)
 	case "hdr_requires_compact":
 		e.Happened = "Save space keeps the picture as it is and cannot encode HDR or Dolby Vision."
 	case "compact_not_needed":
@@ -154,7 +154,7 @@ func explainResult(r operationRecord) resultExplanation {
 	// gives; the sentences above stay for endings without a number.
 	if r.inst.Status == store.ActionStatusCompleted {
 		if c := resultCause(r, action.ConversionStreamsOf(r.state, causeCandidateBytes(r))); c.Measured != nil {
-			e.Happened = c.Summary + "."
+			e.Happened = happenedLine(c.Summary)
 		}
 	}
 	if r.inst.Status == store.ActionStatusCancelled {

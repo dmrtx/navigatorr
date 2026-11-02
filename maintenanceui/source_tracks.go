@@ -69,7 +69,10 @@ type sourceTracksView struct {
 // size_he, compact or copy), keep_audio and keep_subtitles (comma separated
 // stream indexes), max_height, size_budget_percent and size_budget_bytes.
 // ok is false when no mode is named; field names the bad parameter.
-func estimateSettings(q url.Values, selection *transcode.TrackSelection) (s action.EstimateSettings, ok bool, field string) {
+//
+// A list that is not sent follows the automatic selection; with no
+// selection (nothing to remove) every track of that kind stays.
+func estimateSettings(q url.Values, selection *transcode.TrackSelection, rep *mediainspect.DetailedReport) (s action.EstimateSettings, ok bool, field string) {
 	s.Mode = q.Get("mode")
 	if s.Mode == "" {
 		return s, false, ""
@@ -107,11 +110,29 @@ func estimateSettings(q url.Values, selection *transcode.TrackSelection) (s acti
 			return s, false, "keep_subtitles"
 		}
 		s.Tracks = &transcode.TrackSelection{KeepAudio: audio, KeepSubtitles: subs}
-		if !q.Has("keep_audio") && selection != nil {
-			s.Tracks.KeepAudio = selection.KeepAudio
+		all := func(streams []mediainspect.DetailedStream) []int {
+			out := make([]int, 0, len(streams))
+			for _, st := range streams {
+				out = append(out, st.Index)
+			}
+			slices.Sort(out)
+			return slices.Compact(out)
 		}
-		if !q.Has("keep_subtitles") && selection != nil {
-			s.Tracks.KeepSubtitles = selection.KeepSubtitles
+		if !q.Has("keep_audio") {
+			switch {
+			case selection != nil:
+				s.Tracks.KeepAudio = selection.KeepAudio
+			case rep != nil:
+				s.Tracks.KeepAudio = all(rep.Audio)
+			}
+		}
+		if !q.Has("keep_subtitles") {
+			switch {
+			case selection != nil:
+				s.Tracks.KeepSubtitles = selection.KeepSubtitles
+			case rep != nil:
+				s.Tracks.KeepSubtitles = all(rep.Subtitles)
+			}
 		}
 	}
 	for key, target := range map[string]*float64{"size_budget_percent": &s.BudgetPercent} {
@@ -162,7 +183,7 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		}
 		languages = list
 	}
-	if _, _, field := estimateSettings(r.URL.Query(), nil); field != "" {
+	if _, _, field := estimateSettings(r.URL.Query(), nil, nil); field != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid " + field, "code": "invalid_params", "field": field})
 		return
 	}
@@ -218,7 +239,7 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		Languages: languages, Audio: list("audio", rep.Audio), Subtitles: list("subtitle", rep.Subtitles),
 		SizeBytes: preview.SourceBytes, DurationSec: preview.DurationSec, VideoBytes: preview.VideoBytes, VideoApprox: preview.VideoDerived,
 	}
-	if settings, ok, _ := estimateSettings(r.URL.Query(), selection); ok {
+	if settings, ok, _ := estimateSettings(r.URL.Query(), selection, rep); ok {
 		view.Estimate = action.EstimateConversion(rep, settings)
 	}
 	writeJSON(w, 200, view)

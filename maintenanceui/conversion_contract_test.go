@@ -579,3 +579,205 @@ func TestBatchFileRowsCarryTheirCause(t *testing.T) {
 		t.Fatalf("cause %v", out.Items[0]["cause"])
 	}
 }
+
+// A setting whose mean met the target but failed another check names that
+// check, not the mean, on the list, the opened job and its explanation.
+func TestCauseNamesTheCheckThatFailedNotAMeanThatPassed(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	rung := func(failures []any) map[string]any {
+		final := map[string]any{"verdict": "fail", "failed_checks": []any{"quality_cambi_mean_above_maximum"},
+			"measured": map[string]any{"vmaf_mean": 95.0, "vmaf_p5": 90.0, "vmaf_worst_window": 88.0}, "limits": map[string]any{"vmaf_mean_minimum": 93.0, "vmaf_p5_minimum": 85.0, "vmaf_worst_window_minimum": 80.0}}
+		if failures != nil {
+			final["failures"] = failures
+		}
+		return map[string]any{"quality": 18, "reason_code": "quality_not_met", "candidate_bytes": 1_000_000_000, "final": final}
+	}
+	for id, tc := range map[string]struct {
+		failures []any
+		want     string
+	}{
+		"described": {[]any{"CAMBI mean 6.2 is above the maximum 5.0"}, "CAMBI mean 6.2 is above the maximum 5.0 at CRF 18 · medium"},
+		"codes":     {nil, "Failed the cambi mean above maximum check at CRF 18 · medium (quality 95.0 VMAF met the 93.0 target)"},
+	} {
+		seedOperation(t, st, id, "transcode_media", "completed", map[string]any{"path": "/media/movies/" + id + ".mkv", "mode": "quality"}, nil, map[string]any{
+			"resolved_path": "/media/movies/" + id + ".mkv", "skip_transcode": true, "reason_code": "quality_not_met", "original": map[string]any{"size_bytes": 4_000_000_000},
+			"quality_ladder": map[string]any{"video_codec": "libx265", "preset": "medium", "quality_values": []any{18}, "rung": 0, "outcome": "quality_not_met", "tried": []any{rung(tc.failures)}},
+		})
+		for _, query := range []string{"group=workflow", "id=" + id} {
+			job := jobByID(t, getOperations(t, h, query), id)
+			c := operationMap(job["cause"])
+			if c["summary"] != tc.want || strings.Contains(operationString(c["summary"]), "below the 93.0") {
+				t.Fatalf("%s %s: cause %v", id, query, c)
+			}
+			if query != "group=workflow" {
+				if happened := operationString(operationMap(job["explanation"])["happened"]); happened != tc.want+"." {
+					t.Fatalf("%s: explanation %q", id, happened)
+				}
+			}
+		}
+	}
+}
+
+// ready_ids holds only files Replace all may start: not one whose
+// replacement is running or failed.
+func TestReadyIDsLeaveOutFilesBeingReplaced(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for _, id := range []string{"free", "replacing", "failed"} {
+		path := "/media/movies/" + id + ".mkv"
+		seedOperation(t, st, id, "transcode_media", "completed", map[string]any{"path": path}, map[string]any{"original_intact": true}, map[string]any{"resolved_path": path, "original": map[string]any{"size_bytes": 10_000}, "candidate_size_bytes": 4000})
+	}
+	seedOperation(t, st, "promote-running", "promote_transcode_candidate", "running", map[string]any{"transcode_action_id": "replacing"}, nil, nil)
+	seedFailed(t, st, "promote-failed", "promote_transcode_candidate", map[string]any{"transcode_action_id": "failed"}, nil, "transcode failed (worker_unreachable): dial timeout")
+	page := getOperations(t, h, "status=all&limit=100")
+	if got, _ := json.Marshal(page.ReadyIDs); string(got) != `["free"]` {
+		t.Fatalf("ready ids %s", got)
+	}
+}
+
+// One list of indexes in the estimate leaves every track of the other kind
+// in place when the languages select nothing.
+func TestSourceTracksEstimateKeepsTheKindNotListed(t *testing.T) {
+	audio := []mediainspect.DetailedStream{
+		{Index: 1, Kind: "audio", Codec: "aac", Language: "eng", Channels: 2, BitRate: 128_000},
+		{Index: 2, Kind: "audio", Codec: "aac", Language: "spa", Channels: 2, BitRate: 128_000},
+	}
+	subs := []mediainspect.DetailedStream{{Index: 3, Kind: "subtitle", Codec: "subrip", Language: "eng"}, {Index: 4, Kind: "subtitle", Codec: "subrip", Language: "spa"}}
+	_, video, s := tracksFixture(t, audio, subs)
+	h := s.Handler()
+	fates := func(query string) string {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/source-tracks?path="+url.QueryEscape(video)+"&mode=size&"+query, "", true)
+		var out map[string]any
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		streams := operationMap(operationMap(out["estimate"])["streams"])
+		tracks, _ := streams["audio"].([]any)
+		var parts []string
+		for _, tr := range tracks {
+			parts = append(parts, fmt.Sprintf("a%v:%v", operationMap(tr)["index"], operationString(operationMap(tr)["fate"]) == "dropped"))
+		}
+		subTracks, _ := operationMap(streams["subtitles"])["tracks"].([]any)
+		for _, tr := range subTracks {
+			parts = append(parts, fmt.Sprintf("s%v:%v", operationMap(tr)["index"], operationMap(tr)["fate"] == "dropped"))
+		}
+		return strings.Join(parts, " ")
+	}
+	if got := fates("keep_audio=1"); got != "a1:false a2:true s3:false s4:false" {
+		t.Fatalf("keep_audio only: %s", got)
+	}
+	if got := fates("keep_subtitles=4"); got != "a1:false a2:false s3:true s4:false" {
+		t.Fatalf("keep_subtitles only: %s", got)
+	}
+}
+
+// The opened job, its explanation and its batch row weigh the same new-file
+// size, the last setting tried when the job kept no file, so all of them
+// blame the same stream.
+func TestDetailCauseUsesTheLastSettingTriedSize(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	path := "/media/shows/Sample/S01E04.mkv"
+	rep := mediainspect.DetailedReport{
+		DurationSec: 1000, SizeBytes: 4_000_000_000,
+		Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", Width: 1920, Height: 1080}},
+		Audio: []mediainspect.DetailedStream{{Index: 1, Kind: "audio", Codec: "truehd", Channels: 8, Language: "eng", BitRate: 16_000_000}},
+	}
+	seedOperation(t, st, "batch", "transcode_batch", "completed", map[string]any{"paths": []any{path}}, nil, nil)
+	seedOperation(t, st, "child", "transcode_media", "completed", map[string]any{"path": path, "parent_action_id": "batch", "mode": "size"}, nil, map[string]any{
+		"resolved_path": path, "skip_transcode": true, "reason_code": "size_budget_exceeded", "original": map[string]any{"size_bytes": 4_000_000_000},
+		"size_budget":    map[string]any{"budget_bytes": 2_500_000_000},
+		"quality_ladder": map[string]any{"video_codec": "libx265", "preset": "medium", "quality_values": []any{22}, "rung": 0, "tried": []any{ladderRung(22, 95, 3_000_000_000)}},
+		"plan":           asJSONMap(transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, AudioMode: "copy"}),
+		"source_report":  asJSONMap(rep),
+	})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "e4", FilePath: path, DisplayLabel: "e4", ChildActionID: "child", Status: "completed", Decision: "transcode"}); err != nil {
+		t.Fatal(err)
+	}
+	detail := jobByID(t, getOperations(t, h, "id=child"), "child")
+	cause := operationMap(detail["cause"])
+	if cause["kind"] != "audio_too_big" || cause["stream"] != "audio" {
+		t.Fatalf("detail cause %v", cause)
+	}
+	if happened := operationString(operationMap(detail["explanation"])["happened"]); happened != operationString(cause["summary"])+"." {
+		t.Fatalf("explanation %q vs cause %v", happened, cause["summary"])
+	}
+	w := request(h, "GET", "/api/maintenance/batch-items?id=batch", "", true)
+	var out struct {
+		Items []map[string]any `json:"items"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Items) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if row := operationMap(out.Items[0]["cause"]); row["summary"] != cause["summary"] {
+		t.Fatalf("batch row %v vs detail %v", row["summary"], cause["summary"])
+	}
+}
+
+// A cause line as long as a line may be keeps its closing period within
+// the limit in the explanation.
+func TestExplanationLineFitsWithItsPeriod(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	preset := strings.Repeat("p", 120)
+	seedOperation(t, st, "long", "transcode_media", "completed", map[string]any{"path": "/media/movies/long.mkv", "mode": "size"}, nil, map[string]any{
+		"resolved_path": "/media/movies/long.mkv", "skip_transcode": true, "reason_code": "quality_not_met", "original": map[string]any{"size_bytes": 4_000_000_000},
+		"quality_ladder": map[string]any{"video_codec": "libx265", "preset": preset, "quality_values": []any{22}, "rung": 0, "tried": []any{ladderRung(22, 89.5, 1_000_000_000)}},
+	})
+	job := jobByID(t, getOperations(t, h, "id=long"), "long")
+	happened := operationString(operationMap(job["explanation"])["happened"])
+	if n := len([]rune(happened)); n > summaryLimit || strings.Contains(happened, "\n") || !strings.HasSuffix(happened, "….") {
+		t.Fatalf("%d characters: %q", n, happened)
+	}
+}
+
+// Past the read cap the queue says its total stops at the cap.
+func TestReviewQueueSaysWhenItHitTheReadCap(t *testing.T) {
+	s, h := testUI(t)
+	defer func(old int) { queueReadCap = old }(queueReadCap)
+	queueReadCap = 2
+	st := s.engine.Deps().Store
+	for i := range 3 {
+		if _, err := st.AddItem(store.MaintenanceItem{MediaType: "movie", Service: "radarr", MediaID: fmt.Sprint(i + 1), Title: fmt.Sprintf("Sample %d", i), IssueType: "oversized", Priority: i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/queue", "", true)
+	var page queuePage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if page.Total != 2 || len(page.Items) != 2 || !page.Truncated || !page.Capped {
+		t.Fatalf("page total %d, items %d, truncated %v, capped %v", page.Total, len(page.Items), page.Truncated, page.Capped)
+	}
+}
+
+// A goal without a recorded minimum or target says no "0%" or "0 B" limit.
+func TestCauseLeavesOutALimitWithoutANumber(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "nomin", "transcode_media", "completed", map[string]any{"path": "/media/movies/nomin.mkv"}, nil, map[string]any{
+		"resolved_path": "/media/movies/nomin.mkv", "skip_transcode": true, "reason_code": "insufficient_savings", "original": map[string]any{"size_bytes": 1_000_000_000}, "candidate_size_bytes": 950_000_000})
+	rep := mediainspect.DetailedReport{
+		DurationSec: 1000, SizeBytes: 4_000_000_000,
+		Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", Width: 1920, Height: 1080}},
+		Audio: []mediainspect.DetailedStream{{Index: 1, Kind: "audio", Codec: "truehd", Channels: 8, Language: "eng", BitRate: 16_000_000}},
+	}
+	seedOperation(t, st, "notarget", "transcode_media", "completed", map[string]any{"path": "/media/movies/notarget.mkv", "mode": "size"}, nil, map[string]any{
+		"resolved_path": "/media/movies/notarget.mkv", "skip_transcode": true, "reason_code": "size_budget_exceeded", "original": map[string]any{"size_bytes": 4_000_000_000}, "candidate_size_bytes": 3_000_000_000,
+		"plan": asJSONMap(transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, AudioMode: "copy"}), "source_report": asJSONMap(rep)})
+	for _, id := range []string{"nomin", "notarget"} {
+		for _, query := range []string{"group=workflow", "id=" + id} {
+			job := jobByID(t, getOperations(t, h, query), id)
+			summary := operationString(operationMap(job["cause"])["summary"])
+			if summary == "" || strings.Contains(summary, " 0%") || strings.Contains(summary, " 0 B") {
+				t.Fatalf("%s %s: %q", id, query, summary)
+			}
+			if id == "nomin" && summary != "New file 906 MB vs original 954 MB: only 5% smaller" {
+				t.Fatalf("%s: %q", query, summary)
+			}
+		}
+	}
+}

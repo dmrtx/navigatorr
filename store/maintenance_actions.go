@@ -67,7 +67,7 @@ func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 	out := map[string]json.RawMessage{}
-	for _, k := range []string{"verdict", "failed_checks"} {
+	for _, k := range []string{"verdict", "failed_checks", "failures"} {
 		if v, ok := f[k]; ok {
 			out[k] = v
 		}

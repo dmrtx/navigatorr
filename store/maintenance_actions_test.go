@@ -483,7 +483,7 @@ func TestMaintenanceSnapshotKeepsTheLadderScoresAndTheMinimumSaving(t *testing.T
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("%v %v", rows, err)
 	}
-	want := `{"mode_policy":{"min_savings_percent":15},"quality_ladder":{"outcome":"quality_not_met","preset":"medium","quality_values":[22,19],"retry_without_hardware":true,"rung":1,"tried":[{"candidate_bytes":900,"final":{"failed_checks":["below_minimum_quality"],"limits":{"vmaf_mean_minimum":93},"measured":{"vmaf_mean":91.2,"vmaf_worst_window":80.1},"verdict":"fail"},"quality":22,"reason_code":"quality_not_met"}],"video_codec":"libx265"}}`
+	want := `{"mode_policy":{"min_savings_percent":15},"quality_ladder":{"outcome":"quality_not_met","preset":"medium","quality_values":[22,19],"retry_without_hardware":true,"rung":1,"tried":[{"candidate_bytes":900,"final":{"failed_checks":["below_minimum_quality"],"failures":["text"],"limits":{"vmaf_mean_minimum":93},"measured":{"vmaf_mean":91.2,"vmaf_worst_window":80.1},"verdict":"fail"},"quality":22,"reason_code":"quality_not_met"}],"video_codec":"libx265"}}`
 	var a, b any
 	_ = json.Unmarshal([]byte(rows[0].StateJSON), &a)
 	_ = json.Unmarshal([]byte(want), &b)

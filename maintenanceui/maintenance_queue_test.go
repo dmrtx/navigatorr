@@ -16,6 +16,7 @@ type queuePage struct {
 	Counts    store.MaintenanceCounts `json:"counts"`
 	Total     int                     `json:"total"`
 	Truncated bool                    `json:"truncated"`
+	Capped    bool                    `json:"total_capped"`
 }
 
 func TestMaintenanceQueueShowsFoldersAndClosesByHand(t *testing.T) {

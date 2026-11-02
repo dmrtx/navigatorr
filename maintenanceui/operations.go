@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
@@ -1011,7 +1012,14 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 						if streams != nil {
 							job["streams"] = streams
 						}
-						if cause := conversions.cause(full, streams); cause != nil {
+						// The cause weighs the streams against the same new-file
+						// size the explanation and the batch rows use: the result,
+						// else the last setting tried.
+						causeStreams := streams
+						if full.inst.ActionName == "transcode_media" {
+							causeStreams = action.ConversionStreamsOf(full.state, causeCandidateBytes(full))
+						}
+						if cause := conversions.cause(full, causeStreams); cause != nil {
 							job["cause"] = cause
 						}
 					}
@@ -1160,8 +1168,17 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	page.Ready = largestCandidates(ready)
 	// largestCandidates sorted every ready file, the largest first; the ids of
 	// all of them go along with the rows it kept.
+	// Only files Replace all may start: none with a replacement running,
+	// failed or planned, the same rule a batch's ready_item_ids follows.
 	page.ReadyIDs = make([]string, 0, len(ready))
 	for _, c := range ready {
+		r := recordsByID[c.ActionID]
+		if existingReplacements[c.ActionID] != "" || conversions.conversionStatus(r) != "ready_to_replace" {
+			continue
+		}
+		if parent := recordsByID[operationString(r.inputs["parent_action_id"])]; parent.inst.ActionName == "transcode_batch" && replacementPlanState(parent.state, c.ActionID) != "" {
+			continue
+		}
 		page.ReadyIDs = append(page.ReadyIDs, c.ActionID)
 	}
 	if len(page.History) > 25 {

@@ -215,11 +215,16 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Every matching entry is read, so the search, the order and the total
-	// cover the whole queue, not one page of it. The store caps the read.
-	items, err := st.ListItemsForConsole(statuses, issue, 0)
+	// cover the whole queue, not one page of it. The read is capped; one
+	// entry past the cap says the queue holds more than was searched.
+	items, err := st.ListItemsForConsole(statuses, issue, queueReadCap+1)
 	if err != nil {
 		fail(w, 500, "read the maintenance queue")
 		return
+	}
+	capped := len(items) > queueReadCap
+	if capped {
+		items = items[:queueReadCap]
 	}
 	counts, err := st.CountItemsForConsole(issue)
 	if err != nil {
@@ -235,8 +240,11 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 	timing := newServerTiming()
 	timing.since("library", began)
 	timing.set(w)
-	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": total, "offset": offset, "truncated": end < total})
+	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": total, "offset": offset, "truncated": end < total || capped, "total_capped": capped})
 }
+
+// queueReadCap is the most queue entries one request searches and sorts.
+var queueReadCap = store.ConsoleListCap
 
 // filterQueueRows keeps the rows whose title, year, folder or notes contain
 // every word of q, ignoring case and accents. An empty q keeps them all.
