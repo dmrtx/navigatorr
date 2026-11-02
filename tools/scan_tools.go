@@ -289,6 +289,12 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 			src, dst := argString(args, "source", ""), argString(args, "destination", "")
 			res, err := d.Fs.Move(ctx, src, dst)
 			if err != nil {
+				if res.Method != "" {
+					// The copy is in place but the source stayed: record it.
+					detail, _ := json.Marshal(map[string]any{"destination": dst, "method": res.Method,
+						"bytes": res.Bytes, "sha256": res.SHA256, "created_dirs": res.CreatedDirs, "error": err.Error()})
+					_ = d.Store.LogAction("fs_move", "", src, string(detail), "copied, source kept")
+				}
 				return toolErr("%v", err), nil
 			}
 			detail, _ := json.Marshal(map[string]any{"destination": dst, "method": res.Method,

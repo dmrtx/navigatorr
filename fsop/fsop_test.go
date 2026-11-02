@@ -274,9 +274,12 @@ func TestMoveKeepsVerifiedCopyWhenSourceCannotBeRemoved(t *testing.T) {
 	r, root, _ := testResolver(t)
 	a, b := filepath.Join(root, "a.mkv"), filepath.Join(root, "Anime", "a.mkv")
 	os.WriteFile(a, []byte("data"), 0o644)
-	_, err := r.Move(context.Background(), a, b)
+	res, err := r.Move(context.Background(), a, b)
 	if err == nil || !strings.Contains(err.Error(), "both files exist") {
 		t.Fatalf("err = %v", err)
+	}
+	if res.Method != "copy_source_kept" || len(res.SHA256) != 64 || len(res.CreatedDirs) != 1 {
+		t.Errorf("result = %+v", res)
 	}
 	if got, _ := os.ReadFile(b); string(got) != "data" {
 		t.Errorf("verified copy lost: %q", got)
@@ -314,20 +317,63 @@ func TestMoveSourceChangedWhileVerifying(t *testing.T) {
 }
 
 func TestMoveRefusesRootThatLostItsMount(t *testing.T) {
-	r, root, _ := testResolver(t)
-	for k := range r.writeDevs {
-		r.writeDevs[k]++ // as if the root now sat on another device
-	}
-	if len(r.writeDevs) == 0 {
-		t.Skip("no device ids on this platform")
-	}
+	mounted := true
+	old := mountPointFn
+	mountPointFn = func(string) (bool, error) { return mounted, nil }
+	defer func() { mountPointFn = old }()
+	r, root, _ := testResolver(t) // the root is a mount point here
 	a := filepath.Join(root, "a.mkv")
 	os.WriteFile(a, []byte("x"), 0o644)
-	if _, err := r.Move(context.Background(), a, filepath.Join(root, "New", "a.mkv")); err == nil {
+	// A remount (new device number) is still a mount: fine.
+	if _, err := r.Move(context.Background(), a, filepath.Join(root, "Ok", "a.mkv")); err != nil {
+		t.Fatalf("move on a mounted root: %v", err)
+	}
+	// The share goes away: the root is an empty folder on the local disk.
+	mounted = false
+	b := filepath.Join(root, "Ok", "a.mkv")
+	if _, err := r.Move(context.Background(), b, filepath.Join(root, "New", "a.mkv")); err == nil {
 		t.Fatal("moved into an unmounted root")
 	}
 	if _, err := os.Stat(filepath.Join(root, "New")); err == nil {
 		t.Error("folder created in an unmounted root")
+	}
+	if _, err := os.Stat(b); err != nil {
+		t.Error("source lost")
+	}
+}
+
+func TestMoveNeverCreatesAMissingRoot(t *testing.T) {
+	root, gone := t.TempDir(), filepath.Join(t.TempDir(), "nas")
+	r, err := NewResolver([]string{root}, []string{root, gone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := filepath.Join(root, "a.mkv")
+	os.WriteFile(a, []byte("x"), 0o644)
+	if _, err := r.Move(context.Background(), a, filepath.Join(gone, "Show", "S01", "a.mkv")); err == nil {
+		t.Fatal("moved into a root that is not there")
+	}
+	if _, err := os.Stat(gone); err == nil {
+		t.Error("the missing root was created")
+	}
+	if _, err := os.Stat(a); err != nil {
+		t.Error("source lost")
+	}
+}
+
+func TestRenameCheckedNeverReplaces(t *testing.T) {
+	_, root, _ := testResolver(t)
+	a, b := filepath.Join(root, "a"), filepath.Join(root, "b")
+	os.WriteFile(a, []byte("new"), 0o644)
+	os.WriteFile(b, []byte("old"), 0o644)
+	if supported, _ := renameNoReplace(a, b); !supported {
+		t.Skip("no rename-without-replace here")
+	}
+	if err := renameChecked(a, b); err == nil {
+		t.Error("replaced an existing file")
+	}
+	if got, _ := os.ReadFile(b); string(got) != "old" {
+		t.Errorf("destination = %q", got)
 	}
 }
 
