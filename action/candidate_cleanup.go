@@ -78,7 +78,7 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 	if err != nil {
 		return fmt.Errorf("promotion state could not be read: %v", err)
 	}
-	if promotion != nil && !(candidateIsOnWorker(ec.State) && promotionEndedForGood(promotion)) {
+	if promotion != nil && !(candidateIsOnWorker(ec.State) && promotionEndedForGood(promotion)) && !promotionCancelledBeforeApproval(promotion) {
 		return fmt.Errorf("replacement %s references this candidate", promotion.ID)
 	}
 	parentID := getString(ec.Inputs, "parent_action_id")
@@ -637,6 +637,28 @@ func (e *Engine) leftoverCandidateReason(inst *store.ActionInstance, ec *Executi
 		return e.unpromotableOriginalReason(ec), nil
 	}
 	return "", nil
+}
+
+// promotionCancelledBeforeApproval reports a promotion that was cancelled while
+// it still waited for approval. Nothing past the approval step ran, so it never
+// touched its candidate and no longer needs it kept.
+func promotionCancelledBeforeApproval(promotion *store.ActionInstance) bool {
+	if promotion.Status != StatusCancelled {
+		return false
+	}
+	for _, raw := range []string{promotion.StateJSON, promotion.OutputsJSON} {
+		var values map[string]any
+		if json.Unmarshal([]byte(raw), &values) != nil {
+			return false
+		}
+		if getBool(values, "promoted") {
+			return false
+		}
+		if p, ok := values["promotion"].(map[string]any); ok && getBool(p, "approved") {
+			return false
+		}
+	}
+	return true
 }
 
 // promotionEndedForGood reports a promotion that will never use its candidate:
