@@ -2641,7 +2641,7 @@ test("token mode with a local session keeps its sign-out", async () => {
   assert.equal(h.elements.get("local-session").hidden, false);
 });
 
-test("folder breadcrumbs preserve selected files while clearing the focused file/search", async () => {
+test("folder breadcrumbs drop the ticks of the folder left while clearing the focused file/search", async () => {
   const h = harness();
   h.context.paths = [];
   h.run(
@@ -2655,7 +2655,7 @@ test("folder breadcrumbs preserve selected files while clearing the focused file
     .get("folder-breadcrumbs")
     .children[0].listeners.get("click")();
   assert.equal(h.run("state.folder"), "/media");
-  assert.equal(h.run("state.folderSelected.size"), 1);
+  assert.equal(h.run("state.folderSelected.size"), 0);
   assert.equal(h.elements.get("search").value, "");
   assert.equal(h.elements.get("path").value, "");
   assert.match(h.context.paths[0], /path=%2Fmedia&q=&offset=0/);
@@ -8586,4 +8586,92 @@ test("a failed file keeps Retry unless the server says running it again cannot h
   const choose = rail.children.find(b => b.textContent === "Choose tracks");
   assert.ok(choose);
   assert.equal(choose.className, "primary");
+});
+
+test("ticks belong to the folder they were made in: going to another folder drops them", async () => {
+  const h = harness();
+  h.run('controls = () => {}; api = async () => ({path:"/media/B",total:0,items:[],has_more:false}); state.folder = "/media/A"; state.folderSelected = new Set(["/media/A/one.mkv","/media/A/two.mkv"]);');
+  h.document.getElementById("service").value = "folder:/media";
+  await h.run('navigateFolder("/media/B")');
+  assert.equal(h.run("state.folderSelected.size"), 0);
+  // Ticking in the new folder starts from nothing, and the old ones never come back.
+  h.run('state.folderSelected.add("/media/B/three.mkv")');
+  assert.equal(h.run("[...state.folderSelected].join()"), "/media/B/three.mkv");
+});
+
+test("a saved draft brings its ticks back only to the folder they were made in", () => {
+  const h = harness(), saved = new Map();
+  h.context.sessionStorage = {getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value)};
+  h.run('$("service").value = "folder:/media"; state.folder = "/media/A"; state.draftKey = libraryDraftKey(); state.folderSelected = new Set(["/media/A/one.mkv"]); saveLibraryDraft();');
+  h.run('$("selected-only").checked = true; $("scope").value = "batch"; $("path").value = "/media/A/one.mkv"; saveLibraryDraft();');
+  h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = null; restoreLibraryDraft();');
+  assert.equal(h.run("state.folderSelected.size"), 0);
+  assert.equal(h.elements.get("selected-only").checked, false, "no ticks, so no \"selected files only\" scope");
+  assert.equal(h.elements.get("scope").value, "file");
+  assert.equal(h.elements.get("path").value, "", "the file it pointed at is not on screen");
+  h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = "/media/B"; restoreLibraryDraft();');
+  assert.equal(h.run("state.folderSelected.size"), 0);
+  h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = "/media/A"; restoreLibraryDraft();');
+  assert.equal(h.run("state.folderSelected.size"), 1);
+});
+
+test("the queue sorts the view in either direction and keeps jobs without the value last", () => {
+  const h = harness();
+  const jobs = JSON.stringify([
+    {id: "a", number: 12, status: "completed", created_at: "2026-10-02T00:00:00Z", savings: {source_bytes: 5}, batch_files: {context: "Beta"}},
+    {id: "b", number: 3, status: "waiting_decision", created_at: "2026-10-01T00:00:00Z", savings: {source_bytes: 50}, batch_files: {context: "alpha 10"}},
+    {id: "c", status: "running", created_at: "2026-10-03T00:00:00Z", batch_files: {context: "alpha 9"}},
+  ]);
+  h.context.jobs = JSON.parse(jobs);
+  const order = sort => h.run(`sortJobs(jobs, "${sort}").map(job => job.id).join("")`);
+  assert.equal(order("queue"), "abc");
+  assert.equal(order("queue_desc"), "cba");
+  assert.equal(order("number_asc"), "bac");
+  assert.equal(order("number_desc"), "abc");
+  assert.equal(order("created_desc"), "cab");
+  assert.equal(order("created_asc"), "bac");
+  assert.equal(order("size_desc"), "bac");
+  assert.equal(order("size_asc"), "abc");
+  assert.equal(order("status_asc"), "bca");
+  assert.equal(order("status_desc"), "acb");
+  assert.equal(order("name_asc"), "cba");
+  assert.equal(order("name_desc"), "abc");
+});
+
+test("the queue search needs every word, ignores case and accents, and finds a number", () => {
+  const h = harness();
+  h.run('state.operationJobs = new Map([["a", {id:"a", number:41, status:"completed", batch_files:{context:"Café Society · Season 2", files:[{display_label:"Café Society - S02E01.mkv"}]}}], ["b", {id:"b", number:42, status:"failed", source_path:"/media/Movies/Dune.mkv"}]]);');
+  const found = text => { h.run(`state.jobSearch = ${JSON.stringify(text)}`); return h.run("visibleJobs().map(job => job.id).join()"); };
+  assert.equal(found(""), "a,b");
+  assert.equal(found("cafe society"), "a");
+  assert.equal(found("S02E01 CAFÉ"), "a");
+  assert.equal(found("#42"), "b");
+  assert.equal(found("dune"), "b");
+  assert.equal(found("dune cafe"), "");
+  assert.equal(h.run("jobsViewActive()"), true);
+});
+
+test("the eye in a batch's Files keeps what is left to replace and what failed", () => {
+  const h = harness();
+  const left = item => h.run(`batchItemOutstanding(${JSON.stringify(item)})`);
+  assert.equal(left({status: "completed", replaced: true}), false);
+  assert.equal(left({status: "completed"}), false);
+  assert.equal(left({status: "skip"}), false);
+  assert.equal(left({status: "cancelled"}), false);
+  assert.equal(left({status: "completed", candidate_ready: true}), true);
+  assert.equal(left({status: "completed", replacement_plan: "queued"}), true);
+  assert.equal(left({status: "completed", replacement_action_id: "r1"}), true);
+  assert.equal(left({status: "completed", replacement_failure: {reason: "x"}}), true);
+  assert.equal(left({status: "completed", retry_action_id: "r1"}), true);
+  assert.equal(left({status: "failed"}), true);
+  assert.equal(left({status: "running"}), true);
+  assert.equal(left({status: "queued"}), true);
+});
+
+test("each long screen pins its controls and Files keeps its panel beside the list", () => {
+  assert.ok(markup.includes('class="library-head sticky-head"'));
+  assert.equal((markup.match(/class="queue-head sticky-head"/g) || []).length, 2, "Queue and Review pin their toolbar");
+  assert.match(css, /\.sticky-head\s*\{[^}]*position: sticky;[^}]*top: var\(--stick-top\)/);
+  assert.match(css, /\.target-editor\s*\{[^}]*position: sticky;[^}]*overflow-y: auto/);
+  assert.match(css, /\.profile-action-bar\s*\{[^}]*position: sticky;[^}]*bottom: 0/);
 });

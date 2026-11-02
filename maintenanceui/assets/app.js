@@ -6,6 +6,7 @@ const goalMode = goal => goal === "audio_only" ? "size" : goal;
 const goalKeyOf = (mode, audioOnly) => mode === "size" && audioOnly ? "audio_only" : mode;
 const moreGoals = ["quality", "x265_preserve"];
 const state = {
+  batchOutstandingOnly: false,
   tab: "library",
   media: null,
   librarySeason: null,
@@ -1437,7 +1438,7 @@ function saveLibraryDraft() {
   if (!state.draftKey || typeof sessionStorage === "undefined" || $("workspace").hidden) return;
   const fields = {};
   for (const id of draftFields) if ($(id)) fields[id] = {value:id === "season" ? state.draftSeason ?? $(id).value : $(id).value,checked:$(id).checked};
-  const draft = {fields,mode:processingMode(),goalExplicit:Boolean(state.goalExplicit),folderSelected:[...(state.folderSelected || [])],selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
+  const draft = {fields,mode:processingMode(),goalExplicit:Boolean(state.goalExplicit),folderSelected:[...(state.folderSelected || [])],selectedIn:state.folder || $("service").value.slice(7),selected:[...state.selected],files:[...state.files].filter(([id])=>state.selected.has(id))};
   try { sessionStorage.setItem(`navigatorr_draft:${state.draftKey}`,JSON.stringify(draft)); } catch {}
 }
 function restoreLibraryDraft() {
@@ -1451,13 +1452,21 @@ function restoreLibraryDraft() {
   setProcessingMode(draft.mode || "size");
   state.goalExplicit = Boolean(draft.goalExplicit);
   const root = $("service").value.slice(7).replace(/\/$/, "");
-  state.folderSelected = new Set((draft.folderSelected || []).filter(path=>typeof path === "string" && path.startsWith(root+"/")));
+  // Ticks come back only to the folder they were made in.
+  const inThisFolder = (state.folder || $("service").value.slice(7)) === draft.selectedIn;
+  state.folderSelected = new Set(inThisFolder ? (draft.folderSelected || []).filter(path=>typeof path === "string" && path.startsWith(root+"/")) : []);
   state.selected = new Set(draft.selected || []);
   for (const [id,file] of draft.files || []) state.files.set(id,file);
   for (const [id,field] of Object.entries(draft.fields || {})) if (draftFields.includes(id) && $(id)) {
     if (id === "profile" && field.value !== "auto" && !state.recipes.includes(field.value)) continue;
     if (id === "season") state.draftSeason = field.value;
     $(id).value = field.value; $(id).checked = field.checked;
+  }
+  // Ticks left behind in another folder take their scope and the file they pointed at with them,
+  // or Process would send the whole open folder, or a file that is not on screen.
+  if (!inThisFolder && $("service").value.startsWith("folder:")) {
+    $("selected-only").checked = false; $("scope").value = "file";
+    $("path").value = ""; state.file = null; state.fileMedia = null; state.fileService = null;
   }
 }
 $("job-form").addEventListener("change", () => { renderCreationProfile(); saveLibraryDraft(); writeNavigation(true); });
@@ -1528,10 +1537,12 @@ $("back").addEventListener("click", () => {
   if (seriesSeasonSelected()) { safe(() => navigateSeriesSeason(null)); return; }
   if ($("service").value.startsWith("folder:")) {
     const root = $("service").value.slice(7);
-    state.folder =
+    const parent =
       state.folder === root
         ? root
         : state.folder?.slice(0, state.folder.lastIndexOf("/")) || root;
+    if (parent !== state.folder) dropFolderSelection();
+    state.folder = parent;
     saveLibraryDraft();
     state.libraryOffset = 0;
     clearFileSelection();
@@ -1607,7 +1618,23 @@ function clearFileSelection() {
   state.fileService = null;
   controls();
 }
+// A tick belongs to the folder it was made in. Leaving that folder (into a
+// subfolder, up one level or by its path) drops the ticks, so what "Process N
+// files" sends is always what the open folder shows, never files left behind in
+// another one.
+function dropFolderSelection() {
+  state.folderSelected?.clear();
+  state.folderSelectionMembers = new Map();
+  state.allSelectionKeys = null;
+  state.selectionAnchor = null;
+  state.selectionRange = null;
+  if (!state.selected.size) {
+    $("scope").value = "file";
+    $("selected-only").checked = false;
+  }
+}
 async function navigateFolder(path) {
+  if (path !== state.folder) dropFolderSelection();
   state.allSelectionKeys=null;
   state.folderSelectionMembers=new Map();
   saveLibraryDraft();
@@ -6250,7 +6277,10 @@ const jobFilterNames = {pending:"queued", running:"running", waiting_external:"p
 function emptyJobs() {
   const status = $("job-filter").value;
   const box = node("div", "", "empty");
-  if (status === "all") {
+  if (state.operationJobs?.size && jobSearchTerms().length) {
+    box.append(node("p", `No jobs match “${state.jobSearch.trim()}”.`));
+    box.append(button("Clear search", () => setQueueSearch(false), "quiet"));
+  } else if (status === "all") {
     box.append(node("p", "Nothing in the queue yet."));
     box.append(button("Choose files to process", () => selectTab("library"), "quiet"));
   } else {
@@ -6272,6 +6302,204 @@ function showJobsError(error) {
   box.append(button("Try again", () => safe(() => loadJobs()), "quiet"));
   $("jobs-list").replaceChildren(box);
 }
+// Sorting and searching the queue change only what is shown: the server's queue
+// order (what the workers take next) never changes from here.
+const jobsSearchWindow = 1000;
+const jobSortKey = "navigatorr_job_sort";
+const jobSortChoices = ["queue", "queue_desc", "number_asc", "number_desc", "created_desc", "created_asc", "name_asc", "name_desc", "size_desc", "size_asc", "status_asc", "status_desc"];
+function storedJobSort() {
+  try { const value = localStorage.getItem(jobSortKey); if (jobSortChoices.includes(value)) return value; } catch {}
+  return "queue";
+}
+state.jobSort = storedJobSort();
+state.jobSearch = "";
+const foldText = (text) => String(text ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+function jobSearchTerms() {
+  return foldText(state.jobSearch).split(/\s+/).filter(Boolean);
+}
+function jobsViewActive() {
+  return state.jobSort !== "queue" || jobSearchTerms().length > 0;
+}
+// Everything a person could type to find a job: its number, name, folder, files and status.
+function jobSearchText(job) {
+  const presentation = queuePresentation(job);
+  const files = (job.batch_files?.files || []).flatMap(file => [file.display_label, file.file_path?.split("/").pop()]);
+  return foldText([
+    job.number ? `#${job.number} ${job.number}` : "",
+    presentation.title, presentation.context, presentation.status,
+    job.source_path?.split("/").pop(), job.batch?.title, job.batch_files?.context, job.batch_files?.name,
+    ...files,
+  ].filter(Boolean).join(" \n "));
+}
+// What needs a look first: a question, then work in progress, waiting, failed, then done.
+const jobStatusRank = {waiting_decision: 0, running: 1, waiting_external: 2, pending: 3, failed: 4, completed: 5, cancelled: 6};
+function jobSizeBytes(job) {
+  const size = job.savings?.source_bytes ?? job.selection?.source_bytes ?? job.batch?.source_bytes;
+  return Number.isFinite(Number(size)) && size != null ? Number(size) : null;
+}
+// Ties keep the server's order (the sort is stable); a job without the value
+// (no number, size not known yet) goes last whichever way the order runs.
+function sortJobs(jobs, sort) {
+  const [key, direction] = sort.split("_");
+  const descending = direction === "desc";
+  if (key === "queue") return descending ? [...jobs].reverse() : jobs;
+  const value = {
+    number: job => (job.number != null && Number.isFinite(Number(job.number)) ? Number(job.number) : null),
+    created: job => (Number.isFinite(Date.parse(job.created_at)) ? Date.parse(job.created_at) : null),
+    name: job => queuePresentation(job).title || null,
+    size: jobSizeBytes,
+    status: job => jobStatusRank[job.status] ?? 7,
+  }[key];
+  if (!value) return jobs;
+  const keyed = jobs.map(job => ({job, v: value(job)}));
+  keyed.sort((a, b) => {
+    if (a.v == null || b.v == null) return a.v == null ? (b.v == null ? 0 : 1) : -1;
+    const order = typeof a.v === "string" ? a.v.localeCompare(b.v, undefined, {numeric: true, sensitivity: "base"}) : a.v - b.v;
+    return descending ? -order : order;
+  });
+  return keyed.map(entry => entry.job);
+}
+function visibleJobs() {
+  let jobs = [...(state.operationJobs?.values() || [])];
+  const terms = jobSearchTerms();
+  if (terms.length) jobs = jobs.filter(job => { const text = jobSearchText(job); return terms.every(term => text.includes(term)); });
+  return sortJobs(jobs, state.jobSort);
+}
+// A new order or search is drawn from what is loaded; the rest of the queue is
+// read first when only the newest page is.
+function jobsViewChanged() {
+  markQueueView();
+  if (jobsViewActive() && state.jobsHasMore && (state.jobsLoaded || 0) < jobsSearchWindow) safe(() => loadJobs());
+  else renderJobsList();
+}
+function markQueueView() {
+  $("job-sort-pick").classList.toggle("on", state.jobSort !== "queue");
+  $("queue-search-toggle").classList.toggle("on", jobSearchTerms().length > 0);
+}
+// Draws the queue from the jobs read so far, in the chosen order and narrowed by
+// the search. It reads nothing: sorting and searching only change the view.
+function renderJobsList() {
+  const data = state.jobsData;
+  if (!data) return false;
+  // A row under a finger is not rebuilt; the next refresh draws it.
+  if (swipe?.locked) return false;
+  const jobs = visibleJobs();
+  const focus = focusedControl($("jobs-list"));
+  const menu = openActionMenu($("jobs-list"));
+  const commandFocused = commandFocus();
+  $("jobs-list").replaceChildren();
+  for (const job of jobs) {
+    const row = node("article", "", "job-row"),
+      meta = node("div", "", "job-meta");
+    row.dataset.operationId = job.id;
+    if (job.batch) row.className += " batch-job";
+    if (job.batch?.dry_run) row.className += " preview-job";
+    if (["completed", "failed", "cancelled"].includes(job.status)) row.className += " terminal-job";
+    const presentation = queuePresentation(job);
+    const skipped = job.batch?.outcome === "no_changes" && !job.batch?.dry_run;
+    if (skipped) row.className += " skipped-job";
+    const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
+    const heading = node("h3", "", "job-heading");
+    heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
+    heading.append(jobLink(singleFile?.display_label || presentation.title, job.id));
+    heading.append(statusBadge(presentation.status));
+    // A goal batch keeps encoding while one file waits, so its own status says
+    // "In progress"; the flag says a decision is waiting.
+    const flagged = job.needs_decision && job.status !== "waiting_decision";
+    if (flagged) {
+      const decision = statusBadge("Needs decision", "waiting_decision");
+      decision.classList.add("decision-badge");
+      decision.title = "Needs decision";
+      heading.append(decision);
+    }
+    const actions = jobControls(job);
+    if (job.parent_action_id) {
+      const parent = button(
+        "View batch",
+        () => openJob(job.parent_action_id),
+        "quiet",
+      );
+      const icon = actionIcon("View batch");
+      if (icon) parent.append(icon);
+      actions.append(parent);
+    }
+    compactQueueActions(actions);
+    let main = [...actions.children].find(child => /\baction-main\b/.test(child.className));
+    if (!main && flagged) {
+      main = button("Review", () => openJob(job.id), "action-main");
+      main.title = "Review the file that needs a decision";
+    }
+    // One sentence says what happened or what runs now; the one thing to do
+    // next is a link at its end. Everything else is in the More actions menu.
+    // The generic fallback says nothing; a batch with files to review says how many.
+    const fallback = queueOutcome(job);
+    const reviewing = visibleBatch(job)?.waiting_decision || visibleBatch(job)?.review;
+    const outcome = fallback !== "Finished · Open job for details" ? fallback : reviewing > 0 ? `${reviewing} ${reviewing === 1 ? "file needs" : "files need"} your review · Originals unchanged` : "";
+    const failedLine = job.status === "failed" && outcome === "Open job for error details" ? shortJobReason(job.error) || (job.batch_files?.reasons?.[0] ? shortJobReason(job.batch_files.reasons[0].reason) : "") : "";
+    const headline = replacementHeadline(job);
+    const sentenceText = skipped || presentation.showTelemetry && !headline ? "" : failedLine || headline || outcome;
+    if (sentenceText || main) {
+      const sentence = node("p", sentenceText && main ? `${sentenceText} ` : sentenceText, `job-sentence${presentation.status === "Failed" ? " failed" : ""}`);
+      if (sentenceText) sentence.title = sentenceText;
+      if (main) sentence.append(main);
+      meta.append(sentence);
+    }
+    // Facts about the job on one quiet line.
+    const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.facts ? (presentation.facts.length ? [presentation.kind, ...presentation.facts].join(" · ") : "") : presentation.summary;
+    if (summaryText) {
+      const summary = node("p", summaryText, "metadata job-summary");
+      summary.title = summaryText;
+      meta.append(summary);
+    }
+    for (const reason of (skipped ? [] : job.batch_files?.reasons || []).slice(0, 1)) {
+      const text = shortJobReason(reason.reason);
+      if (text === failedLine && !job.error) continue;
+      const count = batchReasonLabel(job, reason);
+      const line = node("p", `${count}: ${text}`, "metadata batch-reason");
+      line.title = reason.reason;
+      meta.append(line);
+    }
+    const menu = [...actions.children].filter(child => child !== main);
+    row.append(heading, meta);
+    const live = skipped ? null : presentation.showTelemetry ? telemetry(job, {segments: true}) : batchProgress(job, {segments: true});
+    // A bar of one colour says nothing the summary line has not said (every file replaced, say), so it is left out.
+    const spread = skipped || live ? null : (seg => seg?.kinds > 1 ? seg : null)(batchSegments(visibleBatch(job)));
+    let body = skipped ? skippedBatchOutcome(job) : live;
+    if (spread) {
+      body = node("div", "", "job-progress batch-summary");
+      body.append(spread.bar, node("span", spread.legend, "batch-legend metadata"));
+    }
+    if (body) {
+      const footer = node("div", "", "job-footer");
+      footer.append(body);
+      row.append(footer);
+    }
+    if (menu.length) {
+      actions.replaceChildren(...menu);
+      row.className += " has-menu";
+      row.append(actions);
+    }
+    $("jobs-list").append(row);
+  }
+  if (!jobs.length) $("jobs-list").append(emptyJobs());
+  renderCommandIndicators();
+  restoreCommandFocus(commandFocused);
+  restoreActionMenu($("jobs-list"), menu);
+  restoreControl($("jobs-list"), focus);
+  restoreSwipe($("jobs-list"));
+  $("swipe-hint").hidden = !swipeHintVisible() || !document.querySelector(".job-row.has-menu");
+  // The list is rebuilt on return, so the place it was left at is restored
+  // once it is as long as it was.
+  if (state.jobsRestore != null && state.tab === "jobs" && typeof window !== "undefined") {
+    window.scrollTo({ top: state.jobsRestore });
+  }
+  $("jobs-more").hidden = !data.has_more;
+  const searching = jobSearchTerms().length > 0;
+  $("jobs-page").textContent = searching
+    ? `${jobs.length} matching · ${state.operationJobs.size} of ${data.total} jobs`
+    : `${state.operationJobs.size} of ${data.total} jobs`;
+  return true;
+}
 async function loadJobs(more = false) {
   if (
     $("workspace").hidden ||
@@ -6285,7 +6513,9 @@ async function loadJobs(more = false) {
   markQueueFilter();
   const status = $("job-filter").value;
   const offset = more ? state.jobsLoaded || 0 : 0;
-  const target = more ? 25 : Math.max(25, state.jobsLoaded || 25);
+  // Another order or a search needs the whole queue (up to a thousand jobs), not
+  // the newest 25, or "oldest first" and a match further down would be wrong.
+  const target = more ? 25 : jobsViewActive() ? Math.max(jobsSearchWindow, state.jobsLoaded || 0) : Math.max(25, state.jobsLoaded || 25);
   let data,
     page = [];
   try {
@@ -6307,121 +6537,8 @@ async function loadJobs(more = false) {
     for (const job of page) state.operationJobs.set(job.workflow_id || job.id, job);
     state.jobsLoaded = offset + page.length;
     state.jobsHasMore = data.has_more;
-    // A row under a finger is not rebuilt; the next refresh draws it.
-    if (swipe?.locked) return;
-    const focus = focusedControl($("jobs-list"));
-    const menu = openActionMenu($("jobs-list"));
-    const commandFocused = commandFocus();
-    $("jobs-list").replaceChildren();
-    for (const job of state.operationJobs.values()) {
-      const row = node("article", "", "job-row"),
-        meta = node("div", "", "job-meta");
-      row.dataset.operationId = job.id;
-      if (job.batch) row.className += " batch-job";
-      if (job.batch?.dry_run) row.className += " preview-job";
-      if (["completed", "failed", "cancelled"].includes(job.status)) row.className += " terminal-job";
-      const presentation = queuePresentation(job);
-      const skipped = job.batch?.outcome === "no_changes" && !job.batch?.dry_run;
-      if (skipped) row.className += " skipped-job";
-      const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
-      const heading = node("h3", "", "job-heading");
-      heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
-      heading.append(jobLink(singleFile?.display_label || presentation.title, job.id));
-      heading.append(statusBadge(presentation.status));
-      // A goal batch keeps encoding while one file waits, so its own status says
-      // "In progress"; the flag says a decision is waiting.
-      const flagged = job.needs_decision && job.status !== "waiting_decision";
-      if (flagged) {
-        const decision = statusBadge("Needs decision", "waiting_decision");
-        decision.classList.add("decision-badge");
-        decision.title = "Needs decision";
-        heading.append(decision);
-      }
-      const actions = jobControls(job);
-      if (job.parent_action_id) {
-        const parent = button(
-          "View batch",
-          () => openJob(job.parent_action_id),
-          "quiet",
-        );
-        const icon = actionIcon("View batch");
-        if (icon) parent.append(icon);
-        actions.append(parent);
-      }
-      compactQueueActions(actions);
-      let main = [...actions.children].find(child => /\baction-main\b/.test(child.className));
-      if (!main && flagged) {
-        main = button("Review", () => openJob(job.id), "action-main");
-        main.title = "Review the file that needs a decision";
-      }
-      // One sentence says what happened or what runs now; the one thing to do
-      // next is a link at its end. Everything else is in the More actions menu.
-      // The generic fallback says nothing; a batch with files to review says how many.
-      const fallback = queueOutcome(job);
-      const reviewing = visibleBatch(job)?.waiting_decision || visibleBatch(job)?.review;
-      const outcome = fallback !== "Finished · Open job for details" ? fallback : reviewing > 0 ? `${reviewing} ${reviewing === 1 ? "file needs" : "files need"} your review · Originals unchanged` : "";
-      const failedLine = job.status === "failed" && outcome === "Open job for error details" ? shortJobReason(job.error) || (job.batch_files?.reasons?.[0] ? shortJobReason(job.batch_files.reasons[0].reason) : "") : "";
-      const headline = replacementHeadline(job);
-      const sentenceText = skipped || presentation.showTelemetry && !headline ? "" : failedLine || headline || outcome;
-      if (sentenceText || main) {
-        const sentence = node("p", sentenceText && main ? `${sentenceText} ` : sentenceText, `job-sentence${presentation.status === "Failed" ? " failed" : ""}`);
-        if (sentenceText) sentence.title = sentenceText;
-        if (main) sentence.append(main);
-        meta.append(sentence);
-      }
-      // Facts about the job on one quiet line.
-      const summaryText = skipped ? [singleFile ? presentation.context : `${job.batch.total} files`, job.batch.total === 1 ? "Original kept" : "Originals kept"].filter(Boolean).join(" · ") : presentation.facts ? (presentation.facts.length ? [presentation.kind, ...presentation.facts].join(" · ") : "") : presentation.summary;
-      if (summaryText) {
-        const summary = node("p", summaryText, "metadata job-summary");
-        summary.title = summaryText;
-        meta.append(summary);
-      }
-      for (const reason of (skipped ? [] : job.batch_files?.reasons || []).slice(0, 1)) {
-        const text = shortJobReason(reason.reason);
-        if (text === failedLine && !job.error) continue;
-        const count = batchReasonLabel(job, reason);
-        const line = node("p", `${count}: ${text}`, "metadata batch-reason");
-        line.title = reason.reason;
-        meta.append(line);
-      }
-      const menu = [...actions.children].filter(child => child !== main);
-      row.append(heading, meta);
-      const live = skipped ? null : presentation.showTelemetry ? telemetry(job, {segments: true}) : batchProgress(job, {segments: true});
-      // A bar of one colour says nothing the summary line has not said (every file replaced, say), so it is left out.
-      const spread = skipped || live ? null : (seg => seg?.kinds > 1 ? seg : null)(batchSegments(visibleBatch(job)));
-      let body = skipped ? skippedBatchOutcome(job) : live;
-      if (spread) {
-        body = node("div", "", "job-progress batch-summary");
-        body.append(spread.bar, node("span", spread.legend, "batch-legend metadata"));
-      }
-      if (body) {
-        const footer = node("div", "", "job-footer");
-        footer.append(body);
-        row.append(footer);
-      }
-      if (menu.length) {
-        actions.replaceChildren(...menu);
-        row.className += " has-menu";
-        row.append(actions);
-      }
-      $("jobs-list").append(row);
-    }
-    if (!state.operationJobs.size) $("jobs-list").append(emptyJobs());
-    renderCommandIndicators();
-    restoreCommandFocus(commandFocused);
-    restoreActionMenu($("jobs-list"), menu);
-    restoreControl($("jobs-list"), focus);
-    restoreSwipe($("jobs-list"));
-    $("swipe-hint").hidden = !swipeHintVisible() || !document.querySelector(".job-row.has-menu");
-    // The list is rebuilt on return, so the place it was left at is restored
-    // once it is as long as it was.
-    if (state.jobsRestore != null && state.tab === "jobs" && typeof window !== "undefined") {
-      window.scrollTo({ top: state.jobsRestore });
-    }
-
-    $("jobs-more").hidden = !data.has_more;
-    $("jobs-page").textContent =
-      `${state.operationJobs.size} of ${data.total} jobs`;
+    state.jobsData = data;
+    if (!renderJobsList()) return;
     $("active-count").textContent = data.active_count
       ? `(${data.active_count})`
       : "";
@@ -7094,6 +7211,7 @@ $("storage-refresh").addEventListener("click", () => void safe(measureStorage));
 // A chosen filter lights the filter button, since the select itself is only an icon.
 function markQueueFilter() {
   $("job-filter-pick").classList.toggle("on", $("job-filter").value !== "all");
+  markQueueView();
 }
 $("job-filter").addEventListener("change", () => {
   markQueueFilter();
@@ -7103,6 +7221,35 @@ $("job-filter").addEventListener("change", () => {
   safe(() => loadJobs());
 });
 $("jobs-more").addEventListener("click", () => safe(() => loadJobs(true)));
+$("job-sort").value = state.jobSort;
+$("job-sort").addEventListener("change", () => {
+  state.jobSort = jobSortChoices.includes($("job-sort").value) ? $("job-sort").value : "queue";
+  try { localStorage.setItem(jobSortKey, state.jobSort); } catch {}
+  jobsViewChanged();
+});
+// Search is a row under the toolbar: open it with the magnifier, close it with the
+// X or Escape, which also clears it and shows the whole queue again.
+function setQueueSearch(open, {focus = false} = {}) {
+  $("queue-search-row").hidden = !open;
+  $("queue-search-toggle").setAttribute("aria-expanded", String(open));
+  if (open) { if (focus) $("job-search").focus(); return; }
+  const had = state.jobSearch !== "";
+  $("job-search").value = "";
+  state.jobSearch = "";
+  if (had) jobsViewChanged(); else markQueueView();
+  if (focus) $("queue-search-toggle").focus();
+}
+$("queue-search-toggle").addEventListener("click", () => setQueueSearch($("queue-search-row").hidden, {focus: true}));
+$("close-queue-search").addEventListener("click", () => setQueueSearch(false, {focus: true}));
+let jobSearchTimer;
+$("job-search").addEventListener("input", () => {
+  clearTimeout(jobSearchTimer);
+  jobSearchTimer = setTimeout(() => { state.jobSearch = $("job-search").value; jobsViewChanged(); }, 180);
+});
+$("job-search").addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); setQueueSearch(false, {focus: true}); }
+  else if (event.key === "Enter") { event.preventDefault(); clearTimeout(jobSearchTimer); state.jobSearch = $("job-search").value; jobsViewChanged(); }
+});
 if (typeof IntersectionObserver !== "undefined") {
   new IntersectionObserver(
     (entries) => {
@@ -7668,6 +7815,22 @@ function batchFileRow(item, id) {
 }
 // The most the server returns at once; a batch of 148 files is two pages.
 const batchItemsPage = 100;
+// Still to replace or being worked on, what the list keeps when the eye hides
+// the rest: not replaced, not skipped or cancelled, and not done with nothing
+// left to replace. A failed file or a stopped replacement stays, since it is
+// still to do (the same rule as the iOS app).
+function batchItemOutstanding(item) {
+  if (item.replaced) return false;
+  if (item.candidate_ready || item.replacement_plan || item.replacement_action_id) return true;
+  if (item.replacement_failure || item.retry_action_id) return true;
+  return !["completed", "skip", "cancelled"].includes(item.status);
+}
+try { state.batchOutstandingOnly = localStorage.getItem("navigatorr_batch_outstanding") === "1"; } catch {}
+$("batch-items-outstanding").addEventListener("click", () => {
+  state.batchOutstandingOnly = !state.batchOutstandingOnly;
+  try { localStorage.setItem("navigatorr_batch_outstanding", state.batchOutstandingOnly ? "1" : "0"); } catch {}
+  if (state.detail) safe(() => loadBatchItems(state.detail, state.detailRevision));
+});
 async function loadBatchItems(id, revision) {
   const offset = state.batchItemsOffset;
   const response = await api(
@@ -7683,11 +7846,25 @@ async function loadBatchItems(id, revision) {
   const list = $("batch-items-list");
   const focus = focusedControl(list);
   const toggled = document.activeElement?.dataset?.fileToggle || null;
-  list.replaceChildren(...(response.items || []).map(item => batchFileRow(item, id)));
+  const all = response.items || [];
+  // The eye only shows when it would hide something, or while it hides.
+  const canHide = state.batchOutstandingOnly || all.some(item => !batchItemOutstanding(item));
+  const shown = state.batchOutstandingOnly ? all.filter(batchItemOutstanding) : all;
+  const eye = $("batch-items-outstanding");
+  eye.hidden = !canHide;
+  eye.setAttribute("aria-pressed", String(state.batchOutstandingOnly));
+  eye.classList.toggle("on", state.batchOutstandingOnly);
+  const eyeLabel = state.batchOutstandingOnly ? "Show every file" : "Show only files left to replace";
+  eye.setAttribute("aria-label", eyeLabel);
+  eye.title = eyeLabel;
+  const rows = shown.map(item => batchFileRow(item, id));
+  if (state.batchOutstandingOnly && !shown.length) rows.push(node("p", response.has_more ? "Nothing left to replace on this page" : "Nothing left to replace", "muted jd-note"));
+  list.replaceChildren(...rows);
   restoreControl(list, focus);
   if (toggled) [...list.querySelectorAll("[data-file-toggle]")].find(t => t.dataset.fileToggle === toggled)?.focus({preventScroll: true});
-  $("batch-items-note").textContent =
-    `${response.items?.length || 0} of ${response.total} files`;
+  $("batch-items-note").textContent = shown.length < all.length
+    ? `${shown.length} of ${response.total} files · ${all.length - shown.length} hidden`
+    : `${all.length} of ${response.total} files`;
   state.batchItemsHasMore = response.has_more;
   $("batch-items-prev").disabled = offset === 0;
   $("batch-items-next").disabled = !response.has_more;

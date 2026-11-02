@@ -815,28 +815,28 @@ main {
 .grow {
   flex: 1;
 }
-.library-browser > .toolbar {
+.library-head > .toolbar {
   gap: 2px;
   margin-bottom: 4px;
 }
-.library-browser > .toolbar > .icon-button {
+.library-head > .toolbar > .icon-button {
   flex: 0 0 var(--control-size);
 }
 /* The source select takes the width the icon buttons leave; search swaps this
    row for the search row, which gives the input the same room. */
-.library-browser > .toolbar select,
-.library-browser > .toolbar input {
+.library-head > .toolbar select,
+.library-head > .toolbar input {
   flex: 1 1 auto;
   height: var(--control-size);
   margin: 0;
 }
-.library-browser > .toolbar select {
+.library-head > .toolbar select {
   margin-right: 4px;
 }
-.library-browser > .search-row input {
+.library-head > .search-row input {
   margin-right: 4px;
 }
-.library-browser > .toolbar .icon-button svg {
+.library-head > .toolbar .icon-button svg {
   width: 19px;
   height: 19px;
 }
@@ -1021,6 +1021,9 @@ main {
   flex-shrink: 0;
   margin: 0;
 }
+#queue-search-row { margin: 0 0 6px; gap: 4px; }
+#queue-search-row input { flex: 1 1 auto; height: var(--control-size); margin: 0; }
+#queue-search-row .icon-button { flex: 0 0 var(--control-size); }
 .queue-filters {
   display: flex;
   align-items: center;
@@ -3176,6 +3179,13 @@ html { scrollbar-gutter: stable; }
 .jd-files-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 12px 0 8px; border-top: 1px solid var(--line); }
 .jd-files-head h3 { margin: 0; font: 600 14px/1.4 var(--body); }
 .jd-files-head p { margin: 0; color: var(--muted); font-size: 12px; }
+.jd-files-head p { margin-right: auto; min-width: 0; }
+#batch-items-outstanding { flex: 0 0 auto; align-self: center; }
+#batch-items-outstanding[hidden] { display: none; }
+#batch-items-outstanding svg { width: 18px; height: 18px; }
+#batch-items-outstanding .eye-slash { display: none; }
+#batch-items-outstanding.on { color: var(--forest); }
+#batch-items-outstanding.on .eye-slash { display: inline; }
 #batch-items-list { border-top: 1px solid var(--line); }
 .jd-file { border-bottom: 1px solid var(--line); }
 .jd-file-head { display: grid; grid-template-columns: minmax(0, 1fr) 20px; grid-template-areas: "name chevron" "meta chevron"; align-items: center; column-gap: 8px; row-gap: 2px; width: 100%; min-height: 48px; padding: 6px 0; border: 0; border-radius: 0; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
@@ -3433,6 +3443,74 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .review-actions { display: flex; gap: 6px; align-items: center; }
 .review-action { display: inline-grid; place-items: center; width: var(--control-size); min-width: var(--control-size); height: var(--control-size); min-height: var(--control-size); padding: 0; }
 .review-action svg { width: 18px; height: 18px; }
+
+/* ---- Scrolling: what you act with stays on screen ---------------------------
+   A long list must not take its controls away. The page scrolls (the masthead and
+   the tab bar stay on top, below), and under them each screen pins its own head:
+   the queue's title, filters and search; Review's filters; Files' source, search,
+   folder path and column header. In Files the "Process videos" panel is pinned
+   beside the list and scrolls on its own when it is taller than the window, so
+   neither pushes the other out of sight. Phones keep their tabs at the bottom, so
+   their heads stick to the top edge. */
+:root { --tabs-h: 30px; --stick-gap: 14px; --stick-top: env(safe-area-inset-top, 0px); }
+@media (min-width: 601px) {
+  :root { --stick-top: calc(var(--masthead-h) + var(--tabs-h) + var(--stick-gap)); }
+}
+.sticky-head {
+  position: sticky;
+  top: var(--stick-top);
+  z-index: 6;
+  background: var(--surface);
+}
+/* The panel's own padding is paint the head must cover while stuck, or rows show above it. */
+.panel > .sticky-head { margin-top: -14px; padding-top: 14px; }
+.library-browser > .sticky-head { margin-top: 0; padding-top: 0; }
+.sticky-head::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 1px;
+  background: var(--line);
+  pointer-events: none;
+}
+.library-head > :last-child { margin-bottom: 0; }
+@media (min-width: 901px) {
+  .library-layout { align-items: start; }
+  .target-editor {
+    position: sticky;
+    top: var(--stick-top);
+    max-height: calc(100dvh - var(--stick-top) - 12px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
+  /* Profiles: the list stays beside the editor. */
+  .recipe-sidebar { position: sticky; top: var(--stick-top); align-self: start; }
+  #recipes-list { max-height: calc(100dvh - var(--stick-top) - 80px); }
+}
+/* Saving a profile is always in reach, as sending a job is. */
+.profile-action-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  margin-top: 8px;
+  padding-bottom: 8px;
+  background: var(--surface);
+}
+@media (max-width: 600px) {
+  .profile-action-bar { bottom: calc(49px + env(safe-area-inset-bottom)); }
+}
+/* Stats: two long lists would make the page endless; each keeps its own height. */
+.stat-list { max-height: min(60dvh, 520px); overflow-y: auto; overscroll-behavior: contain; }
+.queue-head { padding-bottom: 6px; }
+/* Five tools (search, sort, filter, pause, refresh) wrap under the title on the narrowest screens. */
+.queue-head > .queue-toolbar { flex-wrap: wrap; }
+.queue-head .queue-filters { flex-wrap: wrap; justify-content: flex-end; margin-left: auto; }
+/* Where the tools wrap into a tall head (a very narrow or zoomed screen) it would cover the list, so it scrolls away. */
+@media (max-width: 280px) {
+  .sticky-head { position: static; }
+}
+.queue-head #jobs-updated, .queue-head > .queue-toolbar { margin-bottom: 0; }
 
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
