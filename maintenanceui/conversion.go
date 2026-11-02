@@ -230,12 +230,17 @@ func conversionOutcome(r operationRecord) map[string]any {
 }
 
 // conversionStreams is the before → after of each stream, nil without the
-// probe and plan it is read from.
+// probe and plan it is read from. Before the new file exists it is the plan:
+// each track's fate, with the video's size after left unknown.
 func conversionStreams(r operationRecord) *action.ConversionStreams {
-	if r.inst.ActionName != "transcode_media" || r.savings.CandidateBytes == nil {
+	if r.inst.ActionName != "transcode_media" {
 		return nil
 	}
-	return action.ConversionStreamsOf(r.state, int64(*r.savings.CandidateBytes))
+	var candidate int64
+	if r.savings.CandidateBytes != nil {
+		candidate = int64(*r.savings.CandidateBytes)
+	}
+	return action.ConversionStreamsOf(r.state, candidate)
 }
 
 // shortTrackMismatch says in a line why chosen tracks no longer fit a file.
