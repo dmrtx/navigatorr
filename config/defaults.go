@@ -71,6 +71,7 @@ var DefaultAuthMethods = map[string]string{
 // DefaultAuthHeaders maps service type to auth header name override.
 var DefaultAuthHeaders = map[string]string{
 	"audiobookshelf": "Authorization",
+	"plex":           "X-Plex-Token",
 }
 
 // DefaultStatusPaths maps service type to a cheap authenticated endpoint used

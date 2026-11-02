@@ -10,3 +10,10 @@ useDefault = true
 description = "fixed test token of the NAS helper tests"
 regexTarget = "match"
 regexes = ['''helperTestToken = "0123456789abcdef0123456789abcdef"''']
+
+# The Plex policy tests used a fixed fake token before it was built at run time.
+# It is in history (read by the full-history scan), so allow exactly that value.
+[[allowlists]]
+description = "fake Plex test token in early commits of the Plex policy tests"
+regexTarget = "match"
+regexes = ['''APIKey:\s+"tok-12345678"''']

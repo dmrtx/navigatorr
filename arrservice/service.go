@@ -1,6 +1,8 @@
 package arrservice
 
 import (
+	"strings"
+
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/resilience"
 	"github.com/jakenesler/navigatorr/snapshot"
@@ -15,6 +17,9 @@ type Service struct {
 	StatusPath string // cheap authenticated endpoint for Ping, may be empty
 	Pool       *resilience.ServicePool
 	Snapshots  *snapshot.Store
+	policy     interface {
+		Check(method, path string, query map[string]string) error
+	} // nil allows every request
 }
 
 // NewService creates a Service from config.
@@ -24,6 +29,10 @@ func NewService(name string, cfg config.ServiceConfig) *Service {
 		Config:     cfg,
 		BaseURL:    cfg.URL + cfg.APIVersion,
 		StatusPath: config.DefaultStatusPaths[name],
+	}
+
+	if strings.EqualFold(strings.TrimSpace(name), "plex") {
+		svc.policy = plexPolicy{service: name}
 	}
 
 	switch cfg.AuthMethod {

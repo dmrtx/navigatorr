@@ -109,6 +109,11 @@ services:
     api_key: "imaginary-abs-token"
     auth_header: "Authorization"
     auth_prefix: "Bearer "
+  # Plex works like any other service through call_api (service: plex). Reads and
+  # writes pass; DELETE only under /library; the routes that hand out the account token do not.
+  plex:
+    url: "http://localhost:32400"
+    api_key: "imaginary-plex-token"   # sent as X-Plex-Token
 
 # ==============================================================================
 # 4. DOWNLOAD CLIENTS
