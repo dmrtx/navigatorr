@@ -1462,6 +1462,9 @@ function restoreLibraryDraft() {
     if (id === "season") state.draftSeason = field.value;
     $(id).value = field.value; $(id).checked = field.checked;
   }
+  // Ticks left behind in another folder take their "selected files only" scope with them,
+  // or Process would send the whole open folder.
+  if (!inThisFolder && $("service").value.startsWith("folder:")) { $("selected-only").checked = false; $("scope").value = "file"; }
 }
 $("job-form").addEventListener("change", () => { renderCreationProfile(); saveLibraryDraft(); writeNavigation(true); });
 $("job-form").addEventListener("input", () => { renderCreationProfile(); saveLibraryDraft(); });
@@ -1531,11 +1534,12 @@ $("back").addEventListener("click", () => {
   if (seriesSeasonSelected()) { safe(() => navigateSeriesSeason(null)); return; }
   if ($("service").value.startsWith("folder:")) {
     const root = $("service").value.slice(7);
-    state.folder =
+    const parent =
       state.folder === root
         ? root
         : state.folder?.slice(0, state.folder.lastIndexOf("/")) || root;
-    dropFolderSelection();
+    if (parent !== state.folder) dropFolderSelection();
+    state.folder = parent;
     saveLibraryDraft();
     state.libraryOffset = 0;
     clearFileSelection();

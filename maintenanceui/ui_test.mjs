@@ -8603,6 +8603,11 @@ test("a saved draft brings its ticks back only to the folder they were made in",
   const h = harness(), saved = new Map();
   h.context.sessionStorage = {getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value)};
   h.run('$("service").value = "folder:/media"; state.folder = "/media/A"; state.draftKey = libraryDraftKey(); state.folderSelected = new Set(["/media/A/one.mkv"]); saveLibraryDraft();');
+  h.run('$("selected-only").checked = true; $("scope").value = "batch"; saveLibraryDraft();');
+  h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = null; restoreLibraryDraft();');
+  assert.equal(h.run("state.folderSelected.size"), 0);
+  assert.equal(h.elements.get("selected-only").checked, false, "no ticks, so no \"selected files only\" scope");
+  assert.equal(h.elements.get("scope").value, "file");
   h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = "/media/B"; restoreLibraryDraft();');
   assert.equal(h.run("state.folderSelected.size"), 0);
   h.run('state.draftKey = null; state.folderSelected = new Set(); state.folder = "/media/A"; restoreLibraryDraft();');
