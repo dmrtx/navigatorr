@@ -21,6 +21,9 @@ type watchedMutex struct {
 	// Set by the holder, read by the holder when it unlocks.
 	pc uintptr
 	at time.Time
+	// slow and logf default to slowLockHold and log.Printf; a test sets them.
+	slow time.Duration
+	logf func(format string, args ...any)
 }
 
 func (m *watchedMutex) Lock() {
@@ -32,11 +35,19 @@ func (m *watchedMutex) Lock() {
 func (m *watchedMutex) Unlock() {
 	held, pc := time.Since(m.at), m.pc
 	m.mu.Unlock()
-	if held > slowLockHold {
+	slow, logf := m.slow, m.logf
+	if slow == 0 {
+		slow = slowLockHold
+	}
+	if logf == nil {
+		logf = log.Printf
+	}
+	if held > slow {
 		name := "unknown"
-		if fn := runtime.FuncForPC(pc); fn != nil {
+		// pc is a return address; the one before it lies inside the caller.
+		if fn := runtime.FuncForPC(pc - 1); fn != nil {
 			name = fn.Name()
 		}
-		log.Printf("store lock: held %s by %s", held.Round(time.Millisecond), name)
+		logf("store lock: held %s by %s", held.Round(time.Millisecond), name)
 	}
 }
