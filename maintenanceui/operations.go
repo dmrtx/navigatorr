@@ -727,6 +727,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		page.History = append(page.History, savingsReplacement{ActionID: r.inst.ID, SourcePath: path, CompletedAt: r.inst.UpdatedAt, SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.RealizedSavedBytes, CumulativeBytes: page.Savings.RealizedBytes})
 	}
 	page.Daily = dailySavings(page.History, now, clientZone(req))
+	conversions := newConversionFacts(records, recordsByID, roots, existingReplacements, replaced, replacedActions, archives, activeWorkflows, numbers)
 	ready := []savingsCandidate{}
 	seenCandidates, seenEstimates, seenArchivedCandidates := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
@@ -933,6 +934,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			job["number"] = numbers[root]
 			job["stages"] = s.queueStages(r)
+			if conversion := conversions.conversionID(r); conversion != "" {
+				job["conversion_id"] = conversion
+			}
 			// Planning can hash large files before a promotion checkpoint exists.
 			// Its durable source link already identifies the file during that stage.
 			if r.inst.ActionName == "promote_transcode_candidate" {
@@ -978,6 +982,22 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
+				job["conversion_status"] = conversions.conversionStatus(r)
+				if run := conversions.conversionReplacement(r); run != nil {
+					job["replacement_run"] = run
+				}
+				if resolved := conversions.resolvedBy(r); resolved != nil {
+					job["resolved_by"] = resolved
+				}
+				// How it ended, drawn by the client: the job being opened only.
+				if selectedID != "" {
+					if outcome := conversionOutcome(r); outcome != nil {
+						job["outcome"] = outcome
+					}
+					if streams := conversionStreams(r); streams != nil {
+						job["streams"] = streams
+					}
+				}
 			}
 			if r.inst.ActionName == "transcode_media" {
 				if parent := recordsByID[operationString(r.inputs["parent_action_id"])]; parent.inst.ActionName == "transcode_batch" && parent.inputs["dry_run"] != true && parent.state["batch_promotion_plan"] == nil {

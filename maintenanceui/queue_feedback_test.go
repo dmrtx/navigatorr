@@ -298,6 +298,13 @@ func TestQueueGroupsDurableWorkflowsBeforeFilteringAndPaging(t *testing.T) {
 	if len(detail.Jobs) != 1 || detail.Jobs[0]["number"] != number || detail.Jobs[0]["id"] != "source" {
 		t.Fatal("source detail lost its identity", detail)
 	}
+	// The replacement and its transcode are one conversion with one state.
+	if linked["conversion_id"] != "source" || detail.Jobs[0]["conversion_id"] != "source" || detail.Jobs[0]["conversion_status"] != "replacing" {
+		t.Fatal("replacement is not part of its conversion", linked["conversion_id"], detail.Jobs[0]["conversion_status"])
+	}
+	if run, _ := detail.Jobs[0]["replacement_run"].(map[string]any); run["id"] != "replace" || run["status"] != "running" {
+		t.Fatal("conversion lost its replacement", detail.Jobs[0]["replacement_run"])
+	}
 	inst, _ := st.GetActionInstance("replace")
 	inst.CurrentStep = 2
 	if err := st.UpdateActionInstance(*inst); err != nil {
