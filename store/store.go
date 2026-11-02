@@ -96,7 +96,12 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating database directory: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	// Settings that belong to a connection are given in the DSN, so every
+	// connection the pool opens has them. Applied with db.Exec below they only
+	// reached whichever connection ran the statement, and the pool hands out its
+	// idle connections in turn: a commit on any other one waited for the disk
+	// to flush (synchronous=FULL) and gave up at once on a busy database.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("opening database %s: %w", path, err)
 	}
