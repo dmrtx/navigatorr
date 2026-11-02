@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -192,14 +193,38 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issue := r.URL.Query().Get("issue_type")
-	items, err := st.ListItemsForConsole(statuses, issue, maintenanceQueueLimit+1)
+	query := r.URL.Query()
+	order := query.Get("sort")
+	if order != "" && order != "priority" && order != "size" && order != "newest" && order != "title" {
+		fail(w, 400, "sort must be priority, size, newest or title")
+		return
+	}
+	offset, limit := 0, maintenanceQueueLimit
+	for key, target := range map[string]*int{"offset": &offset, "limit": &limit} {
+		if raw := query.Get(key); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil {
+				fail(w, 400, "invalid "+key)
+				return
+			}
+			*target = n
+		}
+	}
+	if offset < 0 || limit < 1 || limit > maintenanceQueueLimit {
+		fail(w, 400, fmt.Sprintf("offset must be nonnegative and limit between 1 and %d", maintenanceQueueLimit))
+		return
+	}
+	// Every matching entry is read, so the search, the order and the total
+	// cover the whole queue, not one page of it. The read is capped; one
+	// entry past the cap says the queue holds more than was searched.
+	items, err := st.ListItemsForConsole(statuses, issue, queueReadCap+1)
 	if err != nil {
 		fail(w, 500, "read the maintenance queue")
 		return
 	}
-	truncated := len(items) > maintenanceQueueLimit
-	if truncated {
-		items = items[:maintenanceQueueLimit]
+	capped := len(items) > queueReadCap
+	if capped {
+		items = items[:queueReadCap]
 	}
 	counts, err := st.CountItemsForConsole(issue)
 	if err != nil {
@@ -207,12 +232,110 @@ func (s *Server) maintenanceQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	began := time.Now()
-	rows := s.maintenanceQueueItems(items)
+	rows := filterQueueRows(s.maintenanceQueueItems(items), query.Get("q"))
+	sortQueueRows(rows, order)
+	total := len(rows)
+	end := min(offset, total) + min(limit, max(0, total-offset))
+	rows = rows[min(offset, total):end]
 	timing := newServerTiming()
 	timing.since("library", began)
 	timing.set(w)
-	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": len(rows), "truncated": truncated})
+	writeJSONTagged(w, r, 200, map[string]any{"items": rows, "counts": counts, "total": total, "offset": offset, "truncated": end < total || capped, "total_capped": capped})
 }
+
+// queueReadCap is the most queue entries one request searches and sorts.
+var queueReadCap = store.ConsoleListCap
+
+// filterQueueRows keeps the rows whose title, year, folder or notes contain
+// every word of q, ignoring case and accents. An empty q keeps them all.
+func filterQueueRows(rows []maintenanceQueueItem, q string) []maintenanceQueueItem {
+	words := strings.Fields(foldText(q))
+	if len(words) == 0 {
+		return rows
+	}
+	out := rows[:0]
+	for _, row := range rows {
+		year := ""
+		if row.Year != nil {
+			year = strconv.Itoa(int(*row.Year))
+		}
+		hay := foldText(strings.Join([]string{row.Title, year, row.Folder, row.Notes}, " "))
+		match := true
+		for _, word := range words {
+			if !strings.Contains(hay, word) {
+				match = false
+				break
+			}
+		}
+		if match {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// sortQueueRows orders the rows; "" and "priority" keep the store's order,
+// the highest priority first, then the most recently updated.
+func sortQueueRows(rows []maintenanceQueueItem, order string) {
+	switch order {
+	case "size":
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := rows[i].SizeBytes, rows[j].SizeBytes
+			if a == nil || b == nil {
+				return a != nil
+			}
+			return *a > *b
+		})
+	case "newest":
+		sort.SliceStable(rows, func(i, j int) bool {
+			if rows[i].CreatedAt != rows[j].CreatedAt {
+				return rows[i].CreatedAt > rows[j].CreatedAt
+			}
+			return rows[i].ID > rows[j].ID
+		})
+	case "title":
+		sort.SliceStable(rows, func(i, j int) bool {
+			a, b := foldText(rows[i].Title), foldText(rows[j].Title)
+			if a != b {
+				return a < b
+			}
+			if ya, yb := rows[i].Year, rows[j].Year; ya != nil && yb != nil && *ya != *yb {
+				return *ya < *yb
+			}
+			return rows[i].ID < rows[j].ID
+		})
+	}
+}
+
+// foldText lowercases text and takes the accents off Latin letters, so "é"
+// matches "e" and "Ñ" matches "n".
+func foldText(text string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(text) {
+		if plain, ok := accentFold[r]; ok {
+			b.WriteString(plain)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+var accentFold = func() map[rune]string {
+	groups := map[string]string{
+		"a": "àáâãäåāăą", "c": "çćĉċč", "d": "ďđ", "e": "èéêëēĕėęě", "g": "ĝğġģ", "h": "ĥħ",
+		"i": "ìíîïĩīĭįı", "j": "ĵ", "k": "ķ", "l": "ĺļľŀł", "n": "ñńņňŉ", "o": "òóôõöøōŏő",
+		"r": "ŕŗř", "s": "śŝşšș", "t": "ţťŧț", "u": "ùúûüũūŭůűų", "w": "ŵ", "y": "ýÿŷ", "z": "źżž",
+		"ae": "æ", "oe": "œ", "ss": "ß",
+	}
+	out := map[rune]string{}
+	for plain, accented := range groups {
+		for _, r := range accented {
+			out[r] = plain
+		}
+	}
+	return out
+}()
 
 func (s *Server) maintenanceQueueAct(w http.ResponseWriter, r *http.Request, st *store.Store) {
 	var input struct {

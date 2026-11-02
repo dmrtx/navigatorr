@@ -139,6 +139,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/commands", s.commandStatus)
 	mux.HandleFunc("GET /api/maintenance/maintenance-queue", s.maintenanceQueue)
 	mux.HandleFunc("POST /api/maintenance/maintenance-queue", s.maintenanceQueue)
+	// The review queue's name in the conversion contract; the same list.
+	mux.HandleFunc("GET /api/maintenance/queue", s.maintenanceQueue)
 	mux.HandleFunc("GET /api/maintenance/batch-candidates", s.batchCandidates)
 	mux.HandleFunc("POST /api/maintenance/batch-candidates", s.batchCandidates)
 	mux.HandleFunc("GET /api/maintenance/batch-settings", s.batchSettings)

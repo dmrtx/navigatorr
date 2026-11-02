@@ -141,12 +141,8 @@ func explainResult(r operationRecord) resultExplanation {
 			e.Happened = "The new file did not fit the target size."
 		}
 	case "quality_not_met", "no_suitable_candidate", "search_budget_exhausted":
-		tried, _ := operationMap(operationValue(r, "quality_ladder"))["tried"].([]any)
-		if len(tried) > 1 {
-			e.Happened = fmt.Sprintf("Each of the %d settings tried missed this goal's quality limits.", len(tried))
-		} else {
-			e.Happened = "The new file missed this goal's quality limits."
-		}
+		// Replaced below by the measured score and its limit when known.
+		e.Happened = happenedLine(qualityCause(r).Summary)
 	case "hdr_requires_compact":
 		e.Happened = "Save space keeps the picture as it is and cannot encode HDR or Dolby Vision."
 	case "compact_not_needed":
@@ -154,13 +150,20 @@ func explainResult(r operationRecord) resultExplanation {
 	case "audio_only_nothing_to_convert":
 		e.Happened = "Every audio track is already compact and no track is removed, so Audio only has nothing to make smaller."
 	}
+	// What was measured against which limit, the same line the job's cause
+	// gives; the sentences above stay for endings without a number.
+	if r.inst.Status == store.ActionStatusCompleted {
+		if c := resultCause(r, action.ConversionStreamsOf(r.state, causeCandidateBytes(r))); c.Measured != nil {
+			e.Happened = happenedLine(c.Summary)
+		}
+	}
 	if r.inst.Status == store.ActionStatusCancelled {
 		e.Happened = "The job was cancelled before it finished."
 	}
 	if s, ok := splitOf(jobSourceReport(r)); ok {
 		e.Learned = append(e.Learned, fmt.Sprintf("Video is %s (%.0f%% of the file); audio is %s (%.0f%%) in %d %s.", formatSize(s.video), percentOf(s.video, s.total), formatSize(s.audio), percentOf(s.audio, s.total), s.audioTracks, plural(s.audioTracks, "track", "tracks")))
 		if s.audio > s.video {
-			e.Learned = append(e.Learned, "The audio weighs more than the video, so shrinking the video alone cannot save much.")
+			e.Learned = append(e.Learned, fmt.Sprintf("The audio (%s) weighs more than the video (%s): shrinking the video alone saves at most %.0f%% of the file.", formatSize(s.audio), formatSize(s.video), percentOf(s.video, s.total)))
 		}
 		if saved := s.audio - s.audioUnderSize; !audioOnly && mode != "compact" && saved > 0 {
 			e.Learned = append(e.Learned, fmt.Sprintf("Converting the audio alone would save about %s (%.0f%% of the file).", formatSize(saved), percentOf(saved, s.total)))

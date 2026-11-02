@@ -61,9 +61,16 @@ func hasClosingMark(notes, mark string) bool {
 // ListItemsForConsole returns the items in the given statuses (all when empty),
 // highest priority first, then newest. Unlike ListItems it is not capped at 100
 // (limit defaults to and is capped at 5000).
+// ConsoleListCap is the most entries ListItemsForConsole returns by default.
+// A caller may ask for ConsoleListCap+1 to learn that the cap was hit.
+const ConsoleListCap = 5000
+
 func (s *Store) ListItemsForConsole(statuses []string, issueType string, limit int) ([]MaintenanceItem, error) {
-	if limit <= 0 || limit > 5000 {
-		limit = 5000
+	if limit <= 0 {
+		limit = ConsoleListCap
+	}
+	if limit > ConsoleListCap+1 {
+		limit = ConsoleListCap + 1
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

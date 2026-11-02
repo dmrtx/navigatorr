@@ -57,12 +57,82 @@ func conversionPath(r operationRecord) string {
 // conversionID is the transcode a single-file workflow started from, "" for a
 // job that is no single file's conversion (a batch, a podcast, a file of a
 // batch: those open as themselves).
+//
+// The replacement of a file of a batch belongs to the batch's workflow, but
+// it is that file's conversion: its conversion is the file's transcode.
 func (f conversionFacts) conversionID(r operationRecord) string {
 	root := f.roots[r.inst.ID]
+	if r.inst.ActionName == "promote_transcode_candidate" && f.byID[root].inst.ActionName == "transcode_batch" {
+		source := firstNonEmpty(operationString(r.inputs["transcode_action_id"]), operationString(operationMap(operationValue(r, "promotion"))["transcode_action_id"]))
+		if f.byID[source].inst.ActionName == "transcode_media" {
+			return source
+		}
+		return ""
+	}
 	if f.byID[root].inst.ActionName != "transcode_media" {
 		return ""
 	}
 	return root
+}
+
+// attempts is every run of the job's file, oldest first: a file of a batch
+// counts its runs in that batch and the file's own runs outside any batch.
+// supersededBy is the latest run when it is not this one.
+func (f conversionFacts) attempts(r operationRecord) (list []map[string]any, supersededBy map[string]any) {
+	path := conversionPath(r)
+	if r.inst.ActionName != "transcode_media" || path == "" {
+		return nil, nil
+	}
+	parent := operationString(r.inputs["parent_action_id"])
+	var runs []operationRecord
+	for _, run := range f.byPath[path] {
+		if p := operationString(run.inputs["parent_action_id"]); parent == "" || p == "" || p == parent {
+			runs = append(runs, run)
+		}
+	}
+	list = []map[string]any{}
+	for _, run := range runs {
+		a := map[string]any{"id": run.inst.ID, "status": run.inst.Status, "conversion_status": f.conversionStatus(run), "created_at": run.inst.CreatedAt, "current": run.inst.ID == r.inst.ID}
+		if n := f.numbers[f.roots[run.inst.ID]]; n > 0 {
+			a["number"] = n
+		}
+		if setting := attemptSetting(run); setting != "" {
+			a["setting"] = setting
+		}
+		if run.savings.CandidateBytes != nil {
+			a["candidate_bytes"] = *run.savings.CandidateBytes
+		}
+		if c := f.cause(run, nil); c != nil {
+			a["cause"] = c
+		}
+		list = append(list, a)
+	}
+	if n := len(runs); n > 0 && runs[n-1].inst.ID != r.inst.ID {
+		latest := runs[n-1]
+		supersededBy = map[string]any{"id": latest.inst.ID}
+		if n := f.numbers[f.roots[latest.inst.ID]]; n > 0 {
+			supersededBy["number"] = n
+		}
+	}
+	return list, supersededBy
+}
+
+// attemptSetting is the setting a run encoded with last, "" when unknown.
+func attemptSetting(r operationRecord) string {
+	if r.state["size_audio_only"] == true {
+		return "audio only"
+	}
+	if ladder := jobLadder(r); ladder != nil {
+		rung := min(max(ladder.Rung, 0), len(ladder.Values)-1)
+		if ladder.Final == nil && len(ladder.Tried) > 0 {
+			return ladderSetting(ladder, ladder.Tried[len(ladder.Tried)-1].Quality)
+		}
+		return ladderSetting(ladder, ladder.Values[rung])
+	}
+	if kbps := operationNumber(operationMap(operationValue(r, "size_budget"))["video_bitrate_kbps"]); kbps > 0 {
+		return fmt.Sprintf("%.0f kbps", kbps)
+	}
+	return ""
 }
 
 // conversionStatus is the one state a transcode job's conversion is in.
@@ -249,4 +319,35 @@ func shortTrackMismatch(detail string) string {
 		return "The tracks picked earlier are not in this file any more: it changed after they were picked."
 	}
 	return "The tracks picked for this job do not match the file."
+}
+
+// batchReadyItems are the child transcodes of every file of a batch that is
+// ready to replace its original, in the batch's order and across all its
+// pages: a finished encode whose original is intact, whose new file is still
+// there, and which no replacement, retry or prepared plan has taken.
+func batchReadyItems(batch operationRecord, items []store.TranscodeBatchItem, byID map[string]operationRecord, replacements map[string]string, replacedActs, replaced map[string]bool) []string {
+	out := []string{}
+	if batch.inputs["dry_run"] == true {
+		return out
+	}
+	pending := operationMap(batch.state["batch_retry_pending"])
+	seen := map[string]bool{}
+	for _, item := range items {
+		child, ok := byID[item.ChildActionID]
+		if !ok || seen[child.inst.ID] || child.inst.ActionName != "transcode_media" || operationString(child.inputs["parent_action_id"]) != batch.inst.ID {
+			continue
+		}
+		if item.Status != "completed" || item.Decision != "transcode" || pending[item.ItemKey] == true {
+			continue
+		}
+		if child.inst.Status != store.ActionStatusCompleted || operationValue(child, "skip_transcode") == true || operationValue(child, "original_intact") != true || operationValue(child, "candidate_removed") == true || child.savings.CandidateBytes == nil {
+			continue
+		}
+		if replacements[child.inst.ID] != "" || replacedActs[child.inst.ID] || replaced[operationSourceKey(child)] || replacementPlanState(batch.state, child.inst.ID) != "" {
+			continue
+		}
+		seen[child.inst.ID] = true
+		out = append(out, child.inst.ID)
+	}
+	return out
 }

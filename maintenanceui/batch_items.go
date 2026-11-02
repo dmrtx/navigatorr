@@ -2,6 +2,7 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/action"
 	"net/http"
 	"slices"
 	"strings"
@@ -58,7 +59,9 @@ type batchItemView struct {
 	// Explanation and NextSteps are the child job's, as a single job shows
 	// them: what happened, what it showed, and the goals to try next.
 	Explanation *resultExplanation `json:"explanation,omitempty"`
-	NextSteps   []nextStep         `json:"next_steps,omitempty"`
+	// Cause is why the file's attempt has no result, as a job's cause is.
+	Cause     *conversionCause `json:"cause,omitempty"`
+	NextSteps []nextStep       `json:"next_steps,omitempty"`
 
 	PreviousAttempts []store.TranscodeBatchItem `json:"previous_attempts,omitempty"`
 	RetryPending     bool                       `json:"retry_pending,omitempty"`
@@ -186,6 +189,15 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 						} else if !view.RetryPending && failedFileJob(r) {
 							e, _, _ := explainFailure(r)
 							view.Explanation = &e
+						}
+						if !view.RetryPending {
+							candidate := causeCandidateBytes(r)
+							switch {
+							case child.Status == store.ActionStatusFailed:
+								view.Cause = transcodeCause(r, "failed", nil)
+							case child.Status == store.ActionStatusCompleted && (operationValue(r, "skip_transcode") == true || operationValue(r, "skipped") == true || projectOperationSavings(r, time.Now()).CandidateBytes == nil):
+								view.Cause = transcodeCause(r, "no_result", action.ConversionStreamsOf(r.state, candidate))
+							}
 						}
 						view.TracksMessage = operationString(operationTracks(r)["message"])
 						for _, service := range []string{"sonarr", "radarr", "filesystem"} {

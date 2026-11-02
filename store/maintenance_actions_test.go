@@ -465,3 +465,31 @@ func TestMigrationV17RevisesActionsAlreadyStored(t *testing.T) {
 		t.Fatalf("an action stored before the migration is missing: %v %v", rows, err)
 	}
 }
+
+// The list states why a job has no result from its ladder's settings and
+// scores and the saving its goal needed; job ids, messages, the encoder
+// choice, the other scores and the rest of the frozen goal stay in history.
+func TestMaintenanceSnapshotKeepsTheLadderScoresAndTheMinimumSaving(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	state := `{"quality_ladder":{"video_codec":"libx265","preset":"medium","quality_values":[22,19],"rung":1,"outcome":"quality_not_met","message":"long","retry_without_hardware":true,"encoder_choice":{"video_codec":"libx265"},"tried":[{"quality":22,"job_id":"j1","reason_code":"quality_not_met","candidate_bytes":900,"final":{"verdict":"fail","failed_checks":["below_minimum_quality"],"failures":["text"],"measured":{"vmaf_mean":91.2,"vmaf_worst_window":80.1,"cambi_mean":2},"limits":{"vmaf_mean_minimum":93,"cambi_mean_maximum":5}}}]},"mode_policy":{"min_savings_percent":15,"profile":{"name":"x"},"size":{"audio_only":false}}}`
+	if err := s.CreateActionInstance(ActionInstance{ID: "ladder", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: `{}`, OutputsJSON: `{}`, StateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	want := `{"mode_policy":{"min_savings_percent":15},"quality_ladder":{"outcome":"quality_not_met","preset":"medium","quality_values":[22,19],"retry_without_hardware":true,"rung":1,"tried":[{"candidate_bytes":900,"final":{"failed_checks":["below_minimum_quality"],"failures":["text"],"limits":{"vmaf_mean_minimum":93},"measured":{"vmaf_mean":91.2,"vmaf_worst_window":80.1},"verdict":"fail"},"quality":22,"reason_code":"quality_not_met"}],"video_codec":"libx265"}}`
+	var a, b any
+	_ = json.Unmarshal([]byte(rows[0].StateJSON), &a)
+	_ = json.Unmarshal([]byte(want), &b)
+	ga, _ := json.Marshal(a)
+	gb, _ := json.Marshal(b)
+	if string(ga) != string(gb) {
+		t.Fatalf("projection\n got %s\nwant %s", ga, gb)
+	}
+}

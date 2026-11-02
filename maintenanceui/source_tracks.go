@@ -3,6 +3,9 @@ package maintenanceui
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -56,6 +59,106 @@ type sourceTracksView struct {
 	DurationSec float64 `json:"duration_sec,omitempty"`
 	VideoBytes  int64   `json:"video_bytes,omitempty"`
 	VideoApprox bool    `json:"video_approx,omitempty"`
+	// Estimate is what the goal being chosen would make of each stream, sent
+	// when the request names a mode.
+	Estimate *action.ConversionEstimate `json:"estimate,omitempty"`
+}
+
+// estimateSettings reads the goal being chosen from the query: mode
+// (size, compact, quality, x265_preserve), audio_only, audio_mode (size,
+// size_he, compact or copy), keep_audio and keep_subtitles (comma separated
+// stream indexes), max_height, size_budget_percent and size_budget_bytes.
+// ok is false when no mode is named; field names the bad parameter.
+//
+// A list that is not sent follows the automatic selection; with no
+// selection (nothing to remove) every track of that kind stays.
+func estimateSettings(q url.Values, selection *transcode.TrackSelection, rep *mediainspect.DetailedReport) (s action.EstimateSettings, ok bool, field string) {
+	s.Mode = q.Get("mode")
+	if s.Mode == "" {
+		return s, false, ""
+	}
+	if s.Mode != "size" && s.Mode != "compact" && s.Mode != "quality" && s.Mode != "x265_preserve" {
+		return s, false, "mode"
+	}
+	s.AudioOnly = q.Get("audio_only") == "true"
+	if s.AudioMode = q.Get("audio_mode"); s.AudioMode != "" && s.AudioMode != "copy" && action.PreviewAudioModes[s.AudioMode] == "" {
+		return s, false, "audio_mode"
+	}
+	indexes := func(key string) ([]int, bool) {
+		var out []int
+		for _, part := range strings.Split(q.Get(key), ",") {
+			if part = strings.TrimSpace(part); part == "" {
+				continue
+			}
+			n, err := strconv.Atoi(part)
+			if err != nil || n < 0 {
+				return nil, false
+			}
+			out = append(out, n)
+		}
+		slices.Sort(out)
+		return slices.Compact(out), true
+	}
+	s.Tracks = selection
+	if q.Has("keep_audio") || q.Has("keep_subtitles") {
+		audio, okA := indexes("keep_audio")
+		subs, okS := indexes("keep_subtitles")
+		if !okA {
+			return s, false, "keep_audio"
+		}
+		if !okS {
+			return s, false, "keep_subtitles"
+		}
+		s.Tracks = &transcode.TrackSelection{KeepAudio: audio, KeepSubtitles: subs}
+		all := func(streams []mediainspect.DetailedStream) []int {
+			out := make([]int, 0, len(streams))
+			for _, st := range streams {
+				out = append(out, st.Index)
+			}
+			slices.Sort(out)
+			return slices.Compact(out)
+		}
+		if !q.Has("keep_audio") {
+			switch {
+			case selection != nil:
+				s.Tracks.KeepAudio = selection.KeepAudio
+			case rep != nil:
+				s.Tracks.KeepAudio = all(rep.Audio)
+			}
+		}
+		if !q.Has("keep_subtitles") {
+			switch {
+			case selection != nil:
+				s.Tracks.KeepSubtitles = selection.KeepSubtitles
+			case rep != nil:
+				s.Tracks.KeepSubtitles = all(rep.Subtitles)
+			}
+		}
+	}
+	for key, target := range map[string]*float64{"size_budget_percent": &s.BudgetPercent} {
+		if raw := q.Get(key); raw != "" {
+			v, err := strconv.ParseFloat(raw, 64)
+			if err != nil || v <= 0 || v > 100 {
+				return s, false, key
+			}
+			*target = v
+		}
+	}
+	if raw := q.Get("size_budget_bytes"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || v <= 0 {
+			return s, false, "size_budget_bytes"
+		}
+		s.BudgetBytes = v
+	}
+	if raw := q.Get("max_height"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v <= 0 {
+			return s, false, "max_height"
+		}
+		s.MaxHeight = v
+	}
+	return s, true, ""
 }
 
 // sourceTracks lists a video's audio and subtitle streams with what the size
@@ -79,6 +182,10 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		languages = list
+	}
+	if _, _, field := estimateSettings(r.URL.Query(), nil, nil); field != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid " + field, "code": "invalid_params", "field": field})
+		return
 	}
 	path, release, ok := s.openSource(w, r)
 	if !ok {
@@ -128,8 +235,12 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		}
 		return out
 	}
-	writeJSON(w, 200, sourceTracksView{
+	view := sourceTracksView{
 		Languages: languages, Audio: list("audio", rep.Audio), Subtitles: list("subtitle", rep.Subtitles),
 		SizeBytes: preview.SourceBytes, DurationSec: preview.DurationSec, VideoBytes: preview.VideoBytes, VideoApprox: preview.VideoDerived,
-	})
+	}
+	if settings, ok, _ := estimateSettings(r.URL.Query(), selection, rep); ok {
+		view.Estimate = action.EstimateConversion(rep, settings)
+	}
+	writeJSON(w, 200, view)
 }

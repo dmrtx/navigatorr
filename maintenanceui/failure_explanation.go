@@ -118,7 +118,7 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 		e.Happened = "The new file could not be checked: Navigatorr's own quality measurement failed, not the picture."
 		e.Learned = []string{"Running it again repeats the same check, so it usually fails the same way until Navigatorr is fixed."}
 	case class == string(resilience.CandidateInvalid):
-		e.Happened = "The new file failed Navigatorr's checks before it could replace the original, for example a missing stream or an empty encode. The original is untouched."
+		e.Happened = "The new file failed Navigatorr's checks (for example a missing stream or an empty encode); the original is untouched."
 		e.Learned = []string{"Running it again encodes a new file."}
 	case class == "worker_setup_failed":
 		e.Happened = "The worker could not prepare the job: copying, reading or setting up the file failed."

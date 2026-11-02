@@ -16,6 +16,20 @@ type ConversionStreams struct {
 	Video       ConversionVideo        `json:"video"`
 	Audio       []ConversionAudioTrack `json:"audio"`
 	Subtitles   ConversionSubtitles    `json:"subtitles"`
+	Totals      ConversionTotals       `json:"totals"`
+}
+
+// ConversionTotals adds up each kind of stream before and after, and what the
+// dropped tracks weighed. Zero is unknown, as for the video's size after
+// before the new file exists.
+type ConversionTotals struct {
+	VideoBefore     int64 `json:"video_before"`
+	VideoAfter      int64 `json:"video_after"`
+	AudioBefore     int64 `json:"audio_before"`
+	AudioAfter      int64 `json:"audio_after"`
+	SubtitlesBefore int64 `json:"subtitles_before"`
+	SubtitlesAfter  int64 `json:"subtitles_after"`
+	RemovedBytes    int64 `json:"removed_bytes"`
 }
 
 type ConversionVideo struct {
@@ -33,6 +47,7 @@ type ConversionAudioTrack struct {
 	Title         string `json:"title,omitempty"`
 	Codec         string `json:"codec"`
 	Channels      int    `json:"channels,omitempty"`
+	BeforeKbps    int    `json:"before_kbps,omitempty"`
 	BeforeBytes   int64  `json:"before_bytes,omitempty"`
 	Fate          string `json:"fate"`
 	AfterCodec    string `json:"after_codec,omitempty"`
@@ -42,9 +57,21 @@ type ConversionAudioTrack struct {
 }
 
 type ConversionSubtitles struct {
-	Total        int   `json:"total"`
-	Kept         int   `json:"kept"`
-	DroppedBytes int64 `json:"dropped_bytes,omitempty"`
+	Total        int                       `json:"total"`
+	Kept         int                       `json:"kept"`
+	DroppedBytes int64                     `json:"dropped_bytes,omitempty"`
+	Tracks       []ConversionSubtitleTrack `json:"tracks"`
+}
+
+// ConversionSubtitleTrack is one source subtitle and whether the new file
+// keeps it. A kept subtitle is copied, so its size is the same after.
+type ConversionSubtitleTrack struct {
+	Index    int    `json:"index"`
+	Language string `json:"language"`
+	Title    string `json:"title,omitempty"`
+	Codec    string `json:"codec"`
+	Bytes    int64  `json:"bytes,omitempty"`
+	Fate     string `json:"fate"`
 }
 
 // ConversionStreamsOf reads a transcode job's state. It is nil without the
@@ -61,7 +88,7 @@ func ConversionStreamsOf(state map[string]any, candidateBytes int64) *Conversion
 func conversionStreams(rep *mediainspect.DetailedReport, plan *transcode.Plan, candidateBytes int64) *ConversionStreams {
 	p := PreviewStreams(rep)
 	dur := rep.DurationSec
-	out := &ConversionStreams{DurationSec: dur, Audio: []ConversionAudioTrack{}, Video: ConversionVideo{BeforeBytes: p.VideoBytes}}
+	out := &ConversionStreams{DurationSec: dur, Audio: []ConversionAudioTrack{}, Video: ConversionVideo{BeforeBytes: p.VideoBytes}, Subtitles: ConversionSubtitles{Tracks: []ConversionSubtitleTrack{}}}
 	if main := rep.MainVideo(); len(main) > 0 {
 		out.Video.Codec = main[0].Codec
 	}
@@ -71,12 +98,12 @@ func conversionStreams(rep *mediainspect.DetailedReport, plan *transcode.Plan, c
 	}
 	rest, known := candidateBytes, candidateBytes > 0
 	for _, a := range rep.Audio {
-		t := ConversionAudioTrack{Index: a.Index, Language: transcode.TrackInfo{Language: a.Language}.LanguageLabel(), Title: a.Title, Codec: a.Codec, Channels: a.Channels, BeforeBytes: p.Audio[a.Index].Bytes}
+		t := ConversionAudioTrack{Index: a.Index, Language: transcode.TrackInfo{Language: a.Language}.LanguageLabel(), Title: a.Title, Codec: a.Codec, Channels: a.Channels, BeforeKbps: p.Audio[a.Index].Kbps, BeforeBytes: p.Audio[a.Index].Bytes}
 		switch o := transcode.AudioOutputFor(plan.AudioMode, audioTrackOf(a, dur)); {
 		case !plan.Tracks.Keeps("audio", a.Index):
 			t.Fate = "dropped"
 		case o.Codec == "copy" || o.Codec == "":
-			t.Fate, t.AfterCodec, t.AfterChannels, t.AfterBytes = "copied", a.Codec, a.Channels, t.BeforeBytes
+			t.Fate, t.AfterCodec, t.AfterChannels, t.AfterKbps, t.AfterBytes = "copied", a.Codec, a.Channels, t.BeforeKbps, t.BeforeBytes
 		default:
 			t.Fate, t.AfterCodec, t.AfterChannels, t.AfterKbps = "converted", "aac", a.Channels, o.Kbps
 			if o.HEAAC {
@@ -94,15 +121,29 @@ func conversionStreams(rep *mediainspect.DetailedReport, plan *transcode.Plan, c
 	}
 	out.Subtitles.Total = len(rep.Subtitles)
 	for _, s := range rep.Subtitles {
+		t := ConversionSubtitleTrack{Index: s.Index, Language: transcode.TrackInfo{Language: s.Language}.LanguageLabel(), Title: s.Title, Codec: s.Codec, Bytes: p.Subtitles[s.Index], Fate: "dropped"}
+		out.Totals.SubtitlesBefore += t.Bytes
 		if plan.Tracks.Keeps("subtitle", s.Index) {
+			t.Fate = "kept"
 			out.Subtitles.Kept++
-			rest -= p.Subtitles[s.Index]
+			out.Totals.SubtitlesAfter += t.Bytes
+			rest -= t.Bytes
 		} else {
-			out.Subtitles.DroppedBytes += p.Subtitles[s.Index]
+			out.Subtitles.DroppedBytes += t.Bytes
 		}
+		out.Subtitles.Tracks = append(out.Subtitles.Tracks, t)
 	}
 	if known && rest > 0 {
 		out.Video.AfterBytes = rest
+	}
+	out.Totals.VideoBefore, out.Totals.VideoAfter = out.Video.BeforeBytes, out.Video.AfterBytes
+	out.Totals.RemovedBytes = out.Subtitles.DroppedBytes
+	for _, a := range out.Audio {
+		out.Totals.AudioBefore += a.BeforeBytes
+		out.Totals.AudioAfter += a.AfterBytes
+		if a.Fate == "dropped" {
+			out.Totals.RemovedBytes += a.BeforeBytes
+		}
 	}
 	return out
 }
