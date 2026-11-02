@@ -311,11 +311,12 @@ func (e *Engine) KeepOriginal(ctx context.Context, id string) (*ActionResult, er
 		return nil, fmt.Errorf("candidate file kept: %v", err)
 	}
 	removal, err := e.removeOwnCandidate(ctx, inst, ec, false)
+	// A failed removal is recorded as kept, with the bytes it emptied when the
+	// file was truncated first; nothing is marked removed then.
+	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredKept, removal, err)
 	if err != nil {
-		// Nothing is recorded as removed, and the earlier note stays as it was.
 		return nil, fmt.Errorf("candidate file kept: %v", err)
 	}
-	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredKept, removal, nil)
 	return e.Status(ctx, id)
 }
 

@@ -1434,3 +1434,32 @@ func TestKeepOriginalRefuses(t *testing.T) {
 		})
 	}
 }
+
+func TestKeepOriginalRecordsAFailedRemovalAsKept(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	original := filepath.Join(root, "Sample Show", "Season 1", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	target := filepath.Join(filepath.Dir(original), "elsewhere.mkv")
+	writeCandidateFile(t, target, "linked")
+	link := filepath.Join(filepath.Dir(original), ".navigatorr-candidates", "sample-episode-01.job-attempt.mkv")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	seedCandidateAttempt(t, st, "attempt", StatusCompleted, original, "job-attempt", nil, map[string]any{"transcode_done": true, "candidate_path": link})
+	if _, err := e.KeepOriginal(context.Background(), "attempt"); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("expected a symlink refusal, got %v", err)
+	}
+	inst := mustInstance(t, st, "attempt")
+	cleanup := candidateCleanupOf(t, e, inst)
+	if getBool(parseExecutionContext(inst, e).State, candidateRemovedKey) || getString(cleanup, "outcome") != "kept" || getString(cleanup, "reason") != candidateRetiredKept {
+		t.Fatalf("failed removal not recorded as kept: %v", cleanup)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("link target touched: %v", err)
+	}
+}
