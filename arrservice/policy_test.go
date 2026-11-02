@@ -43,6 +43,7 @@ func TestPlexPolicy(t *testing.T) {
 		{"GET", "//myplex/account"},
 		{"GET", "/library/sections?_method=DELETE"},
 		{"GET", "/library\\..\\myplex"},
+		{"GET", "/myplex;x=1/account"},
 	} {
 		var pe *PolicyError
 		if err := p.Check(c[0], c[1], nil); !errors.As(err, &pe) {
@@ -83,6 +84,14 @@ func TestPlexServiceNeverSendsBlockedRequests(t *testing.T) {
 	}
 	if _, _, err := svc.DoRequest(ctx, "DELETE", "/library/metadata/9", nil, nil); err != nil || hits.Load() != 2 {
 		t.Errorf("a library delete should pass: %v hits %d", err, hits.Load())
+	}
+	// The guard judges the path as it is sent, after an API prefix is trimmed.
+	prefixed := NewService("plex", config.ServiceConfig{URL: srv.URL, APIVersion: "/x", AuthMethod: "header", AuthHeader: "X-Plex-Token"})
+	if _, _, err := prefixed.DoRequest(ctx, "GET", "/x/myplex/account", nil, nil); err == nil {
+		t.Error("/x/myplex must be blocked once /x is trimmed")
+	}
+	if _, _, err := NewService("Plex", config.ServiceConfig{URL: srv.URL}).DoRequest(ctx, "DELETE", "/playlists/1", nil, nil); err == nil {
+		t.Error("the policy must apply to a service named Plex too")
 	}
 	// Other services are untouched.
 	other := NewService("sonarr", config.ServiceConfig{URL: srv.URL, AuthMethod: "header"})

@@ -137,12 +137,7 @@ func (s *Service) Post(ctx context.Context, path string, body []byte) ([]byte, e
 }
 
 func (s *Service) doRequest(ctx context.Context, client *http.Client, method, path string, query map[string]string, body []byte, contentType string) ([]byte, int, error) {
-	// Below every entry point (pooled, once-only, ping), so none skips it.
-	if s.policy != nil {
-		if err := s.policy.Check(method, path, query); err != nil {
-			return nil, 0, err
-		}
-	}
+	method = strings.ToUpper(strings.TrimSpace(method))
 	cleanPath := path
 	if s.Config.APIVersion != "" && strings.HasPrefix(cleanPath, s.Config.APIVersion) {
 		cleanPath = strings.TrimPrefix(cleanPath, s.Config.APIVersion)
@@ -156,6 +151,13 @@ func (s *Service) doRequest(ctx context.Context, client *http.Client, method, pa
 	}
 	if !strings.HasPrefix(cleanPath, "/") && cleanPath != "" {
 		cleanPath = "/" + cleanPath
+	}
+	// Below every entry point (pooled, once-only, ping), and on the path as it is
+	// sent, after any API prefix has been trimmed.
+	if s.policy != nil {
+		if err := s.policy.Check(method, cleanPath, query); err != nil {
+			return nil, 0, err
+		}
 	}
 	reqURL := s.BaseURL + cleanPath
 

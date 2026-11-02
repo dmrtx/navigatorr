@@ -1,6 +1,8 @@
 package arrservice
 
 import (
+	"strings"
+
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/resilience"
 	"github.com/jakenesler/navigatorr/snapshot"
@@ -29,7 +31,7 @@ func NewService(name string, cfg config.ServiceConfig) *Service {
 		StatusPath: config.DefaultStatusPaths[name],
 	}
 
-	if name == "plex" {
+	if strings.EqualFold(strings.TrimSpace(name), "plex") {
 		svc.policy = plexPolicy{service: name}
 	}
 

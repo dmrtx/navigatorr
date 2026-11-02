@@ -48,7 +48,7 @@ func (p plexPolicy) Check(method, path string, query map[string]string) error {
 			return deny(fmt.Sprintf("query parameter %q is not allowed", k))
 		}
 	}
-	if strings.ContainsAny(route, "%\\#") {
+	if strings.ContainsAny(route, "%\\#;") {
 		return deny("encoded or special characters are not allowed in the path")
 	}
 	for _, r := range route {
