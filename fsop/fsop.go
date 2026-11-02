@@ -8,12 +8,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -174,24 +176,218 @@ func (r *Resolver) List(path string, depth, limit int) ([]Stat, error) {
 	return out, nil
 }
 
-// Move renames source to destination. Both must resolve inside the write
-// roots, so files cannot be smuggled out of the media area.
-func (r *Resolver) Move(source, destination string) error {
+// renameFn is os.Rename; tests replace it to simulate a rename across
+// filesystems.
+var renameFn = os.Rename
+
+// MoveResult says how a move was done, for the action log.
+type MoveResult struct {
+	// Method is "rename" (same filesystem) or "copy" (the rename crossed
+	// filesystems, so the file was copied, verified and the source removed).
+	Method string `json:"method"`
+	Bytes  int64  `json:"bytes,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+	// CreatedDirs lists the destination folders that did not exist.
+	CreatedDirs []string `json:"created_dirs,omitempty"`
+}
+
+// Move moves source to destination. Both must resolve inside the write
+// roots, so files cannot be smuggled out of the media area. It never
+// overwrites. Missing folders above the destination are created (inside the
+// write roots, as plain directories). When the rename crosses filesystems
+// (EXDEV, e.g. two separate mounts of the same share) a file is copied to a
+// temporary name next to the destination, read back and compared by size and
+// SHA-256, and only then put in place and removed from the source. A failure
+// at any point leaves the source untouched. Directories only move within one
+// filesystem.
+func (r *Resolver) Move(ctx context.Context, source, destination string) (MoveResult, error) {
+	var res MoveResult
 	src, err := r.ResolveWrite(source)
 	if err != nil {
-		return fmt.Errorf("source: %w", err)
+		return res, fmt.Errorf("source: %w", err)
 	}
 	dst, err := r.ResolveWrite(destination)
 	if err != nil {
-		return fmt.Errorf("destination: %w", err)
+		return res, fmt.Errorf("destination: %w", err)
 	}
 	if _, err := os.Stat(src); err != nil {
-		return fmt.Errorf("source: %w", err)
+		return res, fmt.Errorf("source: %w", err)
 	}
-	if _, err := os.Stat(dst); err == nil {
-		return fmt.Errorf("destination %q already exists", destination)
+	if _, err := os.Lstat(dst); err == nil {
+		return res, fmt.Errorf("destination %q already exists", destination)
 	}
-	return os.Rename(src, dst)
+	if r.isRoot(dst) {
+		return res, fmt.Errorf("destination %q is an allowed root", destination)
+	}
+	created, err := mkdirAllReport(filepath.Dir(dst))
+	res.CreatedDirs = created
+	if err != nil {
+		return res, fmt.Errorf("creating destination folder: %w", err)
+	}
+	err = renameFn(src, dst)
+	if err == nil {
+		res.Method = "rename"
+		return res, nil
+	}
+	if !errors.Is(err, syscall.EXDEV) {
+		return res, err
+	}
+	n, sum, err := copyVerifiedMove(ctx, src, dst)
+	if err != nil {
+		return res, fmt.Errorf("%w (the source was not touched)", err)
+	}
+	res.Method, res.Bytes, res.SHA256 = "copy", n, sum
+	return res, nil
+}
+
+func (r *Resolver) isRoot(p string) bool {
+	for _, root := range r.writeRoots {
+		if p == root {
+			return true
+		}
+	}
+	return false
+}
+
+// mkdirAllReport creates dir and its missing parents, returning the ones it
+// made (outermost first).
+func mkdirAllReport(dir string) ([]string, error) {
+	var missing []string
+	for d := dir; ; d = filepath.Dir(d) {
+		if _, err := os.Stat(d); err == nil {
+			break
+		}
+		missing = append([]string{d}, missing...)
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	var made []string
+	for _, d := range missing {
+		if err := os.Mkdir(d, 0o755); err != nil && !os.IsExist(err) {
+			return made, err
+		}
+		made = append(made, d)
+	}
+	return made, nil
+}
+
+// copyVerifiedMove is the cross-filesystem move of one regular file.
+func copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, error) {
+	before, err := os.Stat(src)
+	if err != nil {
+		return 0, "", err
+	}
+	if !before.Mode().IsRegular() {
+		return 0, "", fmt.Errorf("%q is on another filesystem than the destination and only files can be copied across (move it in smaller steps)", filepath.Base(src))
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, "", err
+	}
+	defer in.Close()
+	tmp := fmt.Sprintf("%s.moving-%d", dst, time.Now().UnixNano())
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return 0, "", err
+	}
+	keep := false
+	defer func() {
+		out.Close()
+		if !keep {
+			os.Remove(tmp)
+		}
+	}()
+	h := sha256.New()
+	n, err := copyCtx(ctx, io.MultiWriter(out, h), in)
+	if err != nil {
+		return 0, "", err
+	}
+	want := hex.EncodeToString(h.Sum(nil))
+	if err := out.Sync(); err != nil {
+		return 0, "", fmt.Errorf("flushing the copy: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return 0, "", fmt.Errorf("closing the copy: %w", err)
+	}
+	// The source must not have changed while it was read.
+	after, err := os.Stat(src)
+	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || n != before.Size() {
+		return 0, "", fmt.Errorf("the source changed while it was copied")
+	}
+	// Read the copy back from disk and compare.
+	got, gn, err := hashPath(ctx, tmp)
+	if err != nil {
+		return 0, "", fmt.Errorf("reading the copy back: %w", err)
+	}
+	if gn != n || got != want {
+		return 0, "", fmt.Errorf("the copy does not match the original (%d of %d bytes)", gn, n)
+	}
+	_ = os.Chmod(tmp, before.Mode().Perm())
+	_ = os.Chtimes(tmp, before.ModTime(), before.ModTime())
+	// Put it in place without ever replacing something that appeared since.
+	if err := os.Link(tmp, dst); err != nil {
+		if _, serr := os.Lstat(dst); serr == nil {
+			return 0, "", fmt.Errorf("destination %q already exists", dst)
+		}
+		// No hard links on this mount: a rename inside one folder is fine.
+		if rerr := os.Rename(tmp, dst); rerr != nil {
+			return 0, "", rerr
+		}
+		keep = true
+	} else {
+		os.Remove(tmp)
+		keep = true
+	}
+	if err := os.Remove(src); err != nil {
+		if rerr := os.Remove(dst); rerr != nil {
+			return 0, "", fmt.Errorf("copied and verified, but the source could not be removed (%v) and the copy could not be undone (%v): both exist", err, rerr)
+		}
+		return 0, "", fmt.Errorf("the source could not be removed: %w", err)
+	}
+	return n, want, nil
+}
+
+// copyCtx copies in chunks, stopping when ctx is cancelled.
+func copyCtx(ctx context.Context, w io.Writer, r io.Reader) (int64, error) {
+	buf := make([]byte, 1<<20)
+	var n int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return n, fmt.Errorf("cancelled after %d bytes: %w", n, err)
+		}
+		nr, er := r.Read(buf)
+		if nr > 0 {
+			nw, ew := w.Write(buf[:nr])
+			n += int64(nw)
+			if ew != nil {
+				return n, ew
+			}
+			if nw != nr {
+				return n, io.ErrShortWrite
+			}
+		}
+		if er == io.EOF {
+			return n, nil
+		}
+		if er != nil {
+			return n, er
+		}
+	}
+}
+
+func hashPath(ctx context.Context, path string) (string, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	n, err := copyCtx(ctx, h, f)
+	if err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
 }
 
 // Delete removes a file (never a directory tree) inside the write roots.
@@ -218,29 +414,9 @@ func (r *Resolver) Hash(ctx context.Context, path string) (string, int64, error)
 	if err != nil {
 		return "", 0, err
 	}
-	f, err := os.Open(real)
+	h, n, err := hashPath(ctx, real)
 	if err != nil {
-		return "", 0, err
+		return "", 0, fmt.Errorf("hash: %w", err)
 	}
-	defer f.Close()
-	h := sha256.New()
-	var n int64
-	buf := make([]byte, 1<<20)
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", 0, fmt.Errorf("hash cancelled after %d bytes: %w", n, err)
-		}
-		nr, er := f.Read(buf)
-		if nr > 0 {
-			n += int64(nr)
-			h.Write(buf[:nr])
-		}
-		if er == io.EOF {
-			break
-		}
-		if er != nil {
-			return "", 0, er
-		}
-	}
-	return hex.EncodeToString(h.Sum(nil)), n, nil
+	return h, n, nil
 }
