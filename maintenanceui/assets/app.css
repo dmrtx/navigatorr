@@ -1910,6 +1910,7 @@ main {
 .stat-action { min-height: 30px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--forest); font: inherit; font-size: 0.9em; cursor: pointer; }
 .stat-action:disabled { opacity: 0.55; cursor: default; }
 .stat-more { padding: 7px 0; }
+.stat-archived { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 9px 0; }
 
 /* How we compress today: one card per goal, then the dated changes. */
 .compression-page { margin-bottom: 24px; }

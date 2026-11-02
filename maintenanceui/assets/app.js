@@ -3887,7 +3887,7 @@ function readyActions(item) {
 }
 // How many waiting files Stats shows before "Show all".
 const savingsReadyShown = 8;
-function renderReadyList(items, waiting) {
+function renderReadyList(items, waiting, archived = {}) {
   const ready = $("ready-list");
   ready.replaceChildren();
   const shown = state.readyAll ? items : items.slice(0, savingsReadyShown);
@@ -3895,16 +3895,36 @@ function renderReadyList(items, waiting) {
     const waited = waitedText(item.ready_since);
     ready.append(statRow(item, `${bytes(item.source_bytes)} → ${bytes(item.candidate_bytes)}${waited ? ` · waiting ${waited}` : ""}`, readyActions(item)));
   }
-  if (!ready.children.length) {
-    ready.append(node("li", "No finished encodes are waiting.", "muted"));
-    return;
+  if (!ready.children.length) ready.append(node("li", "No finished encodes are waiting.", "muted"));
+  else {
+    if (items.length > savingsReadyShown) {
+      const more = node("li", "", "stat-more");
+      more.append(button(state.readyAll ? "Show fewer" : `Show all ${items.length}`, () => { state.readyAll = !state.readyAll; renderReadyList(items, waiting, archived); }, "stat-action"));
+      ready.append(more);
+    }
+    if (waiting > items.length) ready.append(node("li", `${waiting - items.length} more waiting, smaller than these.`, "muted"));
   }
-  if (items.length > savingsReadyShown) {
-    const more = node("li", "", "stat-more");
-    more.append(button(state.readyAll ? "Show fewer" : `Show all ${items.length}`, () => { state.readyAll = !state.readyAll; renderReadyList(items, waiting); }, "stat-action"));
-    ready.append(more);
+  // Archived jobs are discarded ones, so they do not wait here, but their
+  // smaller copies still use disk until they are deleted.
+  if (archived.count > 0) {
+    const row = node("li", "", "stat-archived");
+    row.append(node("span", `${archived.count} archived ${archived.count === 1 ? "job still holds a smaller copy" : "jobs still hold smaller copies"} (${bytes(archived.bytes)}).`, "metadata"));
+    if (state.info?.allow_destructive) row.append(button("Delete copies", () => discardArchivedCopies(archived), "stat-action"));
+    ready.append(row);
   }
-  if (waiting > items.length) ready.append(node("li", `${waiting - items.length} more waiting, smaller than these.`, "muted"));
+}
+// Archiving a job is the decision to discard it; this deletes what it left on
+// disk. Originals are never touched.
+async function discardArchivedCopies(archived) {
+  const confirmed = await reviewAction({
+    title: "Delete the copies of archived jobs?",
+    message: `${archived.count} smaller ${archived.count === 1 ? "copy" : "copies"} (${bytes(archived.bytes)}) will be deleted. The originals stay exactly as they are, and the copies can't be brought back.`,
+    confirmLabel: "Delete copies",
+  });
+  if (!confirmed) return;
+  const result = await api("discard-archived-candidates", {ids: archived.ids});
+  notify(result.kept ? `Deleted ${result.removed}; kept ${result.kept}${result.error ? `: ${result.error}` : ""}.` : `Deleted ${result.removed} ${result.removed === 1 ? "copy" : "copies"}.`);
+  await loadJobs();
 }
 function renderSavings(data) {
   const savings = data.savings || {};
@@ -3924,7 +3944,7 @@ function renderSavings(data) {
   recent.replaceChildren();
   for (const item of (data.history || []).slice(-8).reverse()) recent.append(statRow(item, agoText(item.completed_at)));
   if (!recent.children.length) recent.append(node("li", "Nothing has been replaced yet.", "muted"));
-  renderReadyList(data.ready || [], waiting);
+  renderReadyList(data.ready || [], waiting, {count: savings.archived_candidate_count || 0, bytes: savings.archived_candidate_bytes || 0, ids: data.archived_ready_ids || []});
 }
 // Stats: how full the NAS is, what each served folder holds, and how that has
 // moved. The numbers come from the server's periodic measurement.

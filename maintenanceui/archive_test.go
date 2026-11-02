@@ -31,8 +31,10 @@ func TestArchiveHidesWorkflowAndRestoresHistoryAndSavings(t *testing.T) {
 		}
 	}
 	main := read("?group=workflow&status=all")
-	if main.Total != 0 || main.Savings.CandidateBytes != before.Savings.CandidateBytes {
-		t.Fatal("history accounting changed", main)
+	// Archiving discards a job: its copy no longer waits for a decision, but it
+	// is still reported (and can be deleted) while it uses disk.
+	if main.Total != 0 || main.Savings.CandidateBytes != 0 || main.Savings.CandidateCount != 0 || main.Savings.ArchivedCandidateCount != 1 || main.Savings.ArchivedCandidateBytes != 300 || len(main.Ready) != 0 || len(main.ArchivedReady) != 1 {
+		t.Fatal("archived copy still waits or is not reported", main)
 	}
 	archived := read("?group=workflow&status=archived&limit=1")
 	if archived.Total != 2 || !archived.HasMore || archived.Jobs[0]["archived"] != true {
@@ -48,6 +50,9 @@ func TestArchiveHidesWorkflowAndRestoresHistoryAndSavings(t *testing.T) {
 	main = read("?group=workflow&status=all")
 	if main.Total != 1 || main.Jobs[0]["id"] != "candidate" || main.Jobs[0]["archived"] != false {
 		t.Fatal(main)
+	}
+	if main.Savings.CandidateBytes != 700 || main.Savings.ArchivedCandidateCount != 0 {
+		t.Fatal("a restored job waits again", main.Savings)
 	}
 	// Another client can retry an archived action; active work must stay visible.
 	inst, _ := s.engine.Deps().Store.GetActionInstance("preview")
