@@ -51,7 +51,7 @@ func (e *Engine) BatchCandidates(ctx context.Context, id string) (*BatchCandidat
 			return nil, err
 		}
 		out := map[string]any{}
-		if json.Unmarshal([]byte(child.OutputsJSON), &out) != nil || child.Status != StatusCompleted || !getBool(out, "original_intact") {
+		if json.Unmarshal([]byte(child.OutputsJSON), &out) != nil || child.Status != StatusCompleted || !getBool(out, "original_intact") || getBool(out, candidateRemovedKey) {
 			continue
 		}
 		reserved := false

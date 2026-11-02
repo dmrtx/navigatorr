@@ -54,6 +54,11 @@ func (s *Server) discardArchivedCandidates(w http.ResponseWriter, r *http.Reques
 		fail(w, 500, "read archive state")
 		return
 	}
+	roots, workflows, err := s.workflowIndex()
+	if err != nil {
+		fail(w, 500, "read maintenance history")
+		return
+	}
 	removed, kept, firstError := 0, 0, ""
 	refuse := func(reason string) {
 		kept++
@@ -62,11 +67,7 @@ func (s *Server) discardArchivedCandidates(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	for _, id := range body.IDs {
-		root, members, err := s.workflowMemberIDs(id)
-		if err != nil {
-			fail(w, 500, "read maintenance history")
-			return
-		}
+		root, members, _ := memberIDsOf(roots, workflows, id)
 		if root == "" || archives[root] == "" {
 			refuse("a job is not archived")
 			continue

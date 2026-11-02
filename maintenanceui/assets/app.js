@@ -3918,7 +3918,7 @@ function renderReadyList(items, waiting, archived = {}) {
 async function discardArchivedCopies(archived) {
   const confirmed = await reviewAction({
     title: "Delete the copies of archived jobs?",
-    message: `${archived.count} smaller ${archived.count === 1 ? "copy" : "copies"} (${bytes(archived.bytes)}) will be deleted. The originals stay exactly as they are, and the copies can't be brought back.`,
+    message: `${archived.ids.length < archived.count ? `${archived.ids.length} of ${archived.count}` : archived.count} smaller ${archived.count === 1 ? "copy" : "copies"}${archived.ids.length < archived.count ? "" : ` (${bytes(archived.bytes)})`} will be deleted. The originals stay exactly as they are, and the copies can't be brought back.`,
     confirmLabel: "Delete copies",
   });
   if (!confirmed) return;

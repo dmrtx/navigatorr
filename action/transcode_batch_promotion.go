@@ -134,6 +134,10 @@ func (e *Engine) buildBatchPromotionPlan(ec *ExecutionContext, items []store.Tra
 		if json.Unmarshal([]byte(child.StateJSON), &state) != nil || json.Unmarshal([]byte(child.OutputsJSON), &out) != nil {
 			return nil, fmt.Errorf("completed item %s has unreadable transcode evidence", item.ItemKey)
 		}
+		// A copy the owner dropped (an archived batch's, for one) has nothing to replace with.
+		if getBool(out, candidateRemovedKey) {
+			continue
+		}
 		if getString(state, "resolved_path") != item.FilePath || getString(out, "candidate_path") != item.CandidatePath || getString(state, "candidate_sha256") == "" {
 			return nil, fmt.Errorf("completed item %s no longer matches its candidate evidence", item.ItemKey)
 		}
