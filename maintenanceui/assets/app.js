@@ -1089,6 +1089,12 @@ $("detail-file-link").addEventListener("click", (event) => {
   if (!link.dataset.path || link.dataset.outside === "true") return;
   return showInFiles(link.dataset.path, {folder: link.dataset.folder === "true"});
 });
+$("detail-batch-link").addEventListener("click", (event) => {
+  if (event?.defaultPrevented || event?.button > 0 || event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey) return;
+  event?.preventDefault?.();
+  const id = $("detail-batch-link").dataset.jobId;
+  if (id) return safe(() => openJob(id));
+});
 $("refresh-workers").addEventListener("click", () => void refreshWorkers());
 async function initialize() {
   state.routeReady=false;
@@ -3882,7 +3888,7 @@ async function keepReadyOriginal(item) {
   const name = item.source_path?.split("/").pop() || "this file";
   const confirmed = await reviewAction({
     title: "Keep the original?",
-    message: `${name} stays exactly as it is. The smaller copy (${bytes(item.candidate_bytes)}, saving ${bytes(item.saved_bytes)}) is deleted. Encoding it again takes the same time as before.`,
+    message: `${name} stays exactly as it is. The smaller copy${Number.isFinite(item.candidate_bytes) && Number.isFinite(item.saved_bytes) ? ` (${bytes(item.candidate_bytes)}, saving ${bytes(item.saved_bytes)})` : ""} is deleted. Encoding it again takes the same time as before.`,
     confirmLabel: "Keep original",
   });
   if (!confirmed) return;
@@ -3920,7 +3926,14 @@ function renderReadyList(items, waiting, archived = {}) {
   // Replace all: each file in turn, through its own Replace.
   const all = $("ready-replace-all");
   all.replaceChildren();
-  if (items.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(items.map(item => item.action_id), {className: "primary"}));
+  // The server lists the largest ready files only; past that cap the button
+  // says it replaces those, not every waiting file.
+  if (items.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(items.map(item => item.action_id), {
+    className: "primary",
+    label: items.length < waiting ? `Replace largest ${items.length}` : `Replace all ${items.length}`,
+    scope: items.length < waiting ? `the largest ${items.length} of ${waiting} ready files` : `all ${items.length} ready files`,
+    sizes: readySizes(items),
+  }));
   // Stats shows one line; the list opens from it.
   const count = Math.max(waiting, items.length);
   const open = $("ready-open");
@@ -4343,8 +4356,9 @@ function updateReplacementChoice() {
     service === "radarr" ? "Movie ID" : "Series ID",
   );
 }
+// True only when this call started a replacement.
 async function enqueueReplacement(job, context) {
-  if (jobIsBusy(job.id)) return;
+  if (jobIsBusy(job.id)) return false;
   state.busyJobs.add(job.id);
   try {
     const latest = (await api(`operations?id=${encodeURIComponent(job.id)}`))
@@ -4352,7 +4366,7 @@ async function enqueueReplacement(job, context) {
     if (latest?.replacement_action_id) {
       $("replacement-choice").close();
       await openReplacement(latest.replacement_action_id);
-      return;
+      return false;
     }
     if (!latest?.candidate_ready)
       throw new Error(
@@ -4381,6 +4395,7 @@ async function enqueueReplacement(job, context) {
     // The open details (this file's, or its batch's) list the file as replacing
     // right away, not on the next refresh, so Replace is not offered again.
     if ([job.id, latest.parent_action_id].includes(state.detail)) await refreshOpenDetail();
+    return true;
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -7929,7 +7944,9 @@ function conversionActionBar(job) {
   const menu = [];
   if (!job.archived && status === "ready_to_replace" && !job.parent_action_id && state.info?.allow_destructive) {
     const {before, after} = conversionSizes(job);
-    menu.push(pageAction("Keep original", async () => { await keepReadyOriginal({action_id: job.id, source_path: job.source_path, candidate_bytes: after, saved_bytes: before - after}); await refreshOpenDetail(); }, job.id));
+    // Sizes are only said when both are known; a missing one never reads NaN.
+    const known = Number.isFinite(before) && Number.isFinite(after);
+    menu.push(pageAction("Keep original", async () => { await keepReadyOriginal({action_id: job.id, source_path: job.source_path, candidate_bytes: known ? after : undefined, saved_bytes: known ? before - after : undefined}); await refreshOpenDetail(); }, job.id));
   }
   const archive = take("Archive", "Restore");
   const cancel = take("Cancel");
@@ -7967,28 +7984,84 @@ function automaticReplacementContext(job, legacy = legacyReplacementHint(job)) {
   if (!replacementIntegrations().length && !["sonarr", "radarr"].includes(legacy?.service)) return {service: "filesystem"};
   return null;
 }
-// Replaces each ready file in turn with the same flow as its own Replace
-// button. A file that needs a library choice is left for its own button.
-async function replaceAllReady(ids, {parentId = "", control = null} = {}) {
-  const total = ids.length;
-  let started = 0, asked = 0, gone = 0, failed = 0;
-  const label = control?.querySelector?.(".jd-label") || null;
-  for (const [index, id] of ids.entries()) {
-    const text = `Replacing ${index + 1} of ${total}…`;
-    if (label) label.textContent = text;
-    notify(text);
-    // One file that cannot start never stops the others.
-    try {
-      const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
-      if (!job?.candidate_ready || job.replacement_action_id || (parentId && job.parent_action_id !== parentId)) { gone++; continue; }
-      const context = automaticReplacementContext(job);
-      if (!context) { asked++; continue; }
-      await enqueueReplacement(job, context);
-      started++;
-    } catch (error) {
-      if (!serverReachable) throw error;
-      failed++;
+// Before, after and freed bytes of ready files; a size a file does not say
+// is left out, and a total nothing adds to is null.
+function readySizes(items) {
+  const sum = key => {
+    const known = items.map(item => item[key]).filter(Number.isFinite);
+    return known.length === items.length ? known.reduce((a, b) => a + b, 0) : null;
+  };
+  return {before: sum("source_bytes"), after: sum("candidate_bytes"), saved: sum("saved_bytes")};
+}
+// One Replace all runs at a time: every Replace all button, also one drawn
+// again by a refresh, waits for it.
+let replaceAllRunning = false;
+function markReplaceAllButtons() {
+  for (const host of ["ready-replace-all", "batch-replace-all"]) {
+    for (const b of [...($(host)?.children || [])]) {
+      if (!b.dataset?.replaceAll) continue;
+      if (replaceAllRunning) setReplaceAllBusy(b);
+      else restoreReplaceAll(b);
     }
+  }
+}
+const replaceAllLabelOf = b => [...(b.children || [])].find(child => child.className === "jd-label") || null;
+function restoreReplaceAll(b) {
+  if (!state.info?.allow_destructive) return;
+  b.disabled = false;
+  delete b.dataset.unavailable;
+  b.title = "";
+  const label = replaceAllLabelOf(b);
+  if (label) label.textContent = b.dataset.replaceAllLabel || label.textContent;
+}
+function setReplaceAllBusy(b, text = "Replacing…") {
+  b.disabled = true;
+  b.dataset.unavailable = "Replacing…";
+  b.title = "Replacing…";
+  const label = replaceAllLabelOf(b);
+  if (label) label.textContent = text;
+}
+// Replaces each ready file in turn with the same flow as its own Replace
+// button, after one confirmation that names how many and how much. A file
+// that needs a library choice is left for its own button.
+async function replaceAllReady(ids, {parentId = "", control = null, scope = "", sizes = {}} = {}) {
+  if (replaceAllRunning) return null;
+  const total = ids.length;
+  const what = scope || `${total} ready ${total === 1 ? "file" : "files"}`;
+  const amount = Number.isFinite(sizes.before) && Number.isFinite(sizes.after) ? ` ${bytes(sizes.before)} of originals become ${bytes(sizes.after)}${Number.isFinite(sizes.saved) ? `, freeing ${bytes(sizes.saved)}` : ""}.`
+    : Number.isFinite(sizes.saved) ? ` This frees ${bytes(sizes.saved)}.` : "";
+  const confirmed = await reviewAction({
+    title: `Replace ${total} ${total === 1 ? "file" : "files"}?`,
+    message: `The originals of ${what} are replaced by their smaller copies, one after another.${amount} A file that needs a library choice is left for its own Replace.`,
+    confirmLabel: `Replace ${total}`,
+  });
+  if (!confirmed || replaceAllRunning) return null;
+  replaceAllRunning = true;
+  markReplaceAllButtons();
+  let started = 0, asked = 0, gone = 0, failed = 0;
+  try {
+    for (const [index, id] of ids.entries()) {
+      const text = `Replacing ${index + 1} of ${total}…`;
+      if (control) setReplaceAllBusy(control, text);
+      notify(text);
+      // One file that cannot start never stops the others.
+      try {
+        const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
+        if (!job?.candidate_ready || job.replacement_action_id || (parentId && job.parent_action_id !== parentId)) { gone++; continue; }
+        const context = automaticReplacementContext(job);
+        if (!context) { asked++; continue; }
+        // A file already being replaced from its own button is not started twice.
+        if (await enqueueReplacement(job, context)) started++;
+        else gone++;
+      } catch (error) {
+        if (!serverReachable) throw error;
+        failed++;
+      }
+    }
+  } finally {
+    replaceAllRunning = false;
+    markReplaceAllButtons();
+    if (control?.dataset) restoreReplaceAll(control);
   }
   const parts = [`Replacing ${started} of ${total} ${total === 1 ? "file" : "files"}`];
   if (asked) parts.push(`${asked} ${asked === 1 ? "needs" : "need"} a library choice: use its Replace`);
@@ -7998,15 +8071,31 @@ async function replaceAllReady(ids, {parentId = "", control = null} = {}) {
   return {started, asked, gone, failed};
 }
 function replaceAllButton(ids, options = {}) {
-  const b = button("", () => replaceAllReady(ids, {...options, control: b}), options.className || "jd-primary");
-  b.append(node("span", `Replace all ${ids.length}`, "jd-label"));
+  const {label, ...run} = options;
+  const b = button("", () => replaceAllReady(ids, {...run, control: b}), options.className || "jd-primary");
+  const text = label || `Replace all ${ids.length}`;
+  b.append(node("span", text, "jd-label"));
   b.dataset.replaceAll = String(ids.length);
+  b.dataset.replaceAllLabel = text;
   if (!state.info?.allow_destructive) {
     b.disabled = true;
     b.dataset.unavailable = "Replacing is off in server settings";
     b.title = b.dataset.unavailable;
-  }
+  } else if (replaceAllRunning) setReplaceAllBusy(b);
   return b;
+}
+// A file of a batch, opened on its own (a deep link, a reload), leads back to
+// its batch from the header. A single-file conversion has no batch to name.
+function renderDetailBatchLink(job) {
+  const link = $("detail-batch-link");
+  const id = job?.parent_batch_id;
+  link.hidden = !id || id === job.id || Boolean(job.batch);
+  if (link.hidden) return;
+  const number = state.operationJobs?.get?.(id)?.number;
+  link.textContent = `${number ? `Batch #${number}` : "Batch"} ›`;
+  link.title = "Open the batch";
+  link.href = `?view=queue&job=${encodeURIComponent(id)}`;
+  link.dataset.jobId = id;
 }
 // The file under the title: a link that shows it in Files.
 function renderDetailFileLink(job) {
@@ -8049,6 +8138,7 @@ function paintDetail(job) {
   $("detail-status").replaceChildren(conversion ? conversionChip(job) : statusBadge(presentation.status));
   summary.replaceChildren(...(conversion ? conversionNodes(job) : detailStatusNodes(job, presentation)));
   renderDetailFileLink(job);
+  renderDetailBatchLink(job);
   summary.dataset.operationId = job.id;
   renderCommandIndicators();
   renderDetailRows(job);
@@ -8407,8 +8497,16 @@ async function loadBatchItems(id, revision) {
   const rows = shown.map(item => batchFileRow(item, id));
   // Act where the files are listed: every ready file of this page at once,
   // while the batch is still running too.
-  const ready = all.filter(batchItemReplaceable).map(item => item.child_action_id);
-  $("batch-replace-all").replaceChildren(...(ready.length > 1 && state.info?.allow_destructive ? [replaceAllButton(ready, {parentId: id, className: "jd-secondary"})] : []));
+  const readyItems = all.filter(batchItemReplaceable);
+  const ready = readyItems.map(item => item.child_action_id);
+  // Only this page's files are known here; with more pages the button says so.
+  const paged = Boolean(response.has_more);
+  $("batch-replace-all").replaceChildren(...(ready.length > 1 && state.info?.allow_destructive ? [replaceAllButton(ready, {
+    parentId: id, className: "jd-secondary",
+    label: paged ? `Replace ${ready.length} on this page` : `Replace all ${ready.length}`,
+    scope: paged ? `the ${ready.length} ready files on this page` : `all ${ready.length} ready files of this batch`,
+    sizes: readySizes(readyItems),
+  })] : []));
   if (state.batchOutstandingOnly && !shown.length) rows.push(node("p", response.has_more ? "Nothing left to replace on this page" : "Nothing left to replace", "muted jd-note"));
   list.replaceChildren(...rows);
   restoreControl(list, focus);

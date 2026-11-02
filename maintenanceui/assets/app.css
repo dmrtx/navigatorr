@@ -3526,6 +3526,9 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .jd-file-link[href]:hover { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
 .jd-file-link[href]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
 .jd-file-link[aria-disabled="true"] { cursor: default; }
+.jd-crumb { display: block; justify-self: start; max-width: 100%; min-height: 28px; color: var(--muted); font-size: 12px; line-height: 28px; text-decoration: none; }
+.jd-crumb:hover { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
+.jd-crumb:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
 
 /* Hero: before → after, the shrink bar and the saving. */
 .cv-hero { display: grid; gap: 8px; }

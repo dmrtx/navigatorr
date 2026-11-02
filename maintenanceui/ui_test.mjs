@@ -8928,22 +8928,49 @@ test("a conversion keeps its actions in fixed slots, and an unavailable one is d
   assert.equal(bar(conversionJob()).length, 3);
 });
 
-test("Replace all runs the one-file flow for each ready file, and says what it could not do", async () => {
+const drain = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const confirmReview = (h) => h.elements.get("confirm-action-review").listeners.get("click")();
+const dismissReview = (h) => h.elements.get("dismiss-action-review").listeners.get("click")();
+
+test("Replace all asks once, naming how many and how much, then runs the one-file flow for each", async () => {
   const h = harness();
   const ready = (id, extra = {}) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "batch", ...extra });
-  h.context.byId = { a: ready("a"), b: ready("b", { replacement_action_id: "already" }), c: ready("c"), d: ready("d", { parent_action_id: "other" }) };
+  h.context.byId = { a: ready("a"), b: ready("b", { replacement_action_id: "already" }), c: ready("c"), d: ready("d", { parent_action_id: "other" }), e: ready("e") };
   h.context.calls = [];
   h.context.notes = [];
-  h.run('state.info={allow_destructive:true,services:[]}; api=async(path)=>({jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}); enqueueReplacement=async(job,context)=>{calls.push([job.id,context.service]); if(job.id==="c") throw new Error("busy");}; notify=(m)=>notes.push(m);');
-  const b = h.run('replaceAllButton(["a","b","c","d"], {parentId:"batch"})');
-  assert.equal(saidBy(b), "Replace all 4");
-  assert.equal(b.dataset.replaceAll, "4");
-  const result = await b.listeners.get("click")();
-  assert.equal(JSON.stringify(h.context.calls), JSON.stringify([["a", "filesystem"], ["c", "filesystem"]]));
-  assert.match(h.context.notes.at(-1), /Replacing 1 of 4 files · 2 no longer ready · 1 could not start/);
+  // c cannot start; e is already being replaced from its own button, so
+  // enqueueReplacement starts nothing for it.
+  h.run('state.info={allow_destructive:true,services:[]}; api=async(path)=>({jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}); enqueueReplacement=async(job,context)=>{calls.push([job.id,context.service]); if(job.id==="c") throw new Error("busy"); return job.id!=="e";}; notify=(m)=>notes.push(m);');
+  const sizes = { before: 10e9, after: 4e9, saved: 6e9 };
+  h.context.sizes = sizes;
+  const b = h.run('replaceAllButton(["a","b","c","d","e"], {parentId:"batch", sizes})');
+  assert.equal(saidBy(b), "Replace all 5");
+  assert.equal(b.dataset.replaceAll, "5");
+  // Backing out of the confirmation replaces nothing.
+  let run = b.listeners.get("click")();
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "Replace 5 files?");
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace 5");
+  const said = allTextOf(h.elements.get("action-review-content"));
+  assert.match(said, /10\.00 GB of originals become 4\.00 GB, freeing 6\.00 GB/);
+  dismissReview(h);
+  assert.equal(await run, null);
+  assert.equal(h.context.calls.length, 0);
+  // Confirmed, each file goes through its own flow.
+  run = b.listeners.get("click")();
+  await drain();
+  confirmReview(h);
+  const result = await run;
+  assert.equal(JSON.stringify(h.context.calls), JSON.stringify([["a", "filesystem"], ["c", "filesystem"], ["e", "filesystem"]]));
+  assert.equal(result.started, 1);
+  assert.match(h.context.notes.at(-1), /Replacing 1 of 5 files · 3 no longer ready · 1 could not start/);
+  assert.equal(b.disabled, false);
   // A library that needs a choice is left for the file's own Replace.
   h.run('state.info.services=[{name:"sonarr"}]; calls.length=0;');
-  await h.run('replaceAllReady(["a"])');
+  run = h.run('replaceAllReady(["a"])');
+  await drain();
+  confirmReview(h);
+  await run;
   assert.equal(h.context.calls.length, 0);
   assert.match(h.context.notes.at(-1), /1 needs a library choice/);
   // Without replacing allowed, the button stays and says why.
@@ -8951,6 +8978,94 @@ test("Replace all runs the one-file flow for each ready file, and says what it c
   const off = h.run('replaceAllButton(["a","c"])');
   assert.equal(off.disabled, true);
   assert.equal(off.dataset.unavailable, "Replacing is off in server settings");
+});
+
+test("Replace all runs once at a time: a button drawn again while it runs waits, disabled", async () => {
+  const h = harness();
+  h.context.byId = { a: { id: "a", action_name: "transcode_media", status: "completed", candidate_ready: true } };
+  h.context.release = null;
+  h.context.calls = [];
+  h.run('state.info={allow_destructive:true,services:[]}; api=async(path)=>({jobs:[byId.a]}); enqueueReplacement=(job)=>{calls.push(job.id); return new Promise(r=>{release=()=>r(true);});}; notify=()=>{};');
+  const first = h.run('replaceAllButton(["a","a"])');
+  const run = first.listeners.get("click")();
+  await drain();
+  confirmReview(h);
+  await drain();
+  assert.equal(h.context.calls.length, 1);
+  // A Stats refresh draws the button again in the middle of the run.
+  const again = h.run('replaceAllButton(["a","a"])');
+  assert.equal(again.disabled, true);
+  assert.equal(again.dataset.unavailable, "Replacing…");
+  assert.equal(saidBy(again), "Replacing…");
+  assert.equal(first.disabled, true);
+  // A second start does nothing and asks nothing.
+  assert.equal(await h.run('replaceAllReady(["a"])'), null);
+  h.context.release();
+  await drain();
+  h.context.release();
+  await run;
+  assert.equal(h.context.calls.length, 2);
+  assert.equal(first.disabled, false);
+  assert.equal(saidBy(first), "Replace all 2");
+});
+
+test("Stats replaces the whole ready set, or says it replaces only the largest it lists", () => {
+  const h = harness();
+  h.run("state.info={allow_destructive:true};");
+  h.context.items = [1, 2, 3].map((n) => ({ action_id: `t-${n}`, source_path: `/media/tv/Sample Show S01E0${n}.mkv`, source_bytes: 4e9, candidate_bytes: 2e9, saved_bytes: 2e9 }));
+  h.run("renderReadyList(items, 3)");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 3");
+  h.run("renderReadyList(items, 250)");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
+  assert.equal(JSON.stringify(h.run("readySizes(items)")), JSON.stringify({ before: 12e9, after: 6e9, saved: 6e9 }));
+  // A file without sizes leaves a total unsaid rather than wrong.
+  assert.equal(h.run("readySizes([...items, {action_id:'x'}]).saved"), null);
+});
+
+test("a batch with more pages offers to replace the ready files of this page, by name", async () => {
+  const items = [
+    { item_key: "k-1", display_label: "One", status: "completed", candidate_ready: true, child_action_id: "t-1", saved_bytes: 1e9 },
+    { item_key: "k-2", display_label: "Two", status: "completed", candidate_ready: true, child_action_id: "t-2", saved_bytes: 1e9 },
+  ];
+  const h = harness();
+  h.context.items = items;
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};api=async()=>({items,total:40,has_more:true});');
+  await h.run('loadBatchItems("batch-a",2)');
+  assert.equal(saidBy(h.elements.get("batch-replace-all")), "Replace 2 on this page");
+});
+
+test("a batch file opened on its own leads back to its batch from the header", () => {
+  const h = harness();
+  h.run('state.operationJobs=new Map([["batch-9",{id:"batch-9",number:9}]]); openJob=async(id)=>{opened=id;}; opened="";');
+  h.run('renderDetailBatchLink({id:"p-1",action_name:"promote_transcode_candidate",parent_batch_id:"batch-9"})');
+  const link = h.elements.get("detail-batch-link");
+  assert.equal(link.hidden, false);
+  assert.equal(link.textContent, "Batch #9 ›");
+  assert.match(link.href, /job=batch-9$/);
+  link.listeners.get("click")({ preventDefault() {} });
+  assert.equal(h.context.opened, "batch-9");
+  // A single-file conversion has no batch to name, and a batch is not its own parent.
+  h.run('renderDetailBatchLink({id:"conv",action_name:"transcode_media"})');
+  assert.equal(link.hidden, true);
+  h.run('renderDetailBatchLink({id:"batch-9",batch:{},parent_batch_id:"batch-9"})');
+  assert.equal(link.hidden, true);
+  assert.match(markup, /<a id="detail-batch-link"[^>]*hidden><\/a>\s*<h2 id="job-detail-title"/);
+});
+
+test("Keep original on a ready conversion never says NaN when its sizes are unknown", async () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true}; state.workerInfo={ready:true}; api=async()=>({}); loadJobs=async()=>{}; refreshOpenDetail=async()=>{}; notify=()=>{};');
+  const job = { id: "r", action_name: "transcode_media", status: "completed", conversion_status: "ready_to_replace", candidate_ready: true, source_path: "/media/tv/Sample Show S01E01.mkv" };
+  const keep = h.run(`conversionActionBar(${JSON.stringify(job)})[2]`);
+  const item = nodesWithClass(keep, "jd-menu-item").find((b) => saidBy(b).startsWith("Keep original"));
+  assert.ok(item, "Keep original is in More");
+  const run = item.listeners.get("click")();
+  await drain();
+  const said = allTextOf(h.elements.get("action-review-content"));
+  assert.doesNotMatch(said, /NaN/);
+  assert.match(said, /The smaller copy is deleted/);
+  dismissReview(h);
+  await run;
 });
 
 test("a running batch offers Replace all for its ready files", async () => {
@@ -8975,7 +9090,7 @@ test("Stats says how many files are ready in one row, and the list it opens can 
   h.run("renderReadyList(items, 5)");
   assert.equal(h.elements.get("ready-open-label").textContent, "5 files ready to replace");
   assert.equal(h.elements.get("ready-open").disabled, false);
-  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 3");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
   h.run("renderReadyList([], 0)");
   assert.equal(h.elements.get("ready-open-label").textContent, "No finished encodes are waiting");
   assert.equal(h.elements.get("ready-open").disabled, true);
