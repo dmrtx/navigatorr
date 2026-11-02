@@ -53,7 +53,7 @@ func TestNextStepsAfterAMissedSavingFollowWhatWasMeasured(t *testing.T) {
 		t.Fatalf("smaller saving step %+v", smaller)
 	}
 	e := explainResult(r)
-	if !strings.Contains(e.Happened, "9% smaller") || !strings.Contains(e.Happened, "at least 15% smaller") {
+	if !strings.Contains(e.Happened, "9% smaller") || !strings.Contains(e.Happened, "below the 15% minimum") {
 		t.Fatalf("happened %q", e.Happened)
 	}
 	if len(e.Learned) < 2 || !strings.Contains(e.Learned[0], "audio is") || !strings.Contains(e.Learned[len(e.Learned)-1], "Converting the audio alone") {
@@ -125,7 +125,7 @@ func TestNextStepsForOtherEndings(t *testing.T) {
 	if s, _ := stepByID(budget, "budget"); s.Inputs["size_budget_percent"] != float64(60) {
 		t.Fatalf("raised budget %+v", s)
 	}
-	if e := explainResult(budget); !strings.Contains(e.Happened, "52% of the original; the target was 40%") {
+	if e := explainResult(budget); !strings.Contains(e.Happened, "(52% of the") || !strings.Contains(e.Happened, "target (40%)") {
 		t.Fatalf("budget explanation %q", e.Happened)
 	}
 	// A budget cannot name more than 85% of the source, so an encode that
@@ -134,8 +134,16 @@ func TestNextStepsForOtherEndings(t *testing.T) {
 	if _, ok := stepByID(high, "budget"); ok {
 		t.Fatalf("budget offered above 85%%: %s", stepIDs(nextStepsFor(high)))
 	}
-	ladder := endedRecord("completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "quality_not_met", "quality_ladder": map[string]any{"tried": []any{1, 2, 3}}})
-	if e := explainResult(ladder); !strings.Contains(e.Happened, "Each of the 3 settings") {
+	// A ladder that missed says the last setting's score and the limit, not
+	// only how many settings it tried.
+	rung := func(q int, vmaf float64) map[string]any {
+		return map[string]any{"quality": q, "reason_code": "quality_not_met", "final": map[string]any{"verdict": "fail", "failed_checks": []any{"below_minimum_quality"}, "measured": map[string]any{"vmaf_mean": vmaf}, "limits": map[string]any{"vmaf_mean_minimum": 93.0}}}
+	}
+	ladder := endedRecord("completed", map[string]any{"path": "/a", "mode": "size"}, map[string]any{"reason_code": "quality_not_met", "quality_ladder": map[string]any{
+		"video_codec": "libx265", "preset": "medium", "quality_values": []any{22, 19, 16}, "rung": 2, "outcome": "quality_not_met",
+		"tried": []any{rung(22, 89.5), rung(19, 90.8), rung(16, 91.2)},
+	}})
+	if e := explainResult(ladder); e.Happened != "Quality 91.2 VMAF at CRF 16 · medium, the last of 3 settings tried, below the 93.0 target." {
 		t.Fatalf("ladder explanation %q", e.Happened)
 	}
 }

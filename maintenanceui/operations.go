@@ -74,6 +74,9 @@ type operationsPage struct {
 	// the largest finished encodes still waiting to replace their originals.
 	Daily []savingsDay       `json:"daily"`
 	Ready []savingsCandidate `json:"ready"`
+	// ReadyIDs are the transcode ids of every ready file, not only the rows
+	// Ready lists, so Replace all covers them all.
+	ReadyIDs []string `json:"ready_ids"`
 	// ArchivedReady names the archived jobs whose smaller copy is still on
 	// disk (up to savingsReadyListed), to be deleted together.
 	ArchivedReady []string `json:"archived_ready_ids"`
@@ -636,7 +639,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	timing.since("snapshot", began)
 	began = time.Now()
 	now := time.Now().UTC()
-	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ArchivedReady: []string{}, ObservedAt: now.Format(time.RFC3339Nano)}
+	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ReadyIDs: []string{}, ArchivedReady: []string{}, ObservedAt: now.Format(time.RFC3339Nano)}
 	page.Savings.Measurement = "verified_content_bytes_after_replacement_cleanup; not filesystem free space"
 	records := make([]operationRecord, 0, len(instances))
 	for _, inst := range instances {
@@ -989,6 +992,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				if resolved := conversions.resolvedBy(r); resolved != nil {
 					job["resolved_by"] = resolved
 				}
+				// Why it has no result, from the keys the list keeps; the job
+				// being opened says it again below with its streams.
+				if cause := conversions.cause(r, nil); cause != nil {
+					job["cause"] = cause
+				}
 				// How it ended, drawn by the client: the job being opened only.
 				// The snapshot keeps only the keys the queue lists; the plan, the
 				// source probe and the quality ladder these are read from are in
@@ -999,8 +1007,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 						if outcome := conversionOutcome(full); outcome != nil {
 							job["outcome"] = outcome
 						}
-						if streams := conversionStreams(full); streams != nil {
+						streams := conversionStreams(full)
+						if streams != nil {
 							job["streams"] = streams
+						}
+						if cause := conversions.cause(full, streams); cause != nil {
+							job["cause"] = cause
+						}
+					}
+					// Every run of the file is one conversion's attempts.
+					if attempts, superseded := conversions.attempts(r); attempts != nil {
+						job["attempts"] = attempts
+						if superseded != nil {
+							job["superseded_by"] = superseded
 						}
 					}
 				}
@@ -1079,6 +1098,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					}
 				}
 				job["remaining_candidates"] = remaining
+				// The opened batch names every file ready to replace its
+				// original, across all its pages, for Replace all.
+				if selectedID != "" {
+					job["ready_item_ids"] = batchReadyItems(r, items, recordsByID, existingReplacements, replacedActions, replaced)
+				}
 				job["replaced_files"] = replacedFiles
 				// A file handed to a worker counts as running in the batch, but one
 				// that is still in the worker's line is not being encoded yet.
@@ -1134,6 +1158,12 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	page.Ready = largestCandidates(ready)
+	// largestCandidates sorted every ready file, the largest first; the ids of
+	// all of them go along with the rows it kept.
+	page.ReadyIDs = make([]string, 0, len(ready))
+	for _, c := range ready {
+		page.ReadyIDs = append(page.ReadyIDs, c.ActionID)
+	}
 	if len(page.History) > 25 {
 		page.History = page.History[len(page.History)-25:]
 	}

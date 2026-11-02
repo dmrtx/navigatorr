@@ -22,7 +22,7 @@ type maintenanceMemo struct {
 const maintenanceRefreshChunk = 400
 
 var maintenanceInputKeys = []string{"path", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "media_type", "is_anime"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "original_integrity_check", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "tracks", "track_report", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "original_integrity_check", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "tracks", "track_report", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message", "quality_ladder", "mode_policy"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal transcode.HardwareSelectedNote;
@@ -57,6 +57,29 @@ func maintenanceWinner(raw json.RawMessage) json.RawMessage {
 	}
 	out, _ := json.Marshal(projected)
 	return out
+}
+
+// maintenanceQualitySummary keeps a quality summary's verdict, failed checks
+// and the VMAF figures with their limits.
+func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
+	var f map[string]json.RawMessage
+	if json.Unmarshal(raw, &f) != nil {
+		return json.RawMessage("{}")
+	}
+	out := map[string]json.RawMessage{}
+	for _, k := range []string{"verdict", "failed_checks"} {
+		if v, ok := f[k]; ok {
+			out[k] = v
+		}
+	}
+	if m, ok := f["measured"]; ok {
+		out["measured"] = json.RawMessage(maintenanceJSON(string(m), []string{"vmaf_mean", "vmaf_p5", "vmaf_worst_window"}))
+	}
+	if l, ok := f["limits"]; ok {
+		out["limits"] = json.RawMessage(maintenanceJSON(string(l), []string{"vmaf_mean_minimum", "vmaf_p5_minimum", "vmaf_worst_window_minimum", "worst_window_seconds"}))
+	}
+	data, _ := json.Marshal(out)
+	return data
 }
 
 func maintenanceJSON(raw string, keys []string) string {
@@ -183,6 +206,37 @@ func maintenanceJSON(raw string, keys []string) string {
 				}
 				members2, _ := json.Marshal(kept)
 				value, _ = json.Marshal(map[string]json.RawMessage{"members": members2})
+			case "quality_ladder":
+				// Each setting tried and what it measured, so a job that
+				// ended without a result says why with numbers; the job ids,
+				// the encoder choice and the messages stay in the history.
+				projected := json.RawMessage(maintenanceJSON(string(value), []string{"video_codec", "preset", "quality_values", "rung", "outcome", "retry_without_hardware"}))
+				var kept map[string]json.RawMessage
+				_ = json.Unmarshal(projected, &kept)
+				var tried []json.RawMessage
+				if json.Unmarshal(nested["tried"], &tried) == nil && len(tried) > 0 {
+					for i, t := range tried {
+						var rung map[string]json.RawMessage
+						_ = json.Unmarshal(t, &rung)
+						row := json.RawMessage(maintenanceJSON(string(t), []string{"quality", "reason_code", "candidate_bytes"}))
+						if final, ok := rung["final"]; ok {
+							var r map[string]json.RawMessage
+							_ = json.Unmarshal(row, &r)
+							r["final"] = maintenanceQualitySummary(final)
+							row, _ = json.Marshal(r)
+						}
+						tried[i] = row
+					}
+					kept["tried"], _ = json.Marshal(tried)
+				}
+				if final, ok := nested["final"]; ok {
+					kept["final"] = maintenanceQualitySummary(final)
+				}
+				value, _ = json.Marshal(kept)
+			case "mode_policy":
+				// The saving the goal needed is all the page reads; the frozen
+				// goal itself stays in the job's record.
+				value = json.RawMessage(maintenanceJSON(string(value), []string{"min_savings_percent"}))
 			case "benchmark_decision":
 				if winner, exists := nested["winner"]; exists {
 					nested = map[string]json.RawMessage{"winner": maintenanceWinner(winner)}
