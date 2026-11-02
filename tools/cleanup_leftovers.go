@@ -196,21 +196,37 @@ func leftoverPolicy(ctx context.Context, qb *qbit.Client, minAge time.Duration, 
 	// A torrent saving outside the scope cannot own anything inside it.
 	files := make([][]qbit.TorrentFile, len(lookups))
 	errs := make([]error, len(lookups))
+	lctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	sem := make(chan struct{}, leftoverFileLookups)
 	var wg sync.WaitGroup
+launch:
 	for i, l := range lookups {
+		select {
+		case sem <- struct{}{}:
+		case <-lctx.Done():
+			break launch
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(i int, l lookup) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			files[i], errs[i] = qb.ListFiles(ctx, l.hash)
+			files[i], errs[i] = qb.ListFiles(lctx, l.hash)
+			if errs[i] != nil {
+				cancel() // one failure ends the whole read: nothing is guessed
+			}
 		}(i, l)
 	}
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return p, fmt.Errorf("listing files of a torrent: %w", err)
+	}
 	for i, l := range lookups {
 		if errs[i] != nil {
 			return p, fmt.Errorf("listing files of a torrent: %w", errs[i])
+		}
+		if files[i] == nil && errs[i] == nil && lctx.Err() != nil {
+			return p, fmt.Errorf("listing files of a torrent: %w", lctx.Err())
 		}
 		for _, f := range files[i] {
 			p.Owned = append(p.Owned, path.Join(l.save, f.Name))

@@ -101,13 +101,17 @@ type RemoveResult struct {
 }
 
 // PathsOverlap reports whether a is inside b or b inside a, comparing without
-// case and also by the names the paths have once symlinks are followed.
+// case, as absolute paths, and also by the names the paths have once symlinks
+// are followed.
 func PathsOverlap(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
 	forms := func(p string) []string {
 		c := filepath.Clean(p)
+		if abs, err := filepath.Abs(c); err == nil {
+			c = abs
+		}
 		if real := evalExistingSymlinks(c); real != c {
 			return []string{c, real}
 		}
@@ -131,9 +135,10 @@ type MkdirResult struct {
 }
 
 // Mkdir creates a folder and its missing parents inside the write roots, as
-// plain directories. A folder that is already there is not an error. The root
-// itself must exist and still be a mounted share: a missing one is never
-// created, since its folders would land on the local disk.
+// plain directories, through a handle confined to the root: a name swapped for
+// a link meanwhile cannot lead outside it. A folder that is already there is
+// not an error. The root itself must exist and still be a mounted share: a
+// missing one is never created, since its folders would land on the local disk.
 func (r *Resolver) Mkdir(path string) (MkdirResult, error) {
 	res := MkdirResult{}
 	real, err := r.ResolveWrite(path)
@@ -145,40 +150,68 @@ func (r *Resolver) Mkdir(path string) (MkdirResult, error) {
 		res.Existed = true
 		return res, r.rootsMounted(real)
 	}
-	rel := ""
-	if wroot, ok := r.writeRootOf(real); ok {
-		rel, _ = filepath.Rel(wroot, real)
+	wroot, ok := r.writeRootOf(real)
+	if !ok {
+		return res, fmt.Errorf("%q is outside the allowed roots", path)
 	}
-	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
-		if part == "" || part == "." || part == ".." {
-			return res, fmt.Errorf("invalid folder name in %q", path)
-		}
-		if part[0] == '.' || strings.EqualFold(part, "@eaDir") || strings.EqualFold(part, "#recycle") {
-			return res, fmt.Errorf("%q is a hidden or system name and cannot be created here", part)
+	rel, err := filepath.Rel(wroot, real)
+	if err != nil {
+		return res, err
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || protectedName(part) {
+			return res, fmt.Errorf("%q is a hidden, system or invalid name and cannot be created here", part)
 		}
 	}
 	if err := r.rootsMounted(real); err != nil {
 		return res, err
 	}
-	if fi, err := os.Lstat(real); err == nil {
-		if !fi.IsDir() {
-			return res, fmt.Errorf("%q already exists and is not a folder", path)
+	root, err := os.OpenRoot(wroot)
+	if err != nil {
+		return res, err
+	}
+	defer root.Close()
+	var made []string // relative to the root, outermost first
+	undo := func() {
+		for i := len(made) - 1; i >= 0; i-- {
+			root.Remove(made[i])
 		}
+	}
+	cur := ""
+	for _, part := range parts {
+		cur = filepath.Join(cur, part)
+		fi, err := root.Lstat(cur)
+		switch {
+		case err == nil && fi.IsDir():
+			continue
+		case err == nil:
+			undo()
+			return res, fmt.Errorf("%q already exists and is not a plain folder", filepath.Join(wroot, cur))
+		case !os.IsNotExist(err):
+			undo()
+			return res, fmt.Errorf("creating folder: %w", err)
+		}
+		if err := root.Mkdir(cur, 0o755); err != nil {
+			if !os.IsExist(err) {
+				undo()
+				return res, fmt.Errorf("creating folder: %w", err)
+			}
+			// Made by someone else just now: fine only as a plain directory.
+			if fi, lerr := root.Lstat(cur); lerr != nil || !fi.IsDir() {
+				undo()
+				return res, fmt.Errorf("%q is not a plain folder", filepath.Join(wroot, cur))
+			}
+			continue
+		}
+		made = append(made, cur)
+	}
+	if len(made) == 0 {
 		res.Existed = true
 		return res, nil
 	}
-	created, err := mkdirAllReport(real)
-	res.Created = created
-	if err == nil {
-		// Nothing swapped in a link while the folders were made.
-		if again, rerr := r.ResolveWrite(real); rerr != nil || again != real {
-			err = fmt.Errorf("%q now resolves somewhere else", real)
-		}
-	}
-	if err != nil {
-		removeEmptyDirs(created)
-		res.Created = nil
-		return res, fmt.Errorf("creating folder: %w", err)
+	for _, m := range made {
+		res.Created = append(res.Created, filepath.Join(wroot, m))
 	}
 	return res, nil
 }
@@ -358,7 +391,7 @@ func dependents(real string, isDir bool, p *RemovePolicy) []string {
 		}
 	}
 	for _, k := range p.Keep {
-		if k != "" && foldUnder(k, real) {
+		if k != "" && (foldUnder(k, real) || foldUnder(evalExistingSymlinks(filepath.Clean(k)), real)) {
 			out = append(out, "the download client saves into "+k)
 			break
 		}
@@ -367,14 +400,16 @@ func dependents(real string, isDir bool, p *RemovePolicy) []string {
 		if c.Path == "" {
 			continue
 		}
+		// A library manager may name the path through a link; real is resolved.
+		inside := foldUnder(c.Path, real) || foldUnder(evalExistingSymlinks(filepath.Clean(c.Path)), real)
 		if c.Folder {
 			// A library folder that is, or sits inside, what is removed.
-			if foldUnder(c.Path, real) {
+			if inside {
 				out = append(out, fmt.Sprintf("%s holds the library folder %s; remove it through %s", c.Owner, c.Path, c.Owner))
 			}
 			continue
 		}
-		if foldUnder(c.Path, real) {
+		if inside {
 			out = append(out, fmt.Sprintf("%s tracks the file %s; remove it through %s", c.Owner, c.Path, c.Owner))
 		}
 	}

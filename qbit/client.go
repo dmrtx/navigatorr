@@ -19,7 +19,10 @@ type Client struct {
 	password string
 	http     *http.Client
 	loggedIn bool
-	mu       sync.Mutex
+	// mu guards loggedIn only, and is never held across a request, so
+	// requests run side by side. loginMu lets one login run at a time.
+	mu      sync.Mutex
+	loginMu sync.Mutex
 }
 
 // NewClient creates a new qBittorrent client.
@@ -70,20 +73,30 @@ func (c *Client) login(ctx context.Context) error {
 		return fmt.Errorf("login failed (HTTP %d): no session cookie", resp.StatusCode)
 	}
 
+	c.mu.Lock()
 	c.loggedIn = true
+	c.mu.Unlock()
 	return nil
+}
+
+// ensureLogin logs in unless a session is already known, one login at a time.
+func (c *Client) ensureLogin(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+	c.mu.Lock()
+	ok := c.loggedIn
+	c.mu.Unlock()
+	if ok {
+		return nil
+	}
+	return c.login(ctx)
 }
 
 // do executes an HTTP request, auto-logging in on 403.
 func (c *Client) do(ctx context.Context, method, path string, form url.Values) ([]byte, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	for attempt := 0; attempt < 2; attempt++ {
-		if !c.loggedIn {
-			if err := c.login(ctx); err != nil {
-				return nil, err
-			}
+		if err := c.ensureLogin(ctx); err != nil {
+			return nil, err
 		}
 
 		var body io.Reader
@@ -107,7 +120,9 @@ func (c *Client) do(ctx context.Context, method, path string, form url.Values) (
 
 		if resp.StatusCode == 403 {
 			// Session expired, re-login
+			c.mu.Lock()
 			c.loggedIn = false
+			c.mu.Unlock()
 			io.ReadAll(resp.Body)
 			continue
 		}

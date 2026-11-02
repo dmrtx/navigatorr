@@ -141,12 +141,17 @@ func arrClaims(ctx context.Context, registry *arrservice.Registry, real string) 
 	for _, name := range registry.List() {
 		lower := strings.ToLower(name)
 		radarr, sonarr := strings.HasPrefix(lower, "radarr"), strings.HasPrefix(lower, "sonarr")
-		if !radarr && !sonarr {
-			continue
-		}
 		svc, err := registry.Get(name)
 		if err != nil {
 			return nil, err
+		}
+		if !radarr && !sonarr {
+			// Sonarr and Radarr speak /api/v3. A service on that API under
+			// another name could track library files this check would miss.
+			if svc.Config.APIVersion == "/api/v3" {
+				return nil, fmt.Errorf("service %q uses the Sonarr/Radarr API but is not named sonarr or radarr, so its tracked files cannot be checked", name)
+			}
+			continue
 		}
 		if radarr {
 			movies, truncated, err := arrCollection(ctx, svc, "/movie", arrListCap)

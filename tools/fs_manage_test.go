@@ -267,3 +267,80 @@ func TestLeftoverPolicyOnlyAsksTorrentsInScope(t *testing.T) {
 		t.Fatalf("without a scope every torrent is asked: %d, %v", fileCalls.Load(), err)
 	}
 }
+
+func TestFsRemoveRefusesAnUnknownLibraryManagerService(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "x"), 0o755)
+	old := time.Now().Add(-48 * time.Hour)
+	os.Chtimes(filepath.Join(root, "x"), old, old)
+	cfg := &config.Config{AllowDestructive: true}
+	cfg.Media.AllowedReadRoots = []string{root}
+	cfg.Media.AllowedWriteRoots = []string{root}
+	cfg.Services = map[string]config.ServiceConfig{
+		"movies4k": {URL: "http://127.0.0.1:1", APIVersion: "/api/v3", APIKey: "k", AuthMethod: "header"},
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	s := server.NewMCPServer("test", "0.0.0")
+	RegisterMaintenance(s, cfg, arrservice.NewRegistry(cfg), nil, st)
+	res := callTool(t, s, "fs_remove", map[string]any{"path": filepath.Join(root, "x"), "recursive": "true"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "not named sonarr or radarr") {
+		t.Fatalf("result = %s", resultText(t, res))
+	}
+}
+
+// A relative path in paths names the same folder as the absolute one, so the
+// torrent seeding there is still asked about its files.
+func TestLeftoverScopeWithARelativePath(t *testing.T) {
+	var fileCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth/login"):
+			w.Write([]byte("Ok."))
+		case strings.HasSuffix(r.URL.Path, "/torrents/info"):
+			wd, _ := os.Getwd()
+			json.NewEncoder(w).Encode([]map[string]any{{"hash": "h", "save_path": filepath.Join(wd, "dl"), "content_path": filepath.Join(wd, "dl")}})
+		case strings.HasSuffix(r.URL.Path, "/torrents/files"):
+			fileCalls.Add(1)
+			json.NewEncoder(w).Encode([]map[string]any{{"name": "seed.nfo"}})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer srv.Close()
+	p, err := leftoverPolicy(t.Context(), qbit.NewClient(srv.URL, "u", "p"), time.Minute, []string{"dl"})
+	if err != nil || fileCalls.Load() != 1 || len(p.Owned) != 1 {
+		t.Fatalf("calls = %d owned = %v err = %v", fileCalls.Load(), p.Owned, err)
+	}
+}
+
+// One failing file list ends the read with an error, and nothing is guessed.
+func TestLeftoverPolicyFailsOnOneBadFileList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/auth/login"):
+			w.Write([]byte("Ok."))
+		case strings.HasSuffix(r.URL.Path, "/torrents/info"):
+			var ts []map[string]any
+			for _, h := range []string{"a", "b", "c", "d"} {
+				ts = append(ts, map[string]any{"hash": h, "save_path": "/dl", "content_path": "/dl"})
+			}
+			json.NewEncoder(w).Encode(ts)
+		case strings.HasSuffix(r.URL.Path, "/torrents/files"):
+			if r.URL.Query().Get("hash") == "c" {
+				w.WriteHeader(500)
+				return
+			}
+			json.NewEncoder(w).Encode([]map[string]any{{"name": "x.mkv"}})
+		default:
+			json.NewEncoder(w).Encode(map[string]any{})
+		}
+	}))
+	defer srv.Close()
+	if _, err := leftoverPolicy(t.Context(), qbit.NewClient(srv.URL, "u", "p"), time.Minute, nil); err == nil {
+		t.Fatal("a failed file list must fail the policy")
+	}
+}

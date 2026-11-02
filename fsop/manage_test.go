@@ -243,3 +243,64 @@ func TestPathsOverlap(t *testing.T) {
 		t.Error("siblings with a shared prefix must not overlap")
 	}
 }
+
+func TestPathsOverlapResolvesRelativePaths(t *testing.T) {
+	r, root, _ := testResolver(t)
+	_ = r
+	wd, _ := os.Getwd()
+	defer os.Chdir(wd)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	// A relative path names the same folder as the absolute one.
+	if !PathsOverlap("Downloads", filepath.Join(root, "Downloads", "Seeding")) {
+		t.Error("a relative path must be compared as an absolute one")
+	}
+}
+
+func TestRemoveBlocksClaimsNamedThroughASymlink(t *testing.T) {
+	r, root := removeFixture(t)
+	// The library manager sees the same folder through a link.
+	viaLink := filepath.Join(t.TempDir(), "media")
+	if err := os.Symlink(root, viaLink); err != nil {
+		t.Skip("no symlinks here")
+	}
+	movie := filepath.Join(viaLink, "Movie (1997)")
+	tracked := filepath.Join(movie, "Movie (1997).mkv")
+	for name, claim := range map[string]Claim{
+		"file":   {Path: tracked, Owner: "radarr"},
+		"folder": {Path: movie, Owner: "radarr", Folder: true},
+	} {
+		plan, err := r.PlanRemove(filepath.Join(root, "Movie (1997)"), true, RemovePolicy{MinAge: DefaultRemoveAge, Tracked: []Claim{claim}})
+		if err != nil || len(plan.Blocked) == 0 {
+			t.Errorf("%s: a claim through a link must still block: %+v, %v", name, plan.Blocked, err)
+		}
+	}
+	plan, _ := r.PlanRemove(filepath.Join(root, "Movie (1997)", "Movie (1997).mkv"), false,
+		RemovePolicy{MinAge: DefaultRemoveAge, Tracked: []Claim{{Path: tracked, Owner: "radarr"}}})
+	if len(plan.Blocked) == 0 {
+		t.Error("the tracked file itself must be blocked")
+	}
+}
+
+func TestMkdirRefusesWhatProtectedNameRefuses(t *testing.T) {
+	r, root, _ := testResolver(t)
+	for _, name := range []string{"@other", "#other", "recovery", ".x"} {
+		if _, err := r.Mkdir(filepath.Join(root, name)); err == nil {
+			t.Errorf("%q must be refused", name)
+		}
+	}
+}
+
+func TestMkdirCannotFollowALinkOutOfTheRoot(t *testing.T) {
+	r, root, outside := testResolver(t)
+	os.MkdirAll(filepath.Join(root, "Movies"), 0o755)
+	// A link that appears where the next folder would be made.
+	os.Symlink(outside, filepath.Join(root, "Movies", "Swapped"))
+	if _, err := r.Mkdir(filepath.Join(root, "Movies", "Swapped", "inner")); err == nil {
+		t.Fatal("a link component must be refused")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("a folder was made outside the root: %v", entries)
+	}
+}
