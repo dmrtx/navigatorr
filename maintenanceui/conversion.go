@@ -92,10 +92,15 @@ func (f conversionFacts) conversionStatus(r operationRecord) string {
 			return "replacing"
 		}
 	}
+	// A job that made no new file replaced nothing, even when another job of
+	// the same file did.
+	if operationValue(r, "skip_transcode") == true || r.savings.CandidateBytes == nil {
+		return "no_result"
+	}
 	if f.replacedByAct[r.inst.ID] || f.replaced[operationSourceKey(r)] {
 		return "replaced"
 	}
-	if operationValue(r, "skip_transcode") == true || operationValue(r, "original_intact") != true || r.savings.CandidateBytes == nil {
+	if operationValue(r, "original_intact") != true {
 		return "no_result"
 	}
 	if operationValue(r, "candidate_removed") == true || f.archives[f.roots[r.inst.ID]] != "" && !f.active[f.roots[r.inst.ID]] {
@@ -132,7 +137,7 @@ func (f conversionFacts) resolvedBy(r operationRecord) map[string]any {
 			seen = true
 			continue
 		}
-		if !seen {
+		if !seen || f.conversionID(later) != "" && f.conversionID(later) == f.conversionID(r) {
 			continue
 		}
 		if status := f.conversionStatus(later); status == "replaced" || status == "ready_to_replace" || status == "replacing" {

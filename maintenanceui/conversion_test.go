@@ -86,3 +86,18 @@ func TestConversionOutcomeIsTheResultNotThePlan(t *testing.T) {
 		t.Fatal("a running job has no outcome")
 	}
 }
+
+// A later run of the same file that made no new file resolves nothing, even
+// after the file was replaced by another run.
+func TestNoResultRunDoesNotResolveAFailure(t *testing.T) {
+	failed := conversionRecord("t0", "transcode_media", store.ActionStatusFailed, "2026-11-01T10:00:00Z", map[string]any{"path": "/media/a.mkv"}, nil, nil)
+	nothing := conversionRecord("t1", "transcode_media", store.ActionStatusCompleted, "2026-11-01T11:00:00Z", map[string]any{"path": "/media/a.mkv"}, map[string]any{"skip_transcode": true}, nil)
+	f := conversionFactsOf(failed, nothing)
+	f.replaced[operationSourceKey(nothing)] = true
+	if got := f.conversionStatus(nothing); got != "no_result" {
+		t.Fatalf("status %q", got)
+	}
+	if by := f.resolvedBy(failed); by != nil {
+		t.Fatalf("resolved by %v", by)
+	}
+}
