@@ -26,6 +26,7 @@ export async function runReviewTab({ screenNames = Object.keys(screens), themes 
         page.on("pageerror", e => add("js-error", e.message));
         page.on("request", r => { if (r.method() === "POST" && r.url().includes("maintenance-queue")) posts.push(JSON.parse(r.postData())); });
         try {
+          state.reviewMoved = new Map();
           await page.goto(`${server.origin}/?view=review`);
           await page.waitForSelector(".review-row", { timeout: 10000 });
           const rows = await page.$$eval(".review-row", els => els.map(el => ({

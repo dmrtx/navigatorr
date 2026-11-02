@@ -9321,3 +9321,94 @@ test("a failed batch file's page offers Encode again and Change goal in its bar"
   assert.ok(said.some((s) => /Change goal/.test(s)), said.join("|"));
   for (const slot of [bar[0], bar[1]]) assert.equal(slot.children[0].disabled, false, saidBy(slot));
 });
+
+test("Review draws the query it fetched, drops older answers, says when the count is capped, and steps once per page", async () => {
+  const h = harness();
+  const answers = [];
+  h.context.answers = answers;
+  h.run('$("workspace").hidden=false;$("review-state").querySelector=()=>null;$("review-state").value="open";$("review-kind").value="";$("review-sort").value="priority";$("review-search").value="alpha";');
+  h.run('api=async url=>new Promise(r=>answers.push({url,r}));');
+  const first = h.run("loadReview(0)");
+  h.run('$("review-search").value="beta";');
+  const second = h.run("loadReview(0)");
+  // The newer answer arrives first; the older one is dropped.
+  answers[1].r({ items: [{ id: 2, title: "Beta" }], offset: 0, total: 120, total_capped: true, counts: {} });
+  await second;
+  answers[0].r({ items: [{ id: 1, title: "Alpha" }], offset: 0, total: 1, counts: {} });
+  await first;
+  assert.equal(h.run("state.review.query.q"), "beta");
+  // The inputs changed after the fetch: the page still says what it fetched.
+  h.run('$("review-search").value="gamma"; renderReview();');
+  assert.match(h.elements.get("review-summary").textContent, /^120 entries match \(more exist\)/);
+  // While a page loads, Previous and Next wait, and a second click does nothing.
+  h.run('$("review-search").value="beta";');
+  const next = h.elements.get("review-next");
+  assert.equal(next.disabled, false);
+  const step = h.run("stepReview(1)");
+  assert.equal(next.disabled, true);
+  h.run("stepReview(1)");
+  assert.equal(answers.length, 3, "one request for two clicks");
+  assert.match(answers[2].url, /offset=50/);
+  answers[2].r({ items: [{ id: 3, title: "Beta 51" }], offset: 50, total: 120, counts: {} });
+  await step;
+  assert.equal(h.run("state.reviewShown.offset"), 50);
+  // Acting on a row lowers the total and reads the page again.
+  h.run('api=async (url, body) => body ? ({counts:{}}) : new Promise(r=>answers.push({url,r})); notify=()=>{};');
+  await h.run('reviewAct({id:3,title:"Beta 51"},"processed")');
+  assert.equal(h.run("state.review.total"), 119);
+  assert.match(answers[3].url, /offset=0/, "the emptied last page falls back one page");
+});
+
+test("the goal estimate asks again for a query a newer one overtook, and retries a failed read later", async () => {
+  const h = harness();
+  const timers = [];
+  h.context.timers = timers;
+  h.run("setTimeout=(fn)=>{timers.push(fn);return timers.length}; clearTimeout=()=>{};");
+  h.context.asked = [];
+  h.run("readSource=async(path)=>{asked.push(path); throw new Error('offline')};");
+  h.run('requestGoalEstimate("a=1"); requestGoalEstimate("a=2");');
+  await timers[0](); await timers[1]();
+  assert.deepEqual(plain(h.context.asked), ["source-tracks?a=2"]);
+  assert.equal(h.run('goalEstimates.has("a=1")'), false, "the overtaken query is not marked");
+  h.run('requestGoalEstimate("a=1")');
+  await timers[2]();
+  assert.equal(h.context.asked.length, 2);
+  // A failed read waits, then is asked again.
+  h.run('requestGoalEstimate("a=2")');
+  assert.equal(timers.length, 3, "not retried at once");
+  h.run('goalEstimates.get("a=2").at -= goalEstimateRetryMs;requestGoalEstimate("a=2")');
+  assert.equal(timers.length, 4);
+});
+
+test("a new run is not forced over a job opened meanwhile, and leaving a goal form drops its way back", async () => {
+  const h = harness();
+  h.run('$("job-detail").open=true; state.detail="other"; refreshDetail=async()=>{}; writeNavigation=()=>{};');
+  await h.run('showAttempt("new-run","conv")');
+  assert.equal(h.run("state.detail"), "other");
+  await h.run('showAttempt("new-run","other")');
+  assert.equal(h.run("state.detail"), "new-run");
+  h.run('state.goalReturn={path:"/media/a.mkv",from:"conv"}; setFileStep("browse");');
+  assert.equal(h.run("state.goalReturn"), null);
+  h.run('state.followAfterGoal={batch:"b",key:"k",from:"conv"};');
+  h.elements.get("reconfigure-batch").listeners.get("close")();
+  assert.equal(h.run("state.followAfterGoal"), null);
+});
+
+test("a batch Replace waits from its first click, and comes back to its own state", async () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  h.context.scans = 0;
+  h.run('let release; batchItemsWhere=async()=>{scans++; await new Promise(r=>release=r); return [];}; notify=()=>{};');
+  const job = { id: "b", action_name: "transcode_batch", status: "completed", batch: { total: 2 } };
+  h.context.b = h.run(`batchReplaceButton(${JSON.stringify(job)}, 2, "jd-primary")`);
+  const first = h.run(`replaceBatchReady(${JSON.stringify(job)}, b)`);
+  h.run(`replaceBatchReady(${JSON.stringify(job)}, b)`);
+  assert.equal(h.context.scans, 1);
+  assert.equal(h.context.b.disabled, true);
+  h.run("release()");
+  await first;
+  assert.equal(h.context.b.disabled, false);
+  // A busy job keeps its batch Replace greyed after a Replace all elsewhere ends.
+  h.run('state.busyJobs.add("b"); restoreReplaceAll(b);');
+  assert.equal(h.context.b.disabled, true);
+});

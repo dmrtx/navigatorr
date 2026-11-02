@@ -1938,6 +1938,8 @@ $("inspect").addEventListener("click", () =>
 
 function setFileStep(step) {
   const previous = state.fileStep;
+  // Leaving the goal form drops the conversion it would have returned to.
+  if (step !== "configure") state.goalReturn = null;
   state.fileStep = step;
   $("library").dataset.fileStep = step;
   if (
@@ -2712,12 +2714,22 @@ function goalEstimateQuery(path, mode, kept, data, {height = 0, budgetPrefix = "
   }
   return params.toString();
 }
+// The server's estimate for the goal form's settings. Only the newest query
+// waits out the debounce; one it overtakes is not marked, so it is asked again
+// when the settings come back to it. A failed read is retried after a while.
+const goalEstimateRetryMs = 30000;
 function requestGoalEstimate(query, rerender) {
-  if (!query || goalEstimates.has(query)) return;
-  goalEstimates.set(query, {status: "loading"});
+  if (!query) return;
+  const known = goalEstimates.get(query);
+  if (known && !(known.status === "error" && Date.now() - known.at >= goalEstimateRetryMs)) return;
+  if (requestGoalEstimate.pending === query) return;
+  requestGoalEstimate.pending = query;
   clearTimeout(requestGoalEstimate.timer);
   requestGoalEstimate.timer = setTimeout(async () => {
-    let entry = {status: "error"};
+    if (requestGoalEstimate.pending !== query) return;
+    requestGoalEstimate.pending = "";
+    goalEstimates.set(query, {status: "loading"});
+    let entry = {status: "error", at: Date.now()};
     try {
       const data = await readSource(`source-tracks?${query}`, undefined, () => goalEstimates.has(query));
       if (data?.estimate?.streams) entry = {status: "ready", estimate: data.estimate};
@@ -3234,6 +3246,8 @@ function showSizeBudget(prefix, settings) {
   updateSizeBudgetFields(prefix);
 }
 async function buildAndSubmitJob(mode = "encode") {
+  // Taken now: leaving the form while it submits must not lose where to return.
+  const back = state.goalReturn;
   const batch = $("scope").value === "batch";
   const name = batch ? "transcode_batch" : "transcode_media";
   const simple = !$("technical").checked;
@@ -3352,7 +3366,6 @@ async function buildAndSubmitJob(mode = "encode") {
     await loadJobs();
     notify(`Queued: ${queued}. It is listed first below.`);
     // Change goal on a conversion comes back to that file's page, now showing the new run.
-    const back = state.goalReturn;
     state.goalReturn = null;
     if (back && !batch && r?.id && back.path === inputs.path) await openJob(r.id);
   } finally {
@@ -4876,6 +4889,8 @@ $("reconfigure-scope").addEventListener("change", () => safe(async () => {
     throw error;
   }
 }));
+// Closing the goal dialog, by any way, drops the file page it would have followed.
+$("reconfigure-batch").addEventListener("close", () => { state.followAfterGoal = null; });
 $("close-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
 $("dismiss-reconfigure").addEventListener("click", () => $("reconfigure-batch").close());
 $("reconfigure-profile").addEventListener("change", () => {
@@ -4885,6 +4900,8 @@ $("reconfigure-profile").addEventListener("change", () => {
 async function submitReconfiguredBatch() {
   const plan = state.reconfigurePlan;
   if (!plan || jobIsBusy(plan.id)) return;
+  // Taken now: the dialog closes on success, and closing drops the follow.
+  const follow = state.followAfterGoal;
   const revision = state.reconfigureRevision, auth = state.authRevision;
   const current = () => auth === state.authRevision && revision === state.reconfigureRevision && $("reconfigure-batch").open;
   if (!plan.mode && (!$("reconfigure-profile").value || (plan.requires_explicit_profile && $("reconfigure-profile").value === "same"))) throw new Error("Choose a profile to try again.");
@@ -4928,8 +4945,6 @@ async function submitReconfiguredBatch() {
     });
     if (auth !== state.authRevision) return;
     await Promise.all([loadJobs(), refreshOpenDetail()]);
-    const follow = state.followAfterGoal;
-    state.followAfterGoal = null;
     if (follow?.batch === plan.id) await followBatchFile(follow.from, follow.batch, follow.key);
     notify(plan.scope === "file" ? "Goal changed. The file encodes again once the batch reaches it." : "Goal changed in this batch. Active files finish first; replaced candidates are removed and their attempts stay in file history.");
   } finally {
@@ -5065,12 +5080,13 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
     const body = {id: job.id, key: state.rerunKeys.get(keyID)};
     if (withoutHardware) body.without_hardware = true;
     if (mode) body.mode = mode;
+    const opened = $("job-detail").open ? state.detail : "";
     const result = await api("rerun", body);
     state.rerunKeys.delete(keyID);
     state.jobsLoaded = 0;
     notify("Encoding this file again. The new run shows on its page.");
     await loadJobs();
-    if (result?.id) await showAttempt(result.id);
+    if (result?.id) await showAttempt(result.id, opened);
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -5096,12 +5112,13 @@ async function runNextStep(job, step) {
   if (jobIsBusy(job.id)) return;
   state.busyJobs.add(job.id);
   try {
+    const opened = $("job-detail").open ? state.detail : "";
     const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(keyID), step: step.id});
     state.rerunKeys.delete(keyID);
     state.jobsLoaded = 0;
     notify(`${step.label}: the new run shows on this file's page.`);
     await loadJobs();
-    if (result?.id) await showAttempt(result.id);
+    if (result?.id) await showAttempt(result.id, opened);
   } finally {
     state.busyJobs.delete(job.id);
   }
@@ -5246,6 +5263,7 @@ function applyLibraryContext(context, goal) {
 // size limit, its library and its languages); options.pickTracks opens the
 // track list.
 function openGoalForm(path, options = {}) {
+  state.goalReturn = null;
   if ($("job-detail").open) $("job-detail").close();
   $("path").value = path || "";
   $("scope").value = "file";
@@ -7444,60 +7462,89 @@ function renderReview() {
     if (o) o.textContent = n != null ? `${label} (${n})` : label;
   }
   const list = $("review-list");
-  const q = $("review-search")?.value?.trim() || "";
-  const view = reviewView(data, {q, sort: $("review-sort")?.value || "priority", offset: state.reviewOffset || 0});
-  state.reviewOffset = view.offset;
+  // Drawn from the query that was fetched, not from what the inputs say now.
+  const asked = data.query || {q: "", sort: "priority", offset: 0, state: $("review-state").value};
+  const q = asked.q || "";
+  const view = reviewView(data, {q, sort: asked.sort, offset: asked.offset || 0});
+  state.reviewShown = view;
   const items = view.items;
-  const pager = $("review-pager");
-  if (pager) {
-    pager.hidden = view.total <= reviewPage;
-    $("review-prev").disabled = view.offset === 0;
-    $("review-next").disabled = view.offset + items.length >= view.total;
-    $("review-page").textContent = items.length ? `${view.offset + 1}–${view.offset + items.length} of ${view.total}` : "";
-  }
+  renderReviewPager();
   if (!items.length) {
-    const word = q ? `Nothing matches “${q}”.` : {open: "Nothing waits for review.", processed: "Nothing marked processed yet.", dismissed: "Nothing dropped."}[$("review-state").value];
+    const word = q ? `Nothing matches “${q}”.` : {open: "Nothing waits for review.", processed: "Nothing marked processed yet.", dismissed: "Nothing dropped."}[asked.state];
     list.replaceChildren(node("li", word, "empty"));
     $("review-summary").textContent = "";
     return;
   }
   const sized = items.filter(i => i.size_bytes != null);
   const total = sized.reduce((sum, i) => sum + i.size_bytes, 0);
-  $("review-summary").textContent = `${view.total} ${view.total === 1 ? "entry" : "entries"}${q ? " match" : ""}${sized.length ? ` · ${bytes(total)} on this page` : ""}`;
+  // A paging server's truncated means more pages; only total_capped says the count stopped short.
+  const more = data.total_capped === true || (data.offset == null && data.truncated === true);
+  $("review-summary").textContent = `${view.total} ${view.total === 1 ? "entry" : "entries"}${q ? " match" : ""}${more ? " (more exist)" : ""}${sized.length ? ` · ${bytes(total)} on this page` : ""}`;
   list.replaceChildren(...items.map(reviewRow));
 }
-async function loadReview() {
+// Previous and Next wait while a page loads, and step from the page shown.
+function renderReviewPager() {
+  const pager = $("review-pager");
+  const view = state.reviewShown;
+  if (!pager || !view) return;
+  pager.hidden = view.total <= reviewPage;
+  $("review-prev").disabled = Boolean(state.reviewLoading) || view.offset === 0;
+  $("review-next").disabled = Boolean(state.reviewLoading) || view.offset + view.items.length >= view.total;
+  $("review-page").textContent = view.items.length ? `${view.offset + 1}–${view.offset + view.items.length} of ${view.total}` : "";
+}
+async function loadReview(offset = state.reviewShown?.offset || 0) {
   const auth = state.authRevision;
-  // Only the newest request may draw: a slow answer to an earlier filter must not replace it.
+  // Only the newest request may draw: a slow answer to an earlier query must not replace it.
   const request = state.reviewRequest = (state.reviewRequest || 0) + 1;
-  const query = new URLSearchParams({state: $("review-state").value});
-  if ($("review-kind").value) query.set("issue_type", $("review-kind").value);
-  const q = $("review-search")?.value?.trim() || "", sort = $("review-sort")?.value || "priority";
-  if (q) query.set("q", q);
-  if (sort !== "priority") query.set("sort", sort);
-  query.set("offset", String(state.reviewOffset || 0));
+  const asked = {state: $("review-state").value, kind: $("review-kind").value || "", q: $("review-search")?.value?.trim() || "", sort: $("review-sort")?.value || "priority", offset: Math.max(0, offset)};
+  const query = new URLSearchParams({state: asked.state});
+  if (asked.kind) query.set("issue_type", asked.kind);
+  if (asked.q) query.set("q", asked.q);
+  if (asked.sort !== "priority") query.set("sort", asked.sort);
+  query.set("offset", String(asked.offset));
   query.set("limit", String(reviewPage));
-  const data = await api(`maintenance-queue?${query}`);
-  if (auth !== state.authRevision || $("workspace").hidden || request !== state.reviewRequest) return;
-  state.review = data;
+  state.reviewLoading = true;
+  renderReviewPager();
+  try {
+    const data = await api(`maintenance-queue?${query}`);
+    if (auth !== state.authRevision || $("workspace").hidden || request !== state.reviewRequest) return;
+    state.review = {...data, query: asked};
+  } finally {
+    if (request === state.reviewRequest) state.reviewLoading = false;
+  }
   renderReview();
 }
 function restartReview() {
-  state.reviewOffset = 0;
-  return safe(loadReview);
+  return safe(() => loadReview(0));
+}
+function stepReview(direction) {
+  const view = state.reviewShown;
+  if (state.reviewLoading || !view) return;
+  const next = view.offset + direction * reviewPage;
+  if (next < 0 || next >= view.total) return;
+  return safe(() => loadReview(next));
 }
 async function reviewAct(item, action) {
   const done = await api("maintenance-queue", {id: item.id, action});
   if (done.counts) state.review.counts = done.counts;
+  const before = (state.review.items || []).length;
   state.review.items = (state.review.items || []).filter(i => i.id !== item.id);
+  if (Number.isFinite(state.review.total) && state.review.items.length < before) state.review.total = Math.max(0, state.review.total - 1);
   renderReview();
+  // A server page has one row fewer: read it again so the next row moves up,
+  // or the page before when this one is now empty.
+  if (state.review.offset != null) {
+    const shown = state.reviewShown;
+    const offset = shown && !shown.items.length && shown.offset > 0 ? Math.max(0, shown.offset - reviewPage) : shown?.offset || 0;
+    void safe(() => loadReview(offset));
+  }
   const undo = {run: async () => { await api("maintenance-queue", {id: item.id, action: "restore"}); await loadReview(); }};
   if (action === "processed") notify(`${item.title} marked as processed.`, {action: {label: "Undo", ...undo}});
   else if (action === "dismiss") notify(`${item.title} dropped. It will not be queued again.`, {action: {label: "Undo", ...undo}});
   else notify(`${item.title} is back in To do.`);
 }
 state.review = {items: [], counts: {}};
-$("refresh-review").addEventListener("click", () => safe(loadReview));
+$("refresh-review").addEventListener("click", () => safe(() => loadReview()));
 $("review-state").addEventListener("change", restartReview);
 $("review-kind").addEventListener("change", restartReview);
 $("review-sort").addEventListener("change", restartReview);
@@ -7505,8 +7552,8 @@ $("review-search").addEventListener("input", () => {
   clearTimeout(state.reviewSearchTimer);
   state.reviewSearchTimer = setTimeout(restartReview, 250);
 });
-$("review-prev").addEventListener("click", () => { state.reviewOffset = Math.max(0, (state.reviewOffset || 0) - reviewPage); return safe(loadReview); });
-$("review-next").addEventListener("click", () => { state.reviewOffset = (state.reviewOffset || 0) + reviewPage; return safe(loadReview); });
+$("review-prev").addEventListener("click", () => stepReview(-1));
+$("review-next").addEventListener("click", () => stepReview(1));
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
 $("storage-refresh").addEventListener("click", () => void safe(measureStorage));
 // A chosen filter lights the filter button, since the select itself is only an icon.
@@ -7841,8 +7888,12 @@ function batchOfJob(job) {
 }
 // Shows another run of the open conversion in place: no new page, no history
 // entry, so Back still leaves the conversion.
-async function showAttempt(id) {
+// `from` is the page that asked: when another job was opened meanwhile, the
+// new run is not forced over it.
+async function showAttempt(id, from) {
   if (!id) return;
+  const open = $("job-detail").open;
+  if (from !== undefined && (from ? state.detail !== from || !open : open)) return;
   if (!$("job-detail").open || !state.detail) return openJob(id);
   state.detail = String(id);
   writeNavigation(true);
@@ -7876,7 +7927,7 @@ async function followBatchFile(fromId, batch, itemKey) {
   try {
     const [item] = await batchItemsWhere(batch, item => item.item_key === itemKey);
     const next = item?.child_action_id;
-    if (next && next !== fromId && state.detail === fromId) await showAttempt(next);
+    if (next && next !== fromId && state.detail === fromId) await showAttempt(next, fromId);
   } catch {}
 }
 // Encode again or a server step for a file of a batch, from its own page.
@@ -8483,7 +8534,21 @@ function batchReadyCount(job) {
 }
 // Replace every ready file of the batch, on every page: the ids the server
 // lists, or else each page read in turn.
+// One batch Replace at a time, from its first click: the page scan and the
+// confirmation both happen while the button waits.
+let replaceBatchStarting = false;
 async function replaceBatchReady(job, control = null) {
+  if (replaceAllRunning || replaceBatchStarting) return null;
+  replaceBatchStarting = true;
+  if (control) control.disabled = true;
+  try {
+    return await replaceBatchReadyNow(job, control);
+  } finally {
+    replaceBatchStarting = false;
+    if (control && !replaceAllRunning) restoreReplaceAll(control);
+  }
+}
+async function replaceBatchReadyNow(job, control) {
   let ids = arrayOf(job.ready_item_ids).map(String).filter(Boolean);
   let sizes = {};
   if (!ids.length) {
@@ -8587,11 +8652,13 @@ function markReplaceAllButtons() {
   }
 }
 const replaceAllLabelOf = b => [...(b.children || [])].find(child => child.className === "jd-label") || null;
+// Back to the button's own state: a batch's Replace still waits for a busy
+// job or an offline server.
 function restoreReplaceAll(b) {
   if (!state.info?.allow_destructive) return;
-  b.disabled = false;
   delete b.dataset.unavailable;
-  b.title = "";
+  b.title = b.getAttribute?.("aria-label") || "";
+  b.disabled = b.dataset.jobControl ? jobControlDisabled(b) : false;
   const label = replaceAllLabelOf(b);
   if (label) label.textContent = b.dataset.replaceAllLabel || label.textContent;
 }
