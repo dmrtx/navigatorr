@@ -151,6 +151,18 @@ func main() {
 		<-retentionDone
 	}()
 
+	// The first Activity page after a start waited about 4 s for the action
+	// ledger to be read and projected (the in-memory snapshot starts cold).
+	// Read it now, in the background, so that wait is no one's.
+	go func() {
+		began := time.Now()
+		if _, err := mStore.ListMaintenanceActionSnapshot(); err != nil {
+			internal.Logf("maintenance snapshot warm-up: %v", err)
+			return
+		}
+		internal.Logf("maintenance snapshot warmed in %s", time.Since(began).Round(time.Millisecond))
+	}()
+
 	// Serve the HTTP ingest endpoint alongside stdio when configured.
 	var qHttpSrv *http.Server
 	if cfg.Queue.Listen != "" {
