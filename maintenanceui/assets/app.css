@@ -3518,6 +3518,138 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 }
 .queue-head #jobs-updated, .queue-head > .queue-toolbar { margin-bottom: 0; }
 
+/* ---- One conversion, one page ---- */
+/* The header: the file's name, and under it the folder it lives in as a link to Files. */
+.jd-titles { display: grid; flex: 1 1 auto; min-width: 0; gap: 1px; }
+.jd-titles h2 { min-width: 0; }
+.jd-file-link { display: block; justify-self: start; max-width: 100%; min-height: 28px; color: var(--muted); font-size: 12px; line-height: 28px; text-decoration: none; }
+.jd-file-link[href]:hover { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
+.jd-file-link[href]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+.jd-file-link[aria-disabled="true"] { cursor: default; }
+.jd-crumb { display: block; justify-self: start; max-width: 100%; min-height: 28px; color: var(--muted); font-size: 12px; line-height: 28px; text-decoration: none; }
+.jd-crumb:hover { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
+.jd-crumb:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+
+/* Hero: before → after, the shrink bar and the saving. */
+.cv-hero { display: grid; gap: 8px; }
+.cv-sizes { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0; font-variant-numeric: tabular-nums; }
+.cv-before { color: var(--muted); font: 500 17px/1.2 var(--heading); }
+.cv-arrow { color: var(--muted); font-size: 17px; }
+.cv-after { color: var(--forest); font: 600 30px/1.1 var(--heading); letter-spacing: -0.01em; }
+.cv-shrink { position: relative; height: 10px; overflow: hidden; border-radius: 5px; background: var(--track); }
+.cv-shrink > i { display: block; height: 100%; border-radius: inherit; background: var(--forest); }
+.cv-saved { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.cv-pct { padding: 1px 8px; border-radius: 999px; background: var(--success-wash); color: var(--forest); font-size: 13px; font-weight: 600; }
+.cv-pct.grew { background: var(--danger-wash); color: var(--danger); }
+.cv-original { margin: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+/* The replacement, as one state line. */
+.cv-replace { display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0; padding: 8px 10px; border-radius: 6px; background: var(--subtle); font-size: 13px; line-height: 1.3; }
+.cv-replace > span:last-child { min-width: 0; }
+.cv-replace-icon { flex: 0 0 auto; display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; font-size: 11px; font-weight: 700; line-height: 1; }
+.cv-ok { background: var(--success-wash); color: var(--forest); }
+.cv-ok .cv-replace-icon { background: var(--forest); color: var(--on-forest); }
+.cv-bad { background: var(--danger-wash); color: var(--danger); }
+.cv-bad .cv-replace-icon { background: var(--danger); color: var(--surface); }
+.cv-warn { color: var(--warning); }
+.cv-warn .cv-replace-icon { background: var(--warning); color: var(--surface); }
+.cv-muted { color: var(--muted); }
+.cv-run { color: var(--info); }
+.cv-run .cv-replace-icon { border: 2px solid currentColor; border-right-color: transparent; box-sizing: border-box; animation: pending-spin .8s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .cv-run .cv-replace-icon { animation: none; } }
+
+/* A failure: an icon and one line; the technical text is folded. */
+.cv-failure { display: grid; gap: 6px; padding: 10px 12px; border-radius: 6px; background: var(--subtle); }
+.cv-failure-head { display: flex; align-items: flex-start; gap: 8px; }
+.cv-failure-icon { flex: 0 0 auto; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-top: 1px; border-radius: 50%; background: var(--neutral-wash); color: var(--neutral); font-size: 12px; font-weight: 700; line-height: 1; }
+.cv-failure-failed { background: var(--danger-wash); }
+.cv-failure-failed .cv-failure-icon { background: var(--danger); color: var(--surface); }
+.cv-failure-text { margin: 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.cv-resolved { margin: 0 0 0 28px; font-size: 13px; }
+.cv-resolved { display: flex; align-items: center; gap: 4px; }
+.cv-resolved .job-title { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; min-height: 28px; padding: 0 6px; color: var(--forest); font-weight: 600; }
+.cv-failure .technical-reason { margin: 0 0 0 28px; }
+#job-detail .cv-failure .technical-reason > summary { gap: 6px; min-height: 32px; margin: 0; color: var(--muted); font-weight: 500; list-style: none; }
+.cv-failure .technical-reason > summary::-webkit-details-marker { display: none; }
+.cv-failure .technical-reason > summary::before { content: "\25B8"; }
+.cv-failure .technical-reason[open] > summary::before { content: "\25BE"; }
+.cv-failure .technical-reason p { margin: 2px 0 6px; color: var(--muted); }
+.cv-now { color: var(--ink); }
+
+/* Cards: streams and quality, compact. */
+.cv-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.cv-card-title { margin: 0; color: var(--muted); font: 600 11px/1.3 var(--body); letter-spacing: .06em; text-transform: uppercase; }
+.cv-stream-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.cv-stream { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: baseline; }
+.cv-stream-label { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.cv-stream-kind { flex: 0 0 auto; color: var(--muted); font-size: 12px; }
+.cv-stream-name { min-width: 0; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-fate { flex: 0 0 auto; padding: 0 6px; border-radius: 999px; font-size: 11px; font-weight: 600; line-height: 18px; }
+.cv-fate-converted { background: var(--info-wash); color: var(--info); }
+.cv-fate-copied { background: var(--neutral-wash); color: var(--neutral); }
+.cv-fate-dropped { background: var(--danger-wash); color: var(--danger); }
+.cv-stream-figures { display: contents; }
+.cv-stream-codec { grid-column: 1; grid-row: 2; min-width: 0; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-stream-size { grid-column: 2; grid-row: 1; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cv-stream-bar { grid-column: 1 / -1; position: relative; height: 4px; border-radius: 2px; background: transparent; }
+.cv-stream-bar > i { position: absolute; left: 0; top: 0; height: 100%; border-radius: inherit; }
+.cv-stream-bar > .cv-was { background: var(--track); }
+.cv-stream-bar > .cv-now { background: var(--forest); }
+.cv-stream.dropped .cv-stream-name { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+.cv-subtitles { display: flex; align-items: baseline; gap: 6px; margin: 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 13px; }
+
+.cv-gauge { display: grid; gap: 4px; }
+.cv-gauge-head { display: flex; align-items: baseline; gap: 6px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.cv-gauge-label { color: var(--muted); }
+.cv-gauge-value { font-size: 15px; }
+.cv-gauge-limit { margin-left: auto; font-size: 12px; }
+.cv-gauge-track { position: relative; height: 6px; border-radius: 3px; background: var(--track); }
+.cv-gauge-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: inherit; background: var(--forest); }
+.cv-gauge.miss .cv-gauge-fill { background: var(--warning); }
+.cv-gauge-tick { position: absolute; top: -3px; width: 2px; height: 12px; margin-left: -1px; border-radius: 1px; background: var(--ink); }
+.cv-settings { margin: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* Stable actions: two fixed slots and More; an unavailable one says why under it. */
+.jd-slot { display: grid; justify-items: stretch; gap: 2px; min-width: 0; }
+.jd-actions > .jd-slot-next { flex: 3 1 0; }
+.jd-actions > .jd-slot-change { flex: 2 1 0; }
+.jd-slot > .jd-primary, .jd-slot > .jd-secondary { width: 100%; min-width: 0; padding-inline: 12px; }
+.jd-slot > button[data-unavailable] { cursor: not-allowed; }
+.jd-reason { display: block; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.3; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.jd-actions { align-items: flex-start; }
+.jd-actions .more-actions { align-self: flex-start; }
+.jd-menu-item[data-unavailable] { cursor: not-allowed; color: var(--on-disabled); opacity: 1; }
+.jd-menu-item:has(.jd-reason) { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; padding-block: 4px; }
+.jd-menu-item .jd-reason { text-align: left; }
+
+/* A batch file that is ready: Replace beside its head, without opening it.
+   While any row offers it, every row keeps that column, so the chevrons line up. */
+.jd-file { display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; column-gap: 8px; }
+#batch-items-list:has(.jd-file-quick:not([hidden])) > .jd-file { grid-template-columns: minmax(0, 1fr) 76px; }
+.jd-file > .jd-file-head { grid-column: 1; grid-row: 1; }
+.jd-file > .jd-file-body { grid-column: 1 / -1; grid-row: 2; }
+.jd-file > .jd-file-quick { grid-column: 2; grid-row: 1; justify-self: end; min-height: var(--control-size); padding: 2px 12px; border-color: var(--forest); color: var(--forest); font-weight: 600; }
+.jd-file > .jd-file-quick:not(:disabled):hover { background: var(--forest-wash-strong); }
+.jd-replace-all:empty { display: none; }
+.jd-replace-all > button { padding-inline: 12px; }
+.jd-files-head { align-items: center; }
+
+/* Stats: one row that opens the ready list. */
+.stat-open { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); color: var(--ink); font-size: 14px; font-weight: 500; text-align: left; }
+.stat-open > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.stat-open-arrow { flex: 0 0 auto; color: var(--forest); font-size: 16px; }
+.stat-open:not(:disabled):hover { border-color: var(--forest); }
+.stat-open:disabled { opacity: 1; color: var(--muted); background: transparent; }
+.stat-open:disabled .stat-open-arrow { display: none; }
+#ready-dialog .stat-list { max-height: min(60vh, 520px); overflow: auto; }
+#ready-replace-all:empty { display: none; }
+#ready-replace-all { display: flex; justify-content: flex-start; margin: 4px 0 8px; }
+
+/* Icons sit tight against their label, wherever a label carries one. */
+.status-badge, .badge.status-badge { gap: 4px; }
+.job-heading .status-badge { justify-content: flex-start; padding-inline: 6px; }
+.job-row .more-menu button.action-icon { gap: 8px; }
+
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
    the file so it wins over the sizes each component, and the touch rules above,
@@ -3552,3 +3684,4 @@ button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button,
 .jd-actions .more-actions > summary { width: var(--control-size); height: var(--control-size); border-radius: 5px; font-size: 18px; }
 .jd-file-actions { gap: 6px; }
 .jd-file-actions > .jd-primary, .jd-file-actions > .jd-secondary { padding-inline: 10px; }
+

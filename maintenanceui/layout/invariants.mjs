@@ -17,7 +17,7 @@ export const budgets = {
   maxButtonHeight: 56,
   // One status block, one action bar: how many controls each may show.
   maxBarControls: 3,
-  maxRowControls: 1,    // a collapsed file row shows at most one button
+  maxRowControls: 2,    // a collapsed file row: its toggle, plus Replace when the file is ready
   // Text.
   minFont: 11,
   // Progress: every bar of a kind is exactly this tall.

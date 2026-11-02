@@ -735,13 +735,13 @@
               ><strong id="candidate-total">—</strong
               ><span id="candidate-count" class="metadata">Potential savings</span>
             </div>
-            <div>
+            <div id="estimated-tile">
               <span class="metadata">Estimated savings</span
               ><strong id="estimated-total">—</strong
               ><span class="metadata">From profiles and plans</span>
             </div>
           </div>
-          <section class="freed-days" aria-labelledby="freed-title">
+          <section id="freed-days" class="freed-days" aria-labelledby="freed-title">
             <div class="freed-head">
               <h3 id="freed-title">Freed per day</h3>
               <p id="freed-summary" class="metadata"></p>
@@ -755,11 +755,10 @@
             </section>
             <section aria-labelledby="ready-title">
               <h3 id="ready-title">Encoded, waiting for you</h3>
-              <p class="metadata ready-note">
-                Smaller copies that finished encoding. Each original stays
-                untouched until you choose Replace or Keep original.
-              </p>
-              <ul id="ready-list" class="stat-list"></ul>
+              <button id="ready-open" type="button" class="stat-open">
+                <span id="ready-open-label">No finished encodes are waiting</span>
+                <span class="stat-open-arrow" aria-hidden="true">→</span>
+              </button>
             </section>
           </div>
         </section>
@@ -1233,7 +1232,11 @@
     </dialog>
     <dialog id="job-detail" aria-labelledby="job-detail-title">
       <header class="jd-header" data-section="header">
-        <h2 id="job-detail-title" tabindex="-1" data-single-line>Job details</h2>
+        <div class="jd-titles">
+          <a id="detail-batch-link" class="jd-crumb" data-single-line hidden></a>
+          <h2 id="job-detail-title" tabindex="-1" data-single-line>Job details</h2>
+          <a id="detail-file-link" class="jd-file-link" data-single-line hidden></a>
+        </div>
         <button id="copy-detail-path" class="icon-button" type="button" aria-label="Copy file path" title="Copy file path" hidden>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V6a2 2 0 0 1 2-2h9" />
@@ -1255,6 +1258,7 @@
         <div class="jd-files-head">
           <h3 id="batch-items-title">Files</h3>
           <p id="batch-items-note" class="metadata" data-single-line></p>
+          <span id="batch-replace-all" class="jd-replace-all"></span>
           <button id="batch-items-outstanding" class="icon-button quiet" type="button" aria-pressed="false" aria-label="Show only files left to replace" title="Show only files left to replace" hidden>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" />
@@ -1308,6 +1312,14 @@
         <button id="reject-file-review" hidden>Keep original</button>
         <button id="approve-file-review" class="primary">Replace file</button>
       </div>
+    </dialog>
+    <dialog id="ready-dialog" aria-labelledby="ready-dialog-title">
+      <div class="dialog-heading">
+        <h2 id="ready-dialog-title">Encoded, waiting for you</h2>
+        <button id="close-ready" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <div id="ready-replace-all" class="ready-replace-all"></div>
+      <ul id="ready-list" class="stat-list"></ul>
     </dialog>
     <dialog id="workers-dialog" aria-labelledby="workers-title">
       <div class="dialog-heading">
