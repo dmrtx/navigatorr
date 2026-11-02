@@ -990,12 +990,18 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					job["resolved_by"] = resolved
 				}
 				// How it ended, drawn by the client: the job being opened only.
+				// The snapshot keeps only the keys the queue lists; the plan, the
+				// source probe and the quality ladder these are read from are in
+				// the job's full record.
 				if selectedID != "" {
-					if outcome := conversionOutcome(r); outcome != nil {
-						job["outcome"] = outcome
-					}
-					if streams := conversionStreams(r); streams != nil {
-						job["streams"] = streams
+					if inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(r.inst.ID); err == nil && inst != nil {
+						full := operationRecord{inst: *inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON), savings: r.savings}
+						if outcome := conversionOutcome(full); outcome != nil {
+							job["outcome"] = outcome
+						}
+						if streams := conversionStreams(full); streams != nil {
+							job["streams"] = streams
+						}
 					}
 				}
 			}
