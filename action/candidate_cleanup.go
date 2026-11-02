@@ -781,6 +781,7 @@ func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
 // originalBeingReplaced reports whether any replacement other than a finished
 // one names the file: while it runs, or after it failed halfway, the original
 // can be moved aside and put back, so another attempt's candidate must wait.
+// One cancelled before its approval never touched the original.
 // A store error counts as a replacement in progress.
 func (e *Engine) originalBeingReplaced(original string) bool {
 	needle := strings.Trim(toJSON(filepath.Base(filepath.Clean(original))), `"`)
@@ -791,7 +792,7 @@ func (e *Engine) originalBeingReplaced(original string) bool {
 			return true
 		}
 		for i := range rows {
-			if rows[i].Status != StatusCompleted && strings.Contains(rows[i].StateJSON, needle) {
+			if rows[i].Status != StatusCompleted && !promotionCancelledBeforeApproval(&rows[i]) && strings.Contains(rows[i].StateJSON, needle) {
 				return true
 			}
 		}

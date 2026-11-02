@@ -1321,3 +1321,36 @@ func TestDiscardLeftoverCandidateIgnoresReplacementCancelledBeforeApproval(t *te
 		})
 	}
 }
+
+// A replacement cancelled before its approval never touched the original, so
+// it must not make a vanished original look like one being rewritten. One that
+// had been approved still might have, and keeps the candidate listed as held.
+func TestLeftoverOriginalIgnoresReplacementCancelledBeforeApproval(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	season := filepath.Join(root, "Sample Show", "Season 1")
+	attempt := func(id, n string) (candidate, original string) {
+		original = filepath.Join(season, "sample-episode-"+n+".mkv")
+		writeCandidateFile(t, filepath.Join(season, "sample-episode-"+n+".replacement.mkv"), "a smaller replacement")
+		candidate = seedCandidateAttempt(t, st, id, StatusCompleted, original, "job-"+id, nil, map[string]any{"transcode_done": true, "original_size": 500})
+		writeCandidateFile(t, candidate, strings.Repeat("c", 40))
+		return candidate, original
+	}
+	_, never := attempt("never-approved", "01")
+	seedActionInstance(t, st, "cancelled-early", "promote_transcode_candidate", StatusCancelled, 1, "promote:custom-service:never-approved", map[string]any{"transcode_action_id": "never-approved"}, map[string]any{"promotion": map[string]any{"approved": false, "original_path": never}})
+	_, approvedOriginal := attempt("approved", "02")
+	seedActionInstance(t, st, "cancelled-late", "promote_transcode_candidate", StatusCancelled, 4, "promote:custom-service:approved", map[string]any{"transcode_action_id": "approved"}, map[string]any{"promotion": map[string]any{"approved": true, "original_path": approvedOriginal}})
+
+	page, err := e.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, item := range page.Items {
+		listed[item.ActionID] = true
+	}
+	if !listed["never-approved"] || listed["approved"] {
+		t.Fatalf("listing: %+v", page.Items)
+	}
+}
