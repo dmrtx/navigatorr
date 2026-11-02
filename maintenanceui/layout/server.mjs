@@ -62,7 +62,17 @@ function defaults(name, params, world) {
     }
     case "maintenance-queue": {
       const rows = world.review || reviewRows;
-      return { items: rows, total: rows.length, counts: { open: rows.length, processed: 3, dismissed: 1 } };
+      const counts = { open: rows.length, processed: 3, dismissed: 1 };
+      // An older server ignores search, sort and paging and answers everything.
+      if (world.reviewLegacy) return { items: rows, total: rows.length, counts };
+      const fold = text => String(text ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      const q = fold(params.get("q") || "");
+      const kind = params.get("issue_type") || "";
+      let found = rows.filter(r => (!kind || r.issue_type === kind) && (!q || fold([r.title, r.year, r.folder, r.notes].join(" ")).includes(q)));
+      const by = { size: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0), newest: (a, b) => String(b.created_at).localeCompare(String(a.created_at)), title: (a, b) => String(a.title).localeCompare(String(b.title)), priority: (a, b) => (b.priority || 0) - (a.priority || 0) }[params.get("sort") || "priority"];
+      if (by) found = [...found].sort(by);
+      const offset = Number(params.get("offset") || 0), limit = Number(params.get("limit") || 200);
+      return { items: found.slice(offset, offset + limit), total: found.length, counts };
     }
     case "logs": return { stdout_tail: "frame= 1024 fps=61 q=28.0 size=  2048kB", stderr_tail: "" };
     default: return {};

@@ -386,16 +386,17 @@
                 <div class="goal-card">
                   <label class="goal-head"><input type="radio" name="processing-mode" value="audio_only" /><span class="goal-text"><strong class="goal-title">Audio only</strong><small class="goal-desc">Use it to keep the picture exactly as it is, 4K and HDR included. The video is copied; only heavy audio becomes AAC and unkept tracks are removed. Any smaller result is kept.</small><em id="goal-note-audio_only" class="goal-note" hidden></em></span></label>
                 </div>
+                <div class="goal-card">
+                  <label class="goal-head"><input type="radio" name="processing-mode" value="x265_preserve" /><span class="goal-text"><strong class="goal-title">Keep quality, convert to x265</strong><small class="goal-desc">Re-encodes H.264, MPEG-2, MPEG-4 and AVI video to x265 at the same visual quality; files already in HEVC are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
+                </div>
                 <details id="more-goals" class="more-goals">
                   <summary>More goals</summary>
                   <div class="goal-card">
                     <label class="goal-head"><input type="radio" name="processing-mode" value="quality" /><span class="goal-text"><strong class="goal-title">Strict quality</strong><small class="goal-desc">Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
                   </div>
-                  <div class="goal-card">
-                    <label class="goal-head"><input type="radio" name="processing-mode" value="x265_preserve" /><span class="goal-text"><strong class="goal-title">Convert to HEVC</strong><small class="goal-desc">Use it to make a library HEVC-only; HEVC files are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
-                  </div>
                 </details>
               </fieldset>
+              <div id="goal-estimate" class="goal-estimate" role="status" aria-live="polite" hidden></div>
               <details id="keep-tracks" class="keep-tracks" hidden>
                 <summary><span class="keep-tracks-title">Audio and subtitles</span><span id="keep-tracks-summary" class="metadata"></span></summary>
                 <div class="keep-tracks-body">
@@ -1134,7 +1135,7 @@
     </dialog>
     <dialog id="reconfigure-batch" aria-labelledby="reconfigure-title">
       <div class="dialog-heading">
-        <h2 id="reconfigure-title">Change settings</h2>
+        <h2 id="reconfigure-title">Change goal</h2>
         <button id="close-reconfigure" type="button" class="icon-button" aria-label="Close reconfiguration">×</button>
       </div>
       <p id="reconfigure-summary" class="metadata"></p>
@@ -1142,60 +1143,85 @@
       <details id="reconfigure-selection" class="reconfigure-selection"><summary>Selected files</summary><div id="reconfigure-files" class="metadata"></div></details>
       <form id="reconfigure-form" hidden>
         <label id="reconfigure-scope-label">Apply to<select id="reconfigure-scope"></select></label>
-        <label id="reconfigure-mode-label" hidden>Goal<select id="reconfigure-mode"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to SDR · At least 30% smaller, HDR removed</option><option value="audio_only">Audio only · Video copied, only the audio converted</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Convert to HEVC · HEVC files are left alone</option></optgroup></select></label>
-        <div id="reconfigure-height-option" class="goal-option" hidden>
-          <span id="reconfigure-height-label" class="goal-option-label">Resolution</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-height-label">
-            <label><input type="radio" name="reconfigure-height" value="1080" checked /><span>1080p · smallest</span></label>
-            <label><input type="radio" name="reconfigure-height" value="2160" /><span>Keep 4K</span></label>
+        <fieldset id="reconfigure-mode-label" class="processing-goal reconfigure-goal" hidden>
+          <legend>Change goal</legend>
+          <select id="reconfigure-mode" hidden tabindex="-1" aria-hidden="true"><option value="size">Save space · At least 15% smaller</option><option value="compact">Shrink to SDR · At least 30% smaller, HDR removed</option><option value="audio_only">Audio only · Video copied, only the audio converted</option><optgroup label="More goals"><option value="quality">Strict quality · May save little</option><option value="x265_preserve">Keep quality, convert to x265 · HEVC files are left alone</option></optgroup></select>
+          <div class="goal-card">
+            <label class="goal-head"><input type="radio" name="reconfigure-goal" value="size" /><span class="goal-text"><strong class="goal-title">Save space</strong><small class="goal-desc">Same look and resolution, at least 15% smaller; heavy audio becomes AAC.</small></span></label>
+            <div class="goal-body">
+              <div id="reconfigure-hardware-option" class="goal-option" hidden>
+                <span id="reconfigure-engine-label" class="goal-option-label">Encoder</span>
+                <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-engine-label">
+                  <label><input type="radio" name="reconfigure-engine" value="fast" checked /><span>Fast · media engine</span></label>
+                  <label><input type="radio" name="reconfigure-engine" value="small" /><span>Smallest · x265</span></label>
+                </div>
+                <input id="reconfigure-hardware" type="checkbox" checked hidden />
+              </div>
+              <div id="reconfigure-budget-option" class="goal-option" hidden>
+                <span id="reconfigure-budget-label" class="goal-option-label">Size limit</span>
+                <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-budget-label">
+                  <label><input type="radio" name="reconfigure-budget-limit" value="" checked /><span>None</span></label>
+                  <label><input type="radio" name="reconfigure-budget-limit" value="siblings" /><span>Like other episodes</span></label>
+                  <label><input type="radio" name="reconfigure-budget-limit" value="fixed" /><span>Fixed</span></label>
+                </div>
+                <select id="reconfigure-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
+                <div id="reconfigure-budget-fixed" class="budget-fields" hidden>
+                  <span class="budget-prefix">At most</span>
+                  <label id="reconfigure-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
+                  <label id="reconfigure-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
+                  <select id="reconfigure-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
+                </div>
+                <div id="reconfigure-budget-multiplier-label" class="budget-fields" hidden>
+                  <span class="budget-prefix">Up to</span>
+                  <span class="stepper"><button id="reconfigure-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="reconfigure-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
+                  <span class="budget-prefix">× their bitrate</span>
+                </div>
+                <p id="reconfigure-budget-readout" class="goal-readout" role="status" hidden></p>
+                <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
+              </div>
+            </div>
           </div>
-        </div>
-        <div id="reconfigure-hdr-option" class="goal-option" hidden>
-          <span id="reconfigure-hdr-label" class="goal-option-label">HDR</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-hdr-label">
-            <label><input type="radio" name="reconfigure-hdr" value="sdr" checked /><span>Convert to SDR · smallest</span></label>
-            <label><input type="radio" name="reconfigure-hdr" value="keep" /><span>Keep HDR</span></label>
+          <div class="goal-card">
+            <label class="goal-head"><input type="radio" name="reconfigure-goal" value="compact" /><span class="goal-text"><strong class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">HDR, Dolby Vision or 4K you don't need. Converted to SDR, at least 30% smaller.</small></span></label>
+            <div class="goal-body">
+              <div id="reconfigure-height-option" class="goal-option" hidden>
+                <span id="reconfigure-height-label" class="goal-option-label">Resolution</span>
+                <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-height-label">
+                  <label><input type="radio" name="reconfigure-height" value="1080" checked /><span>1080p · smallest</span></label>
+                  <label><input type="radio" name="reconfigure-height" value="2160" /><span>Keep 4K</span></label>
+                </div>
+              </div>
+              <div id="reconfigure-hdr-option" class="goal-option" hidden>
+                <span id="reconfigure-hdr-label" class="goal-option-label">HDR</span>
+                <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-hdr-label">
+                  <label><input type="radio" name="reconfigure-hdr" value="sdr" checked /><span>Convert to SDR · smallest</span></label>
+                  <label><input type="radio" name="reconfigure-hdr" value="keep" /><span>Keep HDR</span></label>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-        <div id="reconfigure-hardware-option" class="goal-option" hidden>
-          <span id="reconfigure-engine-label" class="goal-option-label">Encoder</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-engine-label">
-            <label><input type="radio" name="reconfigure-engine" value="fast" checked /><span>Fast · media engine</span></label>
-            <label><input type="radio" name="reconfigure-engine" value="small" /><span>Smallest · x265</span></label>
+          <div class="goal-card">
+            <label class="goal-head"><input type="radio" name="reconfigure-goal" value="audio_only" /><span class="goal-text"><strong class="goal-title">Audio only</strong><small class="goal-desc">The video is copied; only heavy audio becomes AAC and unkept tracks are removed.</small></span></label>
           </div>
-          <input id="reconfigure-hardware" type="checkbox" checked hidden />
-        </div>
-        <div id="reconfigure-budget-option" class="goal-option" hidden>
-          <span id="reconfigure-budget-label" class="goal-option-label">Size limit</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="reconfigure-budget-label">
-            <label><input type="radio" name="reconfigure-budget-limit" value="" checked /><span>None</span></label>
-            <label><input type="radio" name="reconfigure-budget-limit" value="siblings" /><span>Like other episodes</span></label>
-            <label><input type="radio" name="reconfigure-budget-limit" value="fixed" /><span>Fixed</span></label>
+          <div class="goal-card">
+            <label class="goal-head"><input type="radio" name="reconfigure-goal" value="x265_preserve" /><span class="goal-text"><strong class="goal-title">Keep quality, convert to x265</strong><small class="goal-desc">H.264, MPEG and AVI video re-encoded to x265 at the same visual quality; HEVC is left alone.</small></span></label>
           </div>
-          <select id="reconfigure-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
-          <div id="reconfigure-budget-fixed" class="budget-fields" hidden>
-            <span class="budget-prefix">At most</span>
-            <label id="reconfigure-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="reconfigure-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
-            <label id="reconfigure-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="reconfigure-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
-            <select id="reconfigure-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
+          <div class="goal-card">
+            <label class="goal-head"><input type="radio" name="reconfigure-goal" value="quality" /><span class="goal-text"><strong class="goal-title">Strict quality</strong><small class="goal-desc">Picture quality before space; may save little.</small></span></label>
           </div>
-          <div id="reconfigure-budget-multiplier-label" class="budget-fields" hidden>
-            <span class="budget-prefix">Up to</span>
-            <span class="stepper"><button id="reconfigure-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="reconfigure-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="reconfigure-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
-            <span class="budget-prefix">× their bitrate</span>
-          </div>
-          <p id="reconfigure-budget-readout" class="goal-readout" role="status" hidden></p>
-          <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
-        </div>
-        <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
-        <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
-        <p id="reconfigure-current-profiles" class="metadata"></p>
-        <div id="reconfigure-profile-info" class="profile-guidance" hidden></div>
-        <details id="reconfigure-limits" class="reconfigure-limits"><summary>Savings and size limits</summary><div class="form-grid">
-          <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
-          <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
-        </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></details>
-        <div id="reconfigure-preview" class="stream-preview" hidden></div>
+        </fieldset>
+        <div id="reconfigure-estimate" class="goal-estimate" role="status" aria-live="polite" hidden></div>
+        <details id="reconfigure-advanced" class="reconfigure-advanced"><summary>Advanced</summary>
+              <label>Profile<select id="reconfigure-profile" required aria-describedby="reconfigure-profile-note"></select></label>
+              <p id="reconfigure-profile-note" class="profile-guidance" hidden></p>
+              <p id="reconfigure-current-profiles" class="metadata"></p>
+              <div id="reconfigure-profile-info" class="profile-guidance" hidden></div>
+              <div id="reconfigure-limits" class="reconfigure-limits"><div class="form-grid">
+                <label>Minimum savings (%)<input id="reconfigure-savings" type="number" min="0.1" max="100" step="any" placeholder="Default" /></label>
+                <label>Maximum output growth (%)<input id="reconfigure-growth" type="number" min="0" max="1000" step="any" placeholder="Default" /></label>
+              </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></div>
+        </details>
+        <details id="reconfigure-preview-box" class="stream-preview-box"><summary>Every stream</summary><div id="reconfigure-preview" class="stream-preview" hidden></div></details>
         <p id="reconfigure-settings" class="muted"></p>
         <div class="submit-actions"><button id="dismiss-reconfigure" type="button">Back</button><button id="submit-reconfigure" type="submit" class="primary">Apply settings</button></div>
       </form>
