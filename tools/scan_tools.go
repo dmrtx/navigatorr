@@ -280,18 +280,34 @@ func registerFsTools(s *server.MCPServer, d *Deps) {
 	// fs_safe_move — both ends inside write roots.
 	s.AddTool(
 		mcp.NewTool("fs_safe_move",
-			mcp.WithDescription("Move/rename a file where both source and destination stay inside allowed_write_roots. Refuses to overwrite."),
+			mcp.WithDescription("Move/rename a file where both source and destination stay inside allowed_write_roots. Refuses to overwrite. Creates missing destination folders. Across filesystems (separate mounts) it copies, verifies by size and SHA-256, then removes the source."),
 			mcp.WithString("source", mcp.Required(), mcp.Description("Source path")),
 			mcp.WithString("destination", mcp.Required(), mcp.Description("Destination path")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
 			src, dst := argString(args, "source", ""), argString(args, "destination", "")
-			if err := d.Fs.Move(src, dst); err != nil {
+			res, err := d.Fs.Move(ctx, src, dst)
+			if err != nil {
+				if res.Method != "" {
+					// The copy is in place but the source stayed: record it.
+					detail, _ := json.Marshal(map[string]any{"destination": dst, "method": res.Method,
+						"bytes": res.Bytes, "sha256": res.SHA256, "created_dirs": res.CreatedDirs, "error": err.Error()})
+					_ = d.Store.LogAction("fs_move", "", src, string(detail), "copied, source kept")
+				}
 				return toolErr("%v", err), nil
 			}
-			_ = d.Store.LogAction("fs_move", "", src, fmt.Sprintf(`{"destination":%q}`, dst), "moved")
-			return mcp.NewToolResultText("Moved " + src + " -> " + dst), nil
+			detail, _ := json.Marshal(map[string]any{"destination": dst, "method": res.Method,
+				"bytes": res.Bytes, "sha256": res.SHA256, "created_dirs": res.CreatedDirs})
+			_ = d.Store.LogAction("fs_move", "", src, string(detail), "moved ("+res.Method+")")
+			msg := "Moved " + src + " -> " + dst + " (" + res.Method + ")"
+			if res.Method == "copy" {
+				msg += fmt.Sprintf(": copied across filesystems, %d bytes verified by SHA-256 %s, then the source was removed", res.Bytes, res.SHA256)
+			}
+			if len(res.CreatedDirs) > 0 {
+				msg += "; created folders: " + strings.Join(res.CreatedDirs, ", ")
+			}
+			return mcp.NewToolResultText(msg), nil
 		},
 	)
 	// fs_safe_delete — only for a validated job in replacing state.
