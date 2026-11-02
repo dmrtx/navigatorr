@@ -154,7 +154,10 @@ func main() {
 	// The first Activity page after a start waited about 4 s for the action
 	// ledger to be read and projected (the in-memory snapshot starts cold).
 	// Read it now, in the background, so that wait is no one's.
+	warmDone := make(chan struct{})
+	defer func() { <-warmDone }() // registered after the store's close, so it runs first
 	go func() {
+		defer close(warmDone)
 		began := time.Now()
 		if _, err := mStore.ListMaintenanceActionSnapshot(); err != nil {
 			internal.Logf("maintenance snapshot warm-up: %v", err)
