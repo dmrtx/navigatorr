@@ -8419,6 +8419,31 @@ test("Stats names waiting encodes, says how long they waited and decides each on
   assert.doesNotMatch(markup, /Ready to replace/);
 });
 
+test("Stats offers to delete the copies that archived jobs still hold", async () => {
+  const h = commandDom([]);
+  const doc = h.document;
+  for (const id of ["freed-chart", "freed-summary", "candidate-count", "recent-replaced", "ready-list", "saved-total", "saved-count", "candidate-total", "estimated-total"]) {
+    const el = new FakeNode(doc, id.endsWith("list") || id === "recent-replaced" ? "ul" : "div");
+    el.id = id;
+    doc.body.append(el);
+    h.elements.set(id, el);
+  }
+  h.context.data = {savings: {archived_candidate_count: 2, archived_candidate_bytes: 3 * 1024 ** 3}, daily: [], history: [], ready: [], archived_ready_ids: ["a1", "a2"]};
+  h.run("state.info={allow_destructive:true};renderSavings(data)");
+  const list = h.elements.get("ready-list");
+  assert.equal(list.children[0].textContent, "No finished encodes are waiting.");
+  const row = list.children[1];
+  assert.match(row.children[0].textContent, /^2 archived jobs still hold smaller copies \(3\.22 GB\)\.$/);
+  const calls = [];
+  h.context.record = (...c) => calls.push(c);
+  h.run('api=async(path,body)=>{record(path,body);return {removed:2,kept:0}};loadJobs=async()=>{};notify=(t)=>record("notify",t);reviewAction=async(o)=>{record("ask",o.confirmLabel);return true};');
+  await clickAndSettle(row.children[1]);
+  assert.equal(JSON.stringify(calls.slice(0, 3)), JSON.stringify([["ask", "Delete copies"], ["discard-archived-candidates", {ids: ["a1", "a2"]}], ["notify", "Deleted 2 copies."]]));
+  // Without permission to remove files the line only reports.
+  h.run("state.info={allow_destructive:false};renderSavings(data)");
+  assert.equal(h.elements.get("ready-list").children[1].children.length, 1);
+});
+
 test("the masthead and the tab bar stay pinned while the page scrolls, except on phones", () => {
   const wide = /@media \(min-width: 601px\) \{([\s\S]*?)\n\}\n/.exec(css.slice(css.indexOf(".tabs {")))[1];
   assert.match(wide, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;\s*height: var\(--masthead-h\);\s*background: var\(--paper\);/);

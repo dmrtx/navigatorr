@@ -276,6 +276,18 @@ func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*Acti
 // candidate, asks the worker when one might still write, and never touches the
 // original. A candidate that is already gone counts as kept.
 func (e *Engine) KeepOriginal(ctx context.Context, id string) (*ActionResult, error) {
+	return e.keepOriginal(ctx, id, false)
+}
+
+// KeepOriginalOfArchived is KeepOriginal for a file the owner archived, which
+// includes the files of an archived batch: archiving is the decision to drop
+// them. The caller has checked that the workflow is archived and not running.
+// A batch whose replacement review still references the candidate keeps it.
+func (e *Engine) KeepOriginalOfArchived(ctx context.Context, id string) (*ActionResult, error) {
+	return e.keepOriginal(ctx, id, true)
+}
+
+func (e *Engine) keepOriginal(ctx context.Context, id string, archived bool) (*ActionResult, error) {
 	if !e.AllowDestructive() {
 		return nil, fmt.Errorf("allow_destructive must be enabled to remove a candidate")
 	}
@@ -298,7 +310,7 @@ func (e *Engine) KeepOriginal(ctx context.Context, id string) (*ActionResult, er
 		return nil, notAttempt
 	}
 	ec := parseExecutionContext(inst, e)
-	if getString(ec.Inputs, "parent_action_id") != "" {
+	if getString(ec.Inputs, "parent_action_id") != "" && !archived {
 		return nil, fmt.Errorf("this file belongs to a batch; keep its original from the batch")
 	}
 	if getString(ec.State, "candidate_path") == "" {

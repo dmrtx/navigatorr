@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -451,4 +452,29 @@ func TestBatchPromotionPlanReadMatchesWhatApprovalChecks(t *testing.T) {
 	if plan, err := h.engine.BatchPromotionPlan(context.Background(), id); err != nil || plan != nil {
 		t.Fatalf("a rejected plan is gone: %+v %v", plan, err)
 	}
+}
+
+func TestBatchReviewSkipsACandidateThatWasDropped(t *testing.T) {
+	h := newPromotionHarness(t)
+	id := seedFinishedReviewBatch(t, h, "filesystem")
+	child, _ := h.st.GetActionInstance("source-transcode")
+	out := decodeOutputs(t, child.OutputsJSON)
+	out[candidateRemovedKey] = true
+	child.OutputsJSON = toJSON(out)
+	if err := h.st.UpdateActionInstance(*child); err != nil {
+		t.Fatal(err)
+	}
+	review, err := h.engine.BatchCandidates(context.Background(), id)
+	if err != nil || len(review.Members) != 0 || review.Excluded != 1 {
+		t.Fatalf("a dropped copy must not be offered for replacement: %+v %v", review, err)
+	}
+}
+
+func decodeOutputs(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	out := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }

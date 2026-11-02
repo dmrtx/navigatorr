@@ -2,13 +2,13 @@ package maintenanceui
 
 import "net/http"
 
-// workflowMemberIDs returns the root of a queue workflow and every action in
-// it, or "" when the id belongs to no workflow.
-func (s *Server) workflowMemberIDs(id string) (string, []string, error) {
+// workflowIndex reads every maintenance action once and groups them into queue
+// workflows: the root of each action and the members of each root.
+func (s *Server) workflowIndex() (map[string]string, map[string][]operationRecord, error) {
 	st := s.engine.Deps().Store
 	instances, err := st.ListMaintenanceActionSnapshot()
 	if err != nil {
-		return "", nil, err
+		return nil, nil, err
 	}
 	records := make([]operationRecord, 0, len(instances))
 	byID := map[string]operationRecord{}
@@ -18,6 +18,20 @@ func (s *Server) workflowMemberIDs(id string) (string, []string, error) {
 		byID[inst.ID] = r
 	}
 	roots, _, members := queueWorkflows(records, byID, queueReplacementLinks(records))
+	return roots, members, nil
+}
+
+// workflowMemberIDs returns the root of a queue workflow and every action in
+// it, or "" when the id belongs to no workflow.
+func (s *Server) workflowMemberIDs(id string) (string, []string, error) {
+	roots, members, err := s.workflowIndex()
+	if err != nil {
+		return "", nil, err
+	}
+	return memberIDsOf(roots, members, id)
+}
+
+func memberIDsOf(roots map[string]string, members map[string][]operationRecord, id string) (string, []string, error) {
 	root := roots[id]
 	if root == "" {
 		return "", nil, nil

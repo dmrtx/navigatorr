@@ -93,3 +93,35 @@ func TestKeepOriginalNeedsAuthenticationAnIDAndPermission(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestArchivedEncodesDoNotWaitButTheirCopiesCanBeDeleted(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for _, id := range []string{"keep", "gone"} {
+		media := map[string]any{"original": map[string]any{"size_bytes": 1000}, "result": map[string]any{"size_bytes": 400}, "original_intact": true, "original_sha256": id}
+		seedOperation(t, st, "cand-"+id, "transcode_media", "completed", map[string]any{"path": "/media/" + id + ".mkv"}, media, nil)
+	}
+	if err := st.SetMaintenanceArchived("cand-gone", []string{"cand-gone"}, true); err != nil {
+		t.Fatal(err)
+	}
+	w := request(h, "GET", "/api/maintenance/operations?limit=1", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if page.Savings.CandidateCount != 1 || len(page.Ready) != 1 || page.Ready[0].ActionID != "cand-keep" {
+		t.Fatalf("the archived encode must not wait: %+v", page.Ready)
+	}
+	if page.Savings.ArchivedCandidateCount != 1 || page.Savings.ArchivedCandidateBytes != 400 || len(page.ArchivedReady) != 1 || page.ArchivedReady[0] != "cand-gone" {
+		t.Fatalf("archived copy not reported: %+v %v", page.Savings, page.ArchivedReady)
+	}
+	if w := request(h, "POST", "/api/maintenance/discard-archived-candidates", `{"ids":["cand-gone"]}`, false); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "POST", "/api/maintenance/discard-archived-candidates", `{"ids":[]}`, true); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "POST", "/api/maintenance/discard-archived-candidates", `{"ids":["cand-gone"]}`, true); w.Code != 403 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

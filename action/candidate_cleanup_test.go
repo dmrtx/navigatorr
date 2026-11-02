@@ -1463,3 +1463,30 @@ func TestKeepOriginalRecordsAFailedRemovalAsKept(t *testing.T) {
 		t.Fatalf("link target touched: %v", err)
 	}
 }
+
+func TestKeepOriginalOfArchivedAlsoDropsABatchFile(t *testing.T) {
+	root := candidateRoot(t)
+	st := setupTestStore(t)
+	e := discardEngine(t, st, root)
+	original := filepath.Join(root, "Sample Show", "Season 1", "sample-episode-01.mkv")
+	writeCandidateFile(t, original, "original")
+	seedActionInstance(t, st, "batch", "transcode_batch", StatusCancelled, 2, "", map[string]any{}, map[string]any{})
+	candidate := seedCandidateAttempt(t, st, "attempt", StatusCompleted, original, "job-attempt", map[string]any{"parent_action_id": "batch"}, map[string]any{"transcode_done": true})
+	writeCandidateFile(t, candidate, strings.Repeat("c", 30))
+	// A file's own keep stays with its batch; an archived one is dropped.
+	if _, err := e.KeepOriginal(context.Background(), "attempt"); err == nil || !strings.Contains(err.Error(), "belongs to a batch") {
+		t.Fatalf("expected the batch refusal, got %v", err)
+	}
+	if _, err := e.KeepOriginalOfArchived(context.Background(), "attempt"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(candidate); !os.IsNotExist(err) {
+		t.Fatalf("candidate kept: %v", err)
+	}
+	if _, err := os.Stat(original); err != nil {
+		t.Fatalf("original touched: %v", err)
+	}
+	if !getBool(parseExecutionContext(mustInstance(t, st, "attempt"), e).State, candidateRemovedKey) {
+		t.Fatal("removal not recorded")
+	}
+}

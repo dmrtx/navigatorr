@@ -55,21 +55,29 @@ type operationsPage struct {
 	// status filter or page, so none can be missed in a long history.
 	DecisionCount int `json:"decision_count"`
 	Savings       struct {
-		RealizedBytes         int64  `json:"realized_bytes"`
-		CompletedReplacements int    `json:"completed_replacements"`
-		CandidateBytes        int64  `json:"candidate_bytes"`
-		CandidateSavedBytes   int64  `json:"candidate_saved_bytes"`
-		CandidateCount        int    `json:"candidate_count"`
-		EstimatedBytes        int64  `json:"estimated_bytes"`
-		EstimatedSavedBytes   int64  `json:"estimated_saved_bytes"`
-		Measurement           string `json:"measurement"`
+		RealizedBytes         int64 `json:"realized_bytes"`
+		CompletedReplacements int   `json:"completed_replacements"`
+		CandidateBytes        int64 `json:"candidate_bytes"`
+		CandidateSavedBytes   int64 `json:"candidate_saved_bytes"`
+		CandidateCount        int   `json:"candidate_count"`
+		// Smaller copies of archived jobs: archiving is a decision to drop
+		// them, so they are not "waiting", but they still use disk until
+		// they are deleted.
+		ArchivedCandidateCount int    `json:"archived_candidate_count"`
+		ArchivedCandidateBytes int64  `json:"archived_candidate_bytes"`
+		EstimatedBytes         int64  `json:"estimated_bytes"`
+		EstimatedSavedBytes    int64  `json:"estimated_saved_bytes"`
+		Measurement            string `json:"measurement"`
 	} `json:"savings"`
 	History []savingsReplacement `json:"history"`
 	// Daily is the space freed per local day over the last month; Ready lists
 	// the largest finished encodes still waiting to replace their originals.
-	Daily      []savingsDay       `json:"daily"`
-	Ready      []savingsCandidate `json:"ready"`
-	ObservedAt string             `json:"observed_at"`
+	Daily []savingsDay       `json:"daily"`
+	Ready []savingsCandidate `json:"ready"`
+	// ArchivedReady names the archived jobs whose smaller copy is still on
+	// disk (up to savingsReadyListed), to be deleted together.
+	ArchivedReady []string `json:"archived_ready_ids"`
+	ObservedAt    string   `json:"observed_at"`
 }
 
 type operationRecord struct {
@@ -628,7 +636,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	timing.since("snapshot", began)
 	began = time.Now()
 	now := time.Now().UTC()
-	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ObservedAt: now.Format(time.RFC3339Nano)}
+	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ArchivedReady: []string{}, ObservedAt: now.Format(time.RFC3339Nano)}
 	page.Savings.Measurement = "verified_content_bytes_after_replacement_cleanup; not filesystem free space"
 	records := make([]operationRecord, 0, len(instances))
 	for _, inst := range instances {
@@ -720,11 +728,21 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	}
 	page.Daily = dailySavings(page.History, now, clientZone(req))
 	ready := []savingsCandidate{}
-	seenCandidates, seenEstimates := map[string]bool{}, map[string]bool{}
+	seenCandidates, seenEstimates, seenArchivedCandidates := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
 	for _, r := range records {
 		key := operationSourceKey(r)
-		if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] {
+		if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] && archives[roots[r.inst.ID]] != "" && !activeWorkflows[roots[r.inst.ID]] {
+			// An archived job is a discarded one: it is not waiting for a decision.
+			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateBytes != nil && !seenArchivedCandidates[key] {
+				seenArchivedCandidates[key] = true
+				page.Savings.ArchivedCandidateCount++
+				page.Savings.ArchivedCandidateBytes += *r.savings.CandidateBytes
+				if len(page.ArchivedReady) < savingsReadyListed {
+					page.ArchivedReady = append(page.ArchivedReady, r.inst.ID)
+				}
+			}
+		} else if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] {
 			if r.inst.Status == store.ActionStatusCompleted && r.outputs["original_intact"] == true && operationValue(r, "candidate_removed") != true && r.savings.CandidateSavedBytes != nil && !seenCandidates[key] {
 				page.Savings.CandidateBytes += *r.savings.CandidateSavedBytes
 				seenCandidates[key] = true
