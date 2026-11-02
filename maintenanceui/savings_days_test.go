@@ -61,11 +61,14 @@ func TestOperationsListsTheLargestReadyCandidatesAndDays(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if page.Savings.CandidateCount != 10 || len(page.Ready) != savingsReady {
+	if page.Savings.CandidateCount != 10 || len(page.Ready) != 10 {
 		t.Fatalf("ready: count %d, listed %d", page.Savings.CandidateCount, len(page.Ready))
 	}
 	if page.Ready[0].SavedBytes != 500 || page.Ready[0].ActionID != "cand-j" || page.Ready[0].SourcePath != "/media/j.mkv" || page.Ready[0].SavedBytes < page.Ready[1].SavedBytes {
 		t.Fatalf("largest first: %+v", page.Ready)
+	}
+	if page.Ready[0].ReadySince == "" || page.Ready[0].InBatch {
+		t.Fatalf("waiting since and batch membership: %+v", page.Ready[0])
 	}
 	var freed, count int64
 	for _, d := range page.Daily {
@@ -74,5 +77,19 @@ func TestOperationsListsTheLargestReadyCandidatesAndDays(t *testing.T) {
 	}
 	if len(page.Daily) != savingsDays || freed != 600 || count != 1 || page.Daily[len(page.Daily)-1].CumulativeBytes != 600 {
 		t.Fatalf("daily: %+v", page.Daily)
+	}
+}
+
+func TestKeepOriginalNeedsAuthenticationAnIDAndPermission(t *testing.T) {
+	_, h := testUI(t)
+	if w := request(h, "POST", "/api/maintenance/keep-original", `{"id":"cand"}`, false); w.Code != 401 {
+		t.Fatal(w.Code)
+	}
+	if w := request(h, "POST", "/api/maintenance/keep-original", `{}`, true); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	// Dropping a file needs the server to allow it, as removing leftovers does.
+	if w := request(h, "POST", "/api/maintenance/keep-original", `{"id":"cand"}`, true); w.Code != 403 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }

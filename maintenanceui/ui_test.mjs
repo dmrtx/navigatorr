@@ -8370,6 +8370,55 @@ test("Stats charts what was freed per day and links the recent and waiting files
   assert.match(h.elements.get("recent-replaced").children[0].textContent, /Nothing has been replaced yet/);
 });
 
+test("Stats names waiting encodes, says how long they waited and decides each one from its row", async () => {
+  const h = commandDom([]);
+  const doc = h.document;
+  for (const id of ["freed-chart", "freed-summary", "candidate-count", "recent-replaced", "ready-list", "saved-total", "saved-count", "candidate-total", "estimated-total"]) {
+    const el = new FakeNode(doc, id.endsWith("list") || id === "recent-replaced" ? "ul" : "div");
+    el.id = id;
+    doc.body.append(el);
+    h.elements.set(id, el);
+  }
+  const GB = 1024 ** 3;
+  const since = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+  h.context.data = {
+    savings: {candidate_saved_bytes: 10 * GB, candidate_count: 10},
+    daily: [], history: [],
+    ready: Array.from({length: 10}, (_, i) => ({action_id: `c${i}`, source_path: `/m/F${i}.mkv`, source_bytes: 4 * GB, candidate_bytes: 3 * GB, saved_bytes: GB, ready_since: since, in_batch: i === 1})),
+  };
+  const buttons = (row) => row.children.at(-1).children;
+  // Without permission to remove files there is nothing to decide here.
+  h.run("state.info={allow_destructive:false};renderSavings(data)");
+  const list = h.elements.get("ready-list");
+  assert.equal(list.children.length, 9, "eight files and a Show all");
+  assert.equal(list.children[0].children.length, 2, "no buttons without allow_destructive");
+  h.run("state.info={allow_destructive:true};renderSavings(data)");
+  assert.deepEqual(buttons(list.children[0]).map((b) => b.textContent), ["Replace", "Keep original"]);
+  assert.deepEqual(buttons(list.children[1]).map((b) => b.textContent), ["Replace"], "a batch file is kept from its batch");
+  assert.match(JSON.stringify(list.children[0].children[1].children.map((c) => c.textContent)), /4\.29 GB → 3\.22 GB · waiting 3 d/);
+  const showAll = list.children.at(-1).children[0];
+  assert.equal(showAll.textContent, "Show all 10");
+  await clickAndSettle(showAll);
+  assert.equal(list.children.length, 11, "all ten files and Show fewer");
+  assert.equal(list.children.at(-1).children[0].textContent, "Show fewer");
+  // Replace re-reads the job and starts the existing replacement; Keep original asks first.
+  const calls = [];
+  h.context.record = (...c) => calls.push(c);
+  h.run('api=async(path,body)=>{record(path,body);return path.startsWith("operations")?{jobs:[{id:"c0",candidate_ready:true}]}:{}};prepareReplacement=async(job)=>record("prepare",job.id);loadJobs=async()=>{};notify=(t)=>record("notify",t);reviewAction=async(o)=>{record("ask",o.confirmLabel);return true};');
+  await clickAndSettle(buttons(list.children[0])[0]);
+  assert.equal(JSON.stringify(calls), JSON.stringify([["operations?id=c0", null], ["prepare", "c0"]]));
+  calls.length = 0;
+  await clickAndSettle(buttons(list.children[0])[1]);
+  assert.equal(JSON.stringify(calls.slice(0, 2)), JSON.stringify([["ask", "Keep original"], ["keep-original", {id: "c0"}]]));
+  // Declining changes nothing.
+  calls.length = 0;
+  h.run('reviewAction=async()=>false');
+  await clickAndSettle(buttons(list.children[0])[1]);
+  assert.equal(calls.length, 0);
+  assert.match(markup, /Encoded, waiting for you/);
+  assert.doesNotMatch(markup, /Ready to replace/);
+});
+
 test("the masthead and the tab bar stay pinned while the page scrolls, except on phones", () => {
   const wide = /@media \(min-width: 601px\) \{([\s\S]*?)\n\}\n/.exec(css.slice(css.indexOf(".tabs {")))[1];
   assert.match(wide, /\.masthead \{\s*position: sticky;\s*top: 0;\s*z-index: 26;\s*height: var\(--masthead-h\);\s*background: var\(--paper\);/);

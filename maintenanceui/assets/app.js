@@ -3848,6 +3848,64 @@ function statRow(item, detail, extra) {
   if (extra) row.append(extra);
   return row;
 }
+// "3 d" for how long a finished encode has waited for a decision.
+function waitedText(iso, now = Date.now()) {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.round((now - at) / 60000));
+  if (minutes < 60) return "under an hour";
+  if (minutes < 24 * 60) return `${Math.round(minutes / 60)} h`;
+  return `${Math.round(minutes / (24 * 60))} d`;
+}
+// Replace uses the same one-tap replacement as the job page: the plan is read
+// back and approved with the digest just read. Keep original drops the smaller
+// copy and leaves the original exactly as it is.
+async function replaceReady(item) {
+  const job = (await api(`operations?id=${encodeURIComponent(item.action_id)}`)).jobs?.[0];
+  if (!job?.candidate_ready || job.replacement_action_id) throw new Error("This file is no longer waiting. Refresh Stats.");
+  await prepareReplacement(job);
+}
+async function keepReadyOriginal(item) {
+  const name = item.source_path?.split("/").pop() || "this file";
+  const confirmed = await reviewAction({
+    title: "Keep the original?",
+    message: `${name} stays exactly as it is. The smaller copy (${bytes(item.candidate_bytes)}, saving ${bytes(item.saved_bytes)}) is deleted. Encoding it again takes the same time as before.`,
+    confirmLabel: "Keep original",
+  });
+  if (!confirmed) return;
+  await api("keep-original", {id: item.action_id});
+  notify("Original kept. The smaller copy was removed.");
+  await loadJobs();
+}
+function readyActions(item) {
+  if (!state.info?.allow_destructive) return null;
+  const actions = node("span", "", "stat-actions");
+  actions.append(button("Replace", () => replaceReady(item), "stat-action"));
+  // A batch decides its own files, from the batch.
+  if (!item.in_batch) actions.append(button("Keep original", () => keepReadyOriginal(item), "stat-action"));
+  return actions;
+}
+// How many waiting files Stats shows before "Show all".
+const savingsReadyShown = 8;
+function renderReadyList(items, waiting) {
+  const ready = $("ready-list");
+  ready.replaceChildren();
+  const shown = state.readyAll ? items : items.slice(0, savingsReadyShown);
+  for (const item of shown) {
+    const waited = waitedText(item.ready_since);
+    ready.append(statRow(item, `${bytes(item.source_bytes)} → ${bytes(item.candidate_bytes)}${waited ? ` · waiting ${waited}` : ""}`, readyActions(item)));
+  }
+  if (!ready.children.length) {
+    ready.append(node("li", "No finished encodes are waiting.", "muted"));
+    return;
+  }
+  if (items.length > savingsReadyShown) {
+    const more = node("li", "", "stat-more");
+    more.append(button(state.readyAll ? "Show fewer" : `Show all ${items.length}`, () => { state.readyAll = !state.readyAll; renderReadyList(items, waiting); }, "stat-action"));
+    ready.append(more);
+  }
+  if (waiting > items.length) ready.append(node("li", `${waiting - items.length} more waiting, smaller than these.`, "muted"));
+}
 function renderSavings(data) {
   const savings = data.savings || {};
   $("saved-total").textContent = bytes(savings.realized_bytes ?? 0);
@@ -3866,11 +3924,7 @@ function renderSavings(data) {
   recent.replaceChildren();
   for (const item of (data.history || []).slice(-8).reverse()) recent.append(statRow(item, agoText(item.completed_at)));
   if (!recent.children.length) recent.append(node("li", "Nothing has been replaced yet.", "muted"));
-  const ready = $("ready-list");
-  ready.replaceChildren();
-  for (const item of data.ready || []) ready.append(statRow(item, `${bytes(item.source_bytes)} → ${bytes(item.candidate_bytes)}`));
-  if (!ready.children.length) ready.append(node("li", "No finished encodes are waiting.", "muted"));
-  else if (waiting > (data.ready || []).length) ready.append(node("li", `${waiting - data.ready.length} more waiting, smaller than these.`, "muted"));
+  renderReadyList(data.ready || [], waiting);
 }
 // Stats: how full the NAS is, what each served folder holds, and how that has
 // moved. The numbers come from the server's periodic measurement.
