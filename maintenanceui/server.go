@@ -155,6 +155,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/maintenance/batch-reconfigure", s.batchReconfigure)
 	mux.HandleFunc("POST /api/maintenance/batch-reconfigure", s.batchReconfigure)
 	mux.HandleFunc("POST /api/maintenance/candidate-decision", s.candidateDecision)
+	mux.HandleFunc("POST /api/maintenance/keep-original", s.keepOriginal)
 	mux.HandleFunc("POST /api/maintenance/rerun", s.rerun)
 	mux.HandleFunc("GET /api/maintenance/folder", s.folder)
 	mux.HandleFunc("GET /api/maintenance/storage", s.storageStats)

@@ -10,8 +10,13 @@ import (
 // savingsDays is how many local days the per-day chart covers.
 const savingsDays = 30
 
-// savingsReady is how many ready-to-replace files the Stats view lists.
-const savingsReady = 8
+// savingsReady is how many ready-to-replace files the Stats view shows before
+// "Show all"; savingsReadyListed is how many the server sends in all, the
+// largest first. The card's count and total always cover every file.
+const (
+	savingsReady       = 8
+	savingsReadyListed = 200
+)
 
 // savingsDay is the space freed on one local day. CumulativeBytes is the
 // lifetime total at the end of that day, so the chart can say how it grew.
@@ -30,6 +35,11 @@ type savingsCandidate struct {
 	SourceBytes    int64  `json:"source_bytes"`
 	CandidateBytes int64  `json:"candidate_bytes"`
 	SavedBytes     int64  `json:"saved_bytes"`
+	// ReadySince is when the encode finished, so how long it has waited can
+	// be said. InBatch marks a file that belongs to a batch: its original is
+	// kept from the batch, not from this list.
+	ReadySince string `json:"ready_since,omitempty"`
+	InBatch    bool   `json:"in_batch,omitempty"`
 }
 
 // clientZone reads the browser's offset from UTC (minutes east, as JavaScript's
@@ -83,11 +93,12 @@ func dailySavings(history []savingsReplacement, now time.Time, zone *time.Locati
 	return days
 }
 
-// largestCandidates keeps the files that would free the most space.
+// largestCandidates keeps the files that would free the most space, up to
+// savingsReadyListed of them.
 func largestCandidates(all []savingsCandidate) []savingsCandidate {
 	sort.SliceStable(all, func(i, j int) bool { return all[i].SavedBytes > all[j].SavedBytes })
-	if len(all) > savingsReady {
-		all = all[:savingsReady]
+	if len(all) > savingsReadyListed {
+		all = all[:savingsReadyListed]
 	}
 	return all
 }

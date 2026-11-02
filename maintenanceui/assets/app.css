@@ -1905,6 +1905,11 @@ main {
 .stat-link:hover { text-decoration: underline; }
 .stat-facts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0 8px; white-space: nowrap; }
 .stat-facts strong { color: var(--forest); font-weight: 600; }
+.ready-note { margin: 0 0 6px; }
+.stat-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.stat-action { min-height: 30px; padding: 2px 12px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--forest); font: inherit; font-size: 0.9em; cursor: pointer; }
+.stat-action:disabled { opacity: 0.55; cursor: default; }
+.stat-more { padding: 7px 0; }
 
 /* How we compress today: one card per goal, then the dated changes. */
 .compression-page { margin-bottom: 24px; }

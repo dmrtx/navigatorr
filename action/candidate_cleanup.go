@@ -37,6 +37,7 @@ const (
 	candidateRetiredSuperseded = "superseded"
 	candidateRetiredDiscarded  = "discarded"
 	candidateRetiredReplaced   = "replaced"
+	candidateRetiredKept       = "kept_original"
 )
 
 func rejectedCandidateResult() StepResult {
@@ -264,6 +265,57 @@ func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*Acti
 	if err != nil {
 		return nil, fmt.Errorf("candidate file kept: %v", err)
 	}
+	return e.Status(ctx, id)
+}
+
+// KeepOriginal is the owner's decision to keep a finished encode's original
+// and drop its candidate: the same removal as a rejected candidate, offered for
+// a candidate nobody has started replacing. Only a finished standalone attempt
+// qualifies (a batch's files are decided in the batch). It holds the attempt's
+// execution lease, refuses while any replacement or batch review references the
+// candidate, asks the worker when one might still write, and never touches the
+// original. A candidate that is already gone counts as kept.
+func (e *Engine) KeepOriginal(ctx context.Context, id string) (*ActionResult, error) {
+	if !e.AllowDestructive() {
+		return nil, fmt.Errorf("allow_destructive must be enabled to remove a candidate")
+	}
+	notAttempt := fmt.Errorf("only a finished transcode attempt's own candidate can be dropped")
+	if inst, err := e.deps.Store.GetActionInstanceIfExists(id); err != nil {
+		return nil, err
+	} else if inst == nil || inst.ActionName != "transcode_media" {
+		return nil, notAttempt
+	}
+	ctx, release, err := e.claimExecution(ctx, id, false)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
+	if err != nil {
+		return nil, err
+	}
+	if inst == nil || inst.ActionName != "transcode_media" || inst.Status != StatusCompleted {
+		return nil, notAttempt
+	}
+	ec := parseExecutionContext(inst, e)
+	if getString(ec.Inputs, "parent_action_id") != "" {
+		return nil, fmt.Errorf("this file belongs to a batch; keep its original from the batch")
+	}
+	if getString(ec.State, "candidate_path") == "" {
+		return nil, notAttempt
+	}
+	if getBool(ec.State, candidateRemovedKey) {
+		return e.Status(ctx, id)
+	}
+	if err := e.candidateWorkerStopped(ctx, ec); err != nil {
+		return nil, fmt.Errorf("candidate file kept: %v", err)
+	}
+	removal, err := e.removeOwnCandidate(ctx, inst, ec, false)
+	if err != nil {
+		// Nothing is recorded as removed, and the earlier note stays as it was.
+		return nil, fmt.Errorf("candidate file kept: %v", err)
+	}
+	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredKept, removal, nil)
 	return e.Status(ctx, id)
 }
 

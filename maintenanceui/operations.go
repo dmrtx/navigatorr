@@ -730,7 +730,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				seenCandidates[key] = true
 				if r.savings.SourceBytes != nil && r.savings.CandidateBytes != nil {
 					page.Savings.CandidateCount++
-					ready = append(ready, savingsCandidate{ActionID: r.inst.ID, SourcePath: operationString(r.inputs["path"]), SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.CandidateSavedBytes})
+					ready = append(ready, savingsCandidate{ActionID: r.inst.ID, SourcePath: operationString(r.inputs["path"]), SourceBytes: *r.savings.SourceBytes, CandidateBytes: *r.savings.CandidateBytes, SavedBytes: *r.savings.CandidateSavedBytes, ReadySince: r.inst.UpdatedAt, InBatch: operationString(r.inputs["parent_action_id"]) != ""})
 				}
 			}
 			if operationActive(r.inst.Status) && r.savings.EstimatedSavedBytes != nil && !seenEstimates[key] {
