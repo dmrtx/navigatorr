@@ -3650,41 +3650,6 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .job-heading .status-badge { justify-content: flex-start; padding-inline: 6px; }
 .job-row .more-menu button.action-icon { gap: 8px; }
 
-/* One button size everywhere, with a mouse or a finger: every button, the
-   dialog's and the rest, takes the same compact height, type and corner. Last in
-   the file so it wins over the sizes each component, and the touch rules above,
-   gave their own buttons. */
-:root { --control-size: 30px; --control-radius: 5px; --action-height: var(--control-size); }
-/* One corner and one height for every control: buttons and fields alike, in a
-   dialog or out of it. A field's text sits on its own line so a 16px field
-   (kept for iOS) is as tall as a 13px one. */
-input:not([type="checkbox"]):not([type="radio"]), select, textarea { border-radius: var(--control-radius); }
-input:not([type="checkbox"]):not([type="radio"]), select { line-height: 18px; }
-.queue-tool, .theme-switch button, .profile-action-bar .action-control, .job-row .job-actions .action-icon { border-radius: var(--control-radius); }
-.theme-switch { border-radius: calc(var(--control-radius) + 2px); }
-.theme-switch button { padding-block: 2px; }
-.profile-action-bar .action-control { padding-block: 2px; }
-button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
-  min-height: var(--control-size);
-  padding-block: 2px;
-  font-size: 13px;
-  border-radius: 5px;
-}
-.jd-primary, .jd-secondary, .jd-menu-item { padding-inline: 12px; }
-.jd-header .icon-button { flex-basis: var(--control-size); width: var(--control-size); height: var(--control-size); }
-.tabs button { padding-block: 2px; }
-.queue-tool { min-width: var(--control-size); height: var(--control-size); min-height: var(--control-size); }
-.library-columns .column-sort, .range-bar button { min-height: var(--control-size); }
-/* The menu's items sit 6px apart, as far from each other as any two controls. */
-.jd-actions .more-menu { gap: 6px; }
-/* The pinned bar's buttons keep their own width, at the right edge. */
-.jd-actions { justify-content: flex-end; }
-.jd-actions > .jd-primary, .jd-actions > .jd-secondary { flex: 0 1 auto; padding-inline: 14px; }
-.jd-actions .more-actions { flex-basis: var(--control-size); }
-.jd-actions .more-actions > summary { width: var(--control-size); height: var(--control-size); border-radius: 5px; font-size: 18px; }
-.jd-file-actions { gap: 6px; }
-.jd-file-actions > .jd-primary, .jd-file-actions > .jd-secondary { padding-inline: 10px; }
-
 
 /* ---- Batch file rows: name, state and size, Replace, ••• ---- */
 .jd-file, #batch-items-list:has(.jd-file-quick:not([hidden])) > .jd-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "main quick more" "fail fail fail"; align-items: center; column-gap: 8px; padding: 6px 0; }
@@ -3751,3 +3716,64 @@ details.cv-subtitles > .cv-stream-list { margin-top: 6px; }
 .reconfigure-goal > legend { font-weight: 600; margin-bottom: 6px; }
 .reconfigure-advanced > summary, .stream-preview-box > summary { min-height: 36px; display: flex; align-items: center; cursor: pointer; color: var(--muted); }
 .jd-menu-note { margin: 0; padding: 6px 8px 8px; max-width: 260px; color: var(--muted); font-size: 12px; line-height: 1.4; border-bottom: 1px solid var(--line); }
+/* Narrow screens: every card is as wide as the page, never its widest line. */
+.cv-card { grid-template-columns: minmax(0, 1fr); }
+.cv-card > *, .cv-failure > *, .cv-attempt-list > li, .cv-attempt-row { min-width: 0; }
+details.cv-subtitles { display: block; min-width: 0; }
+details.cv-subtitles > summary { min-width: 0; }
+.cv-totals { flex-wrap: wrap; }
+.cv-tries { table-layout: fixed; }
+.cv-tries .cv-try-setting { max-width: none; }
+.cv-tries th.cv-try-setting { width: 38%; }
+.cv-tries td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-tries th.cv-try-result { width: 28px; }
+.jd-file > .more-actions > .more-menu { min-width: min(220px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+/* The file name is the row's link: a full-height target without a taller row. */
+.jd-file-main > a.jd-file-name { line-height: 28px; }
+@media (max-width: 360px) {
+  .cv-stream { grid-template-columns: minmax(0, 1fr); }
+  .cv-stream-size { grid-column: 1; grid-row: auto; }
+  .cv-tries { margin-left: 0; max-width: 100%; }
+  .cv-tries th:nth-child(3), .cv-tries td:nth-child(3) { display: none; }
+}
+.cv-attempt-head > * { flex: 0 0 auto; }
+.cv-attempt-head > .cv-attempt-facts { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 360px) { .cv-attempt-row > summary { flex-wrap: wrap; row-gap: 2px; padding-block: 4px; } }
+.jd-file > .jd-file-main { grid-template-columns: minmax(0, 1fr); }
+.jd-file > .more-actions > .more-menu { gap: 6px; }
+.cv-attempt-list { gap: 6px; }
+
+/* One button size everywhere, with a mouse or a finger: every button, the
+   dialog's and the rest, takes the same compact height, type and corner. Last in
+   the file so it wins over the sizes each component, and the touch rules above,
+   gave their own buttons. */
+:root { --control-size: 30px; --control-radius: 5px; --action-height: var(--control-size); }
+/* One corner and one height for every control: buttons and fields alike, in a
+   dialog or out of it. A field's text sits on its own line so a 16px field
+   (kept for iOS) is as tall as a 13px one. */
+input:not([type="checkbox"]):not([type="radio"]), select, textarea { border-radius: var(--control-radius); }
+input:not([type="checkbox"]):not([type="radio"]), select { line-height: 18px; }
+.queue-tool, .theme-switch button, .profile-action-bar .action-control, .job-row .job-actions .action-icon { border-radius: var(--control-radius); }
+.theme-switch { border-radius: calc(var(--control-radius) + 2px); }
+.theme-switch button { padding-block: 2px; }
+.profile-action-bar .action-control { padding-block: 2px; }
+button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button, .detail-rows .workflow-history button {
+  min-height: var(--control-size);
+  padding-block: 2px;
+  font-size: 13px;
+  border-radius: 5px;
+}
+.jd-primary, .jd-secondary, .jd-menu-item { padding-inline: 12px; }
+.jd-header .icon-button { flex-basis: var(--control-size); width: var(--control-size); height: var(--control-size); }
+.tabs button { padding-block: 2px; }
+.queue-tool { min-width: var(--control-size); height: var(--control-size); min-height: var(--control-size); }
+.library-columns .column-sort, .range-bar button { min-height: var(--control-size); }
+/* The menu's items sit 6px apart, as far from each other as any two controls. */
+.jd-actions .more-menu { gap: 6px; }
+/* The pinned bar's buttons keep their own width, at the right edge. */
+.jd-actions { justify-content: flex-end; }
+.jd-actions > .jd-primary, .jd-actions > .jd-secondary { flex: 0 1 auto; padding-inline: 14px; }
+.jd-actions .more-actions { flex-basis: var(--control-size); }
+.jd-actions .more-actions > summary { width: var(--control-size); height: var(--control-size); border-radius: 5px; font-size: 18px; }
+.jd-file-actions { gap: 6px; }
+.jd-file-actions > .jd-primary, .jd-file-actions > .jd-secondary { padding-inline: 10px; }

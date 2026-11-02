@@ -73,8 +73,9 @@ async function act(page, what) {
     if (!await toggle.count()) return false;
     await toggle.click();
   } else if (what === "expand") {
-    const heads = page.locator("#job-detail [data-file-toggle]");
-    const n = Math.min(await heads.count(), 3);
+    // A batch row's ••• menu: the file's actions, with their reasons.
+    const heads = page.locator("#job-detail .jd-file .more-actions > summary");
+    const n = Math.min(await heads.count(), 1);
     if (!n) return false;
     for (let i = 0; i < n; i++) await heads.nth(i).click();
   } else if (what === "pending") {

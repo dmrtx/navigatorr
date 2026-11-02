@@ -711,9 +711,19 @@
               </button>
             </div>
           </div>
+          <div class="review-find">
+            <input id="review-search" type="search" aria-label="Search review entries" placeholder="Search title, year or folder" autocomplete="off" spellcheck="false" />
+            <select id="review-sort" aria-label="Sort by">
+              <option value="priority">Priority</option>
+              <option value="size">Largest first</option>
+              <option value="newest">Newest</option>
+              <option value="title">Title</option>
+            </select>
+          </div>
           <p id="review-summary" class="metadata" role="status"></p>
           </div>
           <ul id="review-list" class="review-list"></ul>
+          <div id="review-pager" class="pagination review-pager" hidden><button id="review-prev" type="button">Previous</button><span id="review-page" class="metadata"></span><button id="review-next" type="button">Next</button></div>
         </section>
         <section id="stats" class="panel tab-content" hidden>
           <div class="queue-toolbar"><h2>Stats</h2></div>
@@ -723,16 +733,17 @@
               <button id="storage-refresh" type="button">Measure now</button>
             </div>
             <p id="storage-status" class="muted" role="status"></p>
+            <details id="storage-notes" class="storage-notes" hidden><summary id="storage-notes-summary">Notes</summary><ul id="storage-notes-list" class="metadata"></ul></details>
             <div id="storage-volumes"></div>
           </section>
           <div class="savings-dashboard" aria-label="Space savings">
-            <div>
+            <div id="saved-tile">
               <span class="metadata">Space freed</span
               ><strong id="saved-total">—</strong
               ><span id="saved-count" class="metadata"></span>
             </div>
             <div>
-              <span class="metadata">Encoded, waiting for you</span
+              <span class="metadata">Ready to free</span
               ><strong id="candidate-total">—</strong
               ><span id="candidate-count" class="metadata">Potential savings</span>
             </div>
@@ -755,7 +766,7 @@
               <ul id="recent-replaced" class="stat-list"></ul>
             </section>
             <section aria-labelledby="ready-title">
-              <h3 id="ready-title">Encoded, waiting for you</h3>
+              <h3 id="ready-title">Waiting for you</h3>
               <button id="ready-open" type="button" class="stat-open">
                 <span id="ready-open-label">No finished encodes are waiting</span>
                 <span class="stat-open-arrow" aria-hidden="true">→</span>
@@ -1341,7 +1352,7 @@
     </dialog>
     <dialog id="ready-dialog" aria-labelledby="ready-dialog-title">
       <div class="dialog-heading">
-        <h2 id="ready-dialog-title">Encoded, waiting for you</h2>
+        <h2 id="ready-dialog-title">Waiting for you</h2>
         <button id="close-ready" class="icon-button" aria-label="Close">×</button>
       </div>
       <div id="ready-replace-all" class="ready-replace-all"></div>

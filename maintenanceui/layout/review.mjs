@@ -1,7 +1,8 @@
 // The replacement review dialog ("Replace files"), opened the way a person
-// opens it: the batch in the queue, then Review candidates. It runs on every
-// screen, in both themes, at 100% and 150% zoom, for one file and for many,
-// for the choosing step and for the prepared plan. Hard rules:
+// opens it: the batch in the queue, then Review replacements on a batch whose
+// replacement plan waits for approval (the one path left to it: ready files
+// are otherwise replaced from the batch's bar). It runs on every screen, in
+// both themes, at 100% and 150% zoom, for one file and for many. Hard rules:
 //   - the dialog never scrolls as a whole; only the file list does
 //   - the decision buttons are always on screen, below the list
 //   - buttons are one line each, and the same height side by side
@@ -21,11 +22,9 @@ const members = (n, long = false) => Array.from({ length: n }, (_, i) => ({
 const facts = (list) => Object.fromEntries(list.map((m, i) => [m.transcode_action_id, { source_bytes: (2.1 + (i % 5) * 0.17) * GB, candidate_bytes: (1.0 + (i % 4) * 0.08) * GB, vmaf_mean: 98 + (i % 2), vmaf_worst_window: 95 + (i % 3), tracks_message: i % 3 === 0 ? "Kept 2 audio tracks and 2 of 3 subtitles" : undefined }]));
 
 export const reviewVariants = {
-  "choose-one": { mode: "choose", count: 1 },
-  "choose-ten": { mode: "choose", count: 10 },
-  "choose-forty": { mode: "choose", count: 40 },
-  "choose-long-names": { mode: "choose", count: 6, long: true },
+  "plan-one": { mode: "plan", count: 1 },
   "plan-ten": { mode: "plan", count: 10 },
+  "plan-forty": { mode: "plan", count: 40 },
   "plan-long-names": { mode: "plan", count: 4, long: true },
 };
 
@@ -66,7 +65,7 @@ const check = () => {
 export async function runReview({ screenNames = Object.keys(screens), themes = ["light", "dark"], zooms = [1, 1.5], only = process.env.LAYOUT_ONLY || "", gallery = process.env.LAYOUT_GALLERY === "1" } = {}) {
   await mkdir(out, { recursive: true });
   const sameHeight = installButtonHeights();
-  const scenario = scenarios.find(s => s.id === "batch-candidates");
+  const scenario = scenarios.find(s => s.id === "batch-plan-ready");
   const state = { jobs: [], items: {}, reply: {} };
   state.api = (name, params) => (name === "batch-candidates" ? state.reply(params) : undefined);
   const server = await startServer(state);

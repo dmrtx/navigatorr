@@ -8167,7 +8167,11 @@ test("the status says when the numbers were measured and surfaces what could not
   h.run("renderStorage(data)");
   const status = h.elements.get("storage-status").textContent;
   assert.match(status, /^Measured /);
-  assert.match(status, /1 of 3 folders could not be sized completely/);
+  // Notes are folded under one line, not added to the status.
+  assert.doesNotMatch(status, /could not be sized/);
+  assert.equal(h.elements.get("storage-notes").hidden, false);
+  assert.equal(h.elements.get("storage-notes-summary").textContent, "1 note on this measurement");
+  assert.match(allTextOf(h.elements.get("storage-notes-list")), /1 of 3 folders could not be sized completely/);
   assert.match(status, /failed: disk is full/);
   // How the numbers were read is a technical footer; Stats does not print it.
   const mount = storageFixture();
@@ -8407,8 +8411,10 @@ test("Stats names waiting encodes, says how long they waited and decides each on
   h.run('reviewAction=async()=>false');
   await clickAndSettle(buttons(list.children[0])[1]);
   assert.equal(calls.length, 0);
-  assert.match(markup, /Encoded, waiting for you/);
-  assert.doesNotMatch(markup, /Ready to replace/);
+  // The tile counts what is ready to free; the list says once what waits.
+  assert.match(markup, /<h3 id="ready-title">Waiting for you<\/h3>/);
+  assert.match(markup, /Ready to free/);
+  assert.doesNotMatch(markup, /Encoded, waiting for you|Ready to replace/);
 });
 
 test("Stats offers to delete the copies that archived jobs still hold", async () => {
@@ -8980,14 +8986,20 @@ test("Replace all runs once at a time: a button drawn again while it runs waits,
   assert.equal(saidBy(first), "Replace all 2");
 });
 
-test("Stats replaces the whole ready set, or says it replaces only the largest it lists", () => {
+test("Stats replaces the whole ready set from ready_ids, or names the rows it lists from an older server", () => {
   const h = harness();
   h.run("state.info={allow_destructive:true};");
   h.context.items = [1, 2, 3].map((n) => ({ action_id: `t-${n}`, source_path: `/media/tv/Sample Show S01E0${n}.mkv`, source_bytes: 4e9, candidate_bytes: 2e9, saved_bytes: 2e9 }));
   h.run("renderReadyList(items, 3)");
   assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 3");
+  // The server's ready_ids cover every ready file, past the rows listed.
+  h.context.ids = Array.from({ length: 250 }, (_, i) => `t-${i}`);
+  h.run("renderReadyList(items, 250, {readyIds: ids, readySaved: 5e11})");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 250");
+  assert.equal(h.elements.get("ready-replace-all").children[0].dataset.replaceAll, "250");
+  // An older server sends only the listed rows; the button names those.
   h.run("renderReadyList(items, 250)");
-  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace these 3");
   assert.equal(JSON.stringify(h.run("readySizes(items)")), JSON.stringify({ before: 12e9, after: 6e9, saved: 6e9 }));
   // A file without sizes leaves a total unsaid rather than wrong.
   assert.equal(h.run("readySizes([...items, {action_id:'x'}]).saved"), null);
@@ -9069,7 +9081,7 @@ test("Stats says how many files are ready in one row, and the list it opens can 
   h.run("renderReadyList(items, 5)");
   assert.equal(h.elements.get("ready-open-label").textContent, "5 files ready to replace");
   assert.equal(h.elements.get("ready-open").disabled, false);
-  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace these 3");
   h.run("renderReadyList([], 0)");
   assert.equal(h.elements.get("ready-open-label").textContent, "No finished encodes are waiting");
   assert.equal(h.elements.get("ready-open").disabled, true);
@@ -9091,4 +9103,221 @@ test("a failure a later run fixed says Resolved by #N in the queue and asks for 
   // Unresolved, the same failure still offers its fix.
   const open = h.run(`jobControls(${JSON.stringify({ ...job, resolved_by: undefined })}).children.map(b=>b.textContent)`);
   assert.ok(open.includes("Try again"), open.join("|"));
+});
+
+test("Review list asks the server for one page and does the search, order and page itself when the server ignores them", async () => {
+  const h=harness(), urls=[];
+  h.context.record=url=>urls.push(url);
+  // A paging server: answers one page with its total.
+  h.run('$("workspace").hidden=false;$("review-state").querySelector=()=>null;$("review-state").value="open";$("review-kind").value="";$("review-search").value="alpha";$("review-sort").value="size";state.reviewOffset=0;api=async url=>{record(url);return {items:[{title:"Alpha one",size_bytes:5}],offset:0,total:120,counts:{open:120}}};');
+  await h.run('loadReview()');
+  assert.match(urls[0],/q=alpha/);assert.match(urls[0],/sort=size/);assert.match(urls[0],/offset=0/);assert.match(urls[0],/limit=50/);
+  assert.match(h.elements.get("review-summary").textContent,/^120 entries match/);
+  assert.equal(h.elements.get("review-pager").hidden,false);
+  assert.equal(h.elements.get("review-page").textContent,"1–1 of 120");
+  // An older server: everything back, unfiltered and unordered.
+  const items=[...Array(60)].map((_,i)=>({title:i%2?`Alpha ${i}`:`Beta ${i}`,size_bytes:i}));
+  h.context.all=items;
+  h.run('api=async url=>{record(url);return {items:all}};$("review-search").value="álpha";');
+  await h.run('loadReview()');
+  const view=h.run('reviewView(state.review,{q:"álpha",sort:"size",offset:0})');
+  assert.equal(view.total,30);assert.equal(view.items[0].title,"Alpha 59");
+  assert.equal(h.elements.get("review-pager").hidden,true);
+  const paged=h.run('reviewView({items:all},{q:"",sort:"title",offset:50})');
+  assert.equal(paged.items.length,10);assert.equal(paged.offset,50);assert.equal(paged.total,60);
+});
+
+// No walls of text: every line the job, batch and Stats screens draw stays
+// short (about two phone lines), and every failure or no-result line carries
+// its numbers. Folded technical details are exempt; their summary is not.
+const wallLimit = 120;
+function taggedHarness() {
+  const h = harness();
+  const make = h.document.createElement;
+  h.document.createElement = (tag) => Object.assign(make(), { tagName: String(tag).toUpperCase() });
+  return h;
+}
+function linesOf(n, out = [], folded = false) {
+  if (!n || typeof n !== "object") return out;
+  if (n.hidden) return out;
+  const own = typeof n.textContent === "string" ? n.textContent.trim() : "";
+  const summary = n.tagName === "SUMMARY";
+  if (own && (!folded || summary)) out.push({ text: own, className: String(n.className || "") });
+  const inside = folded || n.tagName === "DETAILS";
+  for (const child of n.children || []) {
+    if (typeof child === "string") { if (!inside && child.trim()) out.push({ text: child.trim(), className: "" }); }
+    else linesOf(child, out, inside && !(child.tagName === "SUMMARY"));
+  }
+  return out;
+}
+function wallsIn(lines) {
+  const long = lines.filter((l) => l.text.length > wallLimit).map((l) => `${l.text.length}: ${l.text}`);
+  const numberless = lines.filter((l) => /cv-failure-text/.test(l.className) && !/cv-decided/.test(l.className) && !/\d/.test(l.text)).map((l) => `no number: ${l.text}`);
+  return [...long, ...numberless];
+}
+
+test("no walls of text on the job, batch and Stats screens, and every failure says its numbers", async () => {
+  const { scenarios, world } = await import("./layout/fixtures.mjs");
+  const found = [];
+  for (const scenario of scenarios.filter((s) => !s.id.startsWith("podcast"))) {
+    const h = taggedHarness();
+    h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+    const w = world(scenario);
+    const job = w.jobs.find((j) => j.id === w.open) || w.jobs[0];
+    h.context.job = job;
+    h.run("paintDetail(job)");
+    const lines = [...linesOf(h.elements.get("detail-summary")), ...linesOf(h.elements.get("detail-controls"))];
+    for (const item of w.items[job.id] || []) {
+      h.context.item = item;
+      lines.push(...linesOf(h.run("batchFileRow(item, job.id)")));
+    }
+    for (const wall of wallsIn(lines)) found.push(`${scenario.id} · ${wall}`);
+  }
+  // Stats with a full set of numbers.
+  const h = taggedHarness();
+  h.run('state.info={allow_destructive:true};');
+  h.context.data = {
+    savings: { realized_bytes: 12e9, completed_replacements: 4, candidate_saved_bytes: 30e9, candidate_count: 40, estimated_saved_bytes: 5e9 },
+    ready_ids: Array.from({ length: 40 }, (_, i) => `r-${i}`),
+    ready: [1, 2, 3].map((n) => ({ action_id: `r-${n}`, source_path: `/media/tv/Sample Show S01E0${n}.mkv`, source_bytes: 4e9, candidate_bytes: 2e9, saved_bytes: 2e9, ready_since: new Date(Date.now() - 864e5).toISOString() })),
+    history: [{ action_id: "h-1", source_path: "/media/tv/Sample Show S01E09.mkv", saved_bytes: 3e9, completed_at: new Date().toISOString() }],
+    daily: [],
+  };
+  h.run("renderSavings(data)");
+  const stats = ["saved-count", "candidate-count", "recent-replaced", "ready-list", "ready-replace-all", "ready-open-label"].flatMap((id) => linesOf(h.elements.get(id)));
+  for (const wall of wallsIn(stats)) found.push(`stats · ${wall}`);
+  assert.deepEqual(found, []);
+  // The check itself catches both kinds of wall.
+  assert.equal(wallsIn([{ text: "x".repeat(121), className: "" }, { text: "Stopped", className: "cv-failure-text" }]).length, 2);
+});
+
+test("every job header links its source folder in Files: a batch, a conversion, a batch file and a replacement", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};');
+  const link = h.elements.get("detail-file-link");
+  const shows = (job) => { h.run(`renderDetailFileLink(${JSON.stringify(job)})`); return { hidden: link.hidden, text: link.textContent, path: link.dataset.path, folder: link.dataset.folder, href: link.href }; };
+  // A batch: the server's folder.
+  const batch = shows({ id: "b", action_name: "transcode_batch", batch: { total: 3 }, batch_files: { file_count: 3, folder: "/media/tv/Sample Show/Season 1" } });
+  assert.equal(batch.hidden, false); assert.equal(batch.text, "Sample Show / Season 1"); assert.equal(batch.folder, "true"); assert.match(batch.href, /view=files/);
+  // A batch over several folders without one: their common parent.
+  const spread = shows({ id: "b2", action_name: "transcode_batch", batch: { total: 2 }, batch_files: { file_count: 2, files: [{ file_path: "/media/tv/Sample Show/Season 1/a.mkv" }, { file_path: "/media/tv/Sample Show/Season 2/b.mkv" }] } });
+  assert.equal(spread.path, "/media/tv/Sample Show"); assert.equal(spread.folder, "true");
+  // A one-file batch, a conversion, a batch file and a replacement: the file's folder.
+  const file = "/media/tv/Sample Show/Season 1/Sample Show S01E01.mkv";
+  for (const job of [
+    { id: "b3", action_name: "transcode_batch", batch: { total: 1 }, batch_files: { file_count: 1, files: [{ file_path: file }] } },
+    { id: "c", action_name: "transcode_media", source_path: file },
+    { id: "k", action_name: "transcode_media", source_path: file, parent_batch_id: "b" },
+    { id: "p", action_name: "promote_transcode_candidate", promotion: { original_path: file } },
+  ]) {
+    const shown = shows(job);
+    assert.equal(shown.hidden, false, job.id); assert.equal(shown.text, "Sample Show / Season 1", job.id); assert.equal(shown.path, file, job.id); assert.match(shown.href, /view=files/, job.id);
+  }
+});
+
+test("Stats hides the freed tile until something was freed, and names the storage trend Used space", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true};');
+  h.run('renderSavings({savings:{realized_bytes:0,candidate_count:0}})');
+  assert.equal(h.elements.get("saved-tile").hidden, true);
+  h.run('renderSavings({savings:{realized_bytes:5e9,completed_replacements:2}})');
+  assert.equal(h.elements.get("saved-tile").hidden, false);
+  assert.match(source, /node\("h5", "Used space", "storage-trend-title"\)/);
+  assert.doesNotMatch(source, /node\("h5", "Recovery"/);
+});
+
+test("a superseded run opens the latest run of its file, and a batch file's promote opens the file's conversion", async () => {
+  const old = conversionJob({ id: "conv-old", conversion_id: "", superseded_by: { id: "conv", number: 9 } });
+  const h = await openJobsOf([old, conversionJob()], "conv-old");
+  assert.equal(h.run("state.detail"), "conv");
+  // A promote without conversion_id still names the transcode it replaces.
+  const promote = { id: "p-1", action_name: "promote_transcode_candidate", status: "running", promotion: { original_path: "/media/tv/a.mkv", transcode_action_id: "conv" } };
+  const p = await openJobsOf([promote, conversionJob()], "p-1");
+  assert.equal(p.run("state.detail"), "conv");
+  // Redirects stop after a few hops, so a loop in the data cannot spin.
+  const a = conversionJob({ id: "a", conversion_id: "", superseded_by: { id: "b" } }), b = conversionJob({ id: "b", conversion_id: "", superseded_by: { id: "a" } });
+  const loop = await openJobsOf([a, b], "a");
+  assert.ok(["a", "b"].includes(loop.run("state.detail")));
+});
+
+test("Retry, Encode again and Change goal keep the conversion open and show the new run in place", async () => {
+  const h = await openJobsOf([conversionJob(), conversionJob({ id: "conv-2", conversion_id: "conv-2" })], "conv");
+  const writes = [];
+  h.context.window = { location: { pathname: "/", search: "" }, history: { pushState(_s, _t, url) { writes.push(["push", url]); }, replaceState(_s, _t, url) { writes.push(["replace", url]); } } };
+  h.run("state.routeReady=true;");
+  await h.run('showAttempt("conv-2")');
+  assert.equal(h.run("state.detail"), "conv-2");
+  assert.equal(h.elements.get("job-detail").open, true);
+  assert.ok(writes.every(([kind]) => kind === "replace"), "no new history entry");
+});
+
+test("the attempts card lists every run with its numbers and marks this one", () => {
+  const h = harness();
+  h.context.job = { id: "c3", attempts: [
+    { id: "c1", number: 1, conversion_status: "no_result", setting: "CRF 22", candidate_bytes: 1.4e9, cause: { kind: "quality_below_target", summary: "Quality 91.2 VMAF, below the 93.0 target", attempts: [{ setting: "CRF 22", vmaf_mean: 91.2, vmaf_worst: 84, bytes: 1.4e9, passed: false }] } },
+    { id: "c2", number: 2, conversion_status: "failed", cause: { summary: "The encoder stopped at 41% of the file (exit status 1)" } },
+    { id: "c3", number: 3, conversion_status: "ready_to_replace", current: true, candidate_bytes: 1.1e9 },
+  ] };
+  const card = h.run("conversionAttemptsCard(job)");
+  assert.equal(nodesWithClass(card, "cv-card-title")[0].textContent, "Attempts · 3");
+  const rows = nodesWithClass(card, "cv-attempt");
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].dataset.attemptId, "c3");
+  assert.ok(String(rows[0].className).includes("current"));
+  assert.match(saidBy(rows[2]), /91\.2 VMAF/);
+  assert.equal(nodesWithClass(rows[2], "cv-tries").length, 1);
+  // One run has no history to show.
+  assert.equal(h.run("conversionAttemptsCard({id:'x',attempts:[{id:'x'}]})"), null);
+});
+
+test("a failure block leads with the cause and its numbers, the settings tried, the fix, and folds the raw error", () => {
+  const h = harness();
+  h.context.fix = h.run('button("Try with x265", () => {})');
+  const box = h.run('failureBlock({tone:"no_result", text:"No smaller file", cause:{summary:"Quality 91.2 VMAF, below the 93.0 target", attempts:[{setting:"CRF 22",vmaf_mean:91.2,vmaf_worst:84,bytes:1.4e9,passed:false},{setting:"CRF 18",vmaf_mean:94.1,vmaf_worst:89,bytes:3.9e9,passed:true}]}, fix, technical:["ffmpeg exited with status 1"]})');
+  assert.equal(nodesWithClass(box, "cv-failure-icon").length, 1);
+  assert.equal(nodesWithClass(box, "cv-failure-text")[0].textContent, "Quality 91.2 VMAF, below the 93.0 target");
+  const table = nodesWithClass(box, "cv-tries")[0];
+  assert.match(saidBy(table), /CRF 22 91\.2 84\.0 1\.40 GB/);
+  assert.equal(nodesWithClass(box, "cv-fix").length, 1);
+  assert.match(saidBy(nodesWithClass(box, "technical-reason")[0]), /exited with status 1/);
+  // Without a cause, a raw error lends its first clause with the number.
+  assert.equal(h.run('errorHeadline("ffmpeg exited with status 1: Error while decoding stream #0:1: Invalid data")'), "ffmpeg exited with status 1");
+});
+
+test("the streams card lists video, each audio track with its rates, folds the subtitles and totals what was removed", () => {
+  const h = harness();
+  const GB = 1e9, MB = 1e6;
+  const streams = {
+    video: { codec: "h264", after_codec: "hevc", before_bytes: 3.4 * GB, after_bytes: 0.92 * GB },
+    audio: [
+      { language: "spa", codec: "truehd", channels: 8, before_kbps: 4608, fate: "converted", after_codec: "aac", after_channels: 6, after_kbps: 384, before_bytes: 620 * MB, after_bytes: 140 * MB },
+      { language: "eng", codec: "ac3", channels: 6, before_kbps: 640, after_kbps: 640, fate: "copied", before_bytes: 120 * MB, after_bytes: 120 * MB },
+    ],
+    subtitles: { total: 3, kept: 1, tracks: [{ language: "spa", codec: "subrip", bytes: 1 * MB, fate: "kept" }, { language: "rus", codec: "hdmv_pgs_subtitle", bytes: 12 * MB, fate: "dropped" }, { language: "fre", codec: "hdmv_pgs_subtitle", bytes: 12 * MB, fate: "dropped" }] },
+    totals: { audio_before: 740 * MB, audio_after: 260 * MB, subtitles_before: 25 * MB, subtitles_after: 1 * MB },
+  };
+  h.context.job = { id: "c", status: "completed", conversion_status: "ready_to_replace", candidate_ready: true, savings: { source_bytes: 4.2 * GB, candidate_bytes: 1.1 * GB }, streams };
+  const card = h.run("conversionStreamsCard(job)");
+  const rows = nodesWithClass(card, "cv-stream-list")[0].children;
+  assert.equal(rows.length, 3, "video and two audio rows; subtitles fold");
+  assert.match(saidBy(rows[0]), /^Video/);
+  assert.match(saidBy(rows[1]), /TrueHD 7\.1 4608k → AAC 5\.1 384k/i);
+  assert.match(saidBy(rows[2]), /AC-?3 5\.1 640k/i);
+  const subs = nodesWithClass(card, "cv-subtitles")[0];
+  assert.match(saidBy(subs), /Subtitles 1 of 3 kept \(spa\) · removed 24\.0 MB/);
+  assert.match(saidBy(nodesWithClass(card, "cv-totals")[0]), /Removed 480\.0 MB audio, 24\.0 MB subtitles/);
+  // While encoding the card says what it plans.
+  h.run('job.conversion_status="encoding"; job.status="running"; job.candidate_ready=false;');
+  assert.equal(nodesWithClass(h.run("conversionStreamsCard(job)"), "cv-card-title")[0].textContent, "Streams · planned");
+});
+
+test("a failed batch file's page offers Encode again and Change goal in its bar", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  const job = { id: "k", action_name: "transcode_media", status: "failed", conversion_status: "failed", parent_batch_id: "b", parent_action_id: "b", parent_item_key: "item-4", source_path: "/media/tv/a.mkv", error: "Encode failed", cause: { kind: "quality_below_target", summary: "Quality 91.2 VMAF, below the 93.0 target" } };
+  const bar = h.run(`conversionActionBar(${JSON.stringify(job)})`);
+  const said = [bar[0], bar[1]].map((slot) => saidBy(slot.children[0]));
+  assert.ok(said.some((s) => /Encode again/.test(s)), said.join("|"));
+  assert.ok(said.some((s) => /Change goal/.test(s)), said.join("|"));
+  for (const slot of [bar[0], bar[1]]) assert.equal(slot.children[0].disabled, false, saidBy(slot));
 });

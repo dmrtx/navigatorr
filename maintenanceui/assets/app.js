@@ -4038,13 +4038,17 @@ function renderReadyList(items, waiting, archived = {}) {
   // Replace all: each file in turn, through its own Replace.
   const all = $("ready-replace-all");
   all.replaceChildren();
-  // The server lists the largest ready files only; past that cap the button
-  // says it replaces those, not every waiting file.
-  if (items.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(items.map(item => item.action_id), {
+  // The server sends every ready id (largest saving first), so Replace all
+  // covers the whole set however few rows the list draws. An older server
+  // sends only the rows it lists; the button then names those rows.
+  const ids = Array.isArray(archived.readyIds) && archived.readyIds.length ? archived.readyIds : items.map(item => item.action_id);
+  const whole = ids.length >= waiting || ids.length > items.length;
+  const sizes = ids.length === items.length ? readySizes(items) : {saved: Number.isFinite(archived.readySaved) ? archived.readySaved : null};
+  if (ids.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(ids, {
     className: "primary",
-    label: items.length < waiting ? `Replace largest ${items.length}` : `Replace all ${items.length}`,
-    scope: items.length < waiting ? `the largest ${items.length} of ${waiting} ready files` : `all ${items.length} ready files`,
-    sizes: readySizes(items),
+    label: whole ? `Replace all ${ids.length}` : `Replace these ${ids.length}`,
+    scope: whole ? `all ${ids.length} ready files` : `the ${ids.length} listed of ${waiting} ready files`,
+    sizes,
   }));
   // Stats shows one line; the list opens from it.
   const count = Math.max(waiting, items.length);
@@ -4092,7 +4096,10 @@ function renderSavings(data) {
   recent.replaceChildren();
   for (const item of (data.history || []).slice(-8).reverse()) recent.append(statRow(item, agoText(item.completed_at)));
   if (!recent.children.length) recent.append(node("li", "Nothing has been replaced yet.", "muted"));
-  renderReadyList(data.ready || [], waiting, {count: savings.archived_candidate_count || 0, bytes: savings.archived_candidate_bytes || 0, ids: data.archived_ready_ids || []});
+  // Nothing freed yet is not a headline.
+  $("saved-tile").hidden = !(savings.realized_bytes > 0);
+  const readyIds = arrayOf(data.ready_ids ?? savings.ready_ids).filter(id => typeof id === "string" && id);
+  renderReadyList(data.ready || [], Math.max(waiting, readyIds.length), {count: savings.archived_candidate_count || 0, bytes: savings.archived_candidate_bytes || 0, ids: data.archived_ready_ids || [], readyIds, readySaved: savings.candidate_saved_bytes});
 }
 // Stats: how full the NAS is, what each served folder holds, and how that has
 // moved. The numbers come from the server's periodic measurement.
@@ -4209,7 +4216,7 @@ function storageVolumeCard(data, volume, index) {
   const spark = storageSparkline(volume.trend, "Used space");
   if (spark || changes.length) {
     const trend = node("div", "", "storage-volume-trend");
-    trend.append(node("h5", "Recovery", "storage-trend-title"));
+    trend.append(node("h5", "Used space", "storage-trend-title"));
     if (changes.length) trend.append(node("p", changes.join(" · "), "storage-changes"));
     if (spark) trend.append(spark);
     card.append(trend);
@@ -4239,8 +4246,13 @@ function renderStorage(data) {
     status.push(`Measured ${when}`);
   } else if (!volumes.length) status.push("Not measured yet. It runs by itself shortly after start; use Measure now to run it immediately.");
   if (data.error) status.push(`The last measurement failed: ${data.error}`);
-  for (const note of data.notes || []) status.push(note);
   $("storage-status").textContent = status.join(" ");
+  // How the measurement went is a footnote: folded, one line each.
+  const notes = arrayOf(data.notes).filter(Boolean);
+  const fold = $("storage-notes");
+  fold.hidden = !notes.length;
+  $("storage-notes-summary").textContent = `${notes.length} ${notes.length === 1 ? "note" : "notes"} on this measurement`;
+  $("storage-notes-list").replaceChildren(...notes.map(note => node("li", note)));
 }
 async function loadStorage() {
   const revision = (state.storageRevision = (state.storageRevision || 0) + 1);
@@ -7400,6 +7412,30 @@ function reviewRow(item) {
   li.append(actions);
   return li;
 }
+// The review list pages through the server's matches; a server that ignores
+// q, sort and offset (an older one) returns everything, and the same search,
+// order and page are then worked out here.
+const reviewPage = 50;
+function reviewMatches(item, q) {
+  const hay = foldText([item.title, item.year, item.folder, item.notes, item.note].filter(Boolean).join(" "));
+  return foldText(q).split(/\s+/).filter(Boolean).every(word => hay.includes(word));
+}
+const reviewSorts = {
+  size: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0),
+  newest: (a, b) => String(b.created_at || b.updated_at || "").localeCompare(String(a.created_at || a.updated_at || "")),
+  title: (a, b) => String(a.title || "").localeCompare(String(b.title || ""), undefined, {sensitivity: "base"}),
+};
+function reviewView(data, {q, sort, offset}) {
+  const all = data.items || [];
+  // A server that pages says so with its offset; otherwise the list is whole.
+  const paged = data.offset != null && (!q || all.every(item => reviewMatches(item, q))) && all.length <= reviewPage;
+  if (paged) return {items: all, total: Number.isFinite(data.total) ? data.total : all.length, offset: data.offset || 0};
+  let items = q ? all.filter(item => reviewMatches(item, q)) : [...all];
+  if (reviewSorts[sort]) items.sort(reviewSorts[sort]);
+  const total = items.length;
+  const start = Math.min(offset, Math.max(0, total - 1 - ((total - 1) % reviewPage)));
+  return {items: items.slice(start, start + reviewPage), total, offset: start};
+}
 function renderReview() {
   const data = state.review;
   const counts = data.counts || {};
@@ -7408,16 +7444,26 @@ function renderReview() {
     if (o) o.textContent = n != null ? `${label} (${n})` : label;
   }
   const list = $("review-list");
-  const items = data.items || [];
+  const q = $("review-search")?.value?.trim() || "";
+  const view = reviewView(data, {q, sort: $("review-sort")?.value || "priority", offset: state.reviewOffset || 0});
+  state.reviewOffset = view.offset;
+  const items = view.items;
+  const pager = $("review-pager");
+  if (pager) {
+    pager.hidden = view.total <= reviewPage;
+    $("review-prev").disabled = view.offset === 0;
+    $("review-next").disabled = view.offset + items.length >= view.total;
+    $("review-page").textContent = items.length ? `${view.offset + 1}–${view.offset + items.length} of ${view.total}` : "";
+  }
   if (!items.length) {
-    const word = {open: "Nothing waits for review.", processed: "Nothing marked processed yet.", dismissed: "Nothing dropped."}[$("review-state").value];
+    const word = q ? `Nothing matches “${q}”.` : {open: "Nothing waits for review.", processed: "Nothing marked processed yet.", dismissed: "Nothing dropped."}[$("review-state").value];
     list.replaceChildren(node("li", word, "empty"));
     $("review-summary").textContent = "";
     return;
   }
   const sized = items.filter(i => i.size_bytes != null);
   const total = sized.reduce((sum, i) => sum + i.size_bytes, 0);
-  $("review-summary").textContent = `${items.length} ${items.length === 1 ? "entry" : "entries"}${data.truncated ? " shown (more exist)" : ""}${sized.length ? ` · ${bytes(total)} on disk` : ""}`;
+  $("review-summary").textContent = `${view.total} ${view.total === 1 ? "entry" : "entries"}${q ? " match" : ""}${sized.length ? ` · ${bytes(total)} on this page` : ""}`;
   list.replaceChildren(...items.map(reviewRow));
 }
 async function loadReview() {
@@ -7426,10 +7472,19 @@ async function loadReview() {
   const request = state.reviewRequest = (state.reviewRequest || 0) + 1;
   const query = new URLSearchParams({state: $("review-state").value});
   if ($("review-kind").value) query.set("issue_type", $("review-kind").value);
+  const q = $("review-search")?.value?.trim() || "", sort = $("review-sort")?.value || "priority";
+  if (q) query.set("q", q);
+  if (sort !== "priority") query.set("sort", sort);
+  query.set("offset", String(state.reviewOffset || 0));
+  query.set("limit", String(reviewPage));
   const data = await api(`maintenance-queue?${query}`);
   if (auth !== state.authRevision || $("workspace").hidden || request !== state.reviewRequest) return;
   state.review = data;
   renderReview();
+}
+function restartReview() {
+  state.reviewOffset = 0;
+  return safe(loadReview);
 }
 async function reviewAct(item, action) {
   const done = await api("maintenance-queue", {id: item.id, action});
@@ -7443,8 +7498,15 @@ async function reviewAct(item, action) {
 }
 state.review = {items: [], counts: {}};
 $("refresh-review").addEventListener("click", () => safe(loadReview));
-$("review-state").addEventListener("change", () => safe(loadReview));
-$("review-kind").addEventListener("change", () => safe(loadReview));
+$("review-state").addEventListener("change", restartReview);
+$("review-kind").addEventListener("change", restartReview);
+$("review-sort").addEventListener("change", restartReview);
+$("review-search").addEventListener("input", () => {
+  clearTimeout(state.reviewSearchTimer);
+  state.reviewSearchTimer = setTimeout(restartReview, 250);
+});
+$("review-prev").addEventListener("click", () => { state.reviewOffset = Math.max(0, (state.reviewOffset || 0) - reviewPage); return safe(loadReview); });
+$("review-next").addEventListener("click", () => { state.reviewOffset = (state.reviewOffset || 0) + reviewPage; return safe(loadReview); });
 $("refresh-jobs").addEventListener("click", () => safe(() => loadJobs()));
 $("storage-refresh").addEventListener("click", () => void safe(measureStorage));
 // A chosen filter lights the filter button, since the select itself is only an icon.
@@ -7850,6 +7912,7 @@ function causeAttemptsTable(attempts) {
   const head = node("tr");
   for (const [label, cls] of [["Setting", "cv-try-setting"], ["VMAF", ""], ["Worst", ""], ["Size", ""], ["", "cv-try-result"]]) {
     const th = node("th", label, cls);
+    if (label) th.title = label;
     if (!label) th.append(node("span", "Result", "sr-only"));
     head.append(th);
   }
@@ -7860,7 +7923,10 @@ function causeAttemptsTable(attempts) {
     const tr = node("tr", "", a.passed ? "pass" : "miss");
     const result = node("td", a.passed ? "✓" : "✗", "cv-try-result");
     result.title = a.passed ? "Passed" : "Missed";
-    tr.append(node("td", a.setting || "–", "cv-try-setting"), node("td", vmafText(a.vmaf_mean)), node("td", vmafText(a.vmaf_worst)), node("td", a.bytes > 0 ? bytes(a.bytes) : "–"), result);
+    const setting = node("td", a.setting || "–", "cv-try-setting");
+    setting.title = a.setting || "";
+    tr.append(setting, node("td", vmafText(a.vmaf_mean)), node("td", vmafText(a.vmaf_worst)), node("td", a.bytes > 0 ? bytes(a.bytes) : "–"), result);
+    for (const cell of tr.children) if (!cell.title && cell.textContent) cell.title = cell.textContent;
     body.append(tr);
   }
   table.append(thead, body);
@@ -7875,7 +7941,8 @@ function failureBlock({tone = "failed", text = "", cause = null, fix = null, tec
   const icon = node("span", tone === "failed" ? "!" : "–", "cv-failure-icon");
   icon.setAttribute("aria-hidden", "true");
   const summary = String(cause?.summary || "").trim() || text;
-  head.append(icon, node("p", summary, "cv-failure-text"));
+  // A cancel or a kept original is a decision, not a failure: no cause to measure.
+  head.append(icon, node("p", summary, `cv-failure-text${["cancelled", "kept_original"].includes(tone) ? " cv-decided" : ""}`));
   box.append(head);
   const tries = causeAttemptsTable(cause?.attempts);
   if (tries) box.append(tries);
@@ -7936,6 +8003,12 @@ function conversionSizes(job) {
   return {before: o.source_bytes ?? s.source_bytes, after: o.candidate_bytes ?? s.candidate_bytes};
 }
 // The first sentence of a message, short enough for one line.
+// The first clause of a raw error, when it carries a number and is short:
+// "ffmpeg exited with status 1", not the decoder's whole trace.
+function errorHeadline(error, limit = 110) {
+  const first = String(error || "").split(/\n|: (?=[A-Z])/)[0].trim();
+  return first && /\d/.test(first) && first.length <= limit ? first : shortLine(error, limit);
+}
 function shortLine(text, limit = 90) {
   const clean = shortJobReason(text);
   const first = clean.split(/(?<=[.!?])\s+(?=[A-Z])/)[0] || clean;
@@ -8007,7 +8080,7 @@ function conversionFailure(job, status, fix = null) {
   const text = status === "kept_original" ? "The original was kept; the smaller copy was removed."
     : status === "cancelled" ? (job.explanation?.happened || "Cancelled. The original is untouched.")
     : status === "no_result" ? (job.explanation?.happened || notConvertedReason(job))
-    : job.explanation?.happened || (job.error ? shortLine(job.error, 140) : "The job stopped. The original is untouched.");
+    : job.explanation?.happened || (job.error ? errorHeadline(job.error) : "The job stopped. The original is untouched.");
   const extra = [];
   if (resolved) {
     const line = node("p", "", "cv-resolved");
@@ -8021,7 +8094,9 @@ function conversionFailure(job, status, fix = null) {
   const step = status === "failed" ? stepText(job) : "";
   const advice = job.next_steps?.length ? "" : String(job.benchmark?.user_next_step || "").trim();
   const cause = causeOf(job);
-  return failureBlock({tone: resolved ? "resolved" : status, text, cause, fix: resolved ? null : fix, extra, step, technical: [raw, cause?.summary && job.explanation?.happened, advice && `Next step: ${advice}`], learned: job.explanation?.learned});
+  // A line without its numbers borrows them from the error that has them.
+  const said = !job.explanation?.happened && !/\d/.test(text) && /\d/.test(raw) && ["failed", "no_result"].includes(status) ? errorHeadline(raw) : text;
+  return failureBlock({tone: resolved ? "resolved" : status, text: said, cause, fix: resolved ? null : fix, extra, step, technical: [raw, cause?.summary && job.explanation?.happened, advice && `Next step: ${advice}`], learned: job.explanation?.learned});
 }
 const channelLabel = n => ({1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}[n] || (n ? `${n} ch` : ""));
 const videoCodecLabel = c => ({h264: "H.264", hevc: "HEVC", h265: "HEVC", libx265: "HEVC", hevc_videotoolbox: "HEVC", av1: "AV1", libsvtav1: "AV1", mpeg2video: "MPEG-2", vc1: "VC-1", vp9: "VP9"}[c] || codecLabel(c));
@@ -8124,13 +8199,16 @@ function conversionStreamsCard(job) {
   const scale = Math.max(conversionSizes(job).before || 0, (s.video.before_bytes || 0) + sum(audio, "before_bytes") + sum(subs, "bytes"), 1);
   const card = node("section", "", "cv-card cv-streams");
   card.setAttribute("aria-label", "Streams");
+  // Two tracks can share a codec and layout.
+  card.dataset.allowRepeat = "";
   card.append(node("h3", working ? "Streams · planned" : "Streams", "cv-card-title"));
   const list = node("ul", "", "cv-stream-list");
   const v = s.video;
   const after = v.after_codec || v.codec;
   list.append(streamRow({kind: "Video", name: after && after !== v.codec ? `${videoCodecLabel(v.codec)} → ${videoCodecLabel(after)}` : videoCodecLabel(v.codec), change: after && after !== v.codec ? "re-encoded" : "copied", before: v.before_bytes, after: v.after_bytes, scale, pending: working && !(v.after_bytes > 0)}));
   for (const a of audio) {
-    const was = [codecLabel(a.codec), channelLabel(a.channels), a.kbps ? `${a.kbps}k` : ""].filter(Boolean).join(" ");
+    const kbps = Number(a.kbps || a.before_kbps) || 0;
+    const was = [codecLabel(a.codec), channelLabel(a.channels), kbps ? `${kbps}k` : ""].filter(Boolean).join(" ");
     const now = a.fate === "converted" ? [a.after_codec === "he_aac" ? "HE-AAC" : codecLabel(a.after_codec), channelLabel(a.after_channels), a.after_kbps ? `${a.after_kbps}k` : ""].filter(Boolean).join(" ") : "";
     list.append(streamRow({kind: "Audio", name: [a.language || "Unknown", a.title].filter(Boolean).join(" · "), change: now ? `${was} → ${now}` : was, fate: a.fate, before: a.before_bytes, after: a.after_bytes, scale, pending: working && a.fate === "converted" && !(a.after_bytes > 0)}));
   }
@@ -8196,6 +8274,8 @@ function conversionAttemptsCard(job) {
   if (attempts.length < 2) return null;
   const card = node("section", "", "cv-card cv-attempts");
   card.setAttribute("aria-label", "Attempts");
+  // A history names the same states again, by design.
+  card.dataset.allowRepeat = "";
   card.append(node("h3", `Attempts · ${attempts.length}`, "cv-card-title"));
   const list = node("ol", "", "cv-attempt-list");
   attempts.slice().reverse().forEach((a, i) => {
