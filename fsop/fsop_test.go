@@ -129,7 +129,7 @@ func leftovers(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
 	filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
-		if err == nil && strings.Contains(fi.Name(), ".moving-") {
+		if err == nil && strings.Contains(fi.Name(), ".nav-mv-") {
 			out = append(out, p)
 		}
 		return nil
@@ -263,5 +263,133 @@ func TestMoveOutsideRootsStillRefused(t *testing.T) {
 	}
 	if _, err := r.Move(context.Background(), a, root); err == nil {
 		t.Error("move onto a root was allowed")
+	}
+}
+
+func TestMoveKeepsVerifiedCopyWhenSourceCannotBeRemoved(t *testing.T) {
+	crossDevice(t)
+	old := removeSourceFn
+	removeSourceFn = func(string) error { return syscall.EIO }
+	defer func() { removeSourceFn = old }()
+	r, root, _ := testResolver(t)
+	a, b := filepath.Join(root, "a.mkv"), filepath.Join(root, "Anime", "a.mkv")
+	os.WriteFile(a, []byte("data"), 0o644)
+	_, err := r.Move(context.Background(), a, b)
+	if err == nil || !strings.Contains(err.Error(), "both files exist") {
+		t.Fatalf("err = %v", err)
+	}
+	if got, _ := os.ReadFile(b); string(got) != "data" {
+		t.Errorf("verified copy lost: %q", got)
+	}
+	if _, err := os.Stat(a); err != nil {
+		t.Error("source lost")
+	}
+	if l := leftovers(t, root); len(l) != 0 {
+		t.Errorf("temporary files left: %v", l)
+	}
+}
+
+func TestMoveSourceChangedWhileVerifying(t *testing.T) {
+	crossDevice(t)
+	r, root, _ := testResolver(t)
+	a, b := filepath.Join(root, "a.mkv"), filepath.Join(root, "Anime", "a.mkv")
+	os.WriteFile(a, []byte("data"), 0o644)
+	afterVerifyHook = func() { os.WriteFile(a, []byte("data and more"), 0o644) }
+	defer func() { afterVerifyHook = nil }()
+	if _, err := r.Move(context.Background(), a, b); err == nil {
+		t.Fatal("moved a source that changed")
+	}
+	if got, _ := os.ReadFile(a); string(got) != "data and more" {
+		t.Errorf("source touched: %q", got)
+	}
+	if _, err := os.Stat(b); err == nil {
+		t.Error("stale copy left at the destination")
+	}
+	if _, err := os.Stat(filepath.Dir(b)); err == nil {
+		t.Error("created folder left behind")
+	}
+	if l := leftovers(t, root); len(l) != 0 {
+		t.Errorf("temporary files left: %v", l)
+	}
+}
+
+func TestMoveRefusesRootThatLostItsMount(t *testing.T) {
+	r, root, _ := testResolver(t)
+	for k := range r.writeDevs {
+		r.writeDevs[k]++ // as if the root now sat on another device
+	}
+	if len(r.writeDevs) == 0 {
+		t.Skip("no device ids on this platform")
+	}
+	a := filepath.Join(root, "a.mkv")
+	os.WriteFile(a, []byte("x"), 0o644)
+	if _, err := r.Move(context.Background(), a, filepath.Join(root, "New", "a.mkv")); err == nil {
+		t.Fatal("moved into an unmounted root")
+	}
+	if _, err := os.Stat(filepath.Join(root, "New")); err == nil {
+		t.Error("folder created in an unmounted root")
+	}
+}
+
+func TestMoveIntoItselfRefused(t *testing.T) {
+	r, root, _ := testResolver(t)
+	d := filepath.Join(root, "dir")
+	os.MkdirAll(d, 0o755)
+	if _, err := r.Move(context.Background(), d, filepath.Join(d, "inner", "dir")); err == nil {
+		t.Error("moved a folder into itself")
+	}
+	if _, err := os.Stat(filepath.Join(d, "inner")); err == nil {
+		t.Error("folder created before refusing")
+	}
+}
+
+func TestPlaceNeverReplaces(t *testing.T) {
+	r, root, _ := testResolver(t)
+	tmp, dst := filepath.Join(root, "t"), filepath.Join(root, "d")
+	os.WriteFile(tmp, []byte("new"), 0o644)
+	os.WriteFile(dst, []byte("old"), 0o644)
+	if err := r.place(tmp, dst); err == nil {
+		t.Fatal("replaced an existing file")
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "old" {
+		t.Errorf("destination = %q", got)
+	}
+}
+
+func TestPlaceWithoutHardLinks(t *testing.T) {
+	old := linkFn
+	linkFn = func(string, string) error { return syscall.EPERM }
+	defer func() { linkFn = old }()
+	r, root, _ := testResolver(t)
+	tmp, dst := filepath.Join(root, "t"), filepath.Join(root, "d")
+	os.WriteFile(tmp, []byte("new"), 0o644)
+	if err := r.place(tmp, dst); err != nil {
+		t.Fatalf("place: %v", err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != "new" {
+		t.Errorf("destination = %q", got)
+	}
+	if _, err := os.Stat(tmp); err == nil {
+		t.Error("temporary file still there")
+	}
+	// And it still refuses to replace when links are unavailable.
+	os.WriteFile(tmp, []byte("newer"), 0o644)
+	if err := r.place(tmp, dst); err == nil {
+		t.Error("replaced without hard links")
+	}
+}
+
+func TestMoveFailedCopyRemovesFoldersItMade(t *testing.T) {
+	crossDevice(t)
+	r, root, _ := testResolver(t)
+	a := filepath.Join(root, "a.mkv")
+	os.WriteFile(a, []byte("data"), 0o644)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := r.Move(ctx, a, filepath.Join(root, "x", "y", "a.mkv")); err == nil {
+		t.Fatal("cancelled move succeeded")
+	}
+	if _, err := os.Stat(filepath.Join(root, "x")); err == nil {
+		t.Error("folders left behind")
 	}
 }

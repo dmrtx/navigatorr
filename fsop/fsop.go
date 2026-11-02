@@ -6,6 +6,7 @@ package fsop
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -23,6 +25,13 @@ import (
 type Resolver struct {
 	readRoots  []string
 	writeRoots []string
+	// writeDevs is the device each write root was on when the resolver was
+	// built. A root whose device later differs has lost its mount (an empty
+	// mount point on the local disk), and nothing is created or copied into it.
+	writeDevs map[string]uint64
+	// placeMu serializes the last step of a cross-filesystem move, so two
+	// moves of this process cannot race for one destination name.
+	placeMu sync.Mutex
 }
 
 // NewResolver canonicalizes the configured roots. Empty write roots mean
@@ -53,7 +62,13 @@ func NewResolver(readRoots, writeRoots []string) (*Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Resolver{readRoots: rr, writeRoots: wr}, nil
+	devs := map[string]uint64{}
+	for _, root := range wr {
+		if sp, err := SpaceOf(root); err == nil && sp.Device != 0 {
+			devs[root] = sp.Device
+		}
+	}
+	return &Resolver{readRoots: rr, writeRoots: wr, writeDevs: devs}, nil
 }
 
 // resolve checks path against roots after evaluating symlinks.
@@ -180,6 +195,14 @@ func (r *Resolver) List(path string, depth, limit int) ([]Stat, error) {
 // filesystems.
 var renameFn = os.Rename
 
+// Seams for tests: linking the copy into place, removing the source, and a
+// hook that runs after the copy is read back.
+var (
+	linkFn          = os.Link
+	removeSourceFn  = os.Remove
+	afterVerifyHook func()
+)
+
 // MoveResult says how a move was done, for the action log.
 type MoveResult struct {
 	// Method is "rename" (same filesystem) or "copy" (the rename crossed
@@ -187,19 +210,20 @@ type MoveResult struct {
 	Method string `json:"method"`
 	Bytes  int64  `json:"bytes,omitempty"`
 	SHA256 string `json:"sha256,omitempty"`
-	// CreatedDirs lists the destination folders that did not exist.
+	// CreatedDirs lists the destination folders this move created.
 	CreatedDirs []string `json:"created_dirs,omitempty"`
 }
 
 // Move moves source to destination. Both must resolve inside the write
 // roots, so files cannot be smuggled out of the media area. It never
 // overwrites. Missing folders above the destination are created (inside the
-// write roots, as plain directories). When the rename crosses filesystems
-// (EXDEV, e.g. two separate mounts of the same share) a file is copied to a
-// temporary name next to the destination, read back and compared by size and
-// SHA-256, and only then put in place and removed from the source. A failure
-// at any point leaves the source untouched. Directories only move within one
-// filesystem.
+// write roots, as plain directories, and never in a root that has lost its
+// mount). When the rename crosses filesystems (EXDEV, e.g. two separate
+// mounts of the same share) a file is copied to a temporary name next to the
+// destination, read back and compared by size and SHA-256, and only then put
+// in place and removed from the source. A failure before the source is
+// removed leaves it untouched, and the verified copy is never deleted once
+// the source is gone. Directories only move within one filesystem.
 func (r *Resolver) Move(ctx context.Context, source, destination string) (MoveResult, error) {
 	var res MoveResult
 	src, err := r.ResolveWrite(source)
@@ -219,22 +243,45 @@ func (r *Resolver) Move(ctx context.Context, source, destination string) (MoveRe
 	if r.isRoot(dst) {
 		return res, fmt.Errorf("destination %q is an allowed root", destination)
 	}
-	created, err := mkdirAllReport(filepath.Dir(dst))
-	res.CreatedDirs = created
+	if strings.HasPrefix(dst, src+string(os.PathSeparator)) {
+		return res, fmt.Errorf("cannot move %q into itself", source)
+	}
+	if err := r.rootsMounted(src, dst); err != nil {
+		return res, err
+	}
+	parent := filepath.Dir(dst)
+	created, err := mkdirAllReport(parent)
+	if err == nil {
+		// Nothing swapped in a link while the folders were made.
+		var real string
+		if real, err = r.ResolveWrite(parent); err == nil && real != parent {
+			err = fmt.Errorf("%q now resolves to %q", parent, real)
+		}
+	}
 	if err != nil {
+		removeEmptyDirs(created)
 		return res, fmt.Errorf("creating destination folder: %w", err)
 	}
+	fail := func(err error) (MoveResult, error) {
+		removeEmptyDirs(created)
+		return MoveResult{}, err
+	}
+	res.CreatedDirs = created
 	err = renameFn(src, dst)
 	if err == nil {
 		res.Method = "rename"
 		return res, nil
 	}
 	if !errors.Is(err, syscall.EXDEV) {
-		return res, err
+		return fail(err)
 	}
-	n, sum, err := copyVerifiedMove(ctx, src, dst)
+	n, sum, err := r.copyVerifiedMove(ctx, src, dst)
 	if err != nil {
-		return res, fmt.Errorf("%w (the source was not touched)", err)
+		var done *copiedError
+		if errors.As(err, &done) {
+			return res, err // the copy is in place: keep its folders
+		}
+		return fail(fmt.Errorf("%w (the source was not touched)", err))
 	}
 	res.Method, res.Bytes, res.SHA256 = "copy", n, sum
 	return res, nil
@@ -249,8 +296,31 @@ func (r *Resolver) isRoot(p string) bool {
 	return false
 }
 
+// rootsMounted refuses to work when the write root holding any of paths is
+// no longer on the device it was on at start-up.
+func (r *Resolver) rootsMounted(paths ...string) error {
+	for _, p := range paths {
+		for _, root := range r.writeRoots {
+			if p != root && !strings.HasPrefix(p, root+string(os.PathSeparator)) {
+				continue
+			}
+			want, ok := r.writeDevs[root]
+			if !ok {
+				break
+			}
+			sp, err := SpaceOf(root)
+			if err != nil || sp.Device != want {
+				return fmt.Errorf("allowed root %q is not mounted as it was at start-up; nothing was moved", root)
+			}
+			break
+		}
+	}
+	return nil
+}
+
 // mkdirAllReport creates dir and its missing parents, returning the ones it
-// made (outermost first).
+// made (outermost first). Every folder must really be a directory, never a
+// link that appeared meanwhile.
 func mkdirAllReport(dir string) ([]string, error) {
 	var missing []string
 	for d := dir; ; d = filepath.Dir(d) {
@@ -264,16 +334,48 @@ func mkdirAllReport(dir string) ([]string, error) {
 	}
 	var made []string
 	for _, d := range missing {
-		if err := os.Mkdir(d, 0o755); err != nil && !os.IsExist(err) {
+		err := os.Mkdir(d, 0o755)
+		switch {
+		case err == nil:
+			made = append(made, d)
+		case os.IsExist(err):
+			// Made by someone else just now: fine only as a plain directory.
+			if fi, lerr := os.Lstat(d); lerr != nil || !fi.IsDir() {
+				return made, fmt.Errorf("%q is not a plain directory", d)
+			}
+		default:
 			return made, err
 		}
-		made = append(made, d)
 	}
 	return made, nil
 }
 
+// removeEmptyDirs takes back folders a failed move created, innermost first.
+// os.Remove refuses a folder that holds anything.
+func removeEmptyDirs(dirs []string) {
+	for i := len(dirs) - 1; i >= 0; i-- {
+		os.Remove(dirs[i])
+	}
+}
+
+// copiedError means the file was copied and verified and is in place, but the
+// source could not be removed: both exist, nothing was lost.
+type copiedError struct{ msg string }
+
+func (e *copiedError) Error() string { return e.msg }
+
+// tempName is a short hidden name next to dst, so long titles do not hit the
+// file name limit.
+func tempName(dst string) string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return filepath.Join(filepath.Dir(dst), fmt.Sprintf(".nav-mv-%d", time.Now().UnixNano()))
+	}
+	return filepath.Join(filepath.Dir(dst), ".nav-mv-"+hex.EncodeToString(b[:]))
+}
+
 // copyVerifiedMove is the cross-filesystem move of one regular file.
-func copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, error) {
+func (r *Resolver) copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, error) {
 	before, err := os.Stat(src)
 	if err != nil {
 		return 0, "", err
@@ -286,7 +388,7 @@ func copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, erro
 		return 0, "", err
 	}
 	defer in.Close()
-	tmp := fmt.Sprintf("%s.moving-%d", dst, time.Now().UnixNano())
+	tmp := tempName(dst)
 	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return 0, "", err
@@ -310,9 +412,11 @@ func copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, erro
 	if err := out.Close(); err != nil {
 		return 0, "", fmt.Errorf("closing the copy: %w", err)
 	}
-	// The source must not have changed while it was read.
-	after, err := os.Stat(src)
-	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || n != before.Size() {
+	unchanged := func() bool {
+		now, err := os.Stat(src)
+		return err == nil && now.Size() == before.Size() && now.ModTime().Equal(before.ModTime())
+	}
+	if n != before.Size() || !unchanged() {
 		return 0, "", fmt.Errorf("the source changed while it was copied")
 	}
 	// Read the copy back from disk and compare.
@@ -323,29 +427,82 @@ func copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, erro
 	if gn != n || got != want {
 		return 0, "", fmt.Errorf("the copy does not match the original (%d of %d bytes)", gn, n)
 	}
+	if afterVerifyHook != nil {
+		afterVerifyHook()
+	}
+	// The read-back can take minutes on a big file: check the source again
+	// before the copy is put in place.
+	if !unchanged() {
+		return 0, "", fmt.Errorf("the source changed while the copy was verified")
+	}
 	_ = os.Chmod(tmp, before.Mode().Perm())
 	_ = os.Chtimes(tmp, before.ModTime(), before.ModTime())
-	// Put it in place without ever replacing something that appeared since.
-	if err := os.Link(tmp, dst); err != nil {
-		if _, serr := os.Lstat(dst); serr == nil {
-			return 0, "", fmt.Errorf("destination %q already exists", dst)
-		}
-		// No hard links on this mount: a rename inside one folder is fine.
-		if rerr := os.Rename(tmp, dst); rerr != nil {
-			return 0, "", rerr
-		}
-		keep = true
-	} else {
-		os.Remove(tmp)
-		keep = true
+	if err := r.place(tmp, dst); err != nil {
+		return 0, "", err
 	}
-	if err := os.Remove(src); err != nil {
-		if rerr := os.Remove(dst); rerr != nil {
-			return 0, "", fmt.Errorf("copied and verified, but the source could not be removed (%v) and the copy could not be undone (%v): both exist", err, rerr)
-		}
-		return 0, "", fmt.Errorf("the source could not be removed: %w", err)
+	keep = true
+	// From here the copy is the verified one: it is never deleted again.
+	both := func(why string, err error) error {
+		return &copiedError{fmt.Sprintf("copied and verified to %q, but %s (%v): both files exist, nothing was lost", dst, why, err)}
+	}
+	if err := syncDir(filepath.Dir(dst)); err != nil {
+		return 0, "", both("the destination folder could not be flushed", err)
+	}
+	if !unchanged() {
+		return 0, "", both("the source changed while the copy was verified, so it was kept", errors.New("source modified"))
+	}
+	if err := removeSourceFn(src); err != nil {
+		return 0, "", both("the source could not be removed", err)
 	}
 	return n, want, nil
+}
+
+// place puts the verified temporary file at dst without ever replacing
+// something that is there, trying a hard link, then a rename that refuses to
+// replace, and only on a filesystem with neither, a checked rename.
+func (r *Resolver) place(tmp, dst string) error {
+	r.placeMu.Lock()
+	defer r.placeMu.Unlock()
+	exists := func() error {
+		if _, err := os.Lstat(dst); err == nil {
+			return fmt.Errorf("destination %q already exists", dst)
+		}
+		return nil
+	}
+	if err := exists(); err != nil {
+		return err
+	}
+	if err := linkFn(tmp, dst); err == nil {
+		os.Remove(tmp)
+		return nil
+	}
+	if err := exists(); err != nil {
+		return err
+	}
+	supported, err := renameNoReplace(tmp, dst)
+	if supported {
+		return err
+	}
+	if err := exists(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
+}
+
+// syncDir flushes a directory entry; filesystems that cannot are tolerated.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	err = d.Sync()
+	for _, ok := range []error{syscall.EINVAL, syscall.ENOTSUP, syscall.ENOSYS, syscall.EBADF, syscall.EPERM} {
+		if errors.Is(err, ok) {
+			return nil
+		}
+	}
+	return err
 }
 
 // copyCtx copies in chunks, stopping when ctx is cancelled.
