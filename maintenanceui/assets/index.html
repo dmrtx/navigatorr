@@ -162,6 +162,7 @@
         <section id="library" class="panel tab-content">
           <div class="library-layout">
             <div class="library-browser">
+              <div class="library-head sticky-head">
               <div class="toolbar" id="library-tools">
                 <select id="service" aria-label="Source"></select
                 ><button
@@ -283,6 +284,7 @@
                   ><span class="hint-touch">Drag down the checkboxes to select several files.</span></span
                 ><button id="select-range" class="quiet" aria-pressed="false" hidden>Select range</button
                 ><span id="range-status" class="metadata" aria-live="polite"></span>
+              </div>
               </div>
               <div id="library-items" class="library-items"></div>
               <div class="list-footer">
@@ -599,10 +601,31 @@
           </div>
         </section>
         <section id="jobs" class="panel tab-content operations-panel" hidden>
+          <div class="queue-head sticky-head">
           <div class="queue-toolbar">
             <h2>Queue</h2>
 
             <div class="queue-filters">
+              <button id="queue-search-toggle" class="queue-tool" type="button" aria-label="Search jobs" title="Search jobs" aria-expanded="false" aria-controls="queue-search-row">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="10" r="6" /><path d="m15 15 5 5" /></svg>
+              </button>
+              <label id="job-sort-pick" class="queue-tool filter-pick" title="Sort jobs">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4v16M4 17l3 3 3-3M17 20V4M14 7l3-3 3 3" /></svg>
+                <select id="job-sort" aria-label="Sort jobs">
+                  <option value="queue">Queue order</option>
+                  <option value="queue_desc">Queue order · reversed</option>
+                  <option value="number_asc">Job number · lowest first</option>
+                  <option value="number_desc">Job number · highest first</option>
+                  <option value="created_desc">Date added · newest first</option>
+                  <option value="created_asc">Date added · oldest first</option>
+                  <option value="name_asc">Name · A–Z</option>
+                  <option value="name_desc">Name · Z–A</option>
+                  <option value="size_desc">Size · largest first</option>
+                  <option value="size_asc">Size · smallest first</option>
+                  <option value="status_asc">Status · needs a look first</option>
+                  <option value="status_desc">Status · finished first</option>
+                </select>
+              </label>
               <label id="job-filter-pick" class="queue-tool filter-pick" title="Filter jobs">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16l-6 7v6l-4 2v-8z" /></svg>
                 <select id="job-filter" aria-label="Filter jobs by status">
@@ -640,10 +663,17 @@
               </button>
             </div>
           </div>
+          <div id="queue-search-row" class="toolbar search-row" role="search" hidden>
+            <input id="job-search" type="search" enterkeyhint="search" aria-label="Search jobs" placeholder="Number, name or file" autocomplete="off" />
+            <button id="close-queue-search" class="icon-button" type="button" aria-label="Close search" title="Close search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg>
+            </button>
+          </div>
           <div id="queue-meta" class="queue-meta" data-state="running">
             <span id="queue-drain-dot" class="queue-dot" aria-hidden="true" hidden></span>
             <span id="queue-drain-status" class="queue-state" role="status" hidden></span>
             <p id="jobs-updated" class="metadata" role="status"></p>
+          </div>
           </div>
           <section id="worker-activity" class="worker-activity" aria-label="Video worker activity">
             <div class="activity-heading"><strong id="worker-capacity">Checking worker slots…</strong><span class="activity-heading-end"><span id="activity-checked" class="metadata"></span><span id="activity-scheduler" class="sched-chip" role="status" data-state="unknown"></span><button id="worker-open-settings" type="button" class="queue-tool slot-settings" aria-label="Change in Settings" title="Change in Settings" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></button></span></div>
@@ -659,6 +689,7 @@
           </div>
         </section>
         <section id="review" class="panel tab-content" hidden>
+          <div class="queue-head sticky-head">
           <div class="queue-toolbar">
             <h2>Review</h2>
             <div class="queue-filters">
@@ -680,6 +711,7 @@
             </div>
           </div>
           <p id="review-summary" class="metadata" role="status"></p>
+          </div>
           <ul id="review-list" class="review-list"></ul>
         </section>
         <section id="stats" class="panel tab-content" hidden>
@@ -1219,6 +1251,12 @@
         <div class="jd-files-head">
           <h3 id="batch-items-title">Files</h3>
           <p id="batch-items-note" class="metadata" data-single-line></p>
+          <button id="batch-items-outstanding" class="icon-button quiet" type="button" aria-pressed="false" aria-label="Show only files left to replace" title="Show only files left to replace" hidden>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" />
+              <path class="eye-slash" d="M4 20 20 4" />
+            </svg>
+          </button>
         </div>
         <div id="batch-items-list" role="list"></div>
         <div class="pagination">
