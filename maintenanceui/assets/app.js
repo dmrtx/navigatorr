@@ -64,6 +64,7 @@ function node(tag, text = "", className = "") {
 }
 // A button that only opens something stays usable while its job is busy.
 function jobControlDisabled(b) {
+  if (b.dataset.unavailable) return true;
   if (!serverReachable) return true;
   if (b.dataset.navigation === "true") return false;
   return jobIsBusy(b.dataset.jobControl) || (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready);
@@ -1079,6 +1080,15 @@ $("worker-status").addEventListener("click", () => {
   void refreshWorkers();
 });
 $("close-workers").addEventListener("click", () => $("workers-dialog").close());
+$("ready-open").addEventListener("click", () => { if (!$("ready-dialog").open) $("ready-dialog").showModal(); });
+$("close-ready").addEventListener("click", () => $("ready-dialog").close());
+// The file path in a job's header opens the file in Files, in this page.
+$("detail-file-link").addEventListener("click", (event) => {
+  const link = $("detail-file-link");
+  event.preventDefault?.();
+  if (!link.dataset.path || link.dataset.outside === "true") return;
+  return showInFiles(link.dataset.path, {folder: link.dataset.folder === "true"});
+});
 $("refresh-workers").addEventListener("click", () => void refreshWorkers());
 async function initialize() {
   state.routeReady=false;
@@ -3813,6 +3823,9 @@ function renderFreedPerDay(days) {
   chart.replaceChildren();
   const total = (n) => days.slice(-n).reduce((sum, d) => sum + (d.saved_bytes || 0), 0);
   const files = days.reduce((sum, d) => sum + (d.count || 0), 0);
+  // A month with nothing freed is noise on Stats: the section steps aside.
+  const section = $("freed-days");
+  if (section) section.hidden = !files;
   if (!files) {
     $("freed-summary").textContent = "";
     chart.append(node("p", `Nothing freed in the last ${days.length || 30} days.`, "muted"));
@@ -3904,6 +3917,15 @@ function renderReadyList(items, waiting, archived = {}) {
     }
     if (waiting > items.length) ready.append(node("li", `${waiting - items.length} more waiting, smaller than these.`, "muted"));
   }
+  // Replace all: each file in turn, through its own Replace.
+  const all = $("ready-replace-all");
+  all.replaceChildren();
+  if (items.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(items.map(item => item.action_id), {className: "primary"}));
+  // Stats shows one line; the list opens from it.
+  const count = Math.max(waiting, items.length);
+  const open = $("ready-open");
+  $("ready-open-label").textContent = count ? `${count} ${count === 1 ? "file" : "files"} ready to replace` : archived.count > 0 ? `${archived.count} archived ${archived.count === 1 ? "copy" : "copies"} to clean up` : "No finished encodes are waiting";
+  open.disabled = !count && !(archived.count > 0);
   // Archived jobs are discarded ones, so they do not wait here, but their
   // smaller copies still use disk until they are deleted.
   if (archived.count > 0) {
@@ -3936,9 +3958,10 @@ function renderSavings(data) {
   );
   const waiting = savings.candidate_count || 0;
   $("candidate-count").textContent = waiting ? `${waiting} file${waiting === 1 ? "" : "s"} · Potential savings` : "Potential savings";
-  $("estimated-total").textContent = bytes(
-    savings.estimated_saved_bytes ?? savings.estimated_bytes ?? 0,
-  );
+  const estimated = savings.estimated_saved_bytes ?? savings.estimated_bytes ?? 0;
+  $("estimated-total").textContent = bytes(estimated);
+  // Nothing estimated is noise, not a figure.
+  $("estimated-tile").hidden = !(estimated > 0);
   renderFreedPerDay(data.daily || []);
   const recent = $("recent-replaced");
   recent.replaceChildren();
@@ -4056,7 +4079,6 @@ function storageVolumeCard(data, volume, index) {
     list.append(storageLegendRow(f.name, f.path, f.bytes, total, detail, f.inside ? "storage-nested" : `storage-c${swatch++ % 6}`));
   }
   if (volume.other_bytes > 0) list.append(storageLegendRow("Everything else", "", volume.other_bytes, total, ["Not in a folder the console serves"], "storage-other"));
-  list.append(storageLegendRow("Free", "", free, total, [], "storage-free"));
   card.append(list);
   const changes = storageChanges(volume.trend);
   const spark = storageSparkline(volume.trend, "Used space");
@@ -4089,8 +4111,7 @@ function renderStorage(data) {
   if (measuring) status.push("Measuring now. A large library can take a few minutes.");
   else if (data.measured_at) {
     const when = new Date(data.measured_at).toLocaleString("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    const sources = new Set([...volumes, ...(data.folders || [])].map((x) => x.source));
-    status.push(`Last measured ${when}${sources.size === 1 && sources.has("helper") ? ", inside the NAS" : sources.has("mount") ? ", through the network share" : ""}. It repeats every 6 hours.`);
+    status.push(`Measured ${when}`);
   } else if (!volumes.length) status.push("Not measured yet. It runs by itself shortly after start; use Measure now to run it immediately.");
   if (data.error) status.push(`The last measurement failed: ${data.error}`);
   for (const note of data.notes || []) status.push(note);
@@ -4279,31 +4300,13 @@ async function prepareReplacement(job) {
     await openReplacement(job.replacement_action_id);
     return;
   }
-  const durable = job.replacement_context;
-  if (
-    durable?.service === "filesystem" ||
-    (["sonarr", "radarr"].includes(durable?.service) &&
-      Number.isInteger(
-        durable[durable.service === "radarr" ? "movie_id" : "series_id"],
-      ) &&
-      durable[durable.service === "radarr" ? "movie_id" : "series_id"] > 0)
-  ) {
-    await enqueueReplacement(job, durable);
+  const legacy = legacyReplacementHint(job);
+  const automatic = automaticReplacementContext(job, legacy);
+  if (automatic) {
+    await enqueueReplacement(job, automatic);
     return;
   }
-  let legacy;
-  try {
-    legacy = JSON.parse(
-      localStorage.getItem(`navigatorr_media:${job.id}`) || "null",
-    );
-  } catch {}
-  const integrations = (state.info.services || []).filter((entry) =>
-    ["sonarr", "radarr"].includes(entry.name),
-  );
-  if (!integrations.length && !["sonarr", "radarr"].includes(legacy?.service)) {
-    await enqueueReplacement(job, { service: "filesystem" });
-    return;
-  }
+  const integrations = replacementIntegrations();
   // Old browser-only hints cannot decide how an agent-created or historical
   // candidate is imported. Ask once, then show the engine's exact approval plan.
   state.replacementChoice = { job, legacy };
@@ -5253,12 +5256,13 @@ function jobControls(job, detail = false) {
     // so a transient error can still be retried from here.
     // The server says when running it again cannot change anything (a damaged
     // file, tracks the file does not have); its next steps replace Retry.
-    else if (!job.retry_blocked && (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0))) add("Retry", () => jobControl(job.id, "action_retry"));
+    // A failure a later run already fixed asks for nothing.
+    else if (!job.resolved_by && !job.retry_blocked && (!(job.replacement?.failed > 0) || (!(job.replacement.retryable > 0) && job.replacement.batch_recorded_failed > 0))) add("Retry", () => jobControl(job.id, "action_retry"));
   }
   // The server's next steps replace Run again, the remedy, x265 and the goal
   // form after a missed limit; a batch child takes them from its batch row.
   const legacySteps = !Array.isArray(job.next_steps);
-  if (!legacySteps && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision") {
+  if (!legacySteps && !job.resolved_by && !job.candidate_ready && !job.replacement_action_id && job.status !== "waiting_decision") {
     job.next_steps.forEach((step, i) => {
       add(step.label, () => runNextStep(job, step));
       const b = [...actionRail.children].at(-1);
@@ -5321,8 +5325,6 @@ function jobControls(job, detail = false) {
     state.info.allow_destructive
   )
     add("Replace file", () => prepareReplacement(job));
-  if (job.replacement_action_id)
-    add("View replacement", () => openJob(job.replacement_action_id));
   // Untagged tracks are kept without being asked; the finished file may have
   // kept the wrong ones, and the tag is missing, not the track. The lists come
   // with the one job only, so the queue rows never offer it. A job that was
@@ -5338,9 +5340,9 @@ function jobControls(job, detail = false) {
   // the batch it belongs to.
   // parent_batch_id is only set for a batch the server found, and a job that
   // already offers its preview does not offer the same batch twice.
-  if (detail && job.parent_batch_id && job.parent_batch_id !== job.id && job.parent_batch_id !== job.preview_action_id && job.parent_batch_id !== job.preview_execution_action_id)
-    add("View batch", () => openJob(job.parent_batch_id));
-  const filePath = jobFilePath(job), folderPath = filePath ? "" : jobFolderPath(job);
+  // The page itself links its file and Back returns to the batch, so the
+  // dialog offers neither again; a queue row still shows its file in Files.
+  const filePath = detail ? "" : jobFilePath(job), folderPath = filePath || detail ? "" : jobFolderPath(job);
   if (filePath && filesRouteFor(filePath))
     add("Show in Files", () => showInFiles(filePath));
   else if (folderPath && filesRouteFor(folderPath, {folder: true}))
@@ -5631,11 +5633,13 @@ function queuePresentation(job) {
   const summary = [kind, result, metrics.join(" · ")]
     .filter(Boolean)
     .join(" · ");
+  // A failure a later run fixed is history: it names the fix and asks nothing.
+  const resolvedBy = job.status === "failed" && job.resolved_by;
   return {
     title,
     context,
-    status,
-    summary,
+    status: resolvedBy ? "Resolved" : status,
+    summary: resolvedBy ? [kind, `Resolved by ${job.resolved_by.number ? `#${job.resolved_by.number}` : "a later run"}`, metrics.join(" · ")].filter(Boolean).join(" · ") : summary,
     kind,
     facts: metrics,
     showTelemetry:
@@ -6475,7 +6479,7 @@ function renderJobsList() {
     const singleFile = job.batch_files?.file_count === 1 ? job.batch_files.files?.[0] : null;
     const heading = node("h3", "", "job-heading");
     heading.append(node("span", job.number ? `#${job.number}` : "", "job-number"));
-    heading.append(jobLink(singleFile?.display_label || presentation.title, job.id));
+    heading.append(jobLink(singleFile?.display_label || presentation.title, job.conversion_id || job.id));
     heading.append(statusBadge(presentation.status));
     // A goal batch keeps encoding while one file waits, so its own status says
     // "In progress"; the flag says a decision is waiting.
@@ -7533,6 +7537,10 @@ function syncDetailSections() {
   $("detail-rows").hidden = !rows.some(key => !$(key).hidden && $(key).children.length > 0);
 }
 async function openJob(id) {
+  // Every job of a file's conversion (its replacement, a retry) opens the
+  // conversion: one page per file.
+  const listed = [...(state.operationJobs?.values() || [])].find(job => job.id === id);
+  if (listed?.conversion_id) id = listed.conversion_id;
   // The same job opened again (Back, a link to itself) keeps what it shows.
   const reopened = state.detail === id && $("job-detail").open;
   // Read before any row is cleared: removing the focused control sends focus
@@ -7584,6 +7592,446 @@ async function openJob(id) {
   if (known) paintDetail(known);
   await refreshDetail();
 }
+// ---- A conversion: one file's job, results first ----
+// One page per file, read top to bottom: what it is now and how much smaller
+// it got, what happened to each stream, how good it looks, and what it ran.
+// Its replacement is a state of this page, never a page of its own.
+const conversionLabels = {queued: "Queued", encoding: "Encoding", needs_decision: "Needs decision", ready_to_replace: "Ready to replace", replacing: "Replacing", replaced: "Replaced", replace_failed: "Replace failed", kept_original: "Original kept", no_result: "No smaller file", failed: "Failed", cancelled: "Cancelled"};
+const conversionTones = {queued: "neutral", encoding: "running", needs_decision: "waiting_decision", ready_to_replace: "completed", replacing: "running", replaced: "completed", replace_failed: "failed", kept_original: "neutral", no_result: "neutral", failed: "failed", cancelled: "neutral"};
+function isConversionPage(job) {
+  return job?.action_name === "transcode_media" && !job.batch && !job.podcast;
+}
+// The server says which state the conversion is in; an older server does not,
+// so it is read from the job the same way.
+function conversionStatusOf(job) {
+  if (conversionLabels[job.conversion_status]) return job.conversion_status;
+  if (job.status === "pending") return "queued";
+  if (["running", "waiting_external"].includes(job.status)) return "encoding";
+  if (job.status === "waiting_decision") return "needs_decision";
+  if (job.status === "failed") return "failed";
+  if (job.status === "cancelled") return "cancelled";
+  if (job.replaced) return "replaced";
+  if (job.replacement_action_id) return "replacing";
+  if (job.candidate_ready) return "ready_to_replace";
+  return "no_result";
+}
+function conversionChip(job) {
+  const status = conversionStatusOf(job);
+  if (job.resolved_by && status === "failed") return statusBadge("Resolved", "neutral");
+  return statusBadge(conversionLabels[status], conversionTones[status]);
+}
+const percentOf = (part, whole) => whole > 0 ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
+function conversionSizes(job) {
+  const o = job.outcome || {}, s = job.savings || {};
+  return {before: o.source_bytes ?? s.source_bytes, after: o.candidate_bytes ?? s.candidate_bytes};
+}
+// The first sentence of a message, short enough for one line.
+function shortLine(text, limit = 90) {
+  const clean = shortJobReason(text);
+  const first = clean.split(/(?<=[.!?])\s+(?=[A-Z])/)[0] || clean;
+  return first.length > limit ? `${first.slice(0, limit - 1)}…` : first;
+}
+// Before → after, the bar of what is left, and the share it saved.
+function conversionHero(job, status) {
+  const hero = node("section", "", "cv-hero");
+  hero.setAttribute("aria-label", "Size");
+  const {before, after} = conversionSizes(job);
+  const finished = !["queued", "encoding", "failed", "cancelled"].includes(status);
+  if (finished && before > 0 && after > 0) {
+    const share = after / before;
+    const saved = before - after;
+    const sizes = node("p", "", "cv-sizes");
+    sizes.append(node("span", bytes(before), "cv-before"), node("span", "→", "cv-arrow"), node("strong", bytes(after), "cv-after"));
+    hero.append(sizes);
+    const track = node("div", "", "cv-shrink");
+    track.setAttribute("role", "img");
+    track.setAttribute("aria-label", `The new file is ${Math.round(share * 100)}% of the original`);
+    const fill = node("i");
+    fill.style.width = `${percentOf(after, before).toFixed(1)}%`;
+    track.append(fill);
+    hero.append(track);
+    const pct = Math.round((1 - share) * 100);
+    const line = node("p", "", "cv-saved");
+    line.append(node("strong", saved >= 0 ? `−${pct}%` : `+${-pct}%`, saved >= 0 ? "cv-pct" : "cv-pct grew"), node("span", saved >= 0 ? `${bytes(saved)} smaller` : `${bytes(-saved)} larger`));
+    hero.append(line);
+    return hero;
+  }
+  // Working: the live progress, said once.
+  if (["queued", "encoding"].includes(status)) {
+    const live = detailHero(detailProgressModel(job), conversionLabels[status]);
+    if (before > 0) hero.append(node("p", `${bytes(before)} original`, "cv-original metadata"));
+    if (live) hero.append(live);
+    return hero.children.length ? hero : null;
+  }
+  if (before > 0) {
+    hero.append(node("p", `${bytes(before)} original · untouched`, "cv-original metadata"));
+    return hero;
+  }
+  return null;
+}
+// The replacement, as a state of this page.
+function conversionReplacementRow(job, status) {
+  const run = job.replacement_run;
+  if (!run && !["replacing", "replaced", "replace_failed"].includes(status)) return null;
+  let tone = "run", text = "Replacing…";
+  if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = `Replaced${run?.completed_at ? ` · ${agoText(run.completed_at)}` : ""}`; }
+  else if (run?.status === "failed" || status === "replace_failed") { tone = "bad"; text = `Replace failed: ${run?.error ? shortLine(run.error, 70) : "the original is still in place"}`; }
+  else if (run?.status === "waiting_decision") { tone = "warn"; text = "Replacement is waiting for your approval"; }
+  else if (run?.status === "cancelled") { tone = "muted"; text = "Replacement cancelled · the original is in place"; }
+  const row = node("p", "", `cv-replace cv-${tone}`);
+  row.dataset.replacementRun = run?.status || status;
+  const icon = node("span", {ok: "✓", bad: "!", warn: "!", muted: "–", run: ""}[tone], "cv-replace-icon");
+  icon.setAttribute("aria-hidden", "true");
+  const label = node("span", text);
+  // A failure may take two lines; a state never does.
+  if (tone !== "bad") label.dataset.singleLine = "";
+  row.title = run?.error || text;
+  row.append(icon, label);
+  return row;
+}
+// A failure: an icon, one line, and the technical text folded away. The fix
+// is the first button of the action bar.
+function conversionFailure(job, status) {
+  if (!["failed", "cancelled", "no_result", "kept_original"].includes(status)) return null;
+  const resolved = status === "failed" && job.resolved_by;
+  const box = node("section", "", `cv-failure cv-failure-${resolved ? "resolved" : status}`);
+  box.setAttribute("aria-label", "What happened");
+  const text = status === "kept_original" ? "The original was kept; the smaller copy was removed."
+    : status === "cancelled" ? (job.explanation?.happened || "Cancelled. The original is untouched.")
+    : status === "no_result" ? (job.explanation?.happened || notConvertedReason(job))
+    : job.explanation?.happened || (job.error ? shortLine(job.error, 140) : "The job stopped. The original is untouched.");
+  const head = node("div", "", "cv-failure-head");
+  const icon = node("span", status === "failed" && !resolved ? "!" : "–", "cv-failure-icon");
+  icon.setAttribute("aria-hidden", "true");
+  head.append(icon, node("p", text, "cv-failure-text"));
+  box.append(head);
+  if (resolved) {
+    const line = node("p", "", "cv-resolved");
+    const n = job.resolved_by.number;
+    line.append(node("span", "Resolved by "), jobLink(n ? `#${n}` : "a later run", job.resolved_by.id));
+    box.append(line);
+  }
+  const raw = String(job.error || job.waiting_reason || job.benchmark?.message || "").trim();
+  const showRaw = raw && raw !== text.trim();
+  // Where it stopped and the worker's own advice are technical too: they wait
+  // with the error, folded, so the page leads with one line and one fix.
+  const step = status === "failed" ? stepText(job) : "";
+  const advice = job.next_steps?.length ? "" : String(job.benchmark?.user_next_step || "").trim();
+  if (showRaw || step || advice) {
+    const technical = node("details", "", "technical-reason");
+    technical.append(node("summary", "Technical details"));
+    if (step) technical.append(node("p", step, "metadata jd-step"));
+    if (showRaw) technical.append(node("p", raw, "metadata"));
+    if (advice) technical.append(node("p", `Next step: ${advice}`, "metadata"));
+    box.append(technical);
+  }
+  return box;
+}
+const channelLabel = n => ({1: "mono", 2: "stereo", 6: "5.1", 8: "7.1"}[n] || (n ? `${n} ch` : ""));
+const videoCodecLabel = c => ({h264: "H.264", hevc: "HEVC", h265: "HEVC", libx265: "HEVC", hevc_videotoolbox: "HEVC", av1: "AV1", libsvtav1: "AV1", mpeg2video: "MPEG-2", vc1: "VC-1", vp9: "VP9"}[c] || codecLabel(c));
+// Two bars on one track: the stream's share of the original, and what is left of it.
+function streamBar(before, after, scale) {
+  const track = node("div", "", "cv-stream-bar");
+  track.setAttribute("aria-hidden", "true");
+  const was = node("i", "", "cv-was");
+  was.style.width = `${percentOf(before, scale).toFixed(1)}%`;
+  const now = node("i", "", "cv-now");
+  now.style.width = `${percentOf(after, scale).toFixed(1)}%`;
+  track.append(was, now);
+  return track;
+}
+function streamRow({kind, name, change, fate, before, after, scale}) {
+  const row = node("li", "", `cv-stream${fate === "dropped" ? " dropped" : ""}`);
+  const label = node("div", "", "cv-stream-label");
+  label.append(node("span", kind, "cv-stream-kind"));
+  const title = node("span", name, "cv-stream-name");
+  title.dataset.singleLine = "";
+  title.title = name;
+  label.append(title);
+  if (fate) label.append(node("span", fate, `cv-fate cv-fate-${fate}`));
+  const figures = node("div", "", "cv-stream-figures");
+  const codec = node("span", change, "cv-stream-codec metadata");
+  codec.dataset.singleLine = "";
+  codec.title = change;
+  const size = node("span", fate === "dropped" ? `${before > 0 ? bytes(before) : ""} → 0` : before > 0 && after > 0 ? `${bytes(before)} → ${bytes(after)}` : before > 0 ? bytes(before) : "", "cv-stream-size");
+  figures.append(codec, size);
+  row.append(label, figures);
+  if (before > 0) row.append(streamBar(before, fate === "dropped" ? 0 : after || 0, scale));
+  return row;
+}
+function conversionStreamsCard(job) {
+  const s = job.streams;
+  if (!s?.video) return null;
+  const audio = Array.isArray(s.audio) ? s.audio : [];
+  const scale = Math.max(conversionSizes(job).before || 0, (s.video.before_bytes || 0) + audio.reduce((n, a) => n + (a.before_bytes || 0), 0), 1);
+  const card = node("section", "", "cv-card cv-streams");
+  card.setAttribute("aria-label", "Streams");
+  card.append(node("h3", "Streams", "cv-card-title"));
+  const list = node("ul", "", "cv-stream-list");
+  const v = s.video;
+  const after = v.after_codec || v.codec;
+  list.append(streamRow({kind: "Video", name: after && after !== v.codec ? `${videoCodecLabel(v.codec)} → ${videoCodecLabel(after)}` : videoCodecLabel(v.codec), change: after && after !== v.codec ? "re-encoded" : "copied", before: v.before_bytes, after: v.after_bytes, scale}));
+  for (const a of audio) {
+    const was = [codecLabel(a.codec), channelLabel(a.channels)].filter(Boolean).join(" ");
+    const now = a.fate === "converted" ? [a.after_codec === "he_aac" ? "HE-AAC" : codecLabel(a.after_codec), channelLabel(a.after_channels), a.after_kbps ? `${a.after_kbps}k` : ""].filter(Boolean).join(" ") : "";
+    list.append(streamRow({kind: "Audio", name: [a.language || "Unknown", a.title].filter(Boolean).join(" · "), change: now ? `${was} → ${now}` : was, fate: a.fate, before: a.before_bytes, after: a.after_bytes, scale}));
+  }
+  card.append(list);
+  if (s.subtitles?.total > 0) {
+    const subs = node("p", "", "cv-subtitles");
+    subs.append(node("span", "Subtitles", "cv-stream-kind"), node("span", `${s.subtitles.kept} of ${s.subtitles.total} kept`));
+    card.append(subs);
+  }
+  return card;
+}
+// VMAF against its limit on one short scale; the limit is a tick.
+function vmafGauge(label, value, limit, limitName) {
+  const row = node("div", "", `cv-gauge ${limit == null || value >= limit ? "pass" : "miss"}`);
+  const low = Math.min(80, Math.floor(Math.min(value, limit ?? 100) / 5) * 5);
+  const at = v => `${percentOf(v - low, 100 - low).toFixed(1)}%`;
+  const head = node("div", "", "cv-gauge-head");
+  head.append(node("span", label, "cv-gauge-label"), node("strong", value.toFixed(1), "cv-gauge-value"));
+  if (limit != null) head.append(node("span", `${limitName} ${Number(limit).toFixed(0)}`, "cv-gauge-limit metadata"));
+  const track = node("div", "", "cv-gauge-track");
+  track.setAttribute("role", "meter");
+  track.setAttribute("aria-label", `${label} VMAF ${value.toFixed(1)}${limit != null ? `, ${limitName} ${limit}` : ""}`);
+  track.setAttribute("aria-valuemin", String(low));
+  track.setAttribute("aria-valuemax", "100");
+  track.setAttribute("aria-valuenow", String(value));
+  const fill = node("i", "", "cv-gauge-fill");
+  fill.style.width = at(value);
+  track.append(fill);
+  if (limit != null) {
+    const tick = node("b", "", "cv-gauge-tick");
+    tick.style.left = at(limit);
+    track.append(tick);
+  }
+  row.append(head, track);
+  return row;
+}
+function conversionQualityCard(job) {
+  const o = job.outcome;
+  if (!Number.isFinite(o?.vmaf_mean)) return null;
+  const card = node("section", "", "cv-card cv-quality");
+  card.setAttribute("aria-label", "Quality");
+  card.append(node("h3", "Quality · VMAF", "cv-card-title"));
+  card.append(vmafGauge("Average", o.vmaf_mean, o.vmaf_target, "target"));
+  if (Number.isFinite(o.vmaf_worst)) card.append(vmafGauge("Worst moment", o.vmaf_worst, o.vmaf_floor, "floor"));
+  return card;
+}
+const ordinal = n => `${n}${n % 100 >= 11 && n % 100 <= 13 ? "th" : {1: "st", 2: "nd", 3: "rd"}[n % 10] || "th"}`;
+function conversionSettingsLine(job) {
+  const o = job.outcome;
+  if (!o?.encoder && !o?.setting) return null;
+  const parts = [o.encoder, o.setting].filter(Boolean);
+  if (o.attempts > 1 && o.attempt > 0) parts.push(`${ordinal(o.attempt)} of ${o.attempts} settings tried`);
+  const line = node("p", parts.join(" · "), "cv-settings metadata");
+  line.dataset.singleLine = "";
+  line.title = line.textContent;
+  return line;
+}
+function conversionNodes(job) {
+  const status = conversionStatusOf(job);
+  const out = [conversionHero(job, status), conversionReplacementRow(job, status), conversionFailure(job, status)];
+  if (status === "needs_decision" && job.waiting_reason) out.push(oneLine(shortJobReason(job.waiting_reason), "jd-line cv-now"));
+  // While it works, one line says what is happening now, and the facts of the
+  // try in progress stand in for the settings line it does not have yet.
+  if (["queued", "encoding"].includes(status)) {
+    const step = stepText(job);
+    if (step) out.push(oneLine(step, "jd-line jd-step cv-now"));
+    const facts = job.outcome ? [] : detailFacts(job);
+    if (facts.length) {
+      const chips = node("ul", "", "detail-facts");
+      for (const fact of facts) chips.append(node("li", fact, "detail-fact"));
+      out.push(chips);
+    }
+  }
+  out.push(conversionStreamsCard(job), conversionQualityCard(job), conversionSettingsLine(job));
+  return out.filter(Boolean);
+}
+// ---- Actions that stay put ----
+// A conversion always shows the same controls in the same places: the next
+// step, Change goal, and a More menu that ends with Archive and Cancel. One
+// that cannot run now is disabled and says why, instead of disappearing.
+const pageNavigationLabels = ["View replacement", "View batch", "Show in Files", "View file", "Open job"];
+function unavailableAction(label, reason, className) {
+  const b = node("button", "", className);
+  b.type = "button";
+  b.disabled = true;
+  b.dataset.unavailable = reason;
+  b.title = reason;
+  b.setAttribute("aria-label", `${label} · ${reason}`);
+  b.append(node("span", label, "jd-label"));
+  if (className.includes("jd-menu-item")) b.append(reasonCaption(reason));
+  return b;
+}
+function pageAction(label, fn, target) {
+  const b = button(label, fn);
+  b.dataset.jobControl = target;
+  b.disabled = jobControlDisabled(b);
+  return b;
+}
+// The small caption under a greyed-out control; cut short, its title keeps it whole.
+function reasonCaption(reason) {
+  const caption = node("small", reason, "jd-reason");
+  caption.title = reason;
+  return caption;
+}
+// Why a control is greyed out right now, so no disabled button is silent.
+function disabledReason(b) {
+  if (b.dataset.unavailable) return b.dataset.unavailable;
+  if (!b.disabled) return "";
+  if (!serverReachable) return "Offline · reconnecting";
+  if (jobIsBusy(b.dataset.jobControl)) return "Working on it…";
+  if (b.dataset.requiresWorker === "true" && !state.workerInfo?.ready) return "No worker is available";
+  return "Not available right now";
+}
+// A bar slot: the button, and under it the reason it is unavailable.
+function actionSlot(b, kind) {
+  const slot = node("div", "", `jd-slot jd-slot-${kind}`);
+  slot.append(b);
+  const reason = disabledReason(b);
+  if (reason) {
+    b.title = reason;
+    slot.append(reasonCaption(reason));
+  }
+  return slot;
+}
+function unavailableReason(job, status, slot) {
+  if (job.archived) return "Archived · restore it first";
+  if (slot === "next") {
+    if (status === "failed" && job.resolved_by) return `Resolved by #${job.resolved_by.number || "a later run"}`;
+    return {queued: "Available when the encode finishes", encoding: "Available when the encode finishes", needs_decision: "Decide on the result first", replacing: "Replacing now", replaced: "Already replaced", kept_original: "The original was kept", no_result: "No smaller file to replace with", cancelled: "Nothing ran to the end", failed: "Nothing to retry from here", ready_to_replace: state.info?.allow_destructive ? "Not available right now" : "Replacing is off in server settings"}[status] || "Not available";
+  }
+  return {queued: "Available when this job stops", encoding: "Available when this job stops", replacing: "Replacing now", replaced: "Already replaced", ready_to_replace: "Keep the original first to try another goal", needs_decision: "Decide on the result first", replace_failed: "Retry or keep the original first"}[status] || "Not available now";
+}
+function conversionActionBar(job) {
+  const status = conversionStatusOf(job);
+  const run = job.replacement_run;
+  const labelOf = b => b.textContent.trim();
+  const pool = [...jobControls(job, true).children].filter(b => !pageNavigationLabels.includes(labelOf(b)));
+  const take = (...labels) => {
+    for (const label of labels.filter(Boolean)) {
+      const i = pool.findIndex(b => labelOf(b) === label);
+      if (i >= 0) return pool.splice(i, 1)[0];
+    }
+    return null;
+  };
+  let next = null;
+  if (!job.archived && run?.status === "waiting_decision") next = pageAction("Review replacement", () => reviewFilePromotion(run.id), run.id);
+  else if (!job.archived && status === "replace_failed" && run?.id) {
+    next = pageAction("Retry replacement", () => jobControl(run.id, "action_retry", {}, {decision: {label: "Retry replacement", verb: "Retrying replacement", failure: "Retry failed"}}), run.id);
+  } else if (!(status === "failed" && job.resolved_by)) next = take("Replace file", job.next_steps?.[0]?.label, ...mainQueueActions.filter(label => !["Choose a goal"].includes(label)));
+  const nextLabel = ["failed", "cancelled", "no_result"].includes(status) ? job.next_steps?.[0]?.label || "Try again" : "Replace file";
+  next ||= unavailableAction(nextLabel, unavailableReason(job, status, "next"), "jd-primary");
+  let change = take("Change goal", "Change settings", "Choose a goal", "Try another profile", "Choose tracks");
+  change ||= unavailableAction("Change goal", unavailableReason(job, status, "change"), "jd-secondary");
+  const menu = [];
+  if (!job.archived && status === "ready_to_replace" && !job.parent_action_id && state.info?.allow_destructive) {
+    const {before, after} = conversionSizes(job);
+    menu.push(pageAction("Keep original", async () => { await keepReadyOriginal({action_id: job.id, source_path: job.source_path, candidate_bytes: after, saved_bytes: before - after}); await refreshOpenDetail(); }, job.id));
+  }
+  const archive = take("Archive", "Restore");
+  const cancel = take("Cancel");
+  menu.push(...pool);
+  const archiveReason = operationIsActive(job.status) ? "Only a finished job can be archived"
+    : ["ready_to_replace", "needs_decision", "replace_failed", "replacing"].includes(status) ? "Replace or keep the original first"
+    : "Not available for this job";
+  menu.push(archive || unavailableAction("Archive", archiveReason, "jd-menu-item"));
+  menu.push(cancel || unavailableAction("Cancel", "Nothing is running", "jd-menu-item jd-danger"));
+  for (const b of [next, change, ...menu]) {
+    b.querySelector?.("svg")?.remove?.();
+    if (!b.dataset.unavailable) { b.setAttribute("aria-label", labelOf(b)); b.title ||= labelOf(b); }
+  }
+  if (!next.dataset.unavailable) next.className = "jd-primary";
+  if (!change.dataset.unavailable) change.className = "jd-secondary";
+  for (const b of menu) {
+    if (b.dataset.unavailable) continue;
+    b.className = `jd-menu-item${["Cancel", "Keep original"].includes(labelOf(b)) ? " jd-danger" : ""}`;
+    const reason = disabledReason(b);
+    if (reason) { b.title = reason; b.append(reasonCaption(reason)); }
+  }
+  return [actionSlot(next, "next"), actionSlot(change, "change"), moreActionsMenu(menu, job.id)];
+}
+// ---- Replace many: the one-file flow, one file after another ----
+function legacyReplacementHint(job) {
+  try { return JSON.parse(localStorage.getItem(`navigatorr_media:${job.id}`) || "null"); } catch { return null; }
+}
+const replacementIntegrations = () => (state.info?.services || []).filter((entry) => ["sonarr", "radarr"].includes(entry.name));
+// How a file is replaced without asking: the route it already has, or the
+// filesystem when no library is connected. Null when a person must choose.
+function automaticReplacementContext(job, legacy = legacyReplacementHint(job)) {
+  const durable = job.replacement_context;
+  const key = durable?.service === "radarr" ? "movie_id" : "series_id";
+  if (durable?.service === "filesystem" || (["sonarr", "radarr"].includes(durable?.service) && Number.isInteger(durable[key]) && durable[key] > 0)) return durable;
+  if (!replacementIntegrations().length && !["sonarr", "radarr"].includes(legacy?.service)) return {service: "filesystem"};
+  return null;
+}
+// Replaces each ready file in turn with the same flow as its own Replace
+// button. A file that needs a library choice is left for its own button.
+async function replaceAllReady(ids, {parentId = "", control = null} = {}) {
+  const total = ids.length;
+  let started = 0, asked = 0, gone = 0, failed = 0;
+  const label = control?.querySelector?.(".jd-label") || null;
+  for (const [index, id] of ids.entries()) {
+    const text = `Replacing ${index + 1} of ${total}…`;
+    if (label) label.textContent = text;
+    notify(text);
+    // One file that cannot start never stops the others.
+    try {
+      const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
+      if (!job?.candidate_ready || job.replacement_action_id || (parentId && job.parent_action_id !== parentId)) { gone++; continue; }
+      const context = automaticReplacementContext(job);
+      if (!context) { asked++; continue; }
+      await enqueueReplacement(job, context);
+      started++;
+    } catch (error) {
+      if (!serverReachable) throw error;
+      failed++;
+    }
+  }
+  const parts = [`Replacing ${started} of ${total} ${total === 1 ? "file" : "files"}`];
+  if (asked) parts.push(`${asked} ${asked === 1 ? "needs" : "need"} a library choice: use its Replace`);
+  if (gone) parts.push(`${gone} no longer ready`);
+  if (failed) parts.push(`${failed} could not start`);
+  notify(parts.join(" · "));
+  return {started, asked, gone, failed};
+}
+function replaceAllButton(ids, options = {}) {
+  const b = button("", () => replaceAllReady(ids, {...options, control: b}), options.className || "jd-primary");
+  b.append(node("span", `Replace all ${ids.length}`, "jd-label"));
+  b.dataset.replaceAll = String(ids.length);
+  if (!state.info?.allow_destructive) {
+    b.disabled = true;
+    b.dataset.unavailable = "Replacing is off in server settings";
+    b.title = b.dataset.unavailable;
+  }
+  return b;
+}
+// The file under the title: a link that shows it in Files.
+function renderDetailFileLink(job) {
+  const link = $("detail-file-link");
+  const path = jobFilePath(job) || jobFolderPath(job);
+  link.hidden = !path;
+  if (!path) return;
+  const folder = !jobFilePath(job);
+  const parent = folder ? path : path.slice(0, path.lastIndexOf("/"));
+  const shown = parent.split("/").filter(Boolean).slice(-2).join(" / ") || path;
+  link.textContent = shown;
+  link.title = path;
+  link.dataset.path = path;
+  link.dataset.folder = String(folder);
+  const route = filesRouteFor(path, {folder});
+  link.dataset.outside = String(!route);
+  if (route) {
+    link.href = `?${route}`;
+    link.removeAttribute("aria-disabled");
+  } else {
+    link.removeAttribute("href");
+    link.setAttribute("aria-disabled", "true");
+    link.title = `${path} · outside the media folders`;
+  }
+}
 // Paints a job into the open dialog. The same blocks, in the same order, whether
 // the job came from the list a moment ago or from the server just now.
 function paintDetail(job) {
@@ -7597,20 +8045,26 @@ function paintDetail(job) {
   $("job-detail-title").textContent = title;
   $("job-detail-title").title = path || title;
   $("copy-detail-path").hidden = !path;
-  $("detail-status").replaceChildren(statusBadge(presentation.status));
-  summary.replaceChildren(...detailStatusNodes(job, presentation));
+  const conversion = isConversionPage(job);
+  $("detail-status").replaceChildren(conversion ? conversionChip(job) : statusBadge(presentation.status));
+  summary.replaceChildren(...(conversion ? conversionNodes(job) : detailStatusNodes(job, presentation)));
+  renderDetailFileLink(job);
   summary.dataset.operationId = job.id;
   renderCommandIndicators();
   renderDetailRows(job);
+  // A finished conversion says its plan as results; only work in progress keeps
+  // the plan row. The full path stays in its folded row beside the header link.
+  if (conversion && !["queued", "encoding"].includes(conversionStatusOf(job))) showDetailRow("plan", false);
   const related = $("detail-related");
   related.replaceChildren();
-  for (const action of job.workflow_actions || []) {
+  // The jobs underneath a conversion are this page, not links to other pages.
+  for (const action of conversion ? [] : job.workflow_actions || []) {
     if (action.id === job.id) continue;
     related.append(button(`${workflows[action.action_name] || action.action_name} · ${names[action.status] || action.status}`, () => openJob(action.id), "quiet"));
   }
   syncDetailSections();
   const controls = $("detail-controls");
-  controls.replaceChildren(...detailActionBar(job));
+  controls.replaceChildren(...(conversion ? conversionActionBar(job) : detailActionBar(job)));
   controls.hidden = !controls.children.length;
   $("batch-items-panel").hidden = !job.batch;
   return {focus, menu};
@@ -7622,6 +8076,11 @@ async function refreshDetail() {
     const data = await api(`operations?id=${encodeURIComponent(id)}`),
       job = data.jobs?.[0];
     if (!job) throw new Error("This job is no longer available.");
+    if (job.conversion_id && job.conversion_id !== id && state.detail === id && revision === state.detailRevision) {
+      state.detail = job.conversion_id;
+      writeNavigation(true);
+      return refreshDetail();
+    }
     if (
       state.detail !== id ||
       revision !== state.detailRevision ||
@@ -7662,10 +8121,12 @@ function detailActionBar(job) {
   const labelOf = b => b.textContent.trim();
   const primary = mainQueueActions.map(label => buttons.find(b => labelOf(b) === label)).find(Boolean) || null;
   const rank = b => { const i = detailSecondaryActions.indexOf(labelOf(b)); return i < 0 ? detailSecondaryActions.length : i; };
-  const rest = buttons.filter(b => b !== primary).sort((a, b) => rank(a) - rank(b));
+  // Cancel and Stop are never a visible button: they wait in More, with
+  // their confirmation, at the end.
+  const rest = buttons.filter(b => b !== primary && !destructiveActions.includes(labelOf(b))).sort((a, b) => rank(a) - rank(b));
   const ordered = [primary, ...rest].filter(Boolean);
   const shown = ordered.length <= 2 ? ordered : ordered.slice(0, 2);
-  const overflow = ordered.slice(shown.length);
+  const overflow = [...ordered.slice(shown.length), ...buttons.filter(b => destructiveActions.includes(labelOf(b)))];
   for (const b of buttons) {
     b.setAttribute("aria-label", labelOf(b));
     b.title ||= labelOf(b);
@@ -7741,6 +8202,8 @@ const fileStateLabel = (item, job) => {
   const queued = item.replacement_plan === "queued";
   return item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : job?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
 };
+// A file of a batch its own Replace can replace now.
+const batchItemReplaceable = item => Boolean(item.candidate_ready && !item.replacement_plan && !item.replacement_action_id && item.child_action_id);
 function batchFileRow(item, id) {
   const job = state.detailJob;
   const member = job?.replacement?.members?.find(m => m.item_key === item.item_key);
@@ -7784,16 +8247,28 @@ function batchFileRow(item, id) {
   body.id = bodyId;
   body.dataset.rowBody = "";
   body.hidden = !open;
+  // A ready file is replaced from its row without opening it; open, the
+  // body's Replace file takes over, so the row never shows two.
+  const quick = batchItemReplaceable(item) && state.info?.allow_destructive ? button("Replace", () => replaceBatchFile(id, item.child_action_id), "jd-file-quick") : null;
+  if (quick) {
+    quick.dataset.jobControl = item.child_action_id;
+    quick.dataset.batchItemKey = item.item_key;
+    quick.setAttribute("aria-label", `Replace ${fileName}`);
+    quick.hidden = open;
+    quick.disabled = jobControlDisabled(quick);
+  }
   head.addEventListener("click", () => {
     const next = body.hidden;
     body.hidden = !next;
+    if (quick) quick.hidden = next;
     row.dataset.open = String(next);
     head.setAttribute("aria-expanded", String(next));
     if (next) state.openFiles.add(item.item_key); else state.openFiles.delete(item.item_key);
   });
-  row.append(head, body);
+  // The body stays second so the row keeps its head-then-body order; CSS puts the quick button beside the head.
+  row.append(...[head, body, quick].filter(Boolean));
 
-  const review = item.replacement_action_id ? () => openJob(item.replacement_action_id) : item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
+  const review = item.status === "waiting_decision" && item.child_action_id ? () => openJob(item.child_action_id) : ["skip","review"].includes(item.status) && item.can_reconfigure ? () => reconfigureBatch(id, false, {item_key:item.item_key}) : null;
   const activity = failure || queued ? "" : item.replacement_action_id && member ? replacementStepText(member) : batchFileActivity(item, job);
   if (activity) body.append(node("p", activity, "jd-note batch-file-activity"));
 
@@ -7820,13 +8295,12 @@ function batchFileRow(item, id) {
     card.append(node("strong", `Replacement stopped: ${failure.reason}`), node("p", {in_place: "Your original file is still in place.", recovery: "Your original is safe in its recovery copy. Check Recovery before trying again.", unclear: "Check Recovery to see where your original is before trying again."}[originalStateOf(failure)], "metadata"));
     body.append(card);
     if (item.retry_action_id) add(retryReplacementLabel(item, id, "").button, () => retryFileReplacement(item, id), {target: item.retry_action_id, primary: true});
-    if (item.replacement_action_id) add("View details", () => openJob(item.replacement_action_id), {navigation: true, primary: false});
     if (failure.detail) {
       const technical = node("details", "", "technical-reason");
       technical.append(node("summary", "Technical details"), node("p", failure.detail, "metadata"));
       body.append(technical);
     }
-  } else if (item.replacement_action_id) add("View replacement", () => openJob(item.replacement_action_id), {navigation: true});
+  }
   const unsupportedSource = item.mode && (sourceGateReason(item.reason_code) || item.reasons?.some(sourceGateReason));
   // A ready candidate can also be encoded again under a new goal; the dialog
   // says that candidate is removed, and Replace file stays the primary action.
@@ -7844,10 +8318,9 @@ function batchFileRow(item, id) {
   }
   if (item.can_reconfigure && !unsupportedSource && ["failed","cancelled"].includes(item.status) && !steps.some(step => step.id === "same"))
     add("Encode again", () => encodeFileAgain(id, item.item_key), {primary: true});
-  if (filesRouteFor(item.file_path))
-    add("Show in Files", () => showInFiles(item.file_path), {navigation: true, target: item.child_action_id || id});
-  if (item.child_action_id && !item.replacement_action_id) add("Open job", () => openJob(item.child_action_id), {navigation: true, target: item.child_action_id, primary: false});
-  if (review && !item.replacement_action_id && !item.child_action_id) add("Review", review, {navigation: true, primary: false});
+  // The file's own page holds everything about it, its replacement included.
+  if (item.child_action_id) add("Open job", () => openJob(item.child_action_id), {navigation: true, target: item.child_action_id, primary: false});
+  else if (review && !item.replacement_action_id) add("Review", review, {navigation: true, primary: false});
 
   const where = whereBlock(item.where, {heading: false});
   if (where) {
@@ -7932,6 +8405,10 @@ async function loadBatchItems(id, revision) {
   eye.setAttribute("aria-label", eyeLabel);
   eye.title = eyeLabel;
   const rows = shown.map(item => batchFileRow(item, id));
+  // Act where the files are listed: every ready file of this page at once,
+  // while the batch is still running too.
+  const ready = all.filter(batchItemReplaceable).map(item => item.child_action_id);
+  $("batch-replace-all").replaceChildren(...(ready.length > 1 && state.info?.allow_destructive ? [replaceAllButton(ready, {parentId: id, className: "jd-secondary"})] : []));
   if (state.batchOutstandingOnly && !shown.length) rows.push(node("p", response.has_more ? "Nothing left to replace on this page" : "Nothing left to replace", "muted jd-note"));
   list.replaceChildren(...rows);
   restoreControl(list, focus);
@@ -8133,7 +8610,7 @@ function replacementReady(job) {
 async function openReplacement(id) {
   const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
   if (replacementReady(job)) await reviewFilePromotion(id);
-  else await openJob(id);
+  else await openJob(job?.conversion_id || id);
 }
 const replacementMethods = {filesystem: "Replace the file in place", sonarr: "Import through Sonarr", radarr: "Import through Radarr"};
 function showFileReview(job, approval, {unprompted = false} = {}) {
