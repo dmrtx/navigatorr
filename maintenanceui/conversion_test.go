@@ -1,0 +1,88 @@
+package maintenanceui
+
+import (
+	"testing"
+
+	"github.com/jakenesler/navigatorr/store"
+)
+
+func conversionRecord(id, action, status, created string, inputs, state map[string]any, candidate *int64) operationRecord {
+	if inputs == nil {
+		inputs = map[string]any{}
+	}
+	if state == nil {
+		state = map[string]any{}
+	}
+	return operationRecord{inst: store.ActionInstance{ID: id, ActionName: action, Status: status, CreatedAt: created, UpdatedAt: created}, inputs: inputs, outputs: map[string]any{}, state: state, savings: operationSavings{CandidateBytes: candidate}}
+}
+
+func conversionFactsOf(records ...operationRecord) conversionFacts {
+	byID := map[string]operationRecord{}
+	for _, r := range records {
+		byID[r.inst.ID] = r
+	}
+	replacements := queueReplacementLinks(records)
+	roots, numbers, _ := queueWorkflows(records, byID, replacements)
+	replacedByAct := map[string]bool{}
+	for _, r := range records {
+		if r.inst.ActionName == "promote_transcode_candidate" && r.savings.RealizedSavedBytes != nil {
+			replacedByAct[operationString(r.inputs["transcode_action_id"])] = true
+		}
+	}
+	return newConversionFacts(records, byID, roots, replacements, map[string]bool{}, replacedByAct, map[string]string{}, map[string]bool{}, numbers)
+}
+
+// A file's transcode and its replacement are one conversion with one state,
+// and a later conversion that got a result resolves an earlier failure.
+func TestConversionIsOneJobWithOneState(t *testing.T) {
+	size := int64(100)
+	saved := int64(50)
+	ready := map[string]any{"original_intact": true}
+	failed := conversionRecord("t0", "transcode_media", store.ActionStatusFailed, "2026-11-01T10:00:00Z", map[string]any{"path": "/media/a.mkv"}, nil, nil)
+	done := conversionRecord("t1", "transcode_media", store.ActionStatusCompleted, "2026-11-01T11:00:00Z", map[string]any{"path": "/media/a.mkv"}, ready, &size)
+	promote := conversionRecord("p1", "promote_transcode_candidate", store.ActionStatusCompleted, "2026-11-01T12:00:00Z", map[string]any{"transcode_action_id": "t1"}, nil, nil)
+	promote.savings.RealizedSavedBytes = &saved
+	waiting := conversionRecord("t2", "transcode_media", store.ActionStatusCompleted, "2026-11-01T13:00:00Z", map[string]any{"path": "/media/b.mkv"}, ready, &size)
+	running := conversionRecord("t3", "transcode_media", store.ActionStatusRunning, "2026-11-01T14:00:00Z", map[string]any{"path": "/media/c.mkv"}, nil, nil)
+	f := conversionFactsOf(failed, done, promote, waiting, running)
+
+	if got := f.conversionID(promote); got != "t1" {
+		t.Fatalf("replacement opens its conversion, got %q", got)
+	}
+	for r, want := range map[*operationRecord]string{&done: "replaced", &waiting: "ready_to_replace", &running: "encoding", &failed: "failed"} {
+		if got := f.conversionStatus(*r); got != want {
+			t.Fatalf("%s: status %q want %q", r.inst.ID, got, want)
+		}
+	}
+	if run := f.conversionReplacement(done); run == nil || run["id"] != "p1" || run["status"] != store.ActionStatusCompleted {
+		t.Fatalf("replacement run %v", run)
+	}
+	if by := f.resolvedBy(failed); by == nil || by["id"] != "t1" || by["conversion_status"] != "replaced" {
+		t.Fatalf("resolved by %v", by)
+	}
+	if by := f.resolvedBy(done); by != nil {
+		t.Fatalf("a finished job is not resolved by anything: %v", by)
+	}
+}
+
+// The outcome is the setting that passed, which of the frozen settings it
+// was, and the quality against its limits: data, not a sentence.
+func TestConversionOutcomeIsTheResultNotThePlan(t *testing.T) {
+	size, source := int64(68), int64(111)
+	r := conversionRecord("t", "transcode_media", store.ActionStatusCompleted, "", nil, map[string]any{
+		"size_main10": true,
+		"quality_ladder": map[string]any{"video_codec": "libx265", "preset": "medium", "quality_values": []any{22, 19, 16}, "rung": 0, "outcome": "passed",
+			"final": map[string]any{"verdict": "pass", "measured": map[string]any{"vmaf_mean": 93.4, "vmaf_worst_window": 91.9}, "limits": map[string]any{"vmaf_mean_minimum": 93.0, "vmaf_worst_window_minimum": 85.0}}},
+	}, &size)
+	r.savings.SourceBytes = &source
+	got := conversionOutcome(r)
+	if got["encoder"] != "x265 10-bit" || got["setting"] != "CRF 22 · medium" || got["attempt"] != 1 || got["attempts"] != 3 {
+		t.Fatalf("outcome %v", got)
+	}
+	if got["vmaf_mean"] != 93.4 || got["vmaf_worst"] != 91.9 || got["vmaf_target"] != 93.0 || got["vmaf_floor"] != 85.0 {
+		t.Fatalf("quality %v", got)
+	}
+	if conversionOutcome(conversionRecord("x", "transcode_media", store.ActionStatusRunning, "", nil, nil, nil)) != nil {
+		t.Fatal("a running job has no outcome")
+	}
+}

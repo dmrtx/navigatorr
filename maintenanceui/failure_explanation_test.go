@@ -24,7 +24,7 @@ func TestFailuresSayWhyAndWhetherRetryCanHelp(t *testing.T) {
 		"damaged MP4":       {"failed to probe original media /media/a.mp4 (fail closed): ffprobe tool_exit after 61ms: exit status 1: moov atom not found", nil, "MP4 index", true, "tracks"},
 		"corrupt packets":   {"Transcode failed (ffmpeg_input_corrupt): ffmpeg_input_corrupt: packet scan failed", nil, "broken data", true, "tracks"},
 		"broken new file":   {"Transcode failed (candidate_invalid): probing local candidate for pre-publish validation: moov atom not found", nil, "failed Navigatorr's checks", false, ""},
-		"tracks mismatch":   {"choosing the tracks to keep: keep_audio_streams names stream 4, which is not an audio stream of this file", nil, "names stream 4", true, "tracks"},
+		"tracks mismatch":   {"choosing the tracks to keep: keep_audio_streams names stream 4, which is not an audio stream of this file", nil, "not in this file any more", true, "tracks"},
 		"file replaced":     {"Transcode failed (source_changed): size differs", nil, "changed while the job ran", false, "tracks"},
 		"no permission":     {"Transcode failed (storage_permission_denied): open: permission denied", nil, "not allowed", false, ""},
 		"worker restarted":  {"Transcode failed (runner_killed): signal: killed", nil, "worker restart", false, ""},

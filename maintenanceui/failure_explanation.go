@@ -90,7 +90,7 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 		return e, "This file is damaged; running it again fails the same way.", []nextStep{{ID: "tracks", Label: "Choose a goal", Detail: "Once the file is replaced, start a goal for the new one."}}
 	case strings.Contains(text, "choosing the tracks to keep"):
 		_, detail, _ := strings.Cut(text, "choosing the tracks to keep: ")
-		e.Happened = "The tracks chosen for this job do not match the file: " + strings.TrimSuffix(detail, ".") + "."
+		e.Happened = shortTrackMismatch(detail)
 		return e, "Running it again picks the same tracks.", []nextStep{{ID: "tracks", Label: "Choose tracks", Detail: "Pick the audio and subtitle tracks this file has, then choose a goal."}}
 	case class == string(resilience.Cancelled):
 		e.Happened = "The job was cancelled on the worker."
