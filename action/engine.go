@@ -640,6 +640,15 @@ func (e *Engine) resume(ctx context.Context, instanceID string, decision string,
 	}
 
 	ec := parseExecutionContext(inst, e)
+	if jobID := getString(ec.State, requeuePendingKey); inst.ActionName == "transcode_media" && jobID != "" {
+		moved, err := e.finishPauseRequeue(ctx, inst, ec, jobID, store.WorkerPauseImmediate)
+		if err != nil {
+			return nil, err
+		}
+		if moved {
+			return buildActionResult(inst, len(tmpl.Steps), ec), nil
+		}
+	}
 	// A decision wait is only resumed automatically when shouldReconcile found
 	// the batch's decision stale.
 	if (automatic && !e.shouldReconcile(inst, tmpl, ec)) || (inst.Status == StatusWaitingDecision && decision == "" && !automatic) {

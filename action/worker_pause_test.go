@@ -3,6 +3,8 @@ package action
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -348,10 +350,9 @@ func TestPauseKeepsAFileWhoseSubmitIsUnconfirmed(t *testing.T) {
 	}
 }
 
-// A reset that failed after the cancel is finished by the next sweep, without
-// reading the (now cancelled) job again.
+// A reset that failed after the cancel is finished by the next sweep.
 func TestPauseFinishesAMoveWhoseResetWasUndone(t *testing.T) {
-	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusRunning)}
+	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusCancelled)}
 	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
 	seedEncoding(t, e, "half", "m1", "job-half")
 	inst := mustInstance(t, e.deps.Store, "half")
@@ -387,5 +388,145 @@ func TestRowsWaitingOnAPauseAreNotRunning(t *testing.T) {
 	r := store.DrainActionRow{ActionName: "transcode_media", Status: StatusWaitingExternal, WaitingCondition: pauseWaitCondition, JobID: "job-x"}
 	if got := classifyDrainRow(r); got != transcode.DrainJobQueued {
 		t.Fatalf("classified %q", got)
+	}
+}
+
+func TestPauseRecordsTheMoveBeforeCancelling(t *testing.T) {
+	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusRunning)}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	m1.cancelFunc = func(context.Context, string) error {
+		if getString(parseExecutionContextMust(t, e, "enc").State, requeuePendingKey) != "job-enc" {
+			t.Error("remote cancellation preceded the durable requeue intent")
+		}
+		return errors.New("response lost")
+	}
+	pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	e.sweepPausedNodes(context.Background())
+}
+
+func TestPauseMoveSurvivesReconciliationBeforeTheSweep(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		status         string
+		encodeComplete bool
+	}{
+		{name: "before cancel", status: transcode.StatusRunning},
+		{name: "after cancel", status: transcode.StatusCancelled},
+		{name: "cancel raced with encode completion", status: transcode.StatusCancelled, encodeComplete: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m1 := &mockTranscodeExecutor{statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{ID: id, Status: tc.status, EncodeComplete: tc.encodeComplete}, nil
+			}}
+			e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+			seedEncoding(t, e, "enc", "m1", "job-enc")
+			inst := mustInstance(t, e.deps.Store, "enc")
+			state := parseExecutionContext(inst, e).State
+			state[requeuePendingKey] = "job-enc"
+			inst.StateJSON = toJSON(state)
+			if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+				t.Fatal(err)
+			}
+			// The intent survives even if the node was resumed before restart.
+			restarted := NewEngine(EngineDeps{Store: e.deps.Store, Config: &config.Config{}, Workers: e.deps.Workers, DrainSettle: -1})
+			res, err := restarted.resume(context.Background(), "enc", "", nil, true)
+			if err != nil || res.Status != StatusWaitingExternal || holdsWorkerJob(res.State) || getString(res.State, "previous_job_id") != "job-enc" {
+				t.Fatalf("reconciliation must finish the move before monitoring the old job: %+v %v", res, err)
+			}
+			if tc.status == transcode.StatusRunning && m1.cancelCalls != 1 {
+				t.Fatalf("an intent alone must not release a still running job: cancels=%d", m1.cancelCalls)
+			}
+		})
+	}
+}
+
+func TestImmediatePauseLeavesAPublishingEncodeAlone(t *testing.T) {
+	m1 := &mockTranscodeExecutor{statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: id, Status: transcode.StatusRunning, EncodeComplete: true}, nil
+	}}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "publishing", "m1", "job-publishing")
+	pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	e.sweepPausedNodes(context.Background())
+	if m1.cancelCalls != 0 || getString(parseExecutionContextMust(t, e, "publishing").State, "job_id") != "job-publishing" {
+		t.Fatalf("publication must finish without cancelling or reencoding: cancels=%d", m1.cancelCalls)
+	}
+	if st := e.NodePauseStatuses(context.Background())["m1"]; st.Idle || !strings.Contains(st.Message, "finish publishing") {
+		t.Fatalf("the pause must explain that publication is finishing: %+v", st)
+	}
+}
+
+func TestPauseLeftoversRemainListedAndDiscardable(t *testing.T) {
+	root := candidateRoot(t)
+	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusCancelled)}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	e.deps.Fs = candidateEngine(t, e.deps.Store, root, m1).deps.Fs
+	e.deps.Config.AllowDestructive = true
+	original := filepath.Join(root, "source.mkv")
+	writeCandidateFile(t, original, "original")
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	inst := mustInstance(t, e.deps.Store, "enc")
+	state := parseExecutionContext(inst, e).State
+	candidate := filepath.Join(root, ".navigatorr-candidates", "source.job-enc.mkv")
+	partial := candidate + ".partial.job-enc"
+	state["resolved_path"], state["candidate_path"] = original, candidate
+	inst.StateJSON = toJSON(state)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	writeCandidateFile(t, candidate, "candidate")
+	writeCandidateFile(t, partial, "partial")
+	e.promotionLstatHook = func(string) (os.FileInfo, error) { return nil, errors.New("storage unavailable") }
+	pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	e.sweepPausedNodes(context.Background())
+	e.promotionLstatHook = nil
+	page, err := e.ListLeftoverCandidates(context.Background(), 0)
+	if err != nil || len(page.Items) != 1 || page.Items[0].Path != candidate || page.Bytes != 16 {
+		t.Fatalf("the old candidate and partial must remain inventoried after reset: %+v %v", page, err)
+	}
+	// A new attempt and its promotion do not own the old job's files.
+	inst = mustInstance(t, e.deps.Store, "enc")
+	state = parseExecutionContext(inst, e).State
+	newCandidate := filepath.Join(root, ".navigatorr-candidates", "source.job-new.mkv")
+	state["job_id"], state["candidate_path"], state["resolved_path"], state[workerStateKey] = "job-new", newCandidate, original, "m4"
+	state["transcode_submitted"] = true
+	inst.StateJSON = toJSON(state)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	writeCandidateFile(t, newCandidate, "new candidate")
+	seedActionInstance(t, e.deps.Store, "promotion", "promote_transcode_candidate", StatusPending, 0, "promote:filesystem:enc", map[string]any{"transcode_action_id": "enc"}, map[string]any{})
+	page, err = e.LeftoverCandidatesOf(context.Background(), []string{"enc"})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Path != candidate {
+		t.Fatalf("the job inventory must include the retired candidate only: %+v %v", page, err)
+	}
+	m1.statusFunc = jobStatusFunc(transcode.StatusRunning)
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), "enc"); err == nil {
+		t.Fatal("a previous job that may still write must keep its files")
+	}
+	if _, err := os.Stat(candidate); err != nil {
+		t.Fatalf("the unconfirmed job's candidate was removed: %v", err)
+	}
+	m1.statusFunc = jobStatusFunc(transcode.StatusCancelled)
+	if _, err := e.DiscardLeftoverCandidate(context.Background(), page.Items[0].ActionID); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{candidate, partial} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("leftover was not removed: %v", err)
+		}
+	}
+	if got, err := os.ReadFile(original); err != nil || string(got) != "original" {
+		t.Fatalf("original changed: %q %v", got, err)
+	}
+	if got, err := os.ReadFile(newCandidate); err != nil || string(got) != "new candidate" {
+		t.Fatalf("the current attempt's candidate changed: %q %v", got, err)
+	}
+	if state := parseExecutionContextMust(t, e, "enc").State; getString(state, "job_id") != "job-new" || getBool(state, candidateRemovedKey) {
+		t.Fatalf("discarding leftovers changed the current attempt: %+v", state)
+	}
+	if page, err := e.ListLeftoverCandidates(context.Background(), 0); err != nil || len(page.Items) != 0 {
+		t.Fatalf("discarded leftovers must leave the inventory: %+v %v", page, err)
 	}
 }

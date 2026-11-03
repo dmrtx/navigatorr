@@ -179,6 +179,11 @@ func (e *Engine) removeOwnCandidateFromShare(ctx context.Context, inst *store.Ac
 	if err := e.candidatePromotionStarted(inst, ec, candidate); err != nil {
 		return removal, err
 	}
+	return e.removeCandidateFiles(ctx, candidate, partial, pruneDir)
+}
+
+func (e *Engine) removeCandidateFiles(ctx context.Context, candidate, partial string, pruneDir bool) (candidateRemoval, error) {
+	var removal candidateRemoval
 	for _, path := range []string{candidate, partial} {
 		if err := ctx.Err(); err != nil {
 			return removal, err
@@ -247,6 +252,16 @@ func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*Acti
 		return nil, notAttempt
 	}
 	ec := parseExecutionContext(inst, e)
+	if len(requeueLeftoverStates(ec.State)) > 0 {
+		if err := e.discardRequeueLeftovers(ctx, ec); err != nil {
+			return nil, err
+		}
+		if reason, err := e.leftoverCandidateReason(inst, ec, map[string]map[string]bool{}); err != nil {
+			return nil, err
+		} else if reason == "" {
+			return e.Status(ctx, id)
+		}
+	}
 	reason, err := e.leftoverCandidateReason(inst, ec, map[string]map[string]bool{})
 	if err != nil {
 		return nil, err
@@ -584,12 +599,62 @@ func (e *Engine) ListLeftoverCandidates(ctx context.Context, offset int) (*Lefto
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if item, ok := e.leftoverOf(&instances[i], replaced); ok {
+		for _, item := range e.leftoversOf(&instances[i], replaced) {
 			page.Bytes += item.Bytes + item.PartialBytes
 			page.Items = append(page.Items, item)
 		}
 	}
 	return page, nil
+}
+
+// leftoversOf includes the files older requeued jobs left behind, even while
+// the current attempt is still active.
+func (e *Engine) leftoversOf(inst *store.ActionInstance, replaced map[string]map[string]bool) []LeftoverCandidate {
+	var items []LeftoverCandidate
+	if item, ok := e.leftoverOf(inst, replaced); ok {
+		items = append(items, item)
+	}
+	ec := parseExecutionContext(inst, e)
+	for _, state := range requeueLeftoverStates(ec.State) {
+		candidate, partial, err := requeueLeftoverFiles(state, ec.State)
+		if err != nil {
+			continue
+		}
+		old := *ec
+		old.State = state
+		if item, ok := e.leftoverCandidateFiles(inst, &old, "the attempt was requeued because its node was paused", candidate, partial); ok {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// A requeued job was stopped before validation or promotion. Its recorded
+// files can no longer be promoted, even while the new attempt is active.
+func requeueLeftoverFiles(state, current map[string]any) (string, string, error) {
+	jobID := getString(state, "job_id")
+	if jobID == "" || jobID == getString(current, "job_id") || jobID == getString(current, "external_reference") {
+		return "", "", fmt.Errorf("the leftover must belong to a previous worker job")
+	}
+	return ownCandidateFiles(state)
+}
+
+func (e *Engine) discardRequeueLeftovers(ctx context.Context, ec *ExecutionContext) error {
+	for _, state := range requeueLeftoverStates(ec.State) {
+		candidate, partial, err := requeueLeftoverFiles(state, ec.State)
+		if err != nil {
+			return err
+		}
+		old := *ec
+		old.State = state
+		if err := e.candidateWorkerStopped(ctx, &old); err != nil {
+			return fmt.Errorf("candidate file kept: %v", err)
+		}
+		if _, err := e.removeCandidateFiles(ctx, candidate, partial, false); err != nil {
+			return fmt.Errorf("candidate file kept: %v", err)
+		}
+	}
+	return nil
 }
 
 // leftoverOf reports the candidate files one attempt left behind that nothing
@@ -605,6 +670,10 @@ func (e *Engine) leftoverOf(inst *store.ActionInstance, replaced map[string]map[
 	if err != nil || e.candidatePromotionStarted(inst, ec, candidate) != nil {
 		return LeftoverCandidate{}, false
 	}
+	return e.leftoverCandidateFiles(inst, ec, reason, candidate, partial)
+}
+
+func (e *Engine) leftoverCandidateFiles(inst *store.ActionInstance, ec *ExecutionContext, reason, candidate, partial string) (LeftoverCandidate, bool) {
 	item := LeftoverCandidate{ActionID: inst.ID, Status: inst.Status, Path: candidate, OriginalPath: getString(ec.State, "resolved_path"), Reason: reason, WorkerCheck: candidateNeedsWorkerCheck(ec.State)}
 	if candidateIsOnWorker(ec.State) {
 		// Nothing of it is on the share. It is listed from the worker's
@@ -653,7 +722,7 @@ func (e *Engine) LeftoverCandidatesOf(ctx context.Context, ids []string) (*Lefto
 		if inst == nil || inst.ActionName != "transcode_media" {
 			continue
 		}
-		if item, ok := e.leftoverOf(inst, replaced); ok {
+		for _, item := range e.leftoversOf(inst, replaced) {
 			page.Bytes += item.Bytes + item.PartialBytes
 			page.Items = append(page.Items, item)
 		}

@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -45,7 +46,7 @@ const (
 	requeueLeftoversKey  = "requeue_leftover_candidates"
 	requeueRetryCountKey = "manual_retry_count"
 	// requeuePendingKey marks the job being moved, saved before it is
-	// cancelled, so a sweep that finds the reset undone finishes it instead of
+	// cancelled, so a resume that finds the reset undone finishes it instead of
 	// reading the cancelled job as the action's own end.
 	requeuePendingKey = "pause_requeue_pending"
 )
@@ -274,30 +275,38 @@ func (e *Engine) requeueForPause(ctx context.Context, id string, pause store.Wor
 	if jobID == "" {
 		jobID = getString(ec.State, "external_reference")
 	}
+	return e.finishPauseRequeue(ctx, inst, ec, jobID, pause.Mode)
+}
+
+// finishPauseRequeue also resumes a durable move before normal reconciliation,
+// even if the pause was lifted. An intent does not prove the worker stopped.
+func (e *Engine) finishPauseRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, mode string) (bool, error) {
+	node := e.instanceWorker(ec.State)
 	if jobID != "" && holdsWorkerJob(ec.State) {
-		// A reset that did not finish after the cancel went through: the job
-		// is already gone from the node, so only the reset is left.
-		if getString(ec.State, requeuePendingKey) != jobID {
-			cancelled, err := e.cancelForPause(ctx, ec, jobID, pause.Mode)
-			if err != nil || !cancelled {
-				return false, err
-			}
-			// Saved before anything else changes, so a failed reset below
-			// leaves a record that the cancel already happened.
-			ec.State[requeuePendingKey] = jobID
-			inst.StateJSON = toJSON(ec.State)
-			if err := e.updateInstance(ctx, inst); err != nil {
-				return false, fmt.Errorf("recording the move of %s: %w", id, err)
-			}
+		if getString(ec.State, requeuePendingKey) == jobID {
+			mode = store.WorkerPauseImmediate
+		}
+		cancelled, err := e.cancelForPause(ctx, ec, jobID, mode)
+		if err != nil {
+			return false, err
+		}
+		if !cancelled {
+			delete(ec.State, requeuePendingKey)
+			return false, e.persistExecutionState(ctx, ec)
 		}
 		// The worker removes what it wrote for the job; this removes what the
 		// server knows of, and the paths that stay are kept on the action.
 		e.retireCandidate(ctx, inst, ec, candidateRetiredRequeued)
 		if path := getString(ec.State, "candidate_path"); path != "" && !getBool(ec.State, candidateRemovedKey) {
-			ec.State[requeueLeftoversKey] = append(leftoverPaths(ec.State), path)
+			leftover := map[string]any{}
+			for _, key := range []string{"candidate_path", "resolved_path"} {
+				leftover[key] = ec.State[key]
+			}
+			leftover["job_id"], leftover[workerStateKey] = jobID, node
+			ec.State[requeueLeftoversKey] = append(requeueLeftoverEntries(ec.State), leftover)
 		}
 	}
-	if err := e.resetForRequeue(ctx, inst, ec, jobID, pause.Worker); err != nil {
+	if err := e.resetForRequeue(ctx, inst, ec, jobID, node); err != nil {
 		return false, err
 	}
 	e.noteWorkerSlotFreed()
@@ -325,9 +334,14 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 		return false, nil
 	}
 	switch st.Status {
-	case transcode.StatusQueued:
-	case transcode.StatusRunning:
-		if mode != store.WorkerPauseImmediate {
+	case transcode.StatusQueued, transcode.StatusRunning:
+		// A finished encode is publishing: cancelling it would throw the
+		// result away. Only a still active job is protected this way; a
+		// cancelled one has already lost its output on the node.
+		if st.EncodeComplete {
+			return false, nil
+		}
+		if st.Status == transcode.StatusRunning && mode != store.WorkerPauseImmediate {
 			return false, nil
 		}
 	case transcode.StatusCancelled, transcode.StatusFailed:
@@ -336,6 +350,10 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 		return true, nil
 	default:
 		return false, nil
+	}
+	ec.State[requeuePendingKey] = jobID
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		return false, fmt.Errorf("recording the move of %s: %w", ec.InstanceID, err)
 	}
 	if err := e.cancelTranscodeJobConfirmed(ctx, worker, jobID); err != nil {
 		return false, fmt.Errorf("cancelling job %s to move it: %w", jobID, err)
@@ -382,9 +400,21 @@ func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance
 	return nil
 }
 
-// leftoverPaths is the candidate paths a requeue could not remove yet.
-func leftoverPaths(state map[string]any) []string {
-	list, _ := stringList(state[requeueLeftoversKey])
+// requeueLeftoverStates keeps each retired job's ownership after the reset.
+// Legacy path-only entries cannot prove ownership and are never removed.
+func requeueLeftoverStates(state map[string]any) []map[string]any {
+	var states []map[string]any
+	for _, entry := range requeueLeftoverEntries(state) {
+		if old, ok := entry.(map[string]any); ok {
+			states = append(states, old)
+		}
+	}
+	return states
+}
+
+func requeueLeftoverEntries(state map[string]any) []any {
+	var list []any
+	_ = json.Unmarshal([]byte(toJSON(state[requeueLeftoversKey])), &list)
 	return list
 }
 
@@ -468,7 +498,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		case st.PublicationPending > 0:
 			st.Message = fmt.Sprintf("Paused: %d finished encode(s) not saved yet. Use Try again once storage is reachable.", st.PublicationPending)
 		case st.Running > 0 && pause.Mode == store.WorkerPauseImmediate:
-			st.Message = fmt.Sprintf("Paused: sending %d job(s) back to the queue.", st.Running)
+			st.Message = fmt.Sprintf("Paused: %d job(s) still active. Encoding jobs return to the queue; encoded files finish publishing.", st.Running)
 		case st.Running > 0:
 			st.Message = fmt.Sprintf("Paused: %d job(s) still finishing. Nothing new starts here.", st.Running)
 		default:
