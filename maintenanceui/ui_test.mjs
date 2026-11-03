@@ -8913,27 +8913,29 @@ const drain = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 const confirmReview = (h) => h.elements.get("confirm-action-review").listeners.get("click")();
 const dismissReview = (h) => h.elements.get("dismiss-action-review").listeners.get("click")();
 
-test("Replace all asks once, naming how many and how much, then runs the one-file flow for each", async () => {
+test("Replace all shows each ready file before → after and the total, then replaces exactly those", async () => {
   const h = harness();
-  const ready = (id, extra = {}) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "batch", ...extra });
+  const ready = (id, extra = {}) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "batch", source_path: `/media/tv/Sample Show ${id}.mkv`, outcome: { source_bytes: 4e9, candidate_bytes: 1e9 }, ...extra });
   h.context.byId = { a: ready("a"), b: ready("b", { replacement_action_id: "already" }), c: ready("c"), d: ready("d", { parent_action_id: "other" }), e: ready("e") };
   h.context.calls = [];
   h.context.notes = [];
   // c cannot start; e is already being replaced from its own button, so
   // enqueueReplacement starts nothing for it.
   h.run('state.info={allow_destructive:true,services:[]}; api=async(path)=>({jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}); enqueueReplacement=async(job,context)=>{calls.push([job.id,context.service]); if(job.id==="c") throw new Error("busy"); return job.id!=="e";}; notify=(m)=>notes.push(m);');
-  const sizes = { before: 10e9, after: 4e9, saved: 6e9 };
-  h.context.sizes = sizes;
-  const b = h.run('replaceAllButton(["a","b","c","d","e"], {parentId:"batch", sizes})');
+  const b = h.run('replaceAllButton(["a","b","c","d","e"], {parentId:"batch"})');
   assert.equal(saidBy(b), "Replace all 5");
   assert.equal(b.dataset.replaceAll, "5");
   // Backing out of the confirmation replaces nothing.
   let run = b.listeners.get("click")();
   await drain();
-  assert.equal(h.elements.get("action-review-title").textContent, "Replace 5 files?");
-  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace 5");
+  // Only the files ready now are listed: b is already replacing, d is another batch's.
+  assert.equal(h.elements.get("action-review-title").textContent, "Replace 3 files?");
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace 3");
   const said = allTextOf(h.elements.get("action-review-content"));
-  assert.match(said, /10\.00 GB of originals become 4\.00 GB, freeing 6\.00 GB/);
+  for (const id of ["a", "c", "e"]) assert.match(said, new RegExp(`Sample Show ${id}\\.mkv.*4\\.00 GB → 1\\.00 GB · −75%`, "s"));
+  assert.doesNotMatch(said, /Sample Show [bd]/);
+  assert.match(said, /Total.*12\.00 GB → 3\.00 GB · −75%/s);
+  assert.match(said, /Only these 3 files are replaced/);
   dismissReview(h);
   assert.equal(await run, null);
   assert.equal(h.context.calls.length, 0);
@@ -9017,16 +9019,16 @@ test("Replace ready on a batch covers every page, from the server's ready_item_i
   const next = bar[0].children[0];
   assert.equal(saidBy(next), "Replace 130 ready");
   h.context.sent = [];
-  h.run("replaceAllReady = async (ids, options) => { sent.push([ids.length, options.scope]); };");
+  h.run("replaceAllReady = async (ids, options) => { sent.push([ids.length, options.parentId]); };");
   await next.listeners.get("click")();
-  assert.deepEqual(plain(h.context.sent), [[130, "all 130 ready files of this batch"]]);
+  assert.deepEqual(plain(h.context.sent), [[130, "batch-a"]]);
   // Without ready ids it reads every page of the batch for its ready files.
   const pages = [];
   h.run(`api = async (path) => { pages.push(path); const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset")); return offset === 0 ? {items: [{item_key: "a", child_action_id: "c-1", candidate_ready: true}], has_more: true} : {items: [{item_key: "b", child_action_id: "c-2", candidate_ready: true}], has_more: false}; };`);
   h.context.pages = pages;
   await h.run(`replaceBatchReady(${JSON.stringify({ ...job, ready_item_ids: undefined })})`);
   assert.equal(pages.length, 2);
-  assert.deepEqual(plain(h.context.sent[1]), [2, "all 2 ready files of this batch"]);
+  assert.deepEqual(plain(h.context.sent[1]), [2, "batch-a"]);
 });
 
 
@@ -9420,4 +9422,176 @@ test("a batch Replace waits from its first click, and comes back to its own stat
   // A busy job keeps its batch Replace greyed after a Replace all elsewhere ends.
   h.run('state.busyJobs.add("b"); restoreReplaceAll(b);');
   assert.equal(h.context.b.disabled, true);
+});
+
+test("Replace on one file shows its result first: total, saved, video, audio and VMAF", async () => {
+  const h = harness();
+  h.context.job = conversionJob({ conversion_status: "ready_to_replace", replaced: false, replacement_action_id: "", replacement_run: null, candidate_ready: true });
+  h.context.calls = [];
+  h.run('state.info={allow_destructive:true,services:[]}; api=async()=>({jobs:[job]}); enqueueReplacement=async(j,c,r)=>{calls.push([j.id,c.service,r&&r.after]); return true;};');
+  let run = h.run("prepareReplacement(job)");
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "Replace this file?");
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace");
+  const said = allTextOf(h.elements.get("action-review-content"));
+  assert.match(said, /Sample Show S01E01\.mkv/);
+  assert.match(said, /Total.*4\.00 GB → 1\.60 GB · −60%/s);
+  assert.match(said, /Saved.*2\.40 GB smaller/s);
+  assert.match(said, /Video.*H\.264 → HEVC · 3\.40 GB → 1\.30 GB/s);
+  assert.match(said, /Audio.*3 tracks: 1 converted, 1 kept, 1 removed/s);
+  assert.match(said, /Quality.*VMAF 95\.2 average · 88\.1 worst moment/s);
+  // Back replaces nothing.
+  dismissReview(h);
+  await run;
+  assert.equal(h.context.calls.length, 0);
+  // Confirm starts this file, carrying what was shown.
+  run = h.run("prepareReplacement(job)");
+  await drain();
+  confirmReview(h);
+  await run;
+  assert.deepEqual(plain(h.context.calls), [["conv", "filesystem", 1.6e9]]);
+});
+
+test("a confirmed review approves only the plan for the file and size it showed", async () => {
+  const h = harness(), events = [];
+  h.context.events = events;
+  h.context.current = { id: "p", status: "waiting_decision", waiting_options: [{ decision: "approve" }], promotion: { transcode_action_id: "conv", original_path: "/media/one.mkv", candidate_path: "/c/one.mkv", original_sha256: "o", candidate_sha256: "c", candidate_bytes: 400, plan_digest: "sha256:plan" } };
+  h.run('pollDelay=async()=>{}; notify=()=>{}; api=async()=>({jobs:[current]}); jobControl=async(id,name,args)=>events.push(["approve",args.plan_digest]); reviewFilePromotion=async(id)=>events.push(["review",id]);');
+  await h.run('approveReviewedPlan("p", {id:"conv", after:400})');
+  await h.run('approveReviewedPlan("p", {id:"conv", after:999})');
+  await h.run('approveReviewedPlan("p", {id:"other", after:400})');
+  await h.run('approveReviewedPlan("p", null)');
+  assert.deepEqual(plain(events), [["approve", "sha256:plan"], ["review", "p"], ["review", "p"], ["review", "p"]]);
+});
+
+test("Replace automatically when done: the server default, the forms, and a server that does not know it", async () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true}; api=async()=>{throw new Error("404")};');
+  await h.run("loadReplaceAuto()");
+  assert.equal(h.elements.get("settings-replace-auto").hidden, true);
+  assert.equal(h.elements.get("replace-auto-label").hidden, true);
+  assert.deepEqual(plain(h.run('replaceAutoInput("replace-auto")')), {});
+  h.run("api=async()=>({replace_when_done_default:true});");
+  await h.run("loadReplaceAuto()");
+  assert.equal(h.elements.get("settings-replace-auto").hidden, false);
+  assert.equal(h.elements.get("replace-auto-default").checked, true);
+  assert.equal(h.elements.get("replace-auto").checked, true);
+  assert.deepEqual(plain(h.run('replaceAutoInput("replace-auto")')), { replace_when_done: true });
+  // A choice made in the form is not undone by a later load.
+  h.elements.get("replace-auto").checked = false;
+  h.elements.get("replace-auto").listeners.get("change")();
+  await h.run("loadReplaceAuto()");
+  assert.equal(h.elements.get("replace-auto").checked, false);
+  // Settings saves the default on the server.
+  h.context.sent = [];
+  h.run("api=async(path,body,opts)=>{sent.push([path,body,opts&&opts.method]); return body;};");
+  h.elements.get("replace-auto-default").checked = false;
+  h.elements.get("replace-auto-default").listeners.get("change")();
+  await drain();
+  assert.deepEqual(plain(h.context.sent), [["preferences", { replace_when_done_default: false }, "PUT"]]);
+  assert.match(h.elements.get("replace-auto-default-note").textContent, /wait for you to review/);
+  assert.match(markup, /<input id="replace-auto" type="checkbox" \/>Replace automatically when done/);
+  assert.match(markup, /<input id="reconfigure-replace-auto" type="checkbox" \/>Replace automatically when done/);
+});
+
+test("a running job's switch turns automatic replacing on, asking once about the files ready now", async () => {
+  const h = harness();
+  const batch = { id: "b", action_name: "transcode_batch", status: "running", batch: { total: 3 }, replace_when_done: false, ready_item_ids: ["c1", "c2"] };
+  const child = (id) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, parent_action_id: "b", source_path: `/media/tv/Sample Show ${id}.mkv`, outcome: { source_bytes: 2e9, candidate_bytes: 1e9 } });
+  h.context.byId = { c1: child("c1"), c2: child("c2") };
+  h.context.sent = [];
+  h.context.crypto = globalThis.crypto;
+  h.context.calls = [];
+  h.run('state.info={allow_destructive:true,services:[]}; replaceAuto.supported=true; api=async(path,body)=>{ if(body){ const {key, ...rest} = body; sent.push([path,rest]); return {replacements: []};} return {jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}; }; enqueueReplacement=async(j)=>{calls.push(j.id); return true;}; refreshOpenDetail=async()=>{}; loadJobs=async()=>{}; notify=()=>{};');
+  h.run(`renderDetailAutoReplace(${JSON.stringify(batch)})`);
+  assert.equal(h.elements.get("detail-auto-replace").hidden, false);
+  assert.equal(h.elements.get("detail-auto-replace-input").checked, false);
+  assert.match(markup, /id="detail-auto-replace"[\s\S]*?Replace automatically when done/);
+  // Only the files that finish later: switched on, nothing replaced now.
+  let run = h.run(`toggleAutoReplace(${JSON.stringify(batch)}, true)`);
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "Also replace the 2 files that are ready?");
+  const said = allTextOf(h.elements.get("action-review-content"));
+  assert.match(said, /Sample Show c1\.mkv.*2\.00 GB → 1\.00 GB · −50%.*Sample Show c2\.mkv/s);
+  nodesWithClass(h.elements.get("action-review-content"), "candidate-decisions")[0].children.find((b) => b.dataset.reviewChoice === "later").listeners.get("click")();
+  await run;
+  assert.deepEqual(plain(h.context.sent), [["replace-when-done", { id: "b", replace_when_done: true }]]);
+  assert.equal(h.context.calls.length, 0);
+  // Replace them now too: switched on first, then exactly the two shown, in one request.
+  h.context.sent.length = 0;
+  run = h.run(`toggleAutoReplace(${JSON.stringify(batch)}, true)`);
+  await drain();
+  confirmReview(h);
+  await run;
+  assert.deepEqual(plain(h.context.sent), [["replace-when-done", { id: "b", replace_when_done: true }], ["replace", { ids: ["c1", "c2"] }]]);
+  assert.equal(h.context.calls.length, 0);
+  // Back changes nothing.
+  h.context.sent.length = 0;
+  h.context.calls.length = 0;
+  run = h.run(`toggleAutoReplace(${JSON.stringify(batch)}, true)`);
+  await drain();
+  dismissReview(h);
+  await run;
+  assert.equal(h.context.sent.length + h.context.calls.length, 0);
+  assert.equal(h.elements.get("detail-auto-replace-input").checked, false);
+  // Off asks nothing. A finished job with nothing left to replace shows no switch.
+  await h.run(`toggleAutoReplace(${JSON.stringify({ ...batch, replace_when_done: true })}, false)`);
+  assert.deepEqual(plain(h.context.sent), [["replace-when-done", { id: "b", replace_when_done: false }]]);
+  // Once nothing is left to replace it stays in place, greyed, and says why.
+  h.run(`renderDetailAutoReplace(${JSON.stringify({ ...batch, status: "completed", ready_item_ids: [], remaining_candidates: 0 })})`);
+  assert.equal(h.elements.get("detail-auto-replace").hidden, false);
+  assert.equal(h.elements.get("detail-auto-replace-input").disabled, true);
+  assert.equal(h.elements.get("detail-auto-replace").title, "Nothing is left to replace");
+  // Why the server did not replace a file by itself is said under the switch.
+  h.run(`renderDetailAutoReplace(${JSON.stringify({ ...batch, replace_when_done: true, replace_when_done_skipped: "it needs a library choice" })})`);
+  assert.equal(h.elements.get("detail-auto-replace-note").hidden, false);
+  assert.equal(h.elements.get("detail-auto-replace-note").textContent, "Not replaced automatically: it needs a library choice");
+  // A server without the option shows no switch.
+  h.run("replaceAuto.supported=false;");
+  h.run(`renderDetailAutoReplace(${JSON.stringify(batch)})`);
+  assert.equal(h.elements.get("detail-auto-replace").hidden, true);
+});
+
+test("a file replaced automatically says so in its result", async () => {
+  const h = await openJobsOf([conversionJob({ replacement_run: { id: "promote", status: "completed", automatic: true, completed_at: new Date(Date.now() - 3600e3).toISOString() } })], "conv");
+  const row = nodesWithClass(h.elements.get("detail-summary"), "cv-replace")[0];
+  assert.match(saidBy(row), /Replaced automatically · 1 h ago/);
+});
+
+test("a server with review-first replacement gets one /replace for exactly the reviewed files, and says why none started", async () => {
+  const h = harness();
+  const child = (id) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, replace_when_done: false, parent_action_id: "b", source_path: `/media/tv/Sample Show ${id}.mkv`, outcome: { source_bytes: 2e9, candidate_bytes: 1e9 } });
+  h.context.byId = { c1: child("c1"), c2: child("c2") };
+  h.context.sent = [];
+  h.context.crypto = globalThis.crypto;
+  h.context.answer = null;
+  h.run('state.info={allow_destructive:true,services:[{name:"sonarr"}]}; api=async(path,body)=>{ if(body){ sent.push([path, body.ids, /^[A-Za-z0-9_-]{1,80}$/.test(body.key)]); if(answer){ const a=answer; answer=null; throw Object.assign(new Error("not ready"),{status:409,data:a}); } return {replacements: body.ids.map(id=>({id, replacement_action_id:"p-"+id, approved:"new"}))}; } return {jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}; }; enqueueReplacement=async()=>{throw new Error("no promote from the client")}; loadJobs=async()=>{}; refreshOpenDetail=async()=>{}; notify=()=>{};');
+  // A file of a running batch, behind a library: the server picks it, not the client.
+  let run = h.run('replaceAllReady(["c1","c2"], {parentId:"b"})');
+  await drain();
+  confirmReview(h);
+  const result = await run;
+  assert.deepEqual(plain(h.context.sent), [["replace", ["c1", "c2"], true]]);
+  assert.equal(result.started, 2);
+  // Nothing started: each file that is not ready says so, by name, and the rest can go on their own.
+  h.context.sent.length = 0;
+  h.context.answer = { code: "not_ready", ready: ["c1"], not_ready: [{ id: "c2", reason: "replacement_started" }] };
+  run = h.run('replaceAllReady(["c1","c2"], {parentId:"b"})');
+  await drain();
+  confirmReview(h);
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "Nothing was replaced");
+  assert.match(allTextOf(h.elements.get("action-review-content")), /Sample Show c2\.mkv.*Already being replaced/s);
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace the 1 ready");
+  confirmReview(h);
+  await run;
+  assert.deepEqual(plain(h.context.sent), [["replace", ["c1", "c2"], true], ["replace", ["c1"], true]]);
+  // One file whose library the server cannot pick goes on to the library choice, already reviewed.
+  h.context.answer = { code: "not_ready", ready: [], not_ready: [{ id: "c1", reason: "needs_library_choice" }] };
+  run = h.run("prepareReplacement(byId.c1)");
+  await drain();
+  confirmReview(h);
+  await run;
+  assert.equal(h.elements.get("replacement-choice").open, true);
+  assert.equal(h.run("state.replacementChoice.reviewed.id"), "c1");
 });

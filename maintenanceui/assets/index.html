@@ -433,6 +433,7 @@
                 </div>
               </details>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
+              <label id="replace-auto-label" class="check replace-auto" hidden><input id="replace-auto" type="checkbox" />Replace automatically when done</label>
               <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <details id="advanced-profiles" class="advanced-profiles">
               <summary><span>Advanced: technical profiles</span><span id="advanced-state" class="advanced-state">Off</span></summary>
@@ -1035,6 +1036,15 @@
               </details>
             </div>
           </section>
+          <section id="settings-replace-auto" class="node-settings" aria-labelledby="settings-replace-auto-title" hidden>
+            <strong id="settings-replace-auto-title" class="node-settings-title">Replacing</strong>
+            <label class="settings-row replace-auto-default">
+              <span>Replace automatically when done<span class="metadata">Default for new jobs</span></span>
+              <input id="replace-auto-default" type="checkbox" role="switch" />
+            </label>
+            <p class="muted">Off: each finished file waits until you have seen its result and tapped Replace. Every job can change this when it is created and while it runs.</p>
+            <p id="replace-auto-default-note" class="metadata" role="status"></p>
+          </section>
           <section id="settings-languages" class="node-settings language-settings" aria-labelledby="settings-languages-title">
             <strong id="settings-languages-title" class="node-settings-title">Languages to keep</strong>
             <div class="settings-row">
@@ -1234,6 +1244,7 @@
               </div><p class="muted">Current limits stay unless edited. Blank edited limits use the defaults.</p></div>
         </details>
         <details id="reconfigure-preview-box" class="stream-preview-box"><summary>Every stream</summary><div id="reconfigure-preview" class="stream-preview" hidden></div></details>
+        <label id="reconfigure-replace-auto-label" class="check replace-auto" hidden><input id="reconfigure-replace-auto" type="checkbox" />Replace automatically when done</label>
         <p id="reconfigure-settings" class="muted"></p>
         <div class="submit-actions"><button id="dismiss-reconfigure" type="button">Back</button><button id="submit-reconfigure" type="submit" class="primary">Apply settings</button></div>
       </form>
@@ -1290,6 +1301,8 @@
       <p id="detail-command-announcer" class="sr-only" role="status" aria-live="polite"></p>
       <section class="jd-status" data-section="status" aria-label="Status">
         <div id="detail-status" class="detail-status"></div>
+        <label id="detail-auto-replace" class="jd-auto-replace" hidden><input id="detail-auto-replace-input" type="checkbox" role="switch" /><span data-single-line>Replace automatically when done</span></label>
+        <p id="detail-auto-replace-note" class="metadata jd-auto-replace-note" hidden></p>
         <div id="detail-summary"></div>
       </section>
       <section id="batch-items-panel" class="jd-files" data-section="files" aria-labelledby="batch-items-title" hidden>
