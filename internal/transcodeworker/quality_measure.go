@@ -243,7 +243,7 @@ func (w *Worker) metricThreads(concurrent int) int {
 		concurrent = 1
 	}
 	concurrent *= w.videoJobsSharingCPU()
-	threads := hostCPUCount() / concurrent
+	threads := w.cpuBudget() / concurrent
 	if threads < 1 {
 		threads = 1
 	}

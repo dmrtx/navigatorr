@@ -1262,6 +1262,13 @@ func (w *Worker) spawnTranscodeProcess(selfExe, configPath, jobID string) (int, 
 		return 0, "", err
 	}
 	pid := cmd.Process.Pid
+	// Everything the job runs inherits this, so a node with a core budget
+	// leaves the CPU to other work on the host.
+	if w.slotLimits().CoreBudget > 0 {
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, pid, coreBudgetNice); err != nil {
+			log.Printf("core budget: lowering priority of job process %d: %v", pid, err)
+		}
+	}
 	_, lstart, _ := GetProcessIdentity(pid)
 	return pid, lstart, nil
 }

@@ -1021,6 +1021,14 @@
                 </form>
               </div>
               <p id="worker-x265-note" class="metadata" role="status"></p>
+              <div id="worker-cores-row" class="settings-row" hidden>
+                <span>Cores for encoding<span id="worker-cores-limit" class="metadata"></span></span>
+                <form id="worker-cores-form" class="inline-form">
+                  <select id="core-budget" aria-label="CPU cores encodes may use on this node" aria-describedby="worker-cores-limit worker-cores-note"></select>
+                  <button id="worker-cores-apply" type="submit" class="primary">Apply</button>
+                </form>
+              </div>
+              <p id="worker-cores-note" class="metadata" role="status"></p>
               <details id="worker-slot-split" class="worker-slot-split" hidden>
                 <summary>Assign slots to video and podcast</summary>
                 <form id="worker-slot-form">

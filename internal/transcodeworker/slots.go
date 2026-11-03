@@ -99,6 +99,7 @@ type slotSplitRecord struct {
 	PodcastSlots int       `json:"podcast_slots"`
 	Ceiling      int       `json:"ceiling,omitempty"`
 	X265Slots    int       `json:"x265_slots,omitempty"`
+	CoreBudget   int       `json:"core_budget,omitempty"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
@@ -109,6 +110,9 @@ type slotLimits struct {
 	Podcast int // pool size for podcast work; the ceiling when !Split
 	Split   bool
 	X265    int // most x265 encodes at once inside the video pool; 0 is no cap
+	// CoreBudget is how many host CPUs encodes may use together; 0 is all of
+	// them. A stored value that no longer fits the host is ignored.
+	CoreBudget int
 	// Publication is how many approved publications may copy at once; below 1
 	// it is 1.
 	Publication int
@@ -251,8 +255,11 @@ func (w *Worker) slotLimits() slotLimits {
 	if !ok {
 		return limits
 	}
+	if transcode.ValidateCoreBudget(rec.CoreBudget, hostCPUCount()) == nil {
+		limits.CoreBudget = rec.CoreBudget
+	}
 	if _, err := transcode.ValidateSlotSplit(transcode.SlotSplit{VideoSlots: rec.VideoSlots, PodcastSlots: rec.PodcastSlots}, ceiling, 0); err == nil && (rec.VideoSlots != 0 || rec.PodcastSlots != 0) {
-		limits = slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true, Publication: w.cfg.MaxParallelPublications}
+		limits = slotLimits{Ceiling: ceiling, Video: rec.VideoSlots, Podcast: rec.PodcastSlots, Split: true, Publication: w.cfg.MaxParallelPublications, CoreBudget: limits.CoreBudget}
 	}
 	// A cap larger than the video pool that is in force (the ceiling or the
 	// split was lowered since) is ignored rather than clamped, as a split that
@@ -261,6 +268,28 @@ func (w *Worker) slotLimits() slotLimits {
 		limits.X265 = rec.X265Slots
 	}
 	return limits
+}
+
+// coreBudgetNice is the priority the job processes of a node with a core
+// budget run at. A budget sizes thread pools but macOS cannot pin processes to
+// cores, so the lower priority is what lets other work on the host win the
+// CPU when it asks for it.
+const coreBudgetNice = 10
+
+// cpuBudget is the CPUs encodes may use together: the core budget when one is
+// set, else every CPU of the host.
+func (w *Worker) cpuBudget() int {
+	if w == nil || w.cfg == nil {
+		return hostCPUCount()
+	}
+	return cpuBudgetFor(w.slotLimits().CoreBudget)
+}
+
+func cpuBudgetFor(budget int) int {
+	if cpus := hostCPUCount(); budget <= 0 || budget >= cpus {
+		return cpus
+	}
+	return budget
 }
 
 // slotSplitInvalidError is an operator mistake in a split, as opposed to the
@@ -304,14 +333,14 @@ func (w *Worker) SetSlotSplit(split transcode.SlotSplit) ([]string, error) {
 		return nil, &slotSplitInvalidError{err}
 	}
 	warnings = append(notes, warnings...)
-	if split.Shared() && override == 0 && split.X265Slots == 0 {
+	if split.Shared() && override == 0 && split.X265Slots == 0 && split.CoreBudget == 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 		w.noteSlotSplitChanged()
 		return warnings, nil
 	}
-	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: override, X265Slots: split.X265Slots, UpdatedAt: time.Now().UTC()}, "", "  ")
+	data, err := json.MarshalIndent(slotSplitRecord{VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: override, X265Slots: split.X265Slots, CoreBudget: split.CoreBudget, UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +407,7 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 func (w *Worker) slotsStatus() transcode.WorkerSlots {
 	l := w.slotLimits()
 	_, source := w.ceilingFrom(w.storedSlots())
-	out := transcode.WorkerSlots{Ceiling: l.Ceiling, CeilingLimit: w.slotCeilingLimit(), CeilingSource: source, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}, X265: &transcode.SlotPool{Total: l.X265}}
+	out := transcode.WorkerSlots{Ceiling: l.Ceiling, CeilingLimit: w.slotCeilingLimit(), CeilingSource: source, HostCPUs: hostCPUCount(), Split: l.Split, Video: transcode.SlotPool{Total: l.Video}, Podcast: transcode.SlotPool{Total: l.Podcast}, X265: &transcode.SlotPool{Total: l.X265}, CoreBudget: &l.CoreBudget}
 	if use, err := w.observeSlotUse(false); err == nil {
 		out.Video.Used, out.Podcast.Used, out.X265.Used = use.Video, use.Podcast, use.X265
 	}
