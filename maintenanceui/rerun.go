@@ -312,6 +312,10 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Running it again keeps whether it replaces its file by itself when done.
+	if old.inputs["dry_run"] != true {
+		inputs["replace_when_done"] = s.engine.ReplaceWhenDone(inst)
+	}
 	ctx := action.WithOrigin(r.Context(), "web")
 	// A lost response replays the same key: return that action, never a
 	// second job and never "worker busy" for work that is already admitted.

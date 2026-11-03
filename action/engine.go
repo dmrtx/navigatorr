@@ -390,6 +390,12 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 	// dedicated Run argument or inside inputs. It does not change workflow
 	// semantics and therefore is excluded from the immutable payload check.
 	delete(existing, "idempotency_key")
+	// A submission without replace_when_done takes the server default, which
+	// is frozen into the stored inputs; replaying it without the field is the
+	// same request even after the default changed.
+	if _, sent := requested["replace_when_done"]; !sent {
+		delete(existing, "replace_when_done")
+	}
 	requestedCopy := make(map[string]any, len(requested))
 	for key, value := range requested {
 		if key != "idempotency_key" {
@@ -1199,11 +1205,18 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 	inst.WaitingReason, inst.WaitingCondition, inst.WaitingOptionsJSON = "", "", "[]"
 	inst.Status = StatusCompleted
 	inst.CurrentStep = totalSteps
+	// A job that replaces its file when done starts that replacement once it
+	// is saved as completed; when it cannot, the result says why.
+	autoReplace, autoSkipped := e.autoReplacement(inst, ec)
+	if autoSkipped != "" {
+		ec.Outputs["replace_when_done_skipped"] = autoSkipped
+	}
 	inst.StateJSON = toJSON(ec.State)
 	inst.OutputsJSON = toJSON(ec.Outputs)
 	if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
 		return nil, saveErr
 	}
+	e.startAutoReplacement(ctx, inst, autoReplace)
 
 	_ = e.deps.Store.LogActionEnriched(
 		"action_completed",

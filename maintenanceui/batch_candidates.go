@@ -77,6 +77,9 @@ func (s *Server) batchCandidates(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "review digest and decision are required")
 			return
 		}
+		if body.Decision == "approve" && !s.planStillShown(w, r, body.ID, body.Digest, body.Keys, body.Key) {
+			return
+		}
 		inputs["kind"], inputs["digest"], inputs["decision"] = "review_batch_promotion", body.Digest, body.Decision
 	} else {
 		if body.Version == "" || len(body.Keys) == 0 || len(body.Keys) > 1000 {
@@ -86,4 +89,48 @@ func (s *Server) batchCandidates(w http.ResponseWriter, r *http.Request) {
 		inputs["kind"], inputs["version"], inputs["item_keys"] = "prepare_batch_promotion", body.Version, body.Keys
 	}
 	s.admitCommand(w, r, inputs, body.Key)
+}
+
+// planStillShown answers 409 with the batch's current plan when an approval
+// does not match it: no plan is waiting, its digest differs, or the members
+// the client listed (item_keys, optional) are not exactly the plan's. A
+// replay of an approval already admitted under the same key is let through,
+// so a lost answer stays recoverable.
+func (s *Server) planStillShown(w http.ResponseWriter, r *http.Request, id, digest string, keys []string, key string) bool {
+	if key != "" {
+		if old, err := s.engine.Deps().Store.FindActionByIdempotencyKey("maintenance_command", "web-command:"+key); err == nil && old != nil {
+			return true
+		}
+	}
+	plan, err := s.engine.BatchPromotionPlan(r.Context(), id)
+	if err != nil {
+		fail(w, 409, err.Error())
+		return false
+	}
+	changed := plan == nil || !plan.Waiting || plan.Digest != digest
+	if !changed && len(keys) > 0 {
+		listed := map[string]bool{}
+		for _, k := range keys {
+			listed[k] = true
+		}
+		changed = len(listed) != len(keys) || len(listed) != len(plan.Members)
+		for _, member := range plan.Members {
+			if !listed[member.ItemKey] {
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return true
+	}
+	current := map[string]any{"prepared": false}
+	if plan != nil {
+		ids := make([]string, 0, len(plan.Members))
+		for _, member := range plan.Members {
+			ids = append(ids, member.SourceAction)
+		}
+		current = map[string]any{"prepared": true, "plan": preparedPlan{Prepared: true, BatchPromotionPlanRead: plan, MemberFacts: s.memberFacts(ids)}}
+	}
+	writeJSON(w, 409, map[string]any{"error": "the replacement plan changed since it was shown; review it again", "code": "plan_changed", "plan": current["plan"], "prepared": current["prepared"]})
+	return false
 }

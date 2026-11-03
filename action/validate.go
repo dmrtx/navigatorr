@@ -97,6 +97,9 @@ func (e *Engine) validateActionInputs(ctx context.Context, tmpl ActionTemplate, 
 	if normalized == nil {
 		normalized = inputs
 	}
+	if err := e.normalizeReplaceWhenDone(tmpl.Name, normalized); err != nil {
+		return nil, err
+	}
 	return normalized, nil
 }
 

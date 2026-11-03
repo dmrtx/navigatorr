@@ -368,7 +368,8 @@ func TestRerunRemedyStartsTheRightGoalWithoutTheOldGoalsSettings(t *testing.T) {
 		t.Fatalf("new action %+v", created)
 	}
 	copied := decodeOperationJSON(created.InputsJSON)
-	want := map[string]any{"path": "/media/movie.mkv", "mode": "compact", "replace_original": false, "is_anime": true, "media_type": "movie"}
+	// replace_when_done means the same under every goal and is carried.
+	want := map[string]any{"path": "/media/movie.mkv", "mode": "compact", "replace_original": false, "is_anime": true, "media_type": "movie", "replace_when_done": false}
 	if len(copied) != len(want) {
 		t.Fatalf("inputs carried goal-specific keys: %v", copied)
 	}
@@ -399,7 +400,7 @@ func TestRerunRemedyStartsTheRightGoalWithoutTheOldGoalsSettings(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &started)
 	created, _ = st.GetActionInstance(started.ID)
-	if copied := decodeOperationJSON(created.InputsJSON); copied["mode"] != "size" || copied["path"] != "/media/clip.mkv" || copied["max_height"] != nil || len(copied) != 2 {
+	if copied := decodeOperationJSON(created.InputsJSON); copied["mode"] != "size" || copied["path"] != "/media/clip.mkv" || copied["max_height"] != nil || copied["replace_when_done"] != false || len(copied) != 3 {
 		t.Fatalf("size inputs %v", copied)
 	}
 }

@@ -30,6 +30,8 @@ func (s *Server) candidateReconfigurePlan(id, candidateID string) (batchReconfig
 	if inputs["dry_run"] == true {
 		return p, nil, fmt.Errorf("preview has no candidate")
 	}
+	// The new batch keeps whether this one replaces each file when done.
+	inputs["replace_when_done"] = s.engine.ReplaceWhenDone(parent)
 	items, err := st.ListTranscodeBatchItems(id)
 	if err != nil {
 		return p, nil, err

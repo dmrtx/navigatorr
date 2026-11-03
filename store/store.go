@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 20
+const SchemaVersion = 21
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -418,6 +418,12 @@ var migrations = []migration{
 		// The file's size when the batch planned it, so the size of a selection
 		// is known before any of its files is encoded. 0 on earlier rows.
 		`ALTER TABLE transcode_batch_items ADD COLUMN source_bytes INTEGER NOT NULL DEFAULT 0`,
+	}},
+	{version: 21, statements: []string{
+		// Whether a job or batch replaces each finished file by itself, as
+		// changed after it was submitted. Its inputs keep the choice it was
+		// submitted with; this row, when present, overrides it.
+		`CREATE TABLE action_replace_when_done (action_id TEXT PRIMARY KEY, value INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
 	}},
 }
 

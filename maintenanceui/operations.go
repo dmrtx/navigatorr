@@ -637,6 +637,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read archive state")
 		return
 	}
+	replaceWhenDone, err := s.engine.Deps().Store.ListReplaceWhenDone()
+	if err != nil {
+		fail(w, 500, "read replacement settings")
+		return
+	}
 	timing.since("snapshot", began)
 	began = time.Now()
 	now := time.Now().UTC()
@@ -984,6 +989,15 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if parent, found := recordsByID[operationString(r.inputs["parent_action_id"])]; found && parent.inst.ActionName == "transcode_batch" {
 				job["parent_batch_id"] = parent.inst.ID
 			}
+			switch r.inst.ActionName {
+			case "transcode_media", "transcode_batch":
+				job["replace_when_done"] = replaceWhenDoneOf(r, recordsByID, replaceWhenDone)
+				if skipped := operationString(operationValue(r, "replace_when_done_skipped")); skipped != "" {
+					job["replace_when_done_skipped"] = skipped
+				}
+			case "promote_transcode_candidate":
+				job["replaced_automatically"] = operationString(r.inputs["approval"]) == action.ApprovalAutomatic
+			}
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
 				job["conversion_status"] = conversions.conversionStatus(r)
@@ -1187,4 +1201,22 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	timing.since("jobs", began)
 	timing.set(w)
 	writeJSON(w, http.StatusOK, page)
+}
+
+// replaceWhenDoneOf is whether a job or batch replaces each file by itself
+// once it is done, as Engine.ReplaceWhenDone reads it: its own switch, else
+// its batch's, else the value it was submitted with. A preview never does.
+func replaceWhenDoneOf(r operationRecord, byID map[string]operationRecord, switched map[string]bool) bool {
+	if r.inputs["dry_run"] == true {
+		return false
+	}
+	if value, ok := switched[r.inst.ID]; ok {
+		return value
+	}
+	if r.inst.ActionName == "transcode_media" {
+		if parent, ok := byID[operationString(r.inputs["parent_action_id"])]; ok && parent.inst.ActionName == "transcode_batch" {
+			return replaceWhenDoneOf(parent, byID, switched)
+		}
+	}
+	return r.inputs["replace_when_done"] == true
 }

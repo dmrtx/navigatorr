@@ -21,7 +21,7 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, keeping the verified original recoverable (moved into a private recovery directory, or copied when it cannot be moved) until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
-		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
+		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest", "approval"},
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePlan)},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
@@ -298,7 +298,17 @@ func (e *Engine) stepPromoteApprove(ctx context.Context, ec *ExecutionContext) (
 			// one on the share stays, as it always has.
 			return promoteFailedFinal(fmt.Errorf("candidate promotion rejected; original and candidate remain untouched")), nil
 		default:
+			// Approved before its plan existed: reviewed by a person, or its
+			// job replaces each file when done. A regrab warning still stops.
+			ahead, why := e.promotionApprovedAhead(ec, p)
+			if ahead {
+				p.Approved = true
+				break
+			}
 			reason := "Approve the verified candidate and affected library items before replacement"
+			if why != "" {
+				reason = why + ". " + reason
+			}
 			if p.RegrabWarning != "" {
 				reason += ". " + p.RegrabWarning
 			}
