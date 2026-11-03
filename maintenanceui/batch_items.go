@@ -24,6 +24,12 @@ type batchItemView struct {
 	SavedBytes int64 `json:"saved_bytes,omitempty"`
 	// SourceBytes is the file's size when the batch planned it (0 when unknown).
 	SourceBytes int64 `json:"source_bytes,omitempty"`
+	// OriginalBytes is the file's original size as its job rows show it: the
+	// current attempt's record of the original, else SourceBytes. ResultBytes
+	// is the new file's size once the attempt has one (kept after it replaced
+	// the original). Both are omitted while unknown; see list_sizes.go.
+	OriginalBytes int64 `json:"original_bytes,omitempty"`
+	ResultBytes   int64 `json:"result_bytes,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -145,6 +151,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			view.CanReconfigure = inputs["dry_run"] != true && state["batch_promotion_plan"] == nil && !reserved && !view.RetryPending
+			var attempt *operationRecord
 			if item.ChildActionID != "" {
 				child, err := st.GetActionInstanceIfExists(item.ChildActionID)
 				if err != nil {
@@ -155,6 +162,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					childInputs := decodeOperationJSON(child.InputsJSON)
 					if childInputs["parent_action_id"] == id && childInputs["path"] == item.FilePath {
 						r := operationRecord{inst: *child, inputs: childInputs, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
+						attempt = &r
 						view.WaitingReason = batchReasonText(child.WaitingReason, true)
 						if child.Status == store.ActionStatusWaitingDecision {
 							var options []struct {
@@ -238,6 +246,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					view.CandidateReady = false
 				}
 			}
+			view.OriginalBytes, view.ResultBytes = batchFileSizes(item, attempt, view.Replaced, view.RetryPending)
 			views = append(views, view)
 		}
 	}

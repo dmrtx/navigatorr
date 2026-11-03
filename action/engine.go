@@ -362,6 +362,13 @@ func (e *Engine) Run(ctx context.Context, actionName string, inputs map[string]a
 		}
 	}
 
+	// Only alongside the provenance above: a running action whose state is
+	// still empty is one the reconciler must not resume.
+	if len(ec.State) > 0 {
+		if size := e.submittedSourceBytes(actionName, persistedInputs); size > 0 {
+			ec.State[SubmittedSourceBytesKey] = size
+		}
+	}
 	claimCtx, release, err := e.claimExecution(ctx, inst.ID, true)
 	if err != nil {
 		return nil, err
