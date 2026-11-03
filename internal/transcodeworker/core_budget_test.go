@@ -195,9 +195,14 @@ func TestJobProcessRunsAtLowerPriorityUnderACoreBudget(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
+	// A job inherits the worker's own priority (a CI runner may not run at 0).
+	own, err := exec.Command("ps", "-o", "nice=", "-p", strconv.Itoa(os.Getpid())).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := newBudgetWorker(t, 2)
-	if got := nice(w); got != "0" {
-		t.Fatalf("no budget: nice %s", got)
+	if got := nice(w); got != strings.TrimSpace(string(own)) {
+		t.Fatalf("no budget: nice %s, want the worker's own %s", got, strings.TrimSpace(string(own)))
 	}
 	if _, err := w.SetSlotSplit(transcode.SlotSplit{CoreBudget: 6}); err != nil {
 		t.Fatal(err)
