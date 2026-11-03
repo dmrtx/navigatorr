@@ -56,6 +56,8 @@ type Engine struct {
 
 	// holdSyncing is set while a background worker-hold check runs.
 	holdSyncing atomic.Bool
+	// pauseSweeping is set while a background sweep of paused nodes runs.
+	pauseSweeping atomic.Bool
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the
 	// durable queue order lives in each waiter's state (worker_slot_wait_since).

@@ -11,11 +11,12 @@ import (
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
-// Pause all also has to stop the worker's own queue. A job the server already
-// sent sits in the worker's queue as queued, and the worker starts the next
-// one whenever a slot frees; drain alone only stops new submissions. While
-// drain is on, every worker that supports it is told to hold its queue, so
-// only the encodes already running finish and nothing else starts.
+// Pause all also has to stop the worker's own queue, and so does a node's own
+// pause for that node. A job the server already sent sits in the worker's
+// queue as queued, and the worker starts the next one whenever a slot frees;
+// drain alone only stops new submissions. While drain is on, every worker that
+// supports it is told to hold its queue, so only the encodes already running
+// finish and nothing else starts.
 //
 // The worker is asked on every observation and every reconciler tick, not
 // only when drain changes: the hold is re-sent to a worker that lost it
@@ -48,10 +49,13 @@ type workerHoldState struct {
 	unsupported time.Time
 }
 
-// workerHoldWanted is whether the workers should hold their queues now. An
-// unreadable drain state holds, as drainHold does.
-func (e *Engine) workerHoldWanted() bool {
-	held, _ := e.drainHold()
+// workerHoldWanted is whether the worker should hold its queue now: drain is
+// on, or the node is paused. An unreadable state holds, as drainHold does.
+func (e *Engine) workerHoldWanted(name string) bool {
+	if held, _ := e.drainHold(); held {
+		return true
+	}
+	held, _ := e.pauseHold(name)
 	return held
 }
 
@@ -70,7 +74,7 @@ func (e *Engine) syncWorkerHold(ctx context.Context, w transcode.NamedWorker) {
 	if !st.unsupported.IsZero() && time.Since(st.unsupported) < holdUnsupportedRecheck {
 		return
 	}
-	want := e.workerHoldWanted() // read under the lock: the last toggle wins
+	want := e.workerHoldWanted(w.Name) // read under the lock: the last toggle wins
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), holdCallTimeout)
 	defer cancel()
 	got, err := holder.Hold(ctx)

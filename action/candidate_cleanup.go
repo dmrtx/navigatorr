@@ -38,6 +38,7 @@ const (
 	candidateRetiredDiscarded  = "discarded"
 	candidateRetiredReplaced   = "replaced"
 	candidateRetiredKept       = "kept_original"
+	candidateRetiredRequeued   = "requeued"
 )
 
 func rejectedCandidateResult() StepResult {

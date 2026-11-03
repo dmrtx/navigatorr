@@ -50,6 +50,7 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 				e.startWorkerHoldSync(ctx)
 				// Automatic replacements a crash or an error left behind.
 				e.drainAutoReplacements(ctx)
+				e.startNodePauseSweep(ctx)
 				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}
@@ -271,7 +272,7 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 	} else {
 		delete(ec.State, "worker_poll_failures")
 	}
-	if condition == drainWaitCondition && delay < drainPollDelay {
+	if (condition == drainWaitCondition || condition == pauseWaitCondition) && delay < drainPollDelay {
 		delay = drainPollDelay
 	}
 	if condition == "worker_busy" && (hasSlotTicket(ec.State) || transcodeQueueWaiting(ec.State)) {

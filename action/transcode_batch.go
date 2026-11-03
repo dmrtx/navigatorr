@@ -710,6 +710,15 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 		if it.ChildActionID != "" {
 			existingChild, err := e.deps.Store.GetActionInstance(it.ChildActionID)
 			if err == nil && existingChild != nil {
+				// A file sent back to the queue by a node pause holds no job and no
+				// node until it is assigned again; the row must not keep the old ones.
+				if strings.Contains(existingChild.StateJSON, `"`+requeueCountKey+`"`) {
+					var state map[string]any
+					_ = json.Unmarshal([]byte(existingChild.StateJSON), &state)
+					if getInt(state, requeueCountKey) > 0 && !holdsWorkerJob(state) {
+						it.JobID, it.Worker = "", assignedWorker(state)
+					}
+				}
 				if it.JobID == "" || it.Worker == "" {
 					var state map[string]any
 					_ = json.Unmarshal([]byte(existingChild.StateJSON), &state)

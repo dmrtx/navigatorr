@@ -257,7 +257,7 @@ func classifyDrainRow(r store.DrainActionRow) string {
 		return ""
 	}
 	switch {
-	case r.WaitingCondition == drainWaitCondition:
+	case r.WaitingCondition == drainWaitCondition, r.WaitingCondition == pauseWaitCondition:
 		return transcode.DrainJobQueued
 	case r.RecoveryRequired:
 		return transcode.DrainJobPublicationPending

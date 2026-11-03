@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 22
+const SchemaVersion = 23
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -443,6 +443,12 @@ var migrations = []migration{
 		// Settings only the maintenance API writes (never memory_set): the
 		// value a job submitted without replace_when_done takes.
 		`CREATE TABLE IF NOT EXISTS replace_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
+	}},
+	{version: 23, statements: []string{
+		// A node the operator paused so its CPU is free for other work: one row
+		// while it is paused, none otherwise. mode is 'graceful' (finish what
+		// is encoding) or 'immediate' (send it back to the queue now).
+		`CREATE TABLE IF NOT EXISTS worker_pauses (worker TEXT PRIMARY KEY, mode TEXT NOT NULL, since TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
 	}},
 }
 
