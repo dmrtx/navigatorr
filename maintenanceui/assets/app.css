@@ -719,6 +719,8 @@ main {
 .node-settings { margin-bottom:1.25rem; }
 .node-settings p { margin:4px 0 0; }
 .node-settings-title { display:block; font-size:12px; }
+.node-paused { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:8px; padding:8px 10px; border:1px solid var(--warning-line); border-radius:6px; font-size:12px; }
+.node-paused p { flex:1 1 220px; margin:0; }
 .node-settings .settings-row .metadata { margin-top:1px; }
 .node-settings .settings-row strong { font-weight:600; }
 .inline-form { display:flex; align-items:center; gap:8px; }

@@ -2377,6 +2377,35 @@ test("the core budget is offered only by a worker that reports it, keeps unsaved
   assert.equal(h.elements.get("worker-cores-row").hidden,true);
 });
 
+test("a paused node says so where its limits are and can be resumed from there", async () => {
+  const h=harness();
+  h.context.calls=[];
+  h.run('setNodePause=async(worker,mode)=>{calls.push([worker.name,mode])};refreshWorkerActivity=async()=>{};');
+  const slots={ceiling:1,ceiling_limit:10,ceiling_source:"config",host_cpus:10,split:false,core_budget:4,video:{total:1,used:0},podcast:{total:1,used:0}};
+  h.context.activity={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:0,jobs:[],slots}}]};
+  const info=pause=>h.run(`state.workerInfo={nodes:[{name:"m1",worker:"m1",pause:${JSON.stringify(pause)}}]}`);
+  info({paused:false});
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("settings-node-paused").hidden,true);
+  info({paused:true,idle:true,mode:"immediate"});
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("settings-node-paused").hidden,false);
+  assert.match(h.elements.get("settings-node-paused-text").textContent,/^m1 is paused\. Nothing starts on it until you resume, so the limits below apply from then on\./);
+  await h.elements.get("settings-node-resume").onclick();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)),[["m1","off"]]);
+  // Still finishing files: it says so instead.
+  info({paused:true,idle:false,mode:"graceful"});
+  h.run('renderWorkerActivity(activity)');
+  assert.match(h.elements.get("settings-node-paused-text").textContent,/is pausing\. Files already encoding finish/);
+  // Resumed, or a node the pause list does not know: nothing to say.
+  info({paused:false});
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("settings-node-paused").hidden,true);
+  h.run('state.workerInfo=null');
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("settings-node-paused").hidden,true);
+});
+
 test("the slot table names the encoder of a full conversion", () => {
   const h=harness();
   h.elements.get("x265-limit").options=[{value:"0"},{value:"1"}];
