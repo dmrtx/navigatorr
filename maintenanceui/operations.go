@@ -1111,6 +1111,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					return
 				}
 				job["batch_files"] = batchQueueFeedback(items, s.cfg.Media.AllowedReadRoots)
+				setBatchSizeTotals(job, r, items, recordsByID, func(c operationRecord) bool { return replacedActions[c.inst.ID] || replaced[operationSourceKey(c)] })
 				if progress := s.batchReplacementProgress(r, recordsByID, existingReplacements); progress != nil {
 					job["replacement"] = progress
 				}
@@ -1180,6 +1181,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					}
 					job["activities"] = activities
 				}
+			}
+			if r.inst.ActionName == "transcode_media" || r.inst.ActionName == "promote_transcode_candidate" {
+				var source *operationRecord
+				if src, ok := recordsByID[operationString(r.inputs["transcode_action_id"])]; ok && r.inst.ActionName == "promote_transcode_candidate" && src.inst.ActionName == "transcode_media" {
+					source = &src
+				}
+				setJobSizes(job, r, source, replacedActions[r.inst.ID] || replaced[operationSourceKey(r)])
 			}
 			page.Jobs = append(page.Jobs, job)
 		}

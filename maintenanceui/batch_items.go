@@ -67,6 +67,12 @@ type batchItemView struct {
 	// Explanation and NextSteps are the child job's, as a single job shows
 	// them: what happened, what it showed, and the goals to try next.
 	Explanation *resultExplanation `json:"explanation,omitempty"`
+	// OriginalBytes is the file's original size as its job rows show it: the
+	// current attempt's record of the original, else SourceBytes. ResultBytes
+	// is the new file's size once the attempt has one (kept after it replaced
+	// the original). Both are omitted while unknown; see list_sizes.go.
+	OriginalBytes int64 `json:"original_bytes,omitempty"`
+	ResultBytes   int64 `json:"result_bytes,omitempty"`
 	// Cause is why the file's attempt has no result, as a job's cause is.
 	Cause     *conversionCause `json:"cause,omitempty"`
 	NextSteps []nextStep       `json:"next_steps,omitempty"`
@@ -154,6 +160,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 			view.CanReconfigure = inputs["dry_run"] != true && state["batch_promotion_plan"] == nil && !reserved && !view.RetryPending
+			var attempt *operationRecord
 			if item.ChildActionID != "" {
 				child, err := st.GetActionInstanceIfExists(item.ChildActionID)
 				if err != nil {
@@ -164,6 +171,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					childInputs := decodeOperationJSON(child.InputsJSON)
 					if childInputs["parent_action_id"] == id && childInputs["path"] == item.FilePath {
 						r := operationRecord{inst: *child, inputs: childInputs, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
+						attempt = &r
 						view.WaitingReason = batchReasonText(child.WaitingReason, true)
 						if child.Status == store.ActionStatusWaitingDecision {
 							var options []struct {
@@ -252,6 +260,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalState: originalInPlace, OriginalIntact: true}
 				}
 			}
+			view.OriginalBytes, view.ResultBytes = batchFileSizes(item, attempt, view.Replaced, view.RetryPending)
 			if view.ReplacementActionID == "" && view.ReplacementFailure == nil && item.ChildActionID != "" {
 				if view.ReplacementPlan = replacementPlanState(state, item.ChildActionID); view.ReplacementPlan != "" {
 					view.CandidateReady = false

@@ -82,6 +82,12 @@ func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
 	return data
 }
 
+// maintenanceListKeys are the output and state keys the snapshot keeps:
+// maintenanceOutputKeys; submitted_source_bytes, a transcode job's file size
+// from its submission until its preflight records the original; and skipped,
+// which says a job's candidate_size_bytes is not a result to list.
+var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped")
+
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage
 	if json.Unmarshal([]byte(raw), &source) != nil {
@@ -314,8 +320,8 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 			// The revision read with the row labels it: a write between the two
 			// queries only makes the next snapshot read this action again.
 			inst.InputsJSON = maintenanceJSON(inst.InputsJSON, maintenanceInputKeys)
-			inst.OutputsJSON = maintenanceJSON(inst.OutputsJSON, maintenanceOutputKeys)
-			inst.StateJSON = maintenanceJSON(inst.StateJSON, maintenanceOutputKeys)
+			inst.OutputsJSON = maintenanceJSON(inst.OutputsJSON, maintenanceListKeys)
+			inst.StateJSON = maintenanceJSON(inst.StateJSON, maintenanceListKeys)
 			s.maintenanceMemo[inst.ID] = maintenanceMemo{rev: rev, inst: inst}
 		}
 		err = changed.Err()

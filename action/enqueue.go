@@ -122,7 +122,11 @@ func (e *Engine) Enqueue(ctx context.Context, name string, inputs map[string]any
 	if origin == "" {
 		origin = "unknown"
 	}
-	inst := store.ActionInstance{ID: generateActionID(name), ActionName: name, InputsJSON: string(b), StateJSON: toJSON(map[string]any{"request_origin": origin, "background_admission": true}), IdempotencyKey: strings.TrimSpace(key)}
+	state := map[string]any{"request_origin": origin, "background_admission": true}
+	if size := e.submittedSourceBytes(name, copy); size > 0 {
+		state[SubmittedSourceBytesKey] = size
+	}
+	inst := store.ActionInstance{ID: generateActionID(name), ActionName: name, InputsJSON: string(b), StateJSON: toJSON(state), IdempotencyKey: strings.TrimSpace(key)}
 	id, err := e.deps.Store.QueueAction(inst, name+":"+key)
 	if err != nil {
 		// A promotion can also be created simultaneously through synchronous MCP.
