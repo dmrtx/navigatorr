@@ -9542,6 +9542,10 @@ test("a running job's switch turns automatic replacing on, asking once about the
   assert.equal(h.elements.get("detail-auto-replace").hidden, false);
   assert.equal(h.elements.get("detail-auto-replace-input").disabled, true);
   assert.equal(h.elements.get("detail-auto-replace").title, "Nothing is left to replace");
+  // A finished job still switched on can be switched off: its automatic replacement may still wait for approval.
+  h.run(`renderDetailAutoReplace(${JSON.stringify({ ...batch, status: "completed", ready_item_ids: [], remaining_candidates: 0, replace_when_done: true })})`);
+  assert.equal(h.elements.get("detail-auto-replace-input").disabled, false);
+  assert.equal(h.elements.get("detail-auto-replace-input").checked, true);
   // Why the server did not replace a file by itself is said under the switch.
   h.run(`renderDetailAutoReplace(${JSON.stringify({ ...batch, replace_when_done: true, replace_when_done_skipped: "it needs a library choice" })})`);
   assert.equal(h.elements.get("detail-auto-replace-note").hidden, false);
@@ -9594,4 +9598,104 @@ test("a server with review-first replacement gets one /replace for exactly the r
   await run;
   assert.equal(h.elements.get("replacement-choice").open, true);
   assert.equal(h.run("state.replacementChoice.reviewed.id"), "c1");
+});
+
+test("every submit that makes a conversion says whether it replaces by itself, never leaving it to the server default", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true}; replaceAuto.supported=true; replaceAuto.value=true; state.operationJobs=new Map([["b",{id:"b",replace_when_done:false}]]);');
+  // Run again keeps the job's own switch; one that never said takes the saved default; a preview never replaces.
+  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:false})')), { replace_when_done: false });
+  assert.deepEqual(plain(h.run('replaceAutoOf({})')), { replace_when_done: true });
+  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true, dry_run:true})')), { replace_when_done: false });
+  // A batch file encoded again keeps the batch's switch, from the plan or the batch.
+  assert.equal(h.run('sameSettingsRequest({id:"b", item_key:"k", settings:{replace_when_done:true}}).replace_when_done'), true);
+  assert.equal(h.run('sameSettingsRequest({id:"b", item_key:"k", settings:{}}).replace_when_done'), false);
+  // Replacing switched off on the server: never by itself.
+  h.run("state.info.allow_destructive=false;");
+  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true})')), { replace_when_done: false });
+  // A server without the option is sent nothing.
+  h.run("replaceAuto.supported=false;");
+  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true})')), {});
+});
+
+test("/replace sends the shown plan's digest, a new key per confirm, and says which files of a partial answer did not start", async () => {
+  const h = harness();
+  const child = (id) => ({ id, action_name: "transcode_media", status: "completed", candidate_ready: true, replace_when_done: false, parent_action_id: "b", source_path: `/media/tv/Sample Show ${id}.mkv`, outcome: { source_bytes: 2e9, candidate_bytes: 1e9 } });
+  h.context.byId = { c1: child("c1"), c2: child("c2") };
+  h.context.sent = [];
+  h.context.crypto = globalThis.crypto;
+  h.context.answers = [];
+  h.run('state.info={allow_destructive:true,services:[{name:"sonarr"}]}; replaceAuto.supported=true; api=async(path,body)=>{ if(body){ sent.push([path, body.ids, body.digests||null, body.key]); const a=answers.shift(); if(a&&a.status) throw Object.assign(new Error("refused"),{status:a.status,data:a.data}); if(a) return a; return {replacements: body.ids.map(id=>({id, started:true, approved:"new"}))}; } return {jobs:[byId[decodeURIComponent(path.split("id=")[1])]]}; }; enqueueReplacement=async()=>{throw new Error("no promote from the client")}; loadJobs=async()=>{}; refreshOpenDetail=async()=>{}; notify=()=>{};');
+  // An automatic replacement of c2 planned since the review: c2 is read again, shown as it is now, and only a confirm sends its plan.
+  h.context.answers.push({ status: 409, data: { code: "not_ready", ready: ["c1"], not_ready: [{ id: "c2", reason: "plan_changed", plan_digest: "sha256:new" }] } });
+  let run = h.run('replaceAllReady(["c1","c2"], {parentId:"b"})');
+  await drain();
+  confirmReview(h);
+  await drain();
+  assert.match(h.elements.get("action-review-title").textContent, /plan changed/i);
+  assert.match(allTextOf(h.elements.get("action-review-content")), /Sample Show c2\.mkv/);
+  assert.equal(h.elements.get("confirm-action-review").textContent, "Replace 2");
+  confirmReview(h);
+  let result = await run;
+  const [first, second] = plain(h.context.sent);
+  assert.deepEqual(first.slice(0, 3), ["replace", ["c1", "c2"], null]);
+  assert.deepEqual(second.slice(0, 3), ["replace", ["c1", "c2"], { c2: "sha256:new" }]);
+  assert.notEqual(first[3], second[3]);
+  assert.equal(result.started, 2);
+  // A partial answer: queued and retry count as started; the file that did not start is named with its error.
+  h.context.sent.length = 0;
+  h.context.answers.push({ code: "partial", replacements: [{ id: "c1", started: true, approved: "queued" }, { id: "c2", started: false, error: "the share is unreachable" }] });
+  run = h.run('replaceAllReady(["c1","c2"], {parentId:"b"})');
+  await drain();
+  confirmReview(h);
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "1 not started");
+  assert.match(allTextOf(h.elements.get("action-review-content")), /1 started.*Sample Show c2\.mkv.*the share is unreachable/s);
+  confirmReview(h);
+  result = await run;
+  assert.equal(result.started, 1);
+  assert.equal(result.failed, 1);
+  // A rejected replacement the server plans again starts unapproved: it is said, not counted as replacing.
+  h.context.sent.length = 0;
+  h.context.notices = [];
+  h.run("notify=(text)=>notices.push(text);");
+  h.context.answers.push({ replacements: [{ id: "c1", started: true, approved: "new" }, { id: "c2", started: true, reason: "needs_review", replacement_action_id: "p2" }] });
+  run = h.run('replaceAllReady(["c1","c2"], {parentId:"b"})');
+  await drain();
+  confirmReview(h);
+  result = await run;
+  assert.equal(result.started, 1);
+  assert.equal(result.replanning, 1);
+  assert.match(h.context.notices.at(-1), /Replacing the file\. Re-planning Sample Show c2.* review it again when ready/);
+  // Once that plan waits, the file's Replace shows its before → after and sends that plan's digest.
+  h.context.sent.length = 0;
+  h.context.byId.p2 = { id: "p2", action_name: "promote_transcode_candidate", status: "waiting_decision", waiting_options: [{ decision: "approve" }], promotion: { original_path: "/media/tv/a.mkv", candidate_path: "/tmp/b.mkv", original_sha256: "o", candidate_sha256: "c", plan_digest: "sha256:p2" } };
+  run = h.run(`prepareReplacement(${JSON.stringify({ ...child("c2"), replacement_action_id: "p2" })})`);
+  await drain();
+  assert.equal(h.elements.get("action-review-title").textContent, "Replace this file?");
+  confirmReview(h);
+  await run;
+  assert.deepEqual(plain(h.context.sent).map(entry => entry.slice(0, 3)), [["replace", ["c2"], { c2: "sha256:p2" }]]);
+  h.run("notify=()=>{};");
+  // Nothing started at all, and a reused key, are said plainly.
+  h.context.answers.push({ status: 409, data: { code: "not_started", replacements: [{ id: "c1", started: false, error: "the share is unreachable" }] } });
+  run = h.run("prepareReplacement(byId.c1)");
+  await drain();
+  confirmReview(h);
+  await assert.rejects(run, /Nothing was replaced: the share is unreachable/);
+  h.context.answers.push({ status: 409, data: { code: "key_reused" } });
+  run = h.run("prepareReplacement(byId.c1)");
+  await drain();
+  confirmReview(h);
+  await assert.rejects(run, /already sent/);
+  // A re-grab warning is decided in the replacement's own review.
+  h.context.byId.c1 = { ...child("c1"), replacement_action_id: "p1" };
+  h.run("openReplacement=async(id)=>{ opened.push(id); };");
+  h.context.opened = [];
+  h.context.answers.push({ status: 409, data: { code: "not_ready", ready: [], not_ready: [{ id: "c1", reason: "needs_decision", plan_digest: "sha256:x" }] } });
+  run = h.run(`prepareReplacement(${JSON.stringify(child("c1"))})`);
+  await drain();
+  confirmReview(h);
+  await run;
+  assert.deepEqual(plain(h.context.opened), ["p1"]);
 });
