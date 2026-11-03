@@ -373,7 +373,7 @@ async function api(path, body, { signal, method } = {}) {
     throw new Error(denial?.error || authenticationMessage());
   }
   const data = await res.json();
-  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status });
+  if (!res.ok) throw Object.assign(new Error(data.error || `HTTP ${res.status}`), { status: res.status, data });
   return data;
 }
 async function tool(name, args = {}, onAccepted, decision) {
@@ -870,7 +870,7 @@ function selectTab(tab, fromRoute = false) {
   else if (!fromRoute) safe(loadStorage);
   // The node's job settings come from the worker activity report.
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
-  if (tab === "advanced") void loadKeepLanguages();
+  if (tab === "advanced") { void loadKeepLanguages(); void loadReplaceAuto(); }
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   else if (tab === "library") void refreshFileMarks();
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
@@ -1113,6 +1113,7 @@ async function initialize() {
   void refreshWorkers();
   // The picker in the goal form names the saved languages.
   void loadKeepLanguages();
+  void loadReplaceAuto();
   $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
@@ -2532,6 +2533,73 @@ $("keep-languages-apply").addEventListener("click", () => void saveKeepLanguages
 $("keep-languages-reset").addEventListener("click", () => stageKeepLanguages([...keepLanguages.defaults]));
 $("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
 
+// "Replace automatically when done": off unless asked for. The default lives
+// on the server, so every client starts new jobs the same way; each job keeps
+// its own choice, which can change while it runs. A server that does not know
+// the option shows none of it.
+const replaceAuto = {supported: false, known: false, value: false, saving: false, touched: false, request: 0};
+async function loadReplaceAuto() {
+  const r = replaceAuto, auth = state.authRevision, request = ++r.request;
+  try {
+    const data = await api("preferences");
+    if (auth !== state.authRevision || request !== r.request) return;
+    r.supported = typeof data?.replace_when_done_default === "boolean";
+    if (r.supported) r.value = data.replace_when_done_default;
+    r.known = true;
+  } catch (error) {
+    if (auth !== state.authRevision || request !== r.request) return;
+    // The server answered with an error of its own: it has the option, but
+    // its default could not be read, so a job says off rather than nothing.
+    // An older server has no such answer (no JSON), and an unreachable one
+    // is asked again on the next submit.
+    if (error?.status) {
+      r.supported = true;
+      if (!r.known) r.value = false;
+      r.known = true;
+    } else if (error instanceof SyntaxError) r.known = true;
+  }
+  renderReplaceAuto();
+}
+function renderReplaceAuto() {
+  const r = replaceAuto;
+  $("settings-replace-auto").hidden = !r.supported;
+  $("replace-auto-default").checked = r.value;
+  $("replace-auto-default").disabled = r.saving || !serverReachable;
+  // Replacing at all can be off in server settings; then there is nothing to automate.
+  const shown = r.supported && state.info?.allow_destructive !== false;
+  $("replace-auto-label").hidden = !shown;
+  $("reconfigure-replace-auto-label").hidden = !shown || !state.reconfigurePlan || state.reconfigureAuto == null;
+  if (!r.touched) $("replace-auto").checked = r.value;
+}
+$("replace-auto").addEventListener("change", () => { replaceAuto.touched = true; });
+$("replace-auto-default").addEventListener("change", () => safe(async () => {
+  const r = replaceAuto, note = $("replace-auto-default-note"), want = $("replace-auto-default").checked;
+  if (r.saving) return;
+  r.saving = true;
+  note.textContent = "Saving…";
+  renderReplaceAuto();
+  try {
+    const data = await api("preferences", {replace_when_done_default: want}, {method: "PUT"});
+    r.value = typeof data?.replace_when_done_default === "boolean" ? data.replace_when_done_default : want;
+    note.textContent = r.value ? "Saved. New jobs replace each file once it passes its checks." : "Saved. New jobs wait for you to review each file.";
+  } catch (error) {
+    note.textContent = error.message;
+  } finally {
+    r.saving = false;
+    renderReplaceAuto();
+  }
+}));
+// What a submit sends: nothing to a server that does not know the option,
+// and always a value to one that does, so its default never decides.
+function replaceAutoInput(id) {
+  return replaceAutoValue($(id).checked);
+}
+// /rerun and /batch-settings take no switch: the server keeps the job's own.
+function replaceAutoValue(value) {
+  if (!replaceAuto.supported) return {};
+  return {replace_when_done: state.info?.allow_destructive !== false && (typeof value === "boolean" ? value : replaceAuto.value)};
+}
+
 // The goal form's choice for one job: the saved languages, this job's own list,
 // or every track. For one file the file's tracks are listed too, checked the
 // way the server's rules would keep them (the server answers, so the rules live
@@ -3325,6 +3393,8 @@ async function buildAndSubmitJob(mode = "encode") {
       inputs.min_savings_percent = numeric("min-savings");
     inputs.max_size_increase_percent = numeric("max-growth");
   }
+  if (!replaceAuto.known) await loadReplaceAuto();
+  Object.assign(inputs, mode === "preview" ? replaceAutoValue(false) : replaceAutoInput("replace-auto"));
   const request = JSON.stringify({ name, inputs });
   let receipt;
   try {
@@ -4056,12 +4126,9 @@ function renderReadyList(items, waiting, archived = {}) {
   // sends only the rows it lists; the button then names those rows.
   const ids = Array.isArray(archived.readyIds) && archived.readyIds.length ? archived.readyIds : items.map(item => item.action_id);
   const whole = ids.length >= waiting || ids.length > items.length;
-  const sizes = ids.length === items.length ? readySizes(items) : {saved: Number.isFinite(archived.readySaved) ? archived.readySaved : null};
   if (ids.length > 1 && state.info?.allow_destructive) all.append(replaceAllButton(ids, {
     className: "primary",
     label: whole ? `Replace all ${ids.length}` : `Replace these ${ids.length}`,
-    scope: whole ? `all ${ids.length} ready files` : `the ${ids.length} listed of ${waiting} ready files`,
-    sizes,
   }));
   // Stats shows one line; the list opens from it.
   const count = Math.max(waiting, items.length);
@@ -4440,30 +4507,101 @@ async function continueToReplacement(candidateId, parentId) {
       continue;
     }
     if (job?.candidate_ready && !job.replacement_action_id) {
-      if (parentId) await replaceBatchFile(parentId, candidateId);
-      else await prepareReplacement(job);
+      // "Accept and replace" was decided on this file's own review.
+      if (parentId) await replaceBatchFile(parentId, candidateId, {reviewed: replaceReviewRow(job)});
+      else await prepareReplacement(job, {reviewed: replaceReviewRow(job)});
       return;
     }
     if (!job || job.replacement_action_id || ["failed", "cancelled"].includes(job.status)) break;
   }
   notify("Candidate accepted. Use Replace file when it is ready.");
 }
-async function prepareReplacement(job) {
-  if (jobIsBusy(job.id)) return;
+// One reviewed file through the server's replace; a file whose library the
+// server cannot pick goes on to the choice of library, already reviewed.
+async function replaceOnServerOrChoice(row) {
+  const answer = await postReplace([row]);
+  if (answer.started?.length) {
+    notify("Replacing the file.");
+    await loadJobs();
+    if (state.detail) await refreshOpenDetail();
+    return "started";
+  }
+  if (answer.replanning?.length) {
+    notify(replanningNotice([row], answer.replanning));
+    await loadJobs();
+    if (state.detail) await refreshOpenDetail();
+    return "started";
+  }
+  const failure = answer.failed?.[0];
+  if (failure && !replanned(failure) && failure.reason !== "needs_decision") throw new Error(`Nothing was replaced: ${failure.error || notReadyReasons[failure.reason] || "it could not start"}.`);
+  if (replanned(failure)) {
+    await showNotReady([row], {ready: [], not_ready: [failure]});
+    return "started";
+  }
+  const entry = failure || arrayOf(answer.refused?.not_ready).find(item => item.id === row.id);
+  if (entry?.reason === "needs_library_choice") return "choose";
+  if (replanned(entry)) {
+    await showNotReady([row], answer.refused);
+    return "started";
+  }
+  // A re-grab warning is decided in the replacement's own review.
+  if (entry?.reason === "needs_decision") {
+    const job = (await readJobsById([row.id]))[0];
+    if (job?.replacement_action_id) {
+      await openReplacement(job.replacement_action_id);
+      return "started";
+    }
+  }
+  throw new Error(`Nothing was replaced: ${notReadyReasons[entry?.reason] || "this file is not ready now"}.`);
+}
+// Replace shows the file's result first; only Confirm starts it. A file the
+// person already accepted on its own review passes that review as `reviewed`.
+// One Replace of a file at a time: a second tap while one is open or sent does nothing.
+const replacingFiles = new Set();
+async function prepareReplacement(job, options = {}) {
+  if (jobIsBusy(job.id) || replacingFiles.has(job.id)) return;
+  replacingFiles.add(job.id);
+  try { return await prepareReplacementOnce(job, options); }
+  finally { replacingFiles.delete(job.id); }
+}
+async function prepareReplacementOnce(job, {reviewed = null} = {}) {
   if (job.replacement_action_id) {
-    await openReplacement(job.replacement_action_id);
+    // A replacement waiting on its plan (planned again, or one that was to
+    // run by itself) is approved like any other: the file's before → after,
+    // then /replace with the digest of the plan shown. A re-grab warning is
+    // decided in the replacement's own review.
+    const promotion = replaceEndpointKnown([job]) ? (await api(`operations?id=${encodeURIComponent(job.replacement_action_id)}`)).jobs?.[0] : null;
+    if (!replacementReady(promotion) || promotion.promotion.regrab_warning) {
+      await openReplacement(job.replacement_action_id);
+      return;
+    }
+    const full = job.streams || job.outcome ? job : (await api(`operations?id=${encodeURIComponent(job.id)}`)).jobs?.[0] || job;
+    const row = waitingPlanRow(full, promotion);
+    if (await confirmReplaceReview([row]) && !row.blocked) await replaceOnServerOrChoice(row);
     return;
+  }
+  if (!reviewed) {
+    // The opened job has its streams and quality; a row from a list does not.
+    const full = job.streams || job.outcome ? job : (await api(`operations?id=${encodeURIComponent(job.id)}`)).jobs?.[0] || job;
+    reviewed = replaceReviewRow(full);
+    if (!await confirmReplaceReview([reviewed])) return;
+  }
+  if (replaceEndpointKnown([job])) {
+    // Only a library the server cannot pick by itself is asked for below.
+    const result = await replaceOnServerOrChoice(reviewed);
+    if (result !== "choose") return;
+  } else {
+    const automatic = automaticReplacementContext(job, legacyReplacementHint(job));
+    if (automatic) {
+      await enqueueReplacement(job, automatic, reviewed);
+      return;
+    }
   }
   const legacy = legacyReplacementHint(job);
-  const automatic = automaticReplacementContext(job, legacy);
-  if (automatic) {
-    await enqueueReplacement(job, automatic);
-    return;
-  }
   const integrations = replacementIntegrations();
   // Old browser-only hints cannot decide how an agent-created or historical
   // candidate is imported. Ask once, then show the engine's exact approval plan.
-  state.replacementChoice = { job, legacy };
+  state.replacementChoice = { job, legacy, reviewed };
   const method = $("replacement-method");
   method.replaceChildren();
   option(method, "filesystem", "Replace local file");
@@ -4498,7 +4636,7 @@ function updateReplacementChoice() {
   );
 }
 // True only when this call started a replacement.
-async function enqueueReplacement(job, context) {
+async function enqueueReplacement(job, context, reviewed = null) {
   if (jobIsBusy(job.id)) return false;
   state.busyJobs.add(job.id);
   try {
@@ -4528,9 +4666,9 @@ async function enqueueReplacement(job, context) {
     });
     $("replacement-choice").close();
     await loadJobs();
-    // One tap replaces the file: the plan is approved as soon as it is read
-    // back, without a second dialog or a second button.
-    replaceWhenPlanned(result.id).catch((error) => {
+    // The person saw this file's result and confirmed it: the plan is
+    // approved once it is read back, for that same file only.
+    approveReviewedPlan(result.id, reviewed).catch((error) => {
       if (serverReachable) notify(error.message);
     });
     // The open details (this file's, or its batch's) list the file as replacing
@@ -4562,7 +4700,7 @@ $("prepare-replacement-choice").addEventListener("click", () =>
         );
       context[service === "radarr" ? "movie_id" : "series_id"] = id;
     }
-    await enqueueReplacement(selection.job, context);
+    await enqueueReplacement(selection.job, context, selection.reviewed);
   }),
 );
 function batchCounts(batch, compact = false) {
@@ -4682,6 +4820,11 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
     if (!candidateID && !itemKey && plan.selected === 0) plan = await api(`batch-settings?${new URLSearchParams({id,scope:"all"})}`);
     if (auth !== state.authRevision || revision !== state.reconfigureRevision || !$("reconfigure-batch").open) return;
     state.reconfigurePlan = plan;
+    // The batch's own choice, or the default when it never said.
+    const auto = state.operationJobs?.get?.(plan.id)?.replace_when_done ?? (state.detailJob?.id === plan.id ? state.detailJob.replace_when_done : undefined);
+    state.reconfigureAuto = typeof auto === "boolean" ? auto : null;
+    $("reconfigure-replace-auto").checked = auto === true;
+    renderReplaceAuto();
     $("reconfigure-mode-label").hidden = !plan.mode;
     $("reconfigure-mode").value = goalKeyOf(plan.mode, plan.settings.audio_only === true) || "quality";
     syncReconfigureGoalCards();
@@ -4948,6 +5091,14 @@ async function submitReconfiguredBatch() {
       if (current()) $("reconfigure-batch").close();
     });
     if (auth !== state.authRevision) return;
+    // batch-settings takes no switch: the batch keeps its own through a goal
+    // change, and a changed one is saved on its own. Files already ready are
+    // never replaced by it.
+    const auto = replaceAutoInput("reconfigure-replace-auto").replace_when_done;
+    if (typeof auto === "boolean" && state.reconfigureAuto != null && auto !== state.reconfigureAuto) {
+      try { await saveAutoReplace({id: plan.id}, auto); }
+      catch (error) { notify(`Goal changed, but Replace automatically was not saved: ${error.message}`); }
+    }
     await Promise.all([loadJobs(), refreshOpenDetail()]);
     if (follow?.batch === plan.id) await followBatchFile(follow.from, follow.batch, follow.key);
     notify(plan.scope === "file" ? "Goal changed. The file encodes again once the batch reaches it." : "Goal changed in this batch. Active files finish first; replaced candidates are removed and their attempts stay in file history.");
@@ -8116,12 +8267,15 @@ function conversionHero(job, status) {
   }
   return null;
 }
+// A file the job's "Replace automatically when done" replaced, not a person.
+const replacedAutomatically = job => job.replaced_automatically === true || job.replacement_run?.replaced_automatically === true || job.replacement_run?.automatic === true || state.operationJobs?.get?.(job.replacement_run?.id || job.replacement_action_id)?.replaced_automatically === true;
 // The replacement, as a state of this page.
 function conversionReplacementRow(job, status) {
   const run = job.replacement_run;
   if (!run && !["replacing", "replaced", "replace_failed"].includes(status)) return null;
   let tone = "run", text = "Replacing…";
-  if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = `The smaller file is in place${run?.completed_at ? ` · ${agoText(run.completed_at)}` : ""}`; }
+  const when = run?.completed_at ? ` · ${agoText(run.completed_at)}` : "";
+  if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = replacedAutomatically(job) ? `Replaced automatically${when}` : `The smaller file is in place${when}`; }
   else if (run?.status === "failed" || status === "replace_failed") { tone = "bad"; text = `Replace failed: ${causeOf(job)?.summary || (run?.error ? shortLine(run.error, 70) : "the original is still in place")}`; }
   else if (run?.status === "waiting_decision") { tone = "warn"; text = "Replacement is waiting for your approval"; }
   else if (run?.status === "cancelled") { tone = "muted"; text = "Replacement cancelled · the original is in place"; }
@@ -8561,15 +8715,14 @@ async function replaceBatchReady(job, control = null) {
   }
 }
 async function replaceBatchReadyNow(job, control) {
+  // The files ready now; one that finishes later waits for its own review.
   let ids = arrayOf(job.ready_item_ids).map(String).filter(Boolean);
-  let sizes = {};
   if (!ids.length) {
     const items = await batchItemsWhere(job.id, batchItemReplaceable, {all: true});
     ids = items.map(item => item.child_action_id);
-    sizes = readySizes(items);
-  } else if (Number.isFinite(job.savings?.candidate_saved_bytes)) sizes = {saved: job.savings.candidate_saved_bytes};
+  }
   if (!ids.length) { notify("No file of this batch is ready to replace."); return null; }
-  return replaceAllReady(ids, {parentId: job.id, control, scope: ids.length === 1 ? "the ready file of this batch" : `all ${ids.length} ready files of this batch`, sizes});
+  return replaceAllReady(ids, {parentId: job.id, control});
 }
 function batchReplaceReason(job, n) {
   if (job.archived) return "Archived · restore it first";
@@ -8650,6 +8803,274 @@ function readySizes(items) {
   };
   return {before: sum("source_bytes"), after: sum("candidate_bytes"), saved: sum("saved_bytes")};
 }
+// ---- Replace review: nothing is replaced before its result is seen ----
+// One file or row as the review shows it: its name, sizes before and after,
+// and for one opened file its video, audio and measured quality.
+function replaceReviewRow(job) {
+  const {before, after} = conversionSizes(job);
+  return {id: job.id, name: (job.source_path || job.file_path || job.display_label || job.id || "").split("/").pop(), before, after, job};
+}
+function replaceReviewSizes(before, after) {
+  if (!(before > 0) || !Number.isFinite(after)) return "Sizes not measured";
+  const saved = before - after, pct = Math.round((saved / before) * 100);
+  return `${bytes(before)} → ${bytes(after)} · ${saved >= 0 ? `−${pct}%` : `+${-pct}%`}`;
+}
+function replaceReviewVideo(s) {
+  const v = s?.video;
+  if (!v) return "";
+  const after = v.after_codec || v.codec;
+  const codec = after && after !== v.codec ? `${videoCodecLabel(v.codec)} → ${videoCodecLabel(after)}` : `${videoCodecLabel(v.codec)} copied`;
+  return [codec, v.before_bytes > 0 && v.after_bytes > 0 ? `${bytes(v.before_bytes)} → ${bytes(v.after_bytes)}` : ""].filter(Boolean).join(" · ");
+}
+function replaceReviewAudio(s) {
+  const audio = arrayOf(s?.audio);
+  if (!audio.length) return "";
+  const count = fate => audio.filter(a => a.fate === fate).length;
+  const parts = [["converted", "converted"], ["kept", "kept"], ["copied", "kept"], ["dropped", "removed"]]
+    .map(([fate, word]) => [count(fate), word]).filter(([n]) => n > 0);
+  const merged = {};
+  for (const [n, word] of parts) merged[word] = (merged[word] || 0) + n;
+  const t = s.totals || {};
+  const sizes = Number.isFinite(t.audio_before) && Number.isFinite(t.audio_after) ? ` · ${bytes(t.audio_before)} → ${bytes(t.audio_after)}` : "";
+  return `${audio.length} ${audio.length === 1 ? "track" : "tracks"}: ${Object.entries(merged).map(([word, n]) => `${n} ${word}`).join(", ")}${sizes}`;
+}
+function replaceReviewQuality(o) {
+  if (!Number.isFinite(o?.vmaf_mean)) return "Not measured";
+  return `VMAF ${o.vmaf_mean.toFixed(1)} average${Number.isFinite(o.vmaf_worst) ? ` · ${o.vmaf_worst.toFixed(1)} worst moment` : ""}`;
+}
+// The review itself: one file shows its whole result; several files one row
+// each and the total. Only the files shown are replaced.
+function replaceReviewContent(rows) {
+  const content = [];
+  const known = rows.filter(r => !r.blocked && r.before > 0 && Number.isFinite(r.after));
+  const before = known.reduce((n, r) => n + r.before, 0), after = known.reduce((n, r) => n + r.after, 0);
+  if (rows.length === 1) {
+    const [row] = rows, job = row.job || {};
+    content.push(node("p", row.name, "rr-name"));
+    const facts = node("dl", "", "rr-facts");
+    const fact = (term, text) => { if (!text) return; const line = node("div", "", "rr-fact"); line.append(node("dt", term), node("dd", text)); line.title = text; facts.append(line); };
+    fact("Total", replaceReviewSizes(row.before, row.after));
+    if (row.before > 0 && Number.isFinite(row.after)) fact("Saved", `${bytes(Math.max(0, row.before - row.after))} smaller`);
+    fact("Video", replaceReviewVideo(job.streams));
+    fact("Audio", replaceReviewAudio(job.streams));
+    fact("Quality", replaceReviewQuality(job.outcome));
+    content.push(facts);
+    if (row.blocked) content.push(node("p", row.blocked, "rr-blocked"));
+  } else {
+    const list = node("ul", "", "rr-list");
+    list.dataset.allowRepeat = "";
+    for (const row of rows) {
+      const item = node("li", "", "rr-row");
+      item.append(node("span", row.name, "rr-file"), node("span", row.blocked || replaceReviewSizes(row.before, row.after), "rr-sizes"));
+      item.title = row.name;
+      if (row.blocked) item.dataset.unavailable = "true";
+      list.append(item);
+    }
+    content.push(list);
+    const total = node("p", "", "rr-total");
+    const measured = rows.filter(r => !r.blocked).length;
+    total.append(node("strong", "Total"), node("span", known.length ? `${replaceReviewSizes(before, after)}${known.length < measured ? ` · ${measured - known.length} not measured` : ""}` : "Sizes not measured"));
+    content.push(total);
+  }
+  const sendable = rows.filter(r => !r.blocked).length;
+  if (sendable) content.push(node("p", rows.length === 1 ? "The original is replaced by this smaller file." : `Only these ${sendable} files are replaced. A file that finishes later waits for its own review.`, "metadata"));
+  return content;
+}
+// True when the person confirmed replacing exactly these rows.
+// A row marked `blocked` is shown with its reason and never sent; with none
+// left to send, Confirm is greyed and says why.
+function confirmReplaceReview(rows, {title} = {}) {
+  const n = rows.length, sendable = rows.filter(row => !row.blocked).length;
+  const answer = reviewAction({
+    title: title || (n === 1 ? "Replace this file?" : `Replace ${n} files?`),
+    content: replaceReviewContent(rows),
+    confirmLabel: sendable === 1 && n === 1 ? "Replace" : `Replace ${sendable}`,
+  });
+  if (!sendable) {
+    const confirm = $("confirm-action-review");
+    confirm.disabled = true;
+    confirm.title = rows[0]?.blocked || "Nothing can be replaced";
+  }
+  return answer;
+}
+const sendableRows = rows => rows.filter(row => !row.blocked);
+// A replacement that waits on a plan is shown with that plan's own sizes,
+// since its digest is what Confirm sends. Sizes it does not say cannot be
+// confirmed.
+function waitingPlanRow(job, promotion, digest = promotion?.promotion?.plan_digest) {
+  const p = promotion?.promotion || {};
+  const row = {...replaceReviewRow(job), before: p.original_bytes, after: p.candidate_bytes, digest};
+  if (!(p.original_bytes > 0) || !Number.isFinite(p.candidate_bytes)) return {...row, digest: "", blocked: "Its plan's sizes could not be read: open the replacement"};
+  if (digest && p.plan_digest !== digest) return {...row, digest: "", blocked: "Its plan changed again: refresh and try again"};
+  return row;
+}
+// The server replaces exactly the files reviewed, all or none, from a running
+// batch too. A server from before review-first replacement has no such call:
+// it is known by the fields it adds to every conversion.
+const replaceEndpointKnown = jobs => replaceAuto.supported || jobs.some(job => typeof job?.replace_when_done === "boolean");
+const notReadyReasons = {
+  not_finished: "Not finished yet",
+  no_result: "No smaller file was made",
+  kept_original: "The original was kept",
+  preview: "A preview replaces nothing",
+  replacement_started: "Already being replaced",
+  in_batch_review: "In the batch's replacement review",
+  retry_pending: "Waiting to run again",
+  batch_unavailable: "Its batch is unavailable",
+  needs_library_choice: "Needs a library choice: use its own Replace",
+  needs_decision: "Needs a decision first: open it",
+  plan_changed: "Its replacement plan changed",
+  unavailable: "No longer available",
+};
+// A file whose plan is new since it was shown: it is shown again, as it is now.
+const replanned = entry => entry?.reason === "plan_changed" && Boolean(entry.plan_digest);
+// Each file read again, with the digest of its new plan.
+// The new plan's own sizes are shown with its digest; a file that cannot be
+// read again is shown with why and left out, never sent with the old numbers.
+async function rowsShownAgain(rows, entries) {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  const fresh = entries.length ? await readJobsById(entries.map(entry => entry.id)) : [];
+  const plans = await readJobsById(fresh.map(job => job?.replacement_action_id || "").map(String)).catch(() => []);
+  return entries.map((entry, i) => {
+    const old = byId.get(entry.id) || {id: entry.id, name: entry.id};
+    if (!fresh[i] || !plans[i]) return {id: entry.id, name: old.name, job: old.job, blocked: "Could not be read again: refresh and try again"};
+    return waitingPlanRow(fresh[i], plans[i], entry.plan_digest);
+  });
+}
+// The one request that replaces reviewed files; every Replace path ends here.
+// A file whose replacement already waits on a plan carries the digest of the
+// plan shown. Each confirm sends a new key. Answers {started, failed} (a
+// partial answer starts some files and says why the others did not), or
+// {refused} with each file's readiness when nothing started.
+async function postReplace(rows) {
+  const body = {ids: rows.map(row => row.id), key: submissionID()};
+  const digests = Object.fromEntries(rows.filter(row => row.digest).map(row => [row.id, row.digest]));
+  if (Object.keys(digests).length) body.digests = digests;
+  let files;
+  try {
+    files = arrayOf((await api("replace", body)).replacements);
+  } catch (error) {
+    const code = error.status === 409 ? error.data?.code : "";
+    if (code === "not_ready") return {refused: error.data};
+    if (code === "not_started") files = arrayOf(error.data.replacements);
+    else if (code === "key_reused") throw new Error("This replacement was already sent. Refresh to see where it stands.");
+    else throw error;
+  }
+  // queued and retry approve a replacement that was already there: started
+  // too. One rejected before is planned again, unapproved: its new plan is
+  // reviewed once it is ready, from the file's own Replace.
+  const replanning = files.filter(file => file.started !== false && file.reason === "needs_review");
+  const rest = files.filter(file => !replanning.includes(file));
+  return {started: rest.filter(file => file.started !== false), failed: rest.filter(file => file.started === false), replanning};
+}
+async function replaceOnServer(rows, {control = null} = {}) {
+  rows = sendableRows(rows);
+  if (!rows.length) return {started: 0, asked: 0, gone: 0, failed: 0, replacements: []};
+  let answer;
+  replaceAllRunning = true;
+  markReplaceAllButtons();
+  if (control) setReplaceAllBusy(control);
+  try {
+    answer = await postReplace(rows);
+  } finally {
+    replaceAllRunning = false;
+    markReplaceAllButtons();
+    if (control?.dataset) restoreReplaceAll(control);
+  }
+  if (answer.refused) return showNotReady(rows, answer.refused, {control});
+  const {started, failed, replanning = []} = answer;
+  const said = [];
+  if (started.length) said.push(started.length === 1 ? "Replacing the file." : `Replacing ${started.length} files.`);
+  if (replanning.length) said.push(replanningNotice(rows, replanning));
+  if (said.length) notify(said.join(" "));
+  if (started.length || failed.length || replanning.length) {
+    await loadJobs();
+    if (state.detail) await refreshOpenDetail();
+  }
+  // A file refused while it was submitted, for a plan that changed, is shown
+  // again like a refused one; the others are named with why.
+  const changed = failed.filter(replanned), others = failed.filter(file => !replanned(file));
+  if (others.length) await showNotStarted(rows, others, started.length);
+  const result = {started: started.length, asked: 0, gone: 0, failed: others.length, replanning: replanning.length, replacements: started};
+  if (!changed.length) return result;
+  const shown = await rowsShownAgain(rows, changed);
+  if (!await confirmReplaceReview(shown, {title: shown.length === 1 ? "The plan changed: replace this file?" : `Plans changed: replace these ${shown.length} files?`})) return {...result, failed: failed.length};
+  const next = await replaceOnServer(shown, {control});
+  return {...result, started: result.started + next.started, failed: result.failed + next.failed, replacements: [...started, ...(next.replacements || [])]};
+}
+// A replacement rejected before is planned again; its new plan is reviewed
+// once it waits, with the file's own Replace.
+function replanningNotice(rows, replanning) {
+  const name = rows.find(row => row.id === replanning[0].id)?.name;
+  return replanning.length === 1 ? `Re-planning${name ? ` ${name}` : ""} — review it again when ready.` : `Re-planning ${replanning.length} files — review them again when ready.`;
+}
+// One line per file, with its name, and what to say about it.
+function replaceLines(rows, entries, say) {
+  const byId = new Map(rows.map(row => [row.id, row]));
+  const list = node("ul", "", "rr-list");
+  list.dataset.allowRepeat = "";
+  for (const entry of entries) {
+    const item = node("li", "", "rr-row");
+    const name = byId.get(entry.id)?.name || entry.id;
+    item.append(node("span", name, "rr-file"), node("span", say(entry), "rr-sizes"));
+    item.title = name;
+    list.append(item);
+  }
+  return list;
+}
+// A submission failed partway: the files that did not start, with the error.
+function showNotStarted(rows, failed, started) {
+  const n = failed.length;
+  const lead = started ? `${started} started. ${n === 1 ? "This file" : `These ${n} files`} did not:` : `Nothing was replaced. ${n === 1 ? "This file" : `These ${n} files`} could not start:`;
+  return reviewAction({
+    title: started ? `${n} not started` : "Nothing was replaced",
+    content: [node("p", lead), replaceLines(rows, failed, entry => entry.error || notReadyReasons[entry.reason] || "Could not start")],
+    confirmLabel: "Close", cancelLabel: "Close",
+  });
+}
+// Nothing was replaced: one line per file that is not ready, with its name,
+// and the files that still are can be replaced on their own. A file whose
+// plan changed since it was shown is read again and shown as it is now; only
+// a confirm of that sends its new plan.
+async function showNotReady(rows, refused, {control = null} = {}) {
+  const entries = arrayOf(refused?.not_ready);
+  const changed = entries.filter(replanned);
+  const blocked = entries.filter(entry => !changed.includes(entry));
+  const readyIds = new Set(arrayOf(refused?.ready).map(String));
+  const ready = rows.filter(row => readyIds.has(row.id));
+  const shownAgain = await rowsShownAgain(rows, changed);
+  const replaceable = [...ready, ...shownAgain];
+  const result = {started: 0, asked: blocked.filter(entry => entry.reason === "needs_library_choice").length, gone: blocked.length, failed: 0, notReady: blocked};
+  if (!blocked.length) {
+    const n = replaceable.length;
+    if (!n) return result;
+    const again = await confirmReplaceReview(replaceable, {title: n === 1 ? "The plan changed: replace this file?" : `A plan changed: replace these ${n} files?`});
+    return again ? replaceOnServer(replaceable, {control}) : result;
+  }
+  const content = [node("p", blocked.length === 1 ? "Nothing was replaced. This file is not ready now:" : `Nothing was replaced. These ${blocked.length} files are not ready now:`), replaceLines(rows, blocked, entry => notReadyReasons[entry.reason] || "Not ready")];
+  if (ready.length) content.push(node("p", `${ready.length === 1 ? "The other file is" : `The other ${ready.length} files are`} still ready, as reviewed.`, "metadata"));
+  if (shownAgain.length) content.push(node("p", shownAgain.length === 1 ? "This file's plan changed; this is it now:" : `These ${shownAgain.length} files' plans changed; this is them now:`, "metadata"), replaceLines(shownAgain, shownAgain, row => row.blocked || replaceReviewSizes(row.before, row.after)));
+  const n = sendableRows(replaceable).length;
+  const again = await reviewAction({title: "Nothing was replaced", content, confirmLabel: n ? `Replace the ${n} ready` : "Close", cancelLabel: n ? "Back" : "Close"});
+  if (!again || !n) return result;
+  const next = await replaceOnServer(replaceable, {control});
+  return {...next, notReady: blocked};
+}
+// Several reads at a time, in order.
+async function readJobsById(ids, limit = 4) {
+  const found = new Array(ids.length).fill(null);
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const i = next++;
+      if (!ids[i]) continue;
+      try { found[i] = (await api(`operations?id=${encodeURIComponent(ids[i])}`)).jobs?.[0] || null; }
+      catch (error) { if (!serverReachable) throw error; }
+    }
+  };
+  await Promise.all(Array.from({length: Math.min(limit, ids.length)}, worker));
+  return found;
+}
 // One Replace all runs at a time: every Replace all button, also one drawn
 // again by a refresh, waits for it.
 let replaceAllRunning = false;
@@ -8681,37 +9102,41 @@ function setReplaceAllBusy(b, text = "Replacing…") {
   const label = replaceAllLabelOf(b);
   if (label) label.textContent = text;
 }
-// Replaces each ready file in turn with the same flow as its own Replace
-// button, after one confirmation that names how many and how much. A file
-// that needs a library choice is left for its own button.
-async function replaceAllReady(ids, {parentId = "", control = null, scope = "", sizes = {}} = {}) {
+// Reads every file first and shows each one's before → after and the total;
+// Confirm replaces exactly the files shown, each with the one-file flow. A
+// file that needs a library choice is left for its own Replace.
+async function replaceAllReady(ids, {parentId = "", control = null, title = "", ask = rows => confirmReplaceReview(rows, {title})} = {}) {
   if (replaceAllRunning) return null;
   const total = ids.length;
-  const what = scope || `${total} ready ${total === 1 ? "file" : "files"}`;
-  const amount = Number.isFinite(sizes.before) && Number.isFinite(sizes.after) ? ` ${bytes(sizes.before)} of originals become ${bytes(sizes.after)}${Number.isFinite(sizes.saved) ? `, freeing ${bytes(sizes.saved)}` : ""}.`
-    : Number.isFinite(sizes.saved) ? ` This frees ${bytes(sizes.saved)}.` : "";
-  const confirmed = await reviewAction({
-    title: `Replace ${total} ${total === 1 ? "file" : "files"}?`,
-    message: `The originals of ${what} are replaced by their smaller copies, one after another.${amount} A file that needs a library choice is left for its own Replace.`,
-    confirmLabel: `Replace ${total}`,
-  });
+  if (control) setReplaceAllBusy(control, "Reading…");
+  let jobs;
+  try {
+    jobs = await readJobsById(ids);
+  } finally {
+    if (control?.dataset && !replaceAllRunning) restoreReplaceAll(control);
+  }
+  const ready = jobs.filter(job => job?.candidate_ready && !job.replacement_action_id && (!parentId || job.parent_action_id === parentId));
+  let gone = total - ready.length;
+  if (!ready.length) { notify("No file is ready to replace any more. Refresh to see where they stand."); return null; }
+  const rows = ready.map(replaceReviewRow);
+  const confirmed = await ask(rows);
   if (!confirmed || replaceAllRunning) return null;
+  if (replaceEndpointKnown(ready)) return replaceOnServer(rows, {control});
+  // An older server: each file in turn, with the one-file flow.
   replaceAllRunning = true;
   markReplaceAllButtons();
-  let started = 0, asked = 0, gone = 0, failed = 0;
+  let started = 0, asked = 0, failed = 0;
   try {
-    for (const [index, id] of ids.entries()) {
-      const text = `Replacing ${index + 1} of ${total}…`;
+    for (const [index, row] of rows.entries()) {
+      const text = `Replacing ${index + 1} of ${rows.length}…`;
       if (control) setReplaceAllBusy(control, text);
       notify(text);
       // One file that cannot start never stops the others.
       try {
-        const job = (await api(`operations?id=${encodeURIComponent(id)}`)).jobs?.[0];
-        if (!job?.candidate_ready || job.replacement_action_id || (parentId && job.parent_action_id !== parentId)) { gone++; continue; }
-        const context = automaticReplacementContext(job);
+        const context = automaticReplacementContext(row.job);
         if (!context) { asked++; continue; }
         // A file already being replaced from its own button is not started twice.
-        if (await enqueueReplacement(job, context)) started++;
+        if (await enqueueReplacement(row.job, context, row)) started++;
         else gone++;
       } catch (error) {
         if (!serverReachable) throw error;
@@ -8744,6 +9169,97 @@ function replaceAllButton(ids, options = {}) {
   } else if (replaceAllRunning) setReplaceAllBusy(b);
   return b;
 }
+// The job's own "Replace automatically when done", as a switch in its header.
+// It stays in place on every conversion and batch, so the header never jumps;
+// once nothing is left to replace it is greyed, and says why.
+function autoReplaceShown(job) {
+  return replaceAuto.supported && Boolean(state.info?.allow_destructive) && ["transcode_media", "transcode_batch"].includes(job?.action_name) && !job.batch?.dry_run;
+}
+function autoReplaceApplies(job) {
+  if (!autoReplaceShown(job) || job.archived || job.replaced) return false;
+  return operationIsActive(job.status) || (job.candidate_ready && !job.replacement_action_id) || (job.batch ? batchReadyCount(job) > 0 : false);
+}
+function renderDetailAutoReplace(job) {
+  const row = $("detail-auto-replace"), input = $("detail-auto-replace-input"), note = $("detail-auto-replace-note");
+  row.hidden = !autoReplaceShown(job);
+  // Why the server did not replace a file by itself, e.g. it needs a library choice.
+  const skipped = !row.hidden && job.replace_when_done && !job.replaced ? String(job.replace_when_done_skipped || "") : "";
+  note.hidden = !skipped;
+  note.textContent = skipped ? `Not replaced automatically: ${skipped}` : "";
+  note.title = note.textContent;
+  if (row.hidden) return;
+  // A finished job can still be switched off while its automatic
+  // replacement has not been approved; the server says when it has.
+  const open = autoReplaceApplies(job) || (job.replace_when_done === true && !job.archived && !job.replaced);
+  input.checked = job.replace_when_done === true;
+  input.dataset.jobId = job.id;
+  input.disabled = !open || jobIsBusy(job.id) || !serverReachable || (replaceAllRunning && !input.checked);
+  row.dataset.unavailable = open ? "" : "true";
+  row.title = !open ? (job.archived ? "Archived · restore it first" : "Nothing is left to replace") : job.replace_when_done ? "Each file is replaced once it passes its checks" : "Each finished file waits for you to review it";
+}
+async function saveAutoReplace(job, on) {
+  try {
+    await api("replace-when-done", {id: job.id, replace_when_done: on});
+  } catch (error) {
+    if (error.status === 409 && error.data?.code === "finished") throw new Error(on ? "This job has finished: nothing is left to replace automatically." : "This job has finished: its replacement already went ahead.");
+    throw error;
+  }
+}
+// The files of this job that are ready now.
+async function readyIdsOf(job) {
+  if (!job.batch) return job.candidate_ready && !job.replacement_action_id ? [job.id] : [];
+  const ids = arrayOf(job.ready_item_ids).map(String).filter(Boolean);
+  if (ids.length || !(batchReadyCount(job) > 0)) return ids;
+  return (await batchItemsWhere(job.id, batchItemReplaceable, {all: true})).map(item => item.child_action_id);
+}
+// Turning it on while files are already ready asks once whether to replace
+// those too, showing each one's before → after; files that finish later are
+// replaced by the server either way.
+async function toggleAutoReplace(job, on) {
+  if (jobIsBusy(job.id)) { $("detail-auto-replace-input").checked = !on; return; }
+  // While a Replace all runs its files cannot be asked about: wait for it.
+  if (on && replaceAllRunning) {
+    $("detail-auto-replace-input").checked = false;
+    notify("Wait for the replacement under way to finish, then switch it on.");
+    return;
+  }
+  const ids = on ? await readyIdsOf(job) : [];
+  let decided = null;
+  const ask = async rows => {
+    const n = rows.length;
+    decided = await reviewAction({
+      title: n === 1 ? "Also replace the file that is ready?" : `Also replace the ${n} files that are ready?`,
+      content: replaceReviewContent(rows),
+      confirmLabel: n === 1 ? "Replace it now too" : `Replace ${n} now too`,
+      choices: [{label: "Only files that finish later", value: "later"}],
+    });
+    if (decided === true || decided === "later") await saveAutoReplace(job, true);
+    return decided === true;
+  };
+  const input = $("detail-auto-replace-input");
+  input.disabled = true;
+  try {
+    if (ids.length) {
+      await replaceAllReady(ids, {parentId: job.batch ? job.id : "", ask});
+      // Nothing was ready any more by the time it was read: just switch it.
+      if (decided === null) await saveAutoReplace(job, true);
+    } else await saveAutoReplace(job, on);
+    if (decided === false) { input.checked = !on; return; }
+    if (decided !== true) notify(on ? "Files of this job are replaced once they pass their checks." : "Each finished file of this job waits for you to review it.");
+  } finally {
+    input.disabled = false;
+    await refreshOpenDetail();
+  }
+}
+$("detail-auto-replace-input").addEventListener("change", () => {
+  const input = $("detail-auto-replace-input"), job = state.detailJob;
+  if (!job || input.dataset.jobId !== job.id) return;
+  const want = input.checked;
+  safe(async () => {
+    try { await toggleAutoReplace(job, want); }
+    catch (error) { input.checked = !want; throw error; }
+  });
+});
 // A file of a batch, opened on its own (a deep link, a reload), leads back to
 // its batch from the header. A single-file conversion has no batch to name.
 function renderDetailBatchLink(job) {
@@ -8800,6 +9316,7 @@ function paintDetail(job) {
   summary.replaceChildren(...(conversion ? conversionNodes(job, bar.fix) : detailStatusNodes(job, presentation)));
   renderDetailFileLink(job);
   renderDetailBatchLink(job);
+  renderDetailAutoReplace(job);
   summary.dataset.operationId = job.id;
   renderCommandIndicators();
   renderDetailRows(job);
@@ -8930,12 +9447,12 @@ function batchFileActivity(item, job) {
   return "";
 }
 
-async function replaceBatchFile(batchID, childID) {
+async function replaceBatchFile(batchID, childID, options = {}) {
   const auth = state.authRevision;
   const job = (await api(`operations?id=${encodeURIComponent(childID)}`)).jobs?.[0];
   if (auth !== state.authRevision || $("workspace").hidden) return;
   if (!job || job.parent_action_id !== batchID || (!job.candidate_ready && !job.replacement_action_id)) throw new Error("This candidate changed. Refresh the batch before reviewing replacement.");
-  await prepareReplacement(job);
+  await prepareReplacement(job, options);
 }
 // What a replacement Retry does. Retrying through the batch re-runs every failed
 // file that stopped before approval, so the button says how many; a file's own
@@ -8957,7 +9474,7 @@ async function retryFileReplacement(item, batchID) {
 // cause with numbers, and the fix, under its row.
 const fileStateLabel = (item, job) => {
   const queued = item.replacement_plan === "queued";
-  return item.replaced ? "Replaced" : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : job?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
+  return item.replaced ? (item.replaced_automatically ? "Replaced automatically" : "Replaced") : queued ? "Replacement queued (approved)" : item.replacement_plan === "review" ? "Replacement awaiting approval" : item.replacement_action_id ? ({waiting_decision:"Replacement needs decision",failed:"Replacement failed",cancelled:"Replacement cancelled"}[item.replacement_status] || "Replacement in progress") : item.candidate_ready ? "Candidate ready" : item.status === "waiting_decision" && item.reason_code === "search_budget_exhausted" ? "Needs attention" : savingsPolicyFailure(item.error) ? "Below minimum savings" : rejectedCandidate(item) ? "Rejected" : job?.batch?.dry_run && item.status === "queued" ? "Eligible" : names[item.status] || item.status || item.decision;
 };
 // A file of a batch its own Replace can replace now.
 const batchItemReplaceable = item => Boolean(item.candidate_ready && !item.replacement_plan && !item.replacement_action_id && item.child_action_id);
@@ -9400,13 +9917,13 @@ function showFileReview(job, approval, {unprompted = false} = {}) {
 function pollDelay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
-// Tapping Replace file is the decision, so nothing is asked twice: the plan is
-// read back once it is ready and approved with the digest just read. Only what
-// a person has to see first (a Radarr or Sonarr re-grab warning) or a plan that
-// cannot be approved opens the review or the job instead.
-async function replaceWhenPlanned(id) {
+// Confirm on the review was the decision: the plan is read back once it is
+// ready and approved with the digest just read, but only when it replaces the
+// file that was reviewed, at the size that was shown. Without a review, a
+// re-grab warning, or a plan that differs, it opens the file's own review.
+async function approveReviewedPlan(id, reviewed) {
   const auth = state.authRevision;
-  notify("Preparing the replacement. It starts by itself.");
+  notify("Preparing the replacement.");
   for (let attempt = 0; attempt < 200; attempt++) {
     await pollDelay(1500);
     if (auth !== state.authRevision || $("workspace").hidden) return;
@@ -9417,7 +9934,10 @@ async function replaceWhenPlanned(id) {
       continue;
     }
     if (replacementReady(job)) {
-      if (job.promotion.regrab_warning) return reviewFilePromotion(id, {unprompted: true});
+      const p = job.promotion;
+      // Only the very file reviewed, at the size shown: anything unknown opens its own review.
+      const sameFile = Boolean(reviewed?.id && p.transcode_action_id === reviewed.id && Number.isFinite(reviewed.after) && Number.isFinite(p.candidate_bytes) && p.candidate_bytes === reviewed.after);
+      if (!sameFile || p.regrab_warning) return reviewFilePromotion(id, {unprompted: true});
       return jobControl(id, "action_resume", { decision: "approve", plan_digest: job.promotion.plan_digest }, {decision: {label: "Replace file", verb: "Replacing file", failure: "Replacement failed"}});
     }
     if (!job || ["failed", "cancelled", "completed"].includes(job.status)) return notify(shortJobReason(job?.error) || "This replacement can no longer be approved. Nothing was changed.");

@@ -62,6 +62,7 @@ function defaults(name, params, world) {
     case "workers": return { nodes: [], workers: [] };
     case "worker-activity": return { nodes: [], active: [], slots: {} };
     case "keep-languages": return { languages: ["spa", "eng", "jpn"] };
+    case "preferences": return { replace_when_done_default: false };
     case "operations": {
       const id = params.get("id");
       if (id) return { jobs: world.jobs.filter(job => job.id === id), total: 1 };
