@@ -24,12 +24,6 @@ type batchItemView struct {
 	SavedBytes int64 `json:"saved_bytes,omitempty"`
 	// SourceBytes is the file's size when the batch planned it (0 when unknown).
 	SourceBytes int64 `json:"source_bytes,omitempty"`
-	// OriginalBytes is the file's original size as its job rows show it: the
-	// current attempt's record of the original, else SourceBytes. ResultBytes
-	// is the new file's size once the attempt has one (kept after it replaced
-	// the original). Both are omitted while unknown; see list_sizes.go.
-	OriginalBytes int64 `json:"original_bytes,omitempty"`
-	ResultBytes   int64 `json:"result_bytes,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -65,6 +59,12 @@ type batchItemView struct {
 	// Explanation and NextSteps are the child job's, as a single job shows
 	// them: what happened, what it showed, and the goals to try next.
 	Explanation *resultExplanation `json:"explanation,omitempty"`
+	// OriginalBytes is the file's original size as its job rows show it: the
+	// current attempt's record of the original, else SourceBytes. ResultBytes
+	// is the new file's size once the attempt has one (kept after it replaced
+	// the original). Both are omitted while unknown; see list_sizes.go.
+	OriginalBytes int64 `json:"original_bytes,omitempty"`
+	ResultBytes   int64 `json:"result_bytes,omitempty"`
 	// Cause is why the file's attempt has no result, as a job's cause is.
 	Cause     *conversionCause `json:"cause,omitempty"`
 	NextSteps []nextStep       `json:"next_steps,omitempty"`
