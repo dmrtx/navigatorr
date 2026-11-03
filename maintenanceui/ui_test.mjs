@@ -9600,22 +9600,36 @@ test("a server with review-first replacement gets one /replace for exactly the r
   assert.equal(h.run("state.replacementChoice.reviewed.id"), "c1");
 });
 
-test("every submit that makes a conversion says whether it replaces by itself, never leaving it to the server default", () => {
+test("/rerun and /batch-settings never carry the switch; a changed Change-goal switch is saved on its own", async () => {
   const h = harness();
-  h.run('state.info={allow_destructive:true}; replaceAuto.supported=true; replaceAuto.value=true; state.operationJobs=new Map([["b",{id:"b",replace_when_done:false}]]);');
-  // Run again keeps the job's own switch; one that never said takes the saved default; a preview never replaces.
-  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:false})')), { replace_when_done: false });
-  assert.deepEqual(plain(h.run('replaceAutoOf({})')), { replace_when_done: true });
-  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true, dry_run:true})')), { replace_when_done: false });
-  // A batch file encoded again keeps the batch's switch, from the plan or the batch.
-  assert.equal(h.run('sameSettingsRequest({id:"b", item_key:"k", settings:{replace_when_done:true}}).replace_when_done'), true);
-  assert.equal(h.run('sameSettingsRequest({id:"b", item_key:"k", settings:{}}).replace_when_done'), false);
-  // Replacing switched off on the server: never by itself.
-  h.run("state.info.allow_destructive=false;");
-  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true})')), { replace_when_done: false });
-  // A server without the option is sent nothing.
-  h.run("replaceAuto.supported=false;");
-  assert.deepEqual(plain(h.run('replaceAutoOf({replace_when_done:true})')), {});
+  h.context.sent = [];
+  h.context.sessionStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+  // Like the server: both decode strictly, so an unknown field is a 400.
+  h.context.strict = { rerun: ["id", "key", "without_hardware", "mode", "step"], "batch-settings": ["id", "key", "scope", "item_key", "candidate_id", "decision_version", "selection_version", "mode", "profile", "profile_config", "priority", "min_savings_percent", "max_size_increase_percent", "preserve_limits", "preserve_savings", "preserve_growth", "allow_hardware", "hardware_margin_percent", "accept_smaller_saving", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "keep_hdr", "audio_only", "keep_languages", "preserve_source_bit_depth", "promote_candidates"] };
+  h.run('state.info={allow_destructive:true}; replaceAuto.supported=true; replaceAuto.value=true; const strictCheck=(path,body)=>{ const known=strict[path]; const bad=known&&Object.keys(body).filter(k=>!known.includes(k)); if(bad&&bad.length) throw Object.assign(new Error("unknown field "+bad[0]),{status:400,data:{}}); }; api=async(path,body)=>{ if(body){ strictCheck(path.split("?")[0],body); sent.push([path,body]); } if(path.startsWith("batch-settings?")) return savedPlan; return {id:"new"}; }; commandRequest=async(path,body)=>{ strictCheck(path,body); sent.push([path,body]); return {id:"b"}; }; loadJobs=async()=>{}; refreshOpenDetail=async()=>{}; openJob=async()=>{}; notify=()=>{}; reviewAction=async()=>true; submissionID=()=>"k";');
+  h.context.savedPlan = { id: "b", mode: "size", scope: "file", item_key: "k1", selected: 1, kept: 0, active: 0, files: ["one"], selection_version: "v", decision_version: 1, settings: { replace_when_done: true } };
+  await h.run('rerunJob({id:"old", action_name:"transcode_media", status:"failed", replace_when_done:true})');
+  await h.run('encodeFileAgain("b","k1")');
+  const bodies = plain(h.context.sent);
+  assert.deepEqual(bodies.map(([path]) => path), ["rerun", "batch-settings"]);
+  assert.ok(bodies.every(([, body]) => !("replace_when_done" in body)));
+  // Change goal: the switch goes in its own request after the save, only when it changed.
+  h.context.sent.length = 0;
+  h.context.savedPlan = { id: "b", mode: "size", scope: "unfinished", selected: 2, kept: 0, active: 0, files: ["one", "two"], selection_version: "v", settings: {} };
+  h.run('state.operationJobs=new Map([["b",{id:"b",action_name:"transcode_batch",replace_when_done:false}]]);');
+  await h.run('reconfigureBatch("b")');
+  h.elements.get("reconfigure-replace-auto").checked = true;
+  await h.run("submitReconfiguredBatch()");
+  const sent = plain(h.context.sent);
+  assert.deepEqual(sent.map(([path]) => path), ["batch-settings", "replace-when-done"]);
+  assert.ok(!("replace_when_done" in sent[0][1]));
+  assert.deepEqual(sent[1][1], { id: "b", replace_when_done: true });
+  // Unchanged: no second request.
+  h.context.sent.length = 0;
+  await h.run('reconfigureBatch("b")');
+  h.elements.get("reconfigure-replace-auto").checked = false;
+  await h.run("submitReconfiguredBatch()");
+  assert.deepEqual(plain(h.context.sent).map(([path]) => path), ["batch-settings"]);
 });
 
 test("/replace sends the shown plan's digest, a new key per confirm, and says which files of a partial answer did not start", async () => {

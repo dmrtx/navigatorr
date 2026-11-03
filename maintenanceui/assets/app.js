@@ -2584,13 +2584,11 @@ $("replace-auto-default").addEventListener("change", () => safe(async () => {
 function replaceAutoInput(id) {
   return replaceAutoValue($(id).checked);
 }
-// A job made from another (run again, a batch file encoded again) keeps the
-// switch it had; one that never said takes the saved default.
+// /rerun and /batch-settings take no switch: the server keeps the job's own.
 function replaceAutoValue(value) {
   if (!replaceAuto.supported) return {};
   return {replace_when_done: state.info?.allow_destructive !== false && (typeof value === "boolean" ? value : replaceAuto.value)};
 }
-const replaceAutoOf = job => job?.dry_run || job?.batch?.dry_run ? replaceAutoValue(false) : replaceAutoValue(job?.replace_when_done);
 
 // The goal form's choice for one job: the saved languages, this job's own list,
 // or every track. For one file the file's tracks are listed too, checked the
@@ -4853,11 +4851,9 @@ async function reconfigureBatch(id, candidate = false, savedPlan = null) {
 
 // The request that sends one file back through the goal it already has: what
 // the dialog would submit if nothing were changed.
-// A batch's files keep the batch's switch.
-const batchReplaceAuto = plan => replaceAutoValue(typeof plan.settings?.replace_when_done === "boolean" ? plan.settings.replace_when_done : state.operationJobs?.get?.(plan.id)?.replace_when_done);
 function sameSettingsRequest(plan) {
   const s = plan.settings || {};
-  const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true, ...batchReplaceAuto(plan)};
+  const body = {id:plan.id, scope:"file", item_key:plan.item_key, selection_version:plan.selection_version, decision_version:plan.decision_version, preserve_limits:true, preserve_savings:true, preserve_growth:true};
   if (!plan.mode) return {...body, profile:"same"};
   body.mode = plan.mode;
   if (plan.mode === "compact") return {...body, ...(s.max_height > 0 ? {max_height:s.max_height} : {}), ...(s.keep_hdr ? {keep_hdr:true} : {})};
@@ -5049,8 +5045,6 @@ async function submitReconfiguredBatch() {
     body.allow_hardware = $("reconfigure-hardware").checked;
     Object.assign(body, sizeBudgetInputs("reconfigure-budget"));
   }
-  // Sent with the goal, as the form shows it.
-  Object.assign(body, state.reconfigureAuto !== null && state.reconfigureAuto !== undefined ? replaceAutoInput("reconfigure-replace-auto") : batchReplaceAuto(plan));
   body.preserve_limits = state.reconfigureOriginalLimits === batchSettingsLimits();
   let savedLimits;
   try { savedLimits = JSON.parse(state.reconfigureOriginalLimits); } catch {}
@@ -5074,6 +5068,14 @@ async function submitReconfiguredBatch() {
       if (current()) $("reconfigure-batch").close();
     });
     if (auth !== state.authRevision) return;
+    // batch-settings takes no switch: the batch keeps its own through a goal
+    // change, and a changed one is saved on its own. Files already ready are
+    // never replaced by it.
+    const auto = replaceAutoInput("reconfigure-replace-auto").replace_when_done;
+    if (typeof auto === "boolean" && state.reconfigureAuto != null && auto !== state.reconfigureAuto) {
+      try { await saveAutoReplace({id: plan.id}, auto); }
+      catch (error) { notify(`Goal changed, but Replace automatically was not saved: ${error.message}`); }
+    }
     await Promise.all([loadJobs(), refreshOpenDetail()]);
     if (follow?.batch === plan.id) await followBatchFile(follow.from, follow.batch, follow.key);
     notify(plan.scope === "file" ? "Goal changed. The file encodes again once the batch reaches it." : "Goal changed in this batch. Active files finish first; replaced candidates are removed and their attempts stay in file history.");
@@ -5207,7 +5209,7 @@ async function rerunJob(job, {withoutHardware = false, mode = ""} = {}) {
   if (jobIsBusy(job.id)) return;
   state.busyJobs.add(job.id);
   try {
-    const body = {id: job.id, key: state.rerunKeys.get(keyID), ...replaceAutoOf(job)};
+    const body = {id: job.id, key: state.rerunKeys.get(keyID)};
     if (withoutHardware) body.without_hardware = true;
     if (mode) body.mode = mode;
     const opened = $("job-detail").open ? state.detail : "";
@@ -5243,7 +5245,7 @@ async function runNextStep(job, step) {
   state.busyJobs.add(job.id);
   try {
     const opened = $("job-detail").open ? state.detail : "";
-    const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(keyID), step: step.id, ...replaceAutoOf(job)});
+    const result = await api("rerun", {id: job.id, key: state.rerunKeys.get(keyID), step: step.id});
     state.rerunKeys.delete(keyID);
     state.jobsLoaded = 0;
     notify(`${step.label}: the new run shows on this file's page.`);
@@ -5281,7 +5283,7 @@ async function applyBatchStep(batchID, itemKey, step) {
       // minimum saving changes.
       body = {...sameSettingsRequest(plan), ...step.inputs};
     } else {
-      body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...batchReplaceAuto(plan), ...step.inputs};
+      body = {id: plan.id, scope: "file", item_key: plan.item_key, selection_version: plan.selection_version, decision_version: plan.decision_version, preserve_limits: true, preserve_savings: true, preserve_growth: true, ...step.inputs};
       // A new budget keeps the goal, so it keeps the file's encoder choice.
       if (step.id === "budget" && plan.mode === "size" && plan.settings?.allow_hardware === false) body.allow_hardware = false;
     }
