@@ -27,7 +27,7 @@ const apart = {
   "summary": "disclosure rows",
   ".jd-actions .more-actions > summary": "the More toggle",
   ".action-main": "the one link-styled action at the end of a sentence",
-  "[data-file-toggle]": "a file's expandable row in a batch",
+  ".jd-file-quick": "a batch row's one-tap Replace",
 };
 
 const sizeLimit = 1;

@@ -69,6 +69,11 @@ export function install() {
     // Bars the dialog pins to its edges. Content scrolling under them is how a
     // scrolling dialog works; what is checked is that it can be scrolled clear.
     const pinned = el => { for (let p = el; p && p !== dialog.parentElement; p = p.parentElement) if (/sticky|fixed/.test(getComputedStyle(p).position) && p !== dialog) return p; return null; };
+    // An open pop-over menu may lie over what is underneath its toggle (later
+    // rows, the pinned bar), never over the controls beside the toggle.
+    const overlay = el => { for (let p = el; p && p !== dialog; p = p.parentElement) if (p.classList?.contains("more-menu") && getComputedStyle(p).position === "absolute") return p; return null; };
+    const under = (menu, el) => { const toggle = menu.parentElement?.querySelector(":scope > summary"); if (!toggle || toggle.contains(el)) return false; return rect(el).top >= rect(toggle).bottom - b.overlapTolerance; };
+    const overlaid = (a, c) => { const ma = overlay(a), mc = overlay(c); if (ma === mc) return false; return (ma && !mc && under(ma, c)) || (mc && !ma && under(mc, a)); };
     const interactive = all.filter(el => el.matches("button, a[href], summary, input, select, textarea, [role=button], [tabindex]:not([tabindex='-1'])"));
     const rect = el => el.getBoundingClientRect();
     const dr = rect(dialog);
@@ -108,7 +113,7 @@ export function install() {
       const x = Math.min(Math.max((r.left + r.right) / 2, 0), innerWidth - 1), y = (r.top + r.bottom) / 2;
       if (y < 0 || y > innerHeight) continue; // scrolled out of view; checked at the other scroll positions
       const top = document.elementFromPoint(x, y);
-      if (top && top !== el && !el.contains(top) && !top.contains(el) && !(pinned(top) && !pinned(el))) add("covered", `covered by ${describe(top)}`, el);
+      if (top && top !== el && !el.contains(top) && !top.contains(el) && !(pinned(top) && !pinned(el)) && !(overlay(top) && !overlay(el) && under(overlay(top), el))) add("covered", `covered by ${describe(top)}`, el);
     }
 
     // 2b. A word in a control is never cut in half: each word fits the line it is on.
@@ -134,7 +139,7 @@ export function install() {
       for (let j = i + 1; j < interactive.length; j++) {
         const a = interactive[i], c = interactive[j];
         if (a.contains(c) || c.contains(a)) continue;
-        if (Boolean(pinned(a)) !== Boolean(pinned(c))) continue;
+        if (Boolean(pinned(a)) !== Boolean(pinned(c)) || overlaid(a, c)) continue;
         const ra = rect(a), rc = rect(c);
         const w = Math.min(ra.right, rc.right) - Math.max(ra.left, rc.left);
         const h = Math.min(ra.bottom, rc.bottom) - Math.max(ra.top, rc.top);
@@ -158,7 +163,7 @@ export function install() {
     for (let i = 0; i < interactive.length; i++) {
       for (let j = i + 1; j < interactive.length; j++) {
         const a = interactive[i], c = interactive[j];
-        if (a.contains(c) || c.contains(a) || Boolean(pinned(a)) !== Boolean(pinned(c))) continue;
+        if (a.contains(c) || c.contains(a) || Boolean(pinned(a)) !== Boolean(pinned(c)) || overlaid(a, c)) continue;
         const ra = rect(a), rc = rect(c);
         // Two generous targets (44px both ways) side by side cannot be mistaken for each other.
         if (Math.min(ra.width, ra.height, rc.width, rc.height) >= 44) continue;
@@ -191,7 +196,7 @@ export function install() {
     for (const el of all) {
       const style = getComputedStyle(el);
       const clips = /(hidden|clip)/.test(style.overflowX) || /(hidden|clip)/.test(style.overflowY);
-      if (!clips || !el.firstChild) continue;
+      if (!clips || !el.firstChild || el.closest(".sr-only")) continue;
       const wide = el.scrollWidth > el.clientWidth + 1, tall = el.scrollHeight > el.clientHeight + 1;
       if (!wide && !tall) continue;
       const chosen = style.textOverflow === "ellipsis" || style.webkitLineClamp !== "none" && style.webkitLineClamp !== "" && style.webkitLineClamp !== undefined;
@@ -318,7 +323,7 @@ export function install() {
     for (const row of dialog.querySelectorAll("[data-file-row]")) {
       if (!visible(row)) continue;
       const open = row.dataset.open === "true";
-      const n = [...row.querySelectorAll("button, a[href]")].filter(c => visible(c) && !c.closest("[data-row-body]")).length;
+      const n = [...row.querySelectorAll("button, a[href]")].filter(c => visible(c) && !c.closest("[data-row-body], .more-menu")).length;
       if (!open && n > b.maxRowControls) add("too-many-controls", `collapsed row shows ${n} buttons (max ${b.maxRowControls})`, row);
     }
 

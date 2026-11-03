@@ -388,12 +388,13 @@ test("lost cleanup responses keep removal disabled until the durable job outcome
   h.run('api=async()=>({jobs:[{id:"cleanup",status:"completed"}]});');await h.run('refreshBackupCleanup()');assert.equal(h.run('state.backupCleaning'),null);
 });
 
-test("linked execution keeps preview access in job details and preserves the compact queue controls", () => {
+test("linked execution leaves preview jumps out of job details and preserves the compact queue controls", () => {
   const h=harness();
   h.run('state.workerInfo={ready:true};');
   h.context.job={id:"execution",action_name:"transcode_batch",status:"waiting_external",preview_action_id:"preview"};
   assert.equal(h.run('jobControls(job).children.some(b=>b.textContent==="View preview")'),false);
-  assert.equal(h.run('jobControls(job,true).children.some(b=>b.textContent==="View preview")'),true);
+  // The preview is its own batch; the execution's page no longer jumps to it.
+  assert.equal(h.run('jobControls(job,true).children.some(b=>b.textContent==="View preview")'),false);
 });
 
 test("missing Arr deep links recover to the library and keep other tabs usable", async () => {
@@ -997,7 +998,9 @@ test("a cancelled or failed file offers Encode again; a running or locked one do
   h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:4});');
   await h.run('loadBatchItems("batch-a",2)');
   const rows = itemRows(h);
-  assert.deepEqual(rows.map((row) => buttonLabels(row).includes("Encode again")), [true, true, false, false]);
+  assert.deepEqual(rows.map((row) => enabledLabels(row).includes("Encode again")), [true, true, false, false]);
+  // A file that cannot run again still lists Encode again, greyed with why.
+  assert.ok(flatten(rows[2]).some((e) => e.dataset?.unavailable === "Available when this file stops"));
   // It submits the file's own settings without opening the goal dialog.
   const calls = [];
   h.context.record = (path, body) => { calls.push([path, body]); return {}; };
@@ -3039,13 +3042,12 @@ test("preview item statuses indicate eligibility, while failures and completed i
   h.run('state.detail="p";state.detailRevision=1;state.detailJob={batch:{dry_run:true}};$("job-detail").open=true;api=async()=>({total:2,items:[{status:"queued",display_label:"One",reasons:["explicit profile requested"]},{status:"skip",display_label:"Two",reasons:["Already HEVC; original kept"]}]});');
   await h.run('loadBatchItems("p",1)');
   const rows = h.elements.get("batch-items-list").children;
-  // A row is its toggle (name, state) and a body that stays hidden until opened.
+  // A row is its name, then its state chip and short reason chips.
   const stateOf = row => row.children[0].children[1].children[0].children[1].textContent;
   assert.equal(stateOf(rows[0]), "Eligible");
-  assert.equal(rows[0].children[1].children.length, 0);
   assert.equal(stateOf(rows[1]), "Skipped");
-  assert.equal(rows[1].children[1].children.length, 1);
-  assert.equal(rows[1].children[1].hidden, true);
+  assert.deepEqual(nodesWithClass(rows[1], "jd-chip").map(c => c.textContent), ["Already HEVC"]);
+  assert.match(textOf(rows[1]), /Already HEVC; original kept/);
   assert.equal(h.run('statusClass("completed")'), "completed");
   assert.equal(h.run('statusClass("failed")'), "failed");
   assert.equal(h.run('statusClass("waiting_decision")'), "waiting_decision");
@@ -3290,7 +3292,7 @@ test("HFR sources skipped for a missing worker capability say so and offer no go
   const all = el=>[el,...el.children.flatMap(all)];
   const text=all(row).map(el=>el.textContent).filter(Boolean).join(" ");
   assert.match(text,/cannot measure quality at this frame rate yet/);
-  assert.doesNotMatch(text,/Change goal/);
+  assert.ok(!enabledLabels(row).includes("Change goal"));
 });
 
 test("a compact file skipped for unreadable frame evidence can be tried again", async () => {
@@ -3305,7 +3307,7 @@ test("a compact file skipped for unreadable frame evidence can be tried again", 
   const all = el=>[el,...el.children.flatMap(all)];
   const text=all(row).map(el=>el.textContent).filter(Boolean).join(" ");
   assert.match(text,/Could not read this video's frames/);
-  assert.match(text,/Change goal/);
+  assert.ok(enabledLabels(row).includes("Change goal"));
 });
 
 test("an unsupported-source file row offers no goal change", async () => {
@@ -3320,8 +3322,8 @@ test("an unsupported-source file row offers no goal change", async () => {
   const all = row=>[row,...row.children.flatMap(all)];
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
   assert.match(text(rows[0]),/does not support this source format yet/);
-  assert.doesNotMatch(text(rows[0]),/Change goal/);
-  assert.match(text(rows[1]),/Change goal/);
+  assert.ok(!enabledLabels(rows[0]).includes("Change goal"));
+  assert.ok(enabledLabels(rows[1]).includes("Change goal"));
 });
 
 test("an HDR file skipped by a size goal can change to the compact goal", async () => {
@@ -3336,8 +3338,8 @@ test("an HDR file skipped by a size goal can change to the compact goal", async 
   const all = row=>[row,...row.children.flatMap(all)];
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
   assert.match(text(rows[0]),/only the Shrink to 1080p SDR goal converts it/);
-  assert.match(text(rows[0]),/Change goal/);
-  assert.match(text(rows[1]),/Goal: Shrink to 720p SDR/);
+  assert.ok(enabledLabels(rows[0]).includes("Change goal"));
+  assert.ok(nodesWithClass(rows[1], "jd-chip").some(c => c.textContent === "Shrink to 720p SDR"));
 });
 
 test("compact replacement reviews warn about re-grabs and show read-only tracking", async () => {
@@ -3556,8 +3558,8 @@ test("minimum-savings policy is distinct from technical failures in mixed batche
 test("a finished batch exposes candidates as its next action before settings or archive",()=>{
  const h=harness();h.run('state.info={allow_destructive:true};');
  const actions=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",can_archive:true,batch:{completed:23,total:23,outcome:"candidates_ready"}})');
- assert.deepEqual(actions.children.map(c=>c.textContent),["Review candidates","Change settings","Archive"]);
- const preview=h.run('jobControls({id:"preview",action_name:"transcode_batch",status:"completed",batch:{dry_run:true,completed:0,queued:2}})');assert.equal(preview.children.some(c=>c.textContent==="Review candidates"),false);
+ assert.deepEqual(actions.children.map(c=>c.textContent),["Replace ready files","Change settings","Archive"]);
+ const preview=h.run('jobControls({id:"preview",action_name:"transcode_batch",status:"completed",batch:{dry_run:true,completed:0,queued:2}})');assert.equal(preview.children.some(c=>c.textContent==="Replace ready files"),false);
 });
 
 test("restoring a receipt reattaches cleanup and polls the same command without writing again",async()=>{
@@ -3572,9 +3574,9 @@ test("restoring a receipt reattaches cleanup and polls the same command without 
 test("remaining candidates can be reviewed after a partial batch replacement",()=>{
  const h=harness();h.run('state.info={allow_destructive:true}');
  const actions=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",remaining_candidates:1,batch:{total:2,completed:2,promotion:{promoted:1}}})');
- assert.equal(actions.children.some(c=>c.textContent==="Review candidates"),true);
+ assert.equal(actions.children.some(c=>c.textContent==="Replace ready files"),true);
  const done=h.run('jobControls({id:"batch",action_name:"transcode_batch",status:"completed",remaining_candidates:0,batch:{total:2,completed:2,promotion:{promoted:1}}})');
- assert.equal(done.children.some(c=>c.textContent==="Review candidates"),false);
+ assert.equal(done.children.some(c=>c.textContent==="Replace ready files"),false);
 });
 
 test("saved season stays pending until series options are available",()=>{
@@ -3720,22 +3722,17 @@ test("batch outcome buttons reveal current decisions, readable skips and ready r
   const rows=h.elements.get("batch-items-list").children;
   const all = row=>[row,...row.children.flatMap(all)];
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
-  assert.match(text(rows[0]),/Candidate ready.*Replace file/);
+  assert.match(text(rows[0]),/Candidate ready.*Replace/);
   assert.match(text(rows[1]),/quality target; original kept/);
-  assert.match(text(rows[2]),/Needs attention.*Search reached its limit.*Change goal/);
+  assert.match(text(rows[2]),/Needs attention.*Search reached its limit/);
+  assert.ok(enabledLabels(rows[2]).includes("Change goal"));
   assert.doesNotMatch(rows.map(text).join(" "),/quality_not_met|per-source bounded|Profile: mode-size/);
-  // A row is closed until it is opened, except one that needs a decision, which
-  // opens itself once; all of a file's actions wait inside the row.
-  rows.forEach((row, index) => {
-    const needsYou = index === 2;
-    assert.equal(row.dataset.open, String(needsYou));
-    assert.equal(row.children[1].hidden, !needsYou);
-    assert.equal(row.children[0].children.some(el=>el.className.includes("status-action")), false, "the state is a label, not a second button");
-  });
+  // A row is its name (the way to its page), Replace when ready, and one menu; the state is a label.
+  rows.forEach((row) => assert.equal(flatten(row.children[0]).some(el=>String(el.className).includes("status-action")), false, "the state is a label, not a second button"));
   const click = (row,label)=>all(row).find(el=>el.textContent===label).listeners.get("click")();
   await click(rows[1],"Change goal");
-  await click(rows[2],"Open job");
-  await click(rows[0],"Replace file");
+  await click(rows[2],"Decide on its page");
+  await click(rows[0],"Replace");
   assert.deepEqual(calls,[["settings","batch","skip"],["open","wait-child"],["replace","batch","ready-child"]]);
 });
 
@@ -3766,9 +3763,9 @@ test("a ready candidate can change its goal from its row and its job, and the di
   await h.run('loadBatchItems("batch",2)');
   const rows=h.elements.get("batch-items-list").children;
   const all=row=>[row,...row.children.flatMap(all)];
-  const labels=row=>all(row.children[1]).filter(e=>e.dataset?.jobControl).map(e=>e.textContent);
-  assert.deepEqual(labels(rows[0]),["Replace file","Change goal","Open job"]);
-  assert.deepEqual(all(rows[0]).filter(e=>e.dataset?.jobControl&&String(e.className).includes("jd-primary")).map(e=>e.textContent),["Replace file"]);
+  const labels=row=>enabledLabels(row);
+  assert.deepEqual(labels(rows[0]),["Replace","Change goal"]);
+  assert.equal(all(rows[0]).find(e=>e.textContent==="Replace").className,"jd-file-quick");
   // A candidate already in a replacement plan, or a file the server locked, keeps no goal change.
   assert.ok(!labels(rows[1]).includes("Change goal"));
   assert.ok(!labels(rows[2]).includes("Change goal"));
@@ -5450,7 +5447,7 @@ test("More goals opens for a selected goal inside it", async () => {
   h.context.profile = goalProfileFixture();
   await h.run('loadGoalProfile("/media/movie.mkv")');
   assert.equal(more().open, false);
-  click("x265_preserve");
+  click("quality");
   assert.equal(more().open, true);
 });
 
@@ -5460,13 +5457,13 @@ test("a goal the user chose before the profile arrives is never overridden", asy
   h.context.pending = pending.promise;
   h.run("api = async () => pending; controls()");
   const load = h.run('loadGoalProfile("/media/movie.mkv")');
-  click("x265_preserve");
+  click("quality");
   assert.equal(more().open, true, "an explicit pick inside More goals opens it");
   pending.resolve(goalProfileFixture());
   await load;
-  assert.equal(mode(), "x265_preserve");
+  assert.equal(mode(), "quality");
   assert.equal(note("compact").textContent, "Recommended for this file", "the advice is still shown");
-  assert.equal(h.radios.find((r) => r.checked).value, "x265_preserve");
+  assert.equal(h.radios.find((r) => r.checked).value, "quality");
 });
 
 test("a response for a file the user has since left is ignored", async () => {
@@ -5612,16 +5609,20 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
   const more = form.slice(form.indexOf('<details id="more-goals"'));
   assert.match(visible, /value="size" checked[\s\S]*<strong class="goal-title">Save space<\/strong>[\s\S]*value="compact"[\s\S]*<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>[\s\S]*value="audio_only"[\s\S]*<strong class="goal-title">Audio only<\/strong>[\s\S]*id="goal-note-audio_only"/);
-  assert.doesNotMatch(visible, /value="quality"|value="x265_preserve"/);
+  // Keeping the quality while moving a library to x265 is one of the main goals, said in one line.
+  assert.match(visible, /value="x265_preserve"[\s\S]*<strong class="goal-title">Keep quality, convert to x265<\/strong><small class="goal-desc">Re-encodes H\.264, MPEG-2, MPEG-4 and AVI video to x265 at the same visual quality; files already in HEVC are left alone\.<\/small>/);
+  assert.doesNotMatch(visible, /value="quality"/);
   assert.match(more, /<summary>More goals<\/summary>/);
-  assert.doesNotMatch(more, /checked/);
+  assert.doesNotMatch(more, /checked|value="x265_preserve"/);
   assert.match(more, /value="quality"[\s\S]*<strong class="goal-title">Strict quality<\/strong>[\s\S]*Use it when picture quality matters more than space; may save little\./);
-  assert.match(more, /value="x265_preserve"[\s\S]*<strong class="goal-title">Convert to HEVC<\/strong>[\s\S]*Use it to make a library HEVC-only; HEVC files are left alone\./);
-  const select = markup.match(/<select id="reconfigure-mode">[\s\S]*?<\/select>/)[0];
-  for (const name of ["Save space", "Shrink to SDR", "Audio only", "Strict quality", "Convert to HEVC"]) assert.ok(select.includes(name), name);
-  assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to x265/);
+  // The reconfigure dialog shows the same goal cards; its hidden select carries the choice.
+  const dialog = markup.match(/<fieldset id="reconfigure-mode-label"[\s\S]*?<\/fieldset>/)[0];
+  for (const name of ["Save space", "Shrink to 1080p SDR", "Audio only", "Strict quality", "Keep quality, convert to x265"]) assert.ok(dialog.includes(`<strong class="goal-title">${name}</strong>`), name);
+  assert.match(dialog, /<select id="reconfigure-mode" hidden/);
+  assert.equal((markup.match(/value="x265_preserve"/g) || []).length, 3, "one x265 goal in each place, never a duplicate");
+  assert.doesNotMatch(markup + source, /Prioritize quality|Make it much smaller|Reduce size|Convert to HEVC/);
   const h = harness();
-  assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", audio_only: "Audio only", quality: "Strict quality", x265_preserve: "Convert to HEVC" }));
+  assert.equal(h.run("JSON.stringify(rerunGoals)"), JSON.stringify({ size: "Save space", compact: "Shrink to 1080p SDR", audio_only: "Audio only", quality: "Strict quality", x265_preserve: "Keep quality, convert to x265" }));
 });
 
 // ---- Segmented controls ----
@@ -6450,6 +6451,8 @@ async function batchItemsHarness(items, { detailJob = { status: "completed", bat
 }
 const itemRows = (h) => h.elements.get("batch-items-list").children;
 const buttonLabels = (row) => flatten(row).filter((e) => e.type === "button").map((e) => e.textContent);
+// The controls of a row that can run now: greyed ones carry their reason instead.
+const enabledLabels = (row) => [...new Set(flatten(row).filter((e) => e.type === "button" && !e.dataset?.unavailable && e.textContent).map((e) => e.textContent))];
 
 test("a member of the approved plan that has not started is queued, with no way to replace it again", async () => {
   const items = [
@@ -6471,8 +6474,8 @@ test("a candidate waiting for a plan decision says so, and a candidate still unp
   ];
   const h = await batchItemsHarness(items);
   assert.match(textOf(itemRows(h)[0]), /Replacement awaiting approval/);
-  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => l === "Replace file"), []);
-  assert.deepEqual(buttonLabels(itemRows(h)[1]).filter((l) => l === "Replace file"), ["Replace file"]);
+  assert.deepEqual(buttonLabels(itemRows(h)[0]).filter((l) => l === "Replace"), []);
+  assert.deepEqual(buttonLabels(itemRows(h)[1]).filter((l) => l === "Replace"), ["Replace"]);
 });
 
 test("buttons that only open something are not disabled by a busy batch, and none show before they can work", async () => {
@@ -6484,14 +6487,11 @@ test("buttons that only open something are not disabled by a busy batch, and non
   h.context.items = items;
   h.run('state.info={allow_destructive:true};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};state.busyJobs.add("batch-a");api=async()=>({items,total:2});');
   await h.run('loadBatchItems("batch-a",2)');
-  // A file opens one page about itself; its replacement is a row on that page, not a second button.
-  const open = flatten(itemRows(h)[0]).find((e) => e.textContent === "Open job");
+  // A file opens one page about itself from its name, a link a busy batch never disables.
+  const open = flatten(itemRows(h)[0]).find((e) => e.href && e.textContent === "Sample Show S01E01");
   assert.ok(open);
-  assert.equal(open.disabled, false);
-  assert.equal(itemRows(h).some((row) => buttonLabels(row).includes("View replacement")), false);
-  // The same rule holds when the connection returns: navigation stays usable.
-  h.run("setConnection(false); setConnection(true);");
-  assert.equal(flatten(itemRows(h)[0]).find((e) => e.textContent === "Open job").disabled, false);
+  assert.match(open.href, /job=t-a/);
+  assert.equal(itemRows(h).some((row) => buttonLabels(row).includes("View replacement") || buttonLabels(row).includes("Open job")), false);
 });
 
 test("the single-file job view offers no Replace file while the batch plan covers the candidate", () => {
@@ -6517,8 +6517,9 @@ test("a failed replacement row says why, that the original is still in place, an
   assert.match(text, /Replacement failed/);
   assert.match(text, /Replacement stopped: final check before replacing found an audio mismatch/);
   assert.match(text, /Your original file is still in place\./);
-  // One fix and one way into the file's page; no separate details page.
-  assert.deepEqual(buttonLabels(row).filter((l) => ["Retry replacement", "Keep original", "View details", "Open job"].includes(l)), ["Retry replacement", "Open job"]);
+  // One fix, the same in the menu and the failure block; the name is the way into the file's page.
+  assert.deepEqual(enabledLabels(row).filter((l) => ["Retry replacement", "Keep original", "View details", "Open job"].includes(l)), ["Retry replacement"]);
+  assert.ok(flatten(row).some((e) => e.className === "cv-fix" && e.textContent === "Retry replacement"));
   assert.doesNotMatch(text, /recovery copy/);
   // Technical detail is behind a disclosure; the key and the recipe reason are not shown.
   const technical = flatten(row).find((e) => /technical-reason/.test(e.className));
@@ -6581,7 +6582,7 @@ test("one batch Retry that re-runs several failed files says how many", async ()
   assert.equal(plain(h.context.calls)[0][3].decision.label, "Retry 2 failed replacements");
   // A file's own retry is never described as retrying more than that file.
   const own = await batchItemsHarness([failedItem({ retry_action_id: "p-c" })], { detailJob });
-  assert.deepEqual(buttonLabels(itemRows(own)[0]).filter((l) => /^Retry/.test(l)), ["Retry replacement"]);
+  assert.deepEqual(enabledLabels(itemRows(own)[0]).filter((l) => /^Retry/.test(l)), ["Retry replacement"]);
 });
 
 test("a batch with failed replacements has one Retry, on each file, and no second batch-level button unless only the batch recorded the failure", () => {
@@ -7328,19 +7329,21 @@ test("Choose tracks opens the goal form for the file with its goal and languages
   assert.equal(h.elements.get("path").value, "/media/plain.mkv");
 });
 
-test("a batch's file rows carry the sentence about the tracks they kept", async () => {
+test("a batch's file rows carry the tracks they kept as short chips with numbers", async () => {
   const h = harness();
   h.run(`state.detail = "batch"; state.detailRevision = 1; state.batchItemsOffset = 0; $("job-detail").open = true;
     api = async () => ({ items: [
-      { item_key: "1", display_label: "one.mkv", status: "completed", tracks_message: "Kept 2 of 3 audio tracks (eng, und)" },
+      { item_key: "1", display_label: "one.mkv", status: "completed", tracks_message: "Kept 2 of 3 audio tracks (eng, und) and all 4 subtitles; dropping the rest saves about 700.0 MB" },
       { item_key: "2", display_label: "two.mkv", status: "completed" },
     ] });`);
   await h.run('loadBatchItems("batch", 1)');
   const rows = h.elements.get("batch-items-list").children;
-  const tracks = (row) => row.children[1].children.filter((cell) => String(cell.className).includes("batch-file-tracks")).map((cell) => cell.textContent);
-  assert.deepEqual(tracks(rows[0]), ["Kept 2 of 3 audio tracks (eng, und)"]);
-  assert.deepEqual(tracks(rows[1]), []);
+  const chips = (row) => nodesWithClass(row, "jd-chip").map((c) => c.textContent);
+  assert.deepEqual(chips(rows[0]), ["Audio 2/3", "Subs 4/4", "−700.0 MB tracks"]);
+  assert.deepEqual(chips(rows[1]), []);
+  assert.doesNotMatch(textOf(rows[0]), /dropping the rest/);
 });
+
 
 test("the markup carries the languages editor and the picker inside the forms they belong to", () => {
   const section = markup.slice(markup.indexOf('<section id="settings-languages"'), markup.indexOf("</section>", markup.indexOf('<section id="settings-languages"')));
@@ -7593,12 +7596,12 @@ test("a batch row whose encode finished but was not saved offers Try again, not 
   const item = { item_key: "k-s", display_label: "Sample Show S04E13", status: "waiting_decision", child_action_id: "child-s", waiting_decisions: ["recheck", "cancel"], can_reconfigure: false, mode: "size", reason_code: "eligible" };
   const h = await batchItemsHarness([item], { detailJob: { status: "waiting_decision", batch: {} } });
   const row = itemRows(h)[0];
-  assert.deepEqual(buttonLabels(row).filter((l) => /Try again|Change goal|Change settings/.test(l)), ["Try again"]);
+  assert.deepEqual(enabledLabels(row).filter((l) => /Try again|Change goal|Change settings/.test(l)), ["Try again"]);
   const control = flatten(row).find((e) => e.textContent === "Try again");
-  // It acts on the file's own job, needs its worker, and is the row's main action.
+  // It acts on the file's own job, needs its worker, and is the fix under the row.
   assert.equal(control.dataset.jobControl, "child-s");
   assert.equal(control.dataset.requiresWorker, "true");
-  assert.match(control.className, /primary/);
+  assert.ok(flatten(row).some((e) => e.className === "cv-fix" && e.textContent === "Try again"));
   h.context.calls = [];
   h.run("jobControl = async (...args) => calls.push(JSON.parse(JSON.stringify(args)));");
   await control.listeners.get("click")();
@@ -7716,9 +7719,9 @@ test("every job card and open job offers its file or folder in Files", () => {
   assert.ok(h.run('navigationLabels').includes("Show in Files"));
 });
 
-test("a batch file is one collapsed line: its name, its state and saving; the actions are inside", async () => {
+test("a batch file is one line: its name, its state and size, Replace, and a menu", async () => {
   const items = [
-    { item_key: "k-c", display_label: "Ready.mkv", status: "completed", candidate_ready: true, saved_bytes: 1.9e9, child_action_id: "t-c", file_path: "/media/tv/Ready.mkv", can_reconfigure: true, mode: "size" },
+    { item_key: "k-c", display_label: "Ready.mkv", status: "completed", candidate_ready: true, saved_bytes: 1.9e9, source_bytes: 4.2e9, candidate_bytes: 2.3e9, child_action_id: "t-c", file_path: "/media/tv/Ready.mkv", can_reconfigure: true, mode: "size" },
     { item_key: "k-x", display_label: "Cancelled.mkv", status: "cancelled", child_action_id: "t-x", file_path: "/media/tv/X.mkv", can_reconfigure: true, mode: "size" },
     { item_key: "k-w", display_label: "Waiting.mkv", status: "queued" },
   ];
@@ -7728,62 +7731,26 @@ test("a batch file is one collapsed line: its name, its state and saving; the ac
   h.run('api=async()=>({items,total:3});');
   await h.run('loadBatchItems("batch-a",2)');
   const rows = itemRows(h);
-  const flat = (row) => flatten(row);
-  const classed = (row, name) => flat(row).find((e) => String(e.className || "").split(" ").includes(name));
-  // A row is a head and a body; the head is one button that opens the body. A
-  // ready file also has Replace beside its head, so it can be replaced closed.
-  assert.deepEqual(rows.map((row) => row.children.length), [3, 2, 2]);
-  const quick = rows[0].children[2];
-  assert.equal(quick.textContent, "Replace");
-  assert.equal(quick.hidden, false);
-  assert.equal(quick.dataset.batchItemKey, "k-c");
-  for (const row of rows) {
-    assert.equal(row.children[0].type, "button");
-    assert.equal(row.children[0].dataset.fileToggle, row.dataset.itemKey);
-    assert.equal(row.dataset.open, "false");
-    assert.equal(row.children[1].hidden, true);
-  }
-  assert.equal(classed(rows[0], "jd-file-name").textContent, "Ready.mkv");
-  // The name is no longer a second link or button: the head is the only control until it opens.
-  assert.ok(!rows.some((row) => flat(row.children[0]).some((e) => e !== row.children[0] && e.type === "button")));
-  // The saving is shown only where the server gave one.
-  assert.match(classed(rows[0], "jd-file-saved").textContent, /1\.90 GB/);
+  const classed = (row, name) => flatten(row).find((e) => String(e.className || "").split(" ").includes(name));
+  // Main (name, state, size), Replace for a ready file, and the menu.
+  assert.deepEqual(rows[0].children.map((c) => c.className), ["jd-file-main", "jd-file-quick", "more-actions"]);
+  assert.equal(rows[0].children[1].textContent, "Replace");
+  assert.equal(rows[0].children[1].dataset.batchItemKey, "k-c");
+  // The name is a link to the file's own page: one step, no chain.
+  const name = classed(rows[0], "jd-file-name");
+  assert.equal(name.textContent, "Ready.mkv");
+  assert.match(name.href, /job=t-c/);
+  assert.equal(classed(rows[2], "jd-file-name").href, undefined);
+  // Size before and after, from the server's numbers.
+  assert.equal(classed(rows[0], "jd-file-saved").textContent, "4.20 GB → 2.30 GB");
   assert.equal(classed(rows[1], "jd-file-saved"), undefined);
-  // Inside: Replace file is the one primary action; the rest are plain secondary buttons.
-  const labels = (row) => flat(row.children[1]).filter((e) => e.dataset?.jobControl).map((e) => e.textContent);
-  assert.deepEqual(labels(rows[0]), ["Replace file", "Change goal", "Open job"]);
-  assert.deepEqual(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl && String(e.className).includes("jd-primary")).map((e) => e.textContent), ["Replace file"]);
-  assert.ok(flat(rows[0].children[1]).filter((e) => e.dataset?.jobControl).every((e) => e.dataset.batchItemKey === "k-c"));
-  // The primary action of a cancelled file is Encode again.
-  assert.deepEqual(flat(rows[1].children[1]).filter((e) => e.dataset?.jobControl && String(e.className).includes("jd-primary")).map((e) => e.textContent), ["Encode again"]);
-  // A file that has not started has nothing to do.
-  assert.deepEqual(labels(rows[2]), []);
-  // Opening a row is remembered across the list being rebuilt.
-  rows[0].children[0].listeners.get("click")();
-  assert.equal(rows[0].dataset.open, "true");
-  assert.equal(rows[0].children[1].hidden, false);
-  // Open, the body's Replace file is the one Replace on the row.
-  assert.equal(quick.hidden, true);
-});
-
-test("a file that failed opens itself once, and closing it sticks across refreshes", async () => {
-  const items = [
-    { item_key: "k-f", display_label: "Failed.mkv", status: "failed", child_action_id: "t-f", file_path: "/media/tv/F.mkv", can_reconfigure: true, mode: "size" },
-    { item_key: "k-ok", display_label: "Fine.mkv", status: "completed", child_action_id: "t-ok" },
-  ];
-  const h = harness();
-  h.context.items = items;
-  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;state.detailAutoOpened=new Set();state.openFiles=new Set();$("job-detail").open=true;state.detailJob={status:"completed",batch:{}};api=async()=>({items,total:2});');
-  await h.run('loadBatchItems("batch-a",2)');
-  let rows = itemRows(h);
-  assert.deepEqual(rows.map((row) => row.dataset.open), ["true", "false"]);
-  assert.equal(rows[0].children[1].hidden, false);
-  // The person closes it; the next refresh does not open it again.
-  rows[0].children[0].listeners.get("click")();
-  assert.equal(rows[0].dataset.open, "false");
-  await h.run('loadBatchItems("batch-a",2)');
-  rows = itemRows(h);
-  assert.deepEqual(rows.map((row) => row.dataset.open), ["false", "false"]);
+  // Encode again and Change goal are always in the menu, greyed with a reason when they cannot run.
+  const menu = (row) => flatten(row.children.find((c) => c.className === "more-actions")).filter((e) => e.type === "button").map((e) => e.dataset?.unavailable ? `${flatten(e).map(x => x.textContent).filter(Boolean)[0]} · ${e.dataset.unavailable}` : e.textContent);
+  assert.deepEqual(menu(rows[0]), ["Encode again · Replace or change the goal", "Change goal"]);
+  assert.deepEqual(menu(rows[1]), ["Encode again", "Change goal"]);
+  assert.deepEqual(menu(rows[2]), ["Encode again · Waiting for its turn", "Change goal · Waiting for its turn"]);
+  // No prose, Open job, Attempt or Where in a row.
+  for (const row of rows) assert.doesNotMatch(textOf(row), /Open job|Attempt \d|Where|omitted by the processing plan/);
 });
 
 test("a batch row is one way into its file's page, with no Show in Files or View file loops", async () => {
@@ -7802,8 +7769,9 @@ test("a batch row is one way into its file's page, with no Show in Files or View
     const labels = buttonLabels(row);
     for (const loop of ["Show in Files", "View file", "View details", "View replacement", "View batch"]) assert.ok(!labels.includes(loop), `${loop} in ${labels}`);
   }
-  // Each row with a job opens that one page.
-  assert.deepEqual(rows.map((row) => buttonLabels(row).filter((l) => l === "Open job").length), [1, 1, 0, 1]);
+  // Each row with a job opens that one page from its name.
+  assert.deepEqual(rows.map((row) => flatten(row).filter((e) => /job=/.test(e.href || "")).length), [1, 1, 0, 1]);
+  assert.ok(!rows.some((row) => buttonLabels(row).includes("Open job")));
 });
 
 test("the path in an open job's header is the link to its file in Files", async () => {
@@ -8199,7 +8167,11 @@ test("the status says when the numbers were measured and surfaces what could not
   h.run("renderStorage(data)");
   const status = h.elements.get("storage-status").textContent;
   assert.match(status, /^Measured /);
-  assert.match(status, /1 of 3 folders could not be sized completely/);
+  // Notes are folded under one line, not added to the status.
+  assert.doesNotMatch(status, /could not be sized/);
+  assert.equal(h.elements.get("storage-notes").hidden, false);
+  assert.equal(h.elements.get("storage-notes-summary").textContent, "1 note on this measurement");
+  assert.match(allTextOf(h.elements.get("storage-notes-list")), /1 of 3 folders could not be sized completely/);
   assert.match(status, /failed: disk is full/);
   // How the numbers were read is a technical footer; Stats does not print it.
   const mount = storageFixture();
@@ -8439,8 +8411,10 @@ test("Stats names waiting encodes, says how long they waited and decides each on
   h.run('reviewAction=async()=>false');
   await clickAndSettle(buttons(list.children[0])[1]);
   assert.equal(calls.length, 0);
-  assert.match(markup, /Encoded, waiting for you/);
-  assert.doesNotMatch(markup, /Ready to replace/);
+  // The tile counts what is ready to free; the list says once what waits.
+  assert.match(markup, /<h3 id="ready-title">Waiting for you<\/h3>/);
+  assert.match(markup, /Ready to free/);
+  assert.doesNotMatch(markup, /Encoded, waiting for you|Ready to replace/);
 });
 
 test("Stats offers to delete the copies that archived jobs still hold", async () => {
@@ -8629,8 +8603,11 @@ test("batch rows list the next steps and say what happened", async () => {
   const first = buttonLabels(rows[0]);
   assert.ok(first.includes("Audio only") && first.includes("Encode again") && first.includes("Change goal"), first.join());
   assert.ok(flatten(rows[0]).some(e => e.textContent === "The new file came out 9% smaller."));
+  // What was learned is folded with the technical details, not printed in the row.
+  const learned = flatten(rows[0]).find(e => String(e.className).includes("technical-reason"));
+  assert.match(textOf(learned), /What we learned.*Video is 2 GB/);
   // "same" becomes the one Encode again, not two.
-  assert.equal(buttonLabels(rows[1]).filter(l => l === "Encode again").length, 1);
+  assert.equal(flatten(rows[1].children.at(-2)).filter(e => e.type === "button" && e.textContent === "Encode again").length, 1);
 });
 
 test("the explanation says what happened and what was learned", () => {
@@ -8846,7 +8823,8 @@ test("a finished conversion leads with the size, then streams, quality and the s
   assert.equal(nodesWithClass(hero, "cv-shrink")[0].children[0].style.width, "40.0%");
   // The replacement is a state row on this page, not a link.
   const replaced = nodesWithClass(summary, "cv-replace")[0];
-  assert.match(saidBy(replaced), /Replaced · 1 h ago/);
+  // The status badge already says Replaced; this row says what that means, and when.
+  assert.match(saidBy(replaced), /The smaller file is in place · 1 h ago/);
   assert.equal(replaced.dataset.replacementRun, "completed");
   assert.equal(nodesWithClass(replaced, "job-title").length, 0);
   // Streams: video codec change, audio fates, subtitles inline.
@@ -8919,7 +8897,10 @@ test("a conversion keeps its actions in fixed slots, and an unavailable one is d
   assert.ok(cancel);
   assert.equal(items.at(-1), cancel);
   assert.equal(cancel.disabled, true);
-  assert.deepEqual(nodesWithClass(cancel, "jd-reason").map((n) => n.textContent), ["Nothing is running"]);
+  // The reason sits under the greyed item, outside it, so the item keeps the shared size.
+  assert.deepEqual(nodesWithClass(cancel, "jd-reason"), []);
+  const menuChildren = nodesWithClass(done.more, "more-menu")[0].children;
+  assert.equal(menuChildren[menuChildren.indexOf(cancel) + 1].textContent, "Nothing is running");
   for (const job of [conversionJob(), conversionJob({ status: "running", conversion_status: "encoding" })]) {
     const [next, change] = bar(job);
     assert.ok(![next, change].some((slot) => /Cancel/.test(saidBy(slot))));
@@ -9009,30 +8990,45 @@ test("Replace all runs once at a time: a button drawn again while it runs waits,
   assert.equal(saidBy(first), "Replace all 2");
 });
 
-test("Stats replaces the whole ready set, or says it replaces only the largest it lists", () => {
+test("Stats replaces the whole ready set from ready_ids, or names the rows it lists from an older server", () => {
   const h = harness();
   h.run("state.info={allow_destructive:true};");
   h.context.items = [1, 2, 3].map((n) => ({ action_id: `t-${n}`, source_path: `/media/tv/Sample Show S01E0${n}.mkv`, source_bytes: 4e9, candidate_bytes: 2e9, saved_bytes: 2e9 }));
   h.run("renderReadyList(items, 3)");
   assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 3");
+  // The server's ready_ids cover every ready file, past the rows listed.
+  h.context.ids = Array.from({ length: 250 }, (_, i) => `t-${i}`);
+  h.run("renderReadyList(items, 250, {readyIds: ids, readySaved: 5e11})");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace all 250");
+  assert.equal(h.elements.get("ready-replace-all").children[0].dataset.replaceAll, "250");
+  // An older server sends only the listed rows; the button names those.
   h.run("renderReadyList(items, 250)");
-  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace these 3");
   assert.equal(JSON.stringify(h.run("readySizes(items)")), JSON.stringify({ before: 12e9, after: 6e9, saved: 6e9 }));
   // A file without sizes leaves a total unsaid rather than wrong.
   assert.equal(h.run("readySizes([...items, {action_id:'x'}]).saved"), null);
 });
 
-test("a batch with more pages offers to replace the ready files of this page, by name", async () => {
-  const items = [
-    { item_key: "k-1", display_label: "One", status: "completed", candidate_ready: true, child_action_id: "t-1", saved_bytes: 1e9 },
-    { item_key: "k-2", display_label: "Two", status: "completed", candidate_ready: true, child_action_id: "t-2", saved_bytes: 1e9 },
-  ];
+test("Replace ready on a batch covers every page, from the server's ready_item_ids", async () => {
   const h = harness();
-  h.context.items = items;
-  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};api=async()=>({items,total:40,has_more:true});');
-  await h.run('loadBatchItems("batch-a",2)');
-  assert.equal(saidBy(h.elements.get("batch-replace-all")), "Replace 2 on this page");
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  const job = { id: "batch-a", action_name: "transcode_batch", status: "completed", batch: { total: 140, completed: 140 }, ready_item_ids: Array.from({ length: 130 }, (_, i) => `t-${i}`), remaining_candidates: 130 };
+  const bar = h.run(`batchActionBar(${JSON.stringify(job)})`);
+  const next = bar[0].children[0];
+  assert.equal(saidBy(next), "Replace 130 ready");
+  h.context.sent = [];
+  h.run("replaceAllReady = async (ids, options) => { sent.push([ids.length, options.scope]); };");
+  await next.listeners.get("click")();
+  assert.deepEqual(plain(h.context.sent), [[130, "all 130 ready files of this batch"]]);
+  // Without ready ids it reads every page of the batch for its ready files.
+  const pages = [];
+  h.run(`api = async (path) => { pages.push(path); const offset = Number(new URLSearchParams(path.split("?")[1]).get("offset")); return offset === 0 ? {items: [{item_key: "a", child_action_id: "c-1", candidate_ready: true}], has_more: true} : {items: [{item_key: "b", child_action_id: "c-2", candidate_ready: true}], has_more: false}; };`);
+  h.context.pages = pages;
+  await h.run(`replaceBatchReady(${JSON.stringify({ ...job, ready_item_ids: undefined })})`);
+  assert.equal(pages.length, 2);
+  assert.deepEqual(plain(h.context.sent[1]), [2, "all 2 ready files of this batch"]);
 });
+
 
 test("a batch file opened on its own leads back to its batch from the header", () => {
   const h = harness();
@@ -9068,20 +9064,19 @@ test("Keep original on a ready conversion never says NaN when its sizes are unkn
   await run;
 });
 
-test("a running batch offers Replace all for its ready files", async () => {
-  const items = [
-    { item_key: "k-1", display_label: "One", status: "completed", candidate_ready: true, child_action_id: "t-1" },
-    { item_key: "k-2", display_label: "Two", status: "completed", candidate_ready: true, child_action_id: "t-2" },
-    { item_key: "k-3", display_label: "Three", status: "running", child_action_id: "t-3" },
-  ];
+test("a running batch offers Replace ready in its bar, and greys it with the reason when nothing is ready", async () => {
   const h = harness();
-  h.context.items = items;
-  h.run('state.info={allow_destructive:true,roots:["/media"]};state.detail="batch-a";state.detailRevision=2;$("job-detail").open=true;state.detailJob={status:"running",batch:{}};api=async()=>({items,total:3});');
-  await h.run('loadBatchItems("batch-a",2)');
-  const holder = h.elements.get("batch-replace-all");
-  assert.equal(saidBy(holder), "Replace all 2");
-  assert.equal(holder.hidden, false);
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  const running = { id: "batch-a", action_name: "transcode_batch", status: "running", batch: { total: 3, completed: 2, running: 1 }, ready_item_ids: ["t-1", "t-2"] };
+  assert.equal(saidBy(h.run(`batchActionBar(${JSON.stringify(running)})`)[0].children[0]), "Replace 2 ready");
+  const none = h.run(`batchActionBar(${JSON.stringify({ ...running, ready_item_ids: [] })})`)[0].children[0];
+  assert.equal(none.dataset.unavailable, "Available when files finish encoding");
+  const off = h.run('state.info={allow_destructive:false}; batchActionBar(' + JSON.stringify(running) + ')')[0].children[0];
+  assert.equal(off.dataset.unavailable, "Replacing is off in server settings");
+  // The bar keeps the same three places in every state.
+  assert.deepEqual(plain(h.run(`batchActionBar(${JSON.stringify(running)})`).map((slot) => slot.className.split(" ")[0])), ["jd-slot", "jd-slot", "more-actions"]);
 });
+
 
 test("Stats says how many files are ready in one row, and the list it opens can replace them all", () => {
   const h = harness();
@@ -9090,10 +9085,15 @@ test("Stats says how many files are ready in one row, and the list it opens can 
   h.run("renderReadyList(items, 5)");
   assert.equal(h.elements.get("ready-open-label").textContent, "5 files ready to replace");
   assert.equal(h.elements.get("ready-open").disabled, false);
-  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace largest 3");
+  assert.equal(h.elements.get("ready-open").hidden, false);
+  assert.equal(h.elements.get("ready-none").hidden, true);
+  assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace these 3");
   h.run("renderReadyList([], 0)");
-  assert.equal(h.elements.get("ready-open-label").textContent, "No finished encodes are waiting");
-  assert.equal(h.elements.get("ready-open").disabled, true);
+  // Nothing waiting is a plain line; the button is gone, not greyed.
+  assert.equal(h.elements.get("ready-open").hidden, true);
+  assert.equal(h.elements.get("ready-none").hidden, false);
+  assert.equal(h.elements.get("ready-none").textContent || "No finished encodes are waiting", "No finished encodes are waiting");
+  assert.match(markup, /<p id="ready-none"[^>]*>No finished encodes are waiting<\/p>/);
   // The long list lives in its own dialog, opened from the summary row.
   assert.match(markup, /<button id="ready-open"[^>]*>[\s\S]*?<span id="ready-open-label">/);
   assert.match(markup, /<dialog id="ready-dialog"[\s\S]*?<ul id="ready-list"/);
@@ -9112,4 +9112,312 @@ test("a failure a later run fixed says Resolved by #N in the queue and asks for 
   // Unresolved, the same failure still offers its fix.
   const open = h.run(`jobControls(${JSON.stringify({ ...job, resolved_by: undefined })}).children.map(b=>b.textContent)`);
   assert.ok(open.includes("Try again"), open.join("|"));
+});
+
+test("Review list asks the server for one page and does the search, order and page itself when the server ignores them", async () => {
+  const h=harness(), urls=[];
+  h.context.record=url=>urls.push(url);
+  // A paging server: answers one page with its total.
+  h.run('$("workspace").hidden=false;$("review-state").querySelector=()=>null;$("review-state").value="open";$("review-kind").value="";$("review-search").value="alpha";$("review-sort").value="size";state.reviewOffset=0;api=async url=>{record(url);return {items:[{title:"Alpha one",size_bytes:5}],offset:0,total:120,counts:{open:120}}};');
+  await h.run('loadReview()');
+  assert.match(urls[0],/q=alpha/);assert.match(urls[0],/sort=size/);assert.match(urls[0],/offset=0/);assert.match(urls[0],/limit=50/);
+  assert.match(h.elements.get("review-summary").textContent,/^120 entries match/);
+  assert.equal(h.elements.get("review-pager").hidden,false);
+  assert.equal(h.elements.get("review-page").textContent,"1–1 of 120");
+  // An older server: everything back, unfiltered and unordered.
+  const items=[...Array(60)].map((_,i)=>({title:i%2?`Alpha ${i}`:`Beta ${i}`,size_bytes:i}));
+  h.context.all=items;
+  h.run('api=async url=>{record(url);return {items:all}};$("review-search").value="álpha";');
+  await h.run('loadReview()');
+  const view=h.run('reviewView(state.review,{q:"álpha",sort:"size",offset:0})');
+  assert.equal(view.total,30);assert.equal(view.items[0].title,"Alpha 59");
+  assert.equal(h.elements.get("review-pager").hidden,true);
+  const paged=h.run('reviewView({items:all},{q:"",sort:"title",offset:50})');
+  assert.equal(paged.items.length,10);assert.equal(paged.offset,50);assert.equal(paged.total,60);
+});
+
+// No walls of text: every line the job, batch and Stats screens draw stays
+// short (about two phone lines), and every failure or no-result line carries
+// its numbers. Folded technical details are exempt; their summary is not.
+const wallLimit = 120;
+function taggedHarness() {
+  const h = harness();
+  const make = h.document.createElement;
+  h.document.createElement = (tag) => Object.assign(make(), { tagName: String(tag).toUpperCase() });
+  return h;
+}
+function linesOf(n, out = [], folded = false) {
+  if (!n || typeof n !== "object") return out;
+  if (n.hidden) return out;
+  const own = typeof n.textContent === "string" ? n.textContent.trim() : "";
+  const summary = n.tagName === "SUMMARY";
+  if (own && (!folded || summary)) out.push({ text: own, className: String(n.className || "") });
+  const inside = folded || n.tagName === "DETAILS";
+  for (const child of n.children || []) {
+    if (typeof child === "string") { if (!inside && child.trim()) out.push({ text: child.trim(), className: "" }); }
+    else linesOf(child, out, inside && !(child.tagName === "SUMMARY"));
+  }
+  return out;
+}
+function wallsIn(lines) {
+  const long = lines.filter((l) => l.text.length > wallLimit).map((l) => `${l.text.length}: ${l.text}`);
+  const numberless = lines.filter((l) => /cv-failure-text/.test(l.className) && !/cv-decided/.test(l.className) && !/\d/.test(l.text)).map((l) => `no number: ${l.text}`);
+  return [...long, ...numberless];
+}
+
+test("no walls of text on the job, batch and Stats screens, and every failure says its numbers", async () => {
+  const { scenarios, world } = await import("./layout/fixtures.mjs");
+  const found = [];
+  for (const scenario of scenarios.filter((s) => !s.id.startsWith("podcast"))) {
+    const h = taggedHarness();
+    h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+    const w = world(scenario);
+    const job = w.jobs.find((j) => j.id === w.open) || w.jobs[0];
+    h.context.job = job;
+    h.run("paintDetail(job)");
+    const lines = [...linesOf(h.elements.get("detail-summary")), ...linesOf(h.elements.get("detail-controls"))];
+    for (const item of w.items[job.id] || []) {
+      h.context.item = item;
+      lines.push(...linesOf(h.run("batchFileRow(item, job.id)")));
+    }
+    for (const wall of wallsIn(lines)) found.push(`${scenario.id} · ${wall}`);
+  }
+  // Stats with a full set of numbers.
+  const h = taggedHarness();
+  h.run('state.info={allow_destructive:true};');
+  h.context.data = {
+    savings: { realized_bytes: 12e9, completed_replacements: 4, candidate_saved_bytes: 30e9, candidate_count: 40, estimated_saved_bytes: 5e9 },
+    ready_ids: Array.from({ length: 40 }, (_, i) => `r-${i}`),
+    ready: [1, 2, 3].map((n) => ({ action_id: `r-${n}`, source_path: `/media/tv/Sample Show S01E0${n}.mkv`, source_bytes: 4e9, candidate_bytes: 2e9, saved_bytes: 2e9, ready_since: new Date(Date.now() - 864e5).toISOString() })),
+    history: [{ action_id: "h-1", source_path: "/media/tv/Sample Show S01E09.mkv", saved_bytes: 3e9, completed_at: new Date().toISOString() }],
+    daily: [],
+  };
+  h.run("renderSavings(data)");
+  const stats = ["saved-count", "candidate-count", "recent-replaced", "ready-list", "ready-replace-all", "ready-open-label"].flatMap((id) => linesOf(h.elements.get(id)));
+  for (const wall of wallsIn(stats)) found.push(`stats · ${wall}`);
+  assert.deepEqual(found, []);
+  // The check itself catches both kinds of wall.
+  assert.equal(wallsIn([{ text: "x".repeat(121), className: "" }, { text: "Stopped", className: "cv-failure-text" }]).length, 2);
+});
+
+test("every job header links its source folder in Files: a batch, a conversion, a batch file and a replacement", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};');
+  const link = h.elements.get("detail-file-link");
+  const shows = (job) => { h.run(`renderDetailFileLink(${JSON.stringify(job)})`); return { hidden: link.hidden, text: link.textContent, path: link.dataset.path, folder: link.dataset.folder, href: link.href }; };
+  // A batch: the server's folder.
+  const batch = shows({ id: "b", action_name: "transcode_batch", batch: { total: 3 }, batch_files: { file_count: 3, folder: "/media/tv/Sample Show/Season 1" } });
+  assert.equal(batch.hidden, false); assert.equal(batch.text, "Sample Show / Season 1"); assert.equal(batch.folder, "true"); assert.match(batch.href, /view=files/);
+  // A batch over several folders without one: their common parent.
+  const spread = shows({ id: "b2", action_name: "transcode_batch", batch: { total: 2 }, batch_files: { file_count: 2, files: [{ file_path: "/media/tv/Sample Show/Season 1/a.mkv" }, { file_path: "/media/tv/Sample Show/Season 2/b.mkv" }] } });
+  assert.equal(spread.path, "/media/tv/Sample Show"); assert.equal(spread.folder, "true");
+  // A one-file batch, a conversion, a batch file and a replacement: the file's folder.
+  const file = "/media/tv/Sample Show/Season 1/Sample Show S01E01.mkv";
+  for (const job of [
+    { id: "b3", action_name: "transcode_batch", batch: { total: 1 }, batch_files: { file_count: 1, files: [{ file_path: file }] } },
+    { id: "c", action_name: "transcode_media", source_path: file },
+    { id: "k", action_name: "transcode_media", source_path: file, parent_batch_id: "b" },
+    { id: "p", action_name: "promote_transcode_candidate", promotion: { original_path: file } },
+  ]) {
+    const shown = shows(job);
+    assert.equal(shown.hidden, false, job.id); assert.equal(shown.text, "Sample Show / Season 1", job.id); assert.equal(shown.path, file, job.id); assert.match(shown.href, /view=files/, job.id);
+  }
+});
+
+test("Stats hides the freed tile until something was freed, and names the storage trend Used space", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true};');
+  h.run('renderSavings({savings:{realized_bytes:0,candidate_count:0}})');
+  assert.equal(h.elements.get("saved-tile").hidden, true);
+  h.run('renderSavings({savings:{realized_bytes:5e9,completed_replacements:2}})');
+  assert.equal(h.elements.get("saved-tile").hidden, false);
+  assert.match(source, /node\("h5", "Used space", "storage-trend-title"\)/);
+  assert.doesNotMatch(source, /node\("h5", "Recovery"/);
+});
+
+test("a superseded run opens the latest run of its file, and a batch file's promote opens the file's conversion", async () => {
+  const old = conversionJob({ id: "conv-old", conversion_id: "", superseded_by: { id: "conv", number: 9 } });
+  const h = await openJobsOf([old, conversionJob()], "conv-old");
+  assert.equal(h.run("state.detail"), "conv");
+  // A promote without conversion_id still names the transcode it replaces.
+  const promote = { id: "p-1", action_name: "promote_transcode_candidate", status: "running", promotion: { original_path: "/media/tv/a.mkv", transcode_action_id: "conv" } };
+  const p = await openJobsOf([promote, conversionJob()], "p-1");
+  assert.equal(p.run("state.detail"), "conv");
+  // Redirects stop after a few hops, so a loop in the data cannot spin.
+  const a = conversionJob({ id: "a", conversion_id: "", superseded_by: { id: "b" } }), b = conversionJob({ id: "b", conversion_id: "", superseded_by: { id: "a" } });
+  const loop = await openJobsOf([a, b], "a");
+  assert.ok(["a", "b"].includes(loop.run("state.detail")));
+});
+
+test("Retry, Encode again and Change goal keep the conversion open and show the new run in place", async () => {
+  const h = await openJobsOf([conversionJob(), conversionJob({ id: "conv-2", conversion_id: "conv-2" })], "conv");
+  const writes = [];
+  h.context.window = { location: { pathname: "/", search: "" }, history: { pushState(_s, _t, url) { writes.push(["push", url]); }, replaceState(_s, _t, url) { writes.push(["replace", url]); } } };
+  h.run("state.routeReady=true;");
+  await h.run('showAttempt("conv-2")');
+  assert.equal(h.run("state.detail"), "conv-2");
+  assert.equal(h.elements.get("job-detail").open, true);
+  assert.ok(writes.every(([kind]) => kind === "replace"), "no new history entry");
+});
+
+test("the attempts card lists every run with its numbers and marks this one", () => {
+  const h = harness();
+  h.context.job = { id: "c3", attempts: [
+    { id: "c1", number: 1, conversion_status: "no_result", setting: "CRF 22", candidate_bytes: 1.4e9, cause: { kind: "quality_below_target", summary: "Quality 91.2 VMAF, below the 93.0 target", attempts: [{ setting: "CRF 22", vmaf_mean: 91.2, vmaf_worst: 84, bytes: 1.4e9, passed: false }] } },
+    { id: "c2", number: 2, conversion_status: "failed", cause: { summary: "The encoder stopped at 41% of the file (exit status 1)" } },
+    { id: "c3", number: 3, conversion_status: "ready_to_replace", current: true, candidate_bytes: 1.1e9 },
+  ] };
+  const card = h.run("conversionAttemptsCard(job)");
+  assert.equal(nodesWithClass(card, "cv-card-title")[0].textContent, "Attempts · 3");
+  const rows = nodesWithClass(card, "cv-attempt");
+  assert.equal(rows.length, 3);
+  assert.equal(rows[0].dataset.attemptId, "c3");
+  assert.ok(String(rows[0].className).includes("current"));
+  assert.match(saidBy(rows[2]), /91\.2 VMAF/);
+  assert.equal(nodesWithClass(rows[2], "cv-tries").length, 1);
+  // One run has no history to show.
+  assert.equal(h.run("conversionAttemptsCard({id:'x',attempts:[{id:'x'}]})"), null);
+});
+
+test("a failure block leads with the cause and its numbers, the settings tried, the fix, and folds the raw error", () => {
+  const h = harness();
+  h.context.fix = h.run('button("Try with x265", () => {})');
+  const box = h.run('failureBlock({tone:"no_result", text:"No smaller file", cause:{summary:"Quality 91.2 VMAF, below the 93.0 target", attempts:[{setting:"CRF 22",vmaf_mean:91.2,vmaf_worst:84,bytes:1.4e9,passed:false},{setting:"CRF 18",vmaf_mean:94.1,vmaf_worst:89,bytes:3.9e9,passed:true}]}, fix, technical:["ffmpeg exited with status 1"]})');
+  assert.equal(nodesWithClass(box, "cv-failure-icon").length, 1);
+  assert.equal(nodesWithClass(box, "cv-failure-text")[0].textContent, "Quality 91.2 VMAF, below the 93.0 target");
+  const table = nodesWithClass(box, "cv-tries")[0];
+  assert.match(saidBy(table), /CRF 22 91\.2 84\.0 1\.40 GB/);
+  assert.equal(nodesWithClass(box, "cv-fix").length, 1);
+  assert.match(saidBy(nodesWithClass(box, "technical-reason")[0]), /exited with status 1/);
+  // Without a cause, a raw error lends its first clause with the number.
+  assert.equal(h.run('errorHeadline("ffmpeg exited with status 1: Error while decoding stream #0:1: Invalid data")'), "ffmpeg exited with status 1");
+});
+
+test("the streams card lists video, each audio track with its rates, folds the subtitles and totals what was removed", () => {
+  const h = harness();
+  const GB = 1e9, MB = 1e6;
+  const streams = {
+    video: { codec: "h264", after_codec: "hevc", before_bytes: 3.4 * GB, after_bytes: 0.92 * GB },
+    audio: [
+      { language: "spa", codec: "truehd", channels: 8, before_kbps: 4608, fate: "converted", after_codec: "aac", after_channels: 6, after_kbps: 384, before_bytes: 620 * MB, after_bytes: 140 * MB },
+      { language: "eng", codec: "ac3", channels: 6, before_kbps: 640, after_kbps: 640, fate: "copied", before_bytes: 120 * MB, after_bytes: 120 * MB },
+    ],
+    subtitles: { total: 3, kept: 1, tracks: [{ language: "spa", codec: "subrip", bytes: 1 * MB, fate: "kept" }, { language: "rus", codec: "hdmv_pgs_subtitle", bytes: 12 * MB, fate: "dropped" }, { language: "fre", codec: "hdmv_pgs_subtitle", bytes: 12 * MB, fate: "dropped" }] },
+    totals: { audio_before: 740 * MB, audio_after: 260 * MB, subtitles_before: 25 * MB, subtitles_after: 1 * MB },
+  };
+  h.context.job = { id: "c", status: "completed", conversion_status: "ready_to_replace", candidate_ready: true, savings: { source_bytes: 4.2 * GB, candidate_bytes: 1.1 * GB }, streams };
+  const card = h.run("conversionStreamsCard(job)");
+  const rows = nodesWithClass(card, "cv-stream-list")[0].children;
+  assert.equal(rows.length, 3, "video and two audio rows; subtitles fold");
+  assert.match(saidBy(rows[0]), /^Video/);
+  assert.match(saidBy(rows[1]), /TrueHD 7\.1 4608k → AAC 5\.1 384k/i);
+  assert.match(saidBy(rows[2]), /AC-?3 5\.1 640k/i);
+  const subs = nodesWithClass(card, "cv-subtitles")[0];
+  assert.match(saidBy(subs), /Subtitles 1 of 3 kept \(spa\) · removed 24\.0 MB/);
+  assert.match(saidBy(nodesWithClass(card, "cv-totals")[0]), /Removed 480\.0 MB audio, 24\.0 MB subtitles/);
+  // While encoding the card says what it plans.
+  h.run('job.conversion_status="encoding"; job.status="running"; job.candidate_ready=false;');
+  assert.equal(nodesWithClass(h.run("conversionStreamsCard(job)"), "cv-card-title")[0].textContent, "Streams · planned");
+});
+
+test("a failed batch file's page offers Encode again and Change goal in its bar", () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  const job = { id: "k", action_name: "transcode_media", status: "failed", conversion_status: "failed", parent_batch_id: "b", parent_action_id: "b", parent_item_key: "item-4", source_path: "/media/tv/a.mkv", error: "Encode failed", cause: { kind: "quality_below_target", summary: "Quality 91.2 VMAF, below the 93.0 target" } };
+  const bar = h.run(`conversionActionBar(${JSON.stringify(job)})`);
+  const said = [bar[0], bar[1]].map((slot) => saidBy(slot.children[0]));
+  assert.ok(said.some((s) => /Encode again/.test(s)), said.join("|"));
+  assert.ok(said.some((s) => /Change goal/.test(s)), said.join("|"));
+  for (const slot of [bar[0], bar[1]]) assert.equal(slot.children[0].disabled, false, saidBy(slot));
+});
+
+test("Review draws the query it fetched, drops older answers, says when the count is capped, and steps once per page", async () => {
+  const h = harness();
+  const answers = [];
+  h.context.answers = answers;
+  h.run('$("workspace").hidden=false;$("review-state").querySelector=()=>null;$("review-state").value="open";$("review-kind").value="";$("review-sort").value="priority";$("review-search").value="alpha";');
+  h.run('api=async url=>new Promise(r=>answers.push({url,r}));');
+  const first = h.run("loadReview(0)");
+  h.run('$("review-search").value="beta";');
+  const second = h.run("loadReview(0)");
+  // The newer answer arrives first; the older one is dropped.
+  answers[1].r({ items: [{ id: 2, title: "Beta" }], offset: 0, total: 120, total_capped: true, counts: {} });
+  await second;
+  answers[0].r({ items: [{ id: 1, title: "Alpha" }], offset: 0, total: 1, counts: {} });
+  await first;
+  assert.equal(h.run("state.review.query.q"), "beta");
+  // The inputs changed after the fetch: the page still says what it fetched.
+  h.run('$("review-search").value="gamma"; renderReview();');
+  assert.match(h.elements.get("review-summary").textContent, /^120 entries match \(more exist\)/);
+  // While a page loads, Previous and Next wait, and a second click does nothing.
+  h.run('$("review-search").value="beta";');
+  const next = h.elements.get("review-next");
+  assert.equal(next.disabled, false);
+  const step = h.run("stepReview(1)");
+  assert.equal(next.disabled, true);
+  h.run("stepReview(1)");
+  assert.equal(answers.length, 3, "one request for two clicks");
+  assert.match(answers[2].url, /offset=50/);
+  answers[2].r({ items: [{ id: 3, title: "Beta 51" }], offset: 50, total: 120, counts: {} });
+  await step;
+  assert.equal(h.run("state.reviewShown.offset"), 50);
+  // Acting on a row lowers the total and reads the page again.
+  h.run('api=async (url, body) => body ? ({counts:{}}) : new Promise(r=>answers.push({url,r})); notify=()=>{};');
+  await h.run('reviewAct({id:3,title:"Beta 51"},"processed")');
+  assert.equal(h.run("state.review.total"), 119);
+  assert.match(answers[3].url, /offset=0/, "the emptied last page falls back one page");
+});
+
+test("the goal estimate asks again for a query a newer one overtook, and retries a failed read later", async () => {
+  const h = harness();
+  const timers = [];
+  h.context.timers = timers;
+  h.run("setTimeout=(fn)=>{timers.push(fn);return timers.length}; clearTimeout=()=>{};");
+  h.context.asked = [];
+  h.run("readSource=async(path)=>{asked.push(path); throw new Error('offline')};");
+  h.run('requestGoalEstimate("a=1"); requestGoalEstimate("a=2");');
+  await timers[0](); await timers[1]();
+  assert.deepEqual(plain(h.context.asked), ["source-tracks?a=2"]);
+  assert.equal(h.run('goalEstimates.has("a=1")'), false, "the overtaken query is not marked");
+  h.run('requestGoalEstimate("a=1")');
+  await timers[2]();
+  assert.equal(h.context.asked.length, 2);
+  // A failed read waits, then is asked again.
+  h.run('requestGoalEstimate("a=2")');
+  assert.equal(timers.length, 3, "not retried at once");
+  h.run('goalEstimates.get("a=2").at -= goalEstimateRetryMs;requestGoalEstimate("a=2")');
+  assert.equal(timers.length, 4);
+});
+
+test("a new run is not forced over a job opened meanwhile, and leaving a goal form drops its way back", async () => {
+  const h = harness();
+  h.run('$("job-detail").open=true; state.detail="other"; refreshDetail=async()=>{}; writeNavigation=()=>{};');
+  await h.run('showAttempt("new-run","conv")');
+  assert.equal(h.run("state.detail"), "other");
+  await h.run('showAttempt("new-run","other")');
+  assert.equal(h.run("state.detail"), "new-run");
+  h.run('state.goalReturn={path:"/media/a.mkv",from:"conv"}; setFileStep("browse");');
+  assert.equal(h.run("state.goalReturn"), null);
+  h.run('state.followAfterGoal={batch:"b",key:"k",from:"conv"};');
+  h.elements.get("reconfigure-batch").listeners.get("close")();
+  assert.equal(h.run("state.followAfterGoal"), null);
+});
+
+test("a batch Replace waits from its first click, and comes back to its own state", async () => {
+  const h = harness();
+  h.run('state.info={allow_destructive:true,roots:["/media"]};state.workerInfo={ready:true};');
+  h.context.scans = 0;
+  h.run('let release; batchItemsWhere=async()=>{scans++; await new Promise(r=>release=r); return [];}; notify=()=>{};');
+  const job = { id: "b", action_name: "transcode_batch", status: "completed", batch: { total: 2 } };
+  h.context.b = h.run(`batchReplaceButton(${JSON.stringify(job)}, 2, "jd-primary")`);
+  const first = h.run(`replaceBatchReady(${JSON.stringify(job)}, b)`);
+  h.run(`replaceBatchReady(${JSON.stringify(job)}, b)`);
+  assert.equal(h.context.scans, 1);
+  assert.equal(h.context.b.disabled, true);
+  h.run("release()");
+  await first;
+  assert.equal(h.context.b.disabled, false);
+  // A busy job keeps its batch Replace greyed after a Replace all elsewhere ends.
+  h.run('state.busyJobs.add("b"); restoreReplaceAll(b);');
+  assert.equal(h.context.b.disabled, true);
 });

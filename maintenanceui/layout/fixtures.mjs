@@ -52,8 +52,37 @@ function file(v, v2, n, extra = {}) {
   const childId = id("child");
   return {
     item_key: `item-${n}`, child_action_id: childId, file_path: path(v, n), display_label: v.file(n), status: "completed",
-    candidate_ready: true, saved_bytes: sizes.source - sizes.candidate, can_reconfigure: true,
+    candidate_ready: true, saved_bytes: sizes.source - sizes.candidate, source_bytes: sizes.source, candidate_bytes: sizes.candidate, can_reconfigure: true,
     tracks_message: "Kept all 2 audio tracks and 2 of 3 subtitles; dropping the rest saves about 0 MB", ...extra,
+  };
+}
+
+// ---- contract v2 parts --------------------------------------------------------
+
+const qualityCause = { kind: "quality_below_target", summary: "Quality 91.2 VMAF, below the 93.0 target", measured: 91.2, limit: 93, unit: "vmaf", stream: "video",
+  attempts: [{ setting: "CRF 22 · medium", vmaf_mean: 91.2, vmaf_worst: 84.0, bytes: 1.4 * GB, passed: false }, { setting: "CRF 20 · medium", vmaf_mean: 92.6, vmaf_worst: 86.3, bytes: 1.9 * GB, passed: false }, { setting: "CRF 18 · slow", vmaf_mean: 94.1, vmaf_worst: 89.0, bytes: 3.9 * GB, passed: false }] };
+function attemptsOf(n, last = "no_result") {
+  return Array.from({ length: n }, (_, i) => {
+    const current = i === n - 1;
+    const status = current ? last : i % 2 ? "failed" : "no_result";
+    return { id: current ? "this" : `attempt-${i + 1}`, number: 1200 + i, status: status === "failed" ? "failed" : "completed", conversion_status: status, created_at: iso((n - i) * 86400), setting: ["Save space · media engine", "Save space · x265", "Shrink to 1080p SDR"][i % 3], candidate_bytes: status === "ready_to_replace" ? 1.1 * GB : undefined, cause: status === "failed" ? { kind: "worker_unreachable", summary: "The worker stopped answering for 14 min at 63%" } : status === "no_result" ? { kind: "not_smaller", summary: "4.31 GB result, 2.6% larger than the 4.20 GB original" } : undefined, current };
+  });
+}
+function fullStreams(planned) {
+  return {
+    video: { codec: "h264", after_codec: "hevc", before_bytes: 3.4 * GB, after_bytes: planned ? 0 : 0.92 * GB },
+    audio: [
+      { index: 1, language: "spa", codec: "truehd", channels: 8, before_kbps: 4608, fate: "converted", after_codec: "aac", after_channels: 6, after_kbps: 384, before_bytes: 620 * MB, after_bytes: planned ? 0 : 140 * MB },
+      { index: 2, language: "eng", codec: "ac3", channels: 6, before_kbps: 640, after_kbps: 640, fate: "copied", before_bytes: 120 * MB, after_bytes: 120 * MB },
+      { index: 3, language: "rus", codec: "ac3", channels: 6, before_kbps: 640, fate: "dropped", before_bytes: 120 * MB, after_bytes: 0 },
+    ],
+    subtitles: { total: 8, kept: 3, dropped_bytes: 60 * MB, tracks: [
+      { index: 4, language: "spa", codec: "subrip", bytes: 1 * MB, fate: "kept" },
+      { index: 5, language: "eng", title: "SDH", codec: "hdmv_pgs_subtitle", bytes: 36 * MB, fate: "kept" },
+      { index: 6, language: "jpn", codec: "subrip", bytes: 1 * MB, fate: "kept" },
+      ...["rus", "fre", "ger", "ita", "por"].map((language, i) => ({ index: 7 + i, language, codec: "hdmv_pgs_subtitle", bytes: 12 * MB, fate: "dropped" })),
+    ] },
+    totals: { video_before: 3.4 * GB, video_after: planned ? 0 : 0.92 * GB, audio_before: 860 * MB, audio_after: planned ? 0 : 260 * MB, subtitles_before: 98 * MB, subtitles_after: 38 * MB, removed_bytes: planned ? 0 : 3.1 * GB },
   };
 }
 
@@ -112,9 +141,23 @@ export const scenarios = [
   ...[["copy", "copying_recovery", 1.48 * GB], ["hash-wait", "waiting_for_hash_slot", 0], ["verify", "verifying_candidate", 0.2 * GB], ["verify-done", "verifying_recovery", 3.37 * GB - 1]].map(([name, phase, read]) => ({ id: `file-replacing-${name}`, build: (v, s) => ({ job: single(v, s, { status: "running", action_name: "promote_transcode_candidate", promotion: { original_path: path(v), new_path: path(v) }, stages: replaceStages.map((x, i) => ({ name: x, status: i < 2 ? "completed" : i === 2 ? "running" : "pending" })), current_step: 2, work: { phase, bytes_read: read, total_bytes: 3.37 * GB }, savings: { source_bytes: 3.37 * GB, candidate_bytes: 0.589 * GB } }) }) })),
   { id: "file-replaced", build: (v, s) => ({ job: single(v, s, { status: "completed", replaced: true, savings: { source_bytes: sizeVariants[s].source, candidate_bytes: sizeVariants[s].candidate, realized_saved_bytes: sizeVariants[s].source - sizeVariants[s].candidate }, stages: encodeStages.map(x => ({ ...x, status: "completed" })) }) }) },
   { id: "file-failed", build: (v, s) => ({ job: single(v, s, { status: "failed", error: "ffmpeg exited with status 1: Error while decoding stream #0:1: Invalid data found when processing input\n  at libavcodec/hevc_ps.c:1204", current_step: 2, stages: encodeStages.map((x, i) => ({ ...x, status: i < 2 ? "completed" : i === 2 ? "failed" : "pending", note: i === 2 ? "Worker reported exit 1" : undefined })) }) }) },
-  { id: "file-failed-short", build: (v, s) => ({ job: single(v, s, { status: "failed", error: "Source file is missing", stages: encodeStages.map((x, i) => ({ ...x, status: i === 0 ? "failed" : "pending" })), current_step: 0 }) }) },
+  { id: "file-failed-short", build: (v, s) => ({ job: single(v, s, { status: "failed", error: "Source file is missing", cause: { kind: "source_missing", summary: "The source file is missing: 0 of 1 expected files found" }, stages: encodeStages.map((x, i) => ({ ...x, status: i === 0 ? "failed" : "pending" })), current_step: 0 }) }) },
   { id: "file-cancelled", build: (v, s) => ({ job: single(v, s, { status: "cancelled", stages: encodeStages.map((x, i) => ({ ...x, status: i < 2 ? "completed" : "cancelled" })) }) }) },
-  { id: "file-archived", build: (v, s) => ({ job: single(v, s, { status: "completed", archived: true }) }) },
+  { id: "file-archived", build: (v, s) => ({ job: single(v, s, { status: "completed", archived: true, conversion_status: "no_result", cause: { kind: "not_smaller", summary: "The result was 3.42 GB, 0.6% larger than the 3.40 GB original", measured: 3.42 * GB, limit: 3.4 * GB, unit: "bytes" } }) }) },
+
+  // -- contract v2: the cause with numbers, every attempt, every stream
+  { id: "file-no-result-cause", build: (v, s) => ({ job: single(v, s, { status: "completed", conversion_status: "no_result", stages: encodeStages.map(x => ({ ...x, status: "completed" })), cause: qualityCause, attempts: attemptsOf(3), next_steps: [{ id: "smaller", label: "Make it smaller", detail: "Encode again accepting a 10% saving." }, { id: "x265", label: "Try with x265", detail: "x265 keeps more quality at the same size." }], rerun: { mode: "size" }, savings: { source_bytes: sizeVariants[s].source } }) }) },
+  { id: "file-audio-too-big", build: (v, s) => ({ job: single(v, s, { status: "completed", conversion_status: "no_result", stages: encodeStages.map(x => ({ ...x, status: "completed" })), cause: { kind: "audio_too_big", stream: "audio", summary: "Audio is 2.10 GB of the 3.40 GB result (62%); the video alone met the target", measured: 2.1 * GB, limit: 1.2 * GB, unit: "bytes" }, rerun: { mode: "size" }, savings: { source_bytes: sizeVariants[s].source } }) }) },
+  { id: "file-failed-cause", build: (v, s) => ({ job: single(v, s, { status: "failed", conversion_status: "failed", error: "ffmpeg exited with status 1: Error while decoding stream #0:1: Invalid data found when processing input", cause: { kind: "encoder_stopped", summary: "The encoder stopped at 41% of the file (exit status 1)" }, stages: encodeStages.map((x, i) => ({ ...x, status: i < 2 ? "completed" : i === 2 ? "failed" : "pending" })), current_step: 2, attempts: attemptsOf(2, "failed") }) }) },
+  { id: "file-candidate-streams", build: (v, s) => ({ job: single(v, s, { status: "completed", conversion_status: "ready_to_replace", candidate_ready: true, stages: encodeStages.map(x => ({ ...x, status: "completed" })), savings: { source_bytes: 4.2 * GB, candidate_bytes: 1.1 * GB, candidate_saved_bytes: 3.1 * GB }, outcome: { source_bytes: 4.2 * GB, candidate_bytes: 1.1 * GB, vmaf_mean: 95.4, vmaf_target: 93, vmaf_worst: 88.1, vmaf_floor: 85, encoder: "x265", setting: "CRF 22 · medium" }, streams: fullStreams(false), attempts: attemptsOf(2, "ready_to_replace") }) }) },
+  { id: "file-encoding-planned", build: (v, s) => ({ job: single(v, s, { conversion_status: "encoding", worker: worker("encoding", { progress: 42.5, speed: 1.35, fps: 61.2 }), savings: { source_bytes: 4.2 * GB, eta_seconds: 1500 }, streams: fullStreams(true) }) }) },
+  { id: "batch-child-failed", build: (v, s) => ({ job: single(v, s, { status: "failed", conversion_status: "failed", parent_action_id: "batch-parent", parent_batch_id: "batch-parent", parent_item_key: "item-4", error: "Encode failed", cause: qualityCause, stages: encodeStages.map((x, i) => ({ ...x, status: i < 2 ? "completed" : i === 2 ? "failed" : "pending" })), current_step: 2 }) }) },
+  // A batch file's replacement before conversion_id existed: it still opens the file's conversion.
+  { id: "file-replacement-of-batch-child", build: (v, s) => {
+    const child = single(v, s, { status: "completed", conversion_status: "replacing", candidate_ready: false, replacement_action_id: "promote-of-child", parent_action_id: "batch-parent", parent_batch_id: "batch-parent", parent_item_key: "item-1", stages: encodeStages.map(x => ({ ...x, status: "completed" })), savings: { source_bytes: 4.2 * GB, candidate_bytes: 1.1 * GB }, streams: fullStreams(false) });
+    const promote = { id: "promote-of-child", number: 1300, status: "running", action_name: "promote_transcode_candidate", source_path: child.source_path, promotion: { original_path: child.source_path, transcode_action_id: child.id }, stages: [{ name: "plan_promotion", status: "running" }], current_step: 0, created_at: iso(60), updated_at: iso(2) };
+    return { job: child, open: promote.id, extra: [promote] };
+  } },
 
   // -- batches
   ...batchScenarios(),
@@ -138,7 +181,7 @@ function batchScenarios() {
   const ready = (v, s, n, extra = {}) => itemsOf(v, s, n, () => ({}));
   add("batch-candidates", (v, s) => { const items = ready(v, s, 6); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 6, batch: { total: 6, completed: 6, outcome: "candidates_ready" }, savings: { source_bytes: 22.07 * GB, candidate_bytes: 3.67 * GB, candidate_saved_bytes: 18 * GB } }, items); });
   add("batch-plan-ready", (v, s) => { const items = ready(v, s, 6); return batch(v, s, { status: "waiting_decision", waiting_options: [{ decision: "approve" }, { decision: "reject" }], batch: { total: 6, completed: 6, promotion_plan_ready: true, outcome: "candidates_ready" } }, items); });
-  add("batch-mixed-candidates", (v, s) => { const items = [...ready(v, s, 3), ...itemsOf(v, s, 2, () => ({ status: "failed", candidate_ready: false, error: "Encode failed", saved_bytes: 0, can_reconfigure: true })), ...itemsOf(v, s, 2, () => ({ status: "skip", candidate_ready: false, saved_bytes: 0, reason_code: "already_efficient" }))].map((it, i) => ({ ...it, item_key: `item-${i + 1}`, display_label: v.file(i + 1) })); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 3, batch: { total: 7, completed: 3, failed: 2, skip: 2, outcome: "partial" } }, items); });
+  add("batch-mixed-candidates", (v, s) => { const items = [...ready(v, s, 3), ...itemsOf(v, s, 2, i => ({ status: "failed", candidate_ready: false, error: "Encode failed: quality ladder exhausted", saved_bytes: 0, candidate_bytes: undefined, can_reconfigure: true, next_steps: [{ id: "same", label: "Encode again" }], cause: i ? { kind: "over_size_target", summary: "Best result 3.40 GB, over the 2.00 GB target by 70%", measured: 3.4 * GB, limit: 2 * GB, unit: "bytes" } : { ...qualityCause } })), ...itemsOf(v, s, 2, () => ({ status: "skip", candidate_ready: false, saved_bytes: 0, candidate_bytes: undefined, reason_code: "already_efficient" }))].map((it, i) => ({ ...it, item_key: `item-${i + 1}`, display_label: v.file(i + 1) })); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 3, readyIds: true, batch: { total: 7, completed: 3, failed: 2, skip: 2, outcome: "partial" } }, items); });
 
   // Replacing: the state that looked worst on a phone.
   const replacing = (phases, over = {}) => (v, s) => {
@@ -160,7 +203,7 @@ function batchScenarios() {
   add("batch-partially-replaced", (v, s) => { const items = [...itemsOf(v, s, 3, () => ({ replaced: true, candidate_ready: false })), ...itemsOf(v, s, 4, () => ({}))].map((it, i) => ({ ...it, item_key: `item-${i + 1}`, display_label: v.file(i + 1) })); return batch(v, s, { status: "completed", replaced_files: 3, remaining_candidates: 4, savings: { realized_saved_bytes: 4 * GB, source_bytes: 30 * GB }, batch: { total: 7, completed: 7, outcome: "promoted", promotion: { eligible: 7, promoted: 3 } } }, items); });
 
   // A long batch: two pages, to check paging controls and a tall list.
-  add("batch-large", (v, s) => { const items = itemsOf(v, s, 148, i => (i % 9 === 4 ? { status: "failed", candidate_ready: false, error: "Encode failed", saved_bytes: 0 } : i % 7 === 3 ? { status: "skip", candidate_ready: false, saved_bytes: 0, reason_code: "already_efficient" } : {})).map((it, i) => ({ ...it, item_key: `item-${i + 1}`, display_label: v.file(1).replace(/E0\d/, `E${String(i + 1).padStart(3, "0")}`) })); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 120, batch: { total: 148, completed: 120, failed: 16, skip: 12, outcome: "partial" } }, items); });
+  add("batch-large", (v, s) => { const items = itemsOf(v, s, 148, i => (i % 9 === 4 ? { status: "failed", candidate_ready: false, error: "Encode failed", saved_bytes: 0, cause: { kind: "over_size_target", summary: "Best result 2.31 GB, over the 2.00 GB target by 16%", measured: 2.31 * GB, limit: 2 * GB, unit: "bytes" } } : i % 7 === 3 ? { status: "skip", candidate_ready: false, saved_bytes: 0, reason_code: "already_efficient" } : {})).map((it, i) => ({ ...it, item_key: `item-${i + 1}`, display_label: v.file(1).replace(/E0\d/, `E${String(i + 1).padStart(3, "0")}`) })); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 120, readyIds: true, batch: { total: 148, completed: 120, failed: 16, skip: 12, outcome: "partial" } }, items); });
   // One file only, still a batch.
   add("batch-single", (v, s) => { const items = ready(v, s, 1); return batch(v, s, { status: "completed", stages: batchStages(2, null), remaining_candidates: 1, batch: { total: 1, completed: 1, outcome: "candidates_ready" }, batch_files: { file_count: 1, files: [{ file_path: items[0].file_path, display_label: items[0].display_label }] } }, items); });
   return out;
@@ -173,5 +216,9 @@ export function world(scenario, nameVariant = "short", sizeVariant = "normal") {
   const built = scenario.build(v, s);
   const job = built.job;
   job.workflow_id ||= job.id;
-  return { jobs: [job], items: built.items ? { [job.id]: built.items } : {}, id: job.id };
+  // The current attempt is the job itself.
+  for (const a of job.attempts || []) if (a.current) a.id = job.id;
+  // Contract v2: every ready file's id across all pages.
+  if (job.readyIds) { job.ready_item_ids = (built.items || []).filter(it => it.candidate_ready && !it.replaced && !it.replacement_action_id).map(it => it.child_action_id); delete job.readyIds; }
+  return { jobs: [job, ...(built.extra || [])], items: built.items ? { [job.id]: built.items } : {}, id: job.id, open: built.open || job.id };
 }

@@ -26,6 +26,18 @@ export async function startServer(world) {
     };
     if (url.pathname.startsWith("/api/maintenance/")) {
       const name = url.pathname.slice("/api/maintenance/".length);
+      // A Review action moves its row out of To do, as the real server does.
+      if (req.method === "POST" && name === "maintenance-queue" && world.api?.(name, url.searchParams, req.method) === undefined) {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        try {
+          const { id, action } = JSON.parse(body || "{}");
+          world.reviewMoved ||= new Map();
+          if (action === "restore") world.reviewMoved.delete(id);
+          else if (action) world.reviewMoved.set(id, action === "dismiss" ? "dismissed" : "processed");
+        } catch {}
+        return json({ ok: true });
+      }
       const reply = world.api?.(name, url.searchParams, req.method) ?? defaults(name, url.searchParams, world);
       return json(reply ?? {});
     }
@@ -61,8 +73,21 @@ function defaults(name, params, world) {
       return { items: items.slice(offset, offset + limit), total: items.length, has_more: offset + limit < items.length };
     }
     case "maintenance-queue": {
-      const rows = world.review || reviewRows;
-      return { items: rows, total: rows.length, counts: { open: rows.length, processed: 3, dismissed: 1 } };
+      const moved = world.reviewMoved || new Map();
+      const wanted = params.get("state") || "open";
+      const rows = (world.review || reviewRows).filter(r => (moved.get(r.id) || "open") === wanted);
+      const counts = { open: rows.length, processed: 3, dismissed: 1 };
+      // An older server ignores search, sort and paging and answers everything.
+      if (world.reviewLegacy) return { items: rows, total: rows.length, counts };
+      const fold = text => String(text ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      const q = fold(params.get("q") || "");
+      const kind = params.get("issue_type") || "";
+      let found = rows.filter(r => (!kind || r.issue_type === kind) && (!q || fold([r.title, r.year, r.folder, r.notes].join(" ")).includes(q)));
+      const by = { size: (a, b) => (b.size_bytes || 0) - (a.size_bytes || 0), newest: (a, b) => String(b.created_at).localeCompare(String(a.created_at)), title: (a, b) => String(a.title).localeCompare(String(b.title)), priority: (a, b) => (b.priority || 0) - (a.priority || 0) }[params.get("sort") || "priority"];
+      if (by) found = [...found].sort(by);
+      const offset = Math.max(0, Number(params.get("offset") || 0)), limit = Math.min(1000, Math.max(1, Number(params.get("limit") || 200)));
+      // A paging server: one page, where it starts, how many match, and whether that count stopped short.
+      return { items: found.slice(offset, offset + limit), total: found.length, offset, truncated: offset + limit < found.length, total_capped: false, counts };
     }
     case "logs": return { stdout_tail: "frame= 1024 fps=61 q=28.0 size=  2048kB", stderr_tail: "" };
     default: return {};

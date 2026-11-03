@@ -3619,8 +3619,7 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .jd-actions { align-items: flex-start; }
 .jd-actions .more-actions { align-self: flex-start; }
 .jd-menu-item[data-unavailable] { cursor: not-allowed; color: var(--on-disabled); opacity: 1; }
-.jd-menu-item:has(.jd-reason) { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; padding-block: 4px; }
-.jd-menu-item .jd-reason { text-align: left; }
+.more-menu > .jd-reason { margin-top: -2px; padding: 0 12px 2px; text-align: left; }
 
 /* A batch file that is ready: Replace beside its head, without opening it.
    While any row offers it, every row keeps that column, so the chevrons line up. */
@@ -3635,9 +3634,10 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .jd-files-head { align-items: center; }
 
 /* Stats: one row that opens the ready list. */
-.stat-open { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); color: var(--ink); font-size: 14px; font-weight: 500; text-align: left; }
-.stat-open > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.stat-open-arrow { flex: 0 0 auto; color: var(--forest); font-size: 16px; }
+.stat-open { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; height: var(--control-size, 30px); padding: 0 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--subtle); color: var(--ink); font-size: 13px; font-weight: 500; text-align: left; }
+.stat-open > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-open-arrow { flex: 0 0 auto; color: var(--forest); font-size: 13px; }
+.stat-open[hidden] { display: none; }
 .stat-open:not(:disabled):hover { border-color: var(--forest); }
 .stat-open:disabled { opacity: 1; color: var(--muted); background: transparent; }
 .stat-open:disabled .stat-open-arrow { display: none; }
@@ -3649,6 +3649,99 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .status-badge, .badge.status-badge { gap: 4px; }
 .job-heading .status-badge { justify-content: flex-start; padding-inline: 6px; }
 .job-row .more-menu button.action-icon { gap: 8px; }
+
+
+/* ---- Batch file rows: name, state and size, Replace, ••• ---- */
+.jd-file, #batch-items-list:has(.jd-file-quick:not([hidden])) > .jd-file { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "main quick more" "fail fail fail"; align-items: center; column-gap: 8px; padding: 6px 0; }
+.jd-file > .jd-file-main { grid-area: main; display: grid; gap: 2px; min-width: 0; min-height: 44px; align-content: center; }
+.jd-file > .jd-file-quick { grid-area: quick; grid-column: auto; grid-row: auto; }
+.jd-file > .more-actions { grid-area: more; position: relative; }
+.jd-file > .more-actions > summary { display: grid; place-items: center; width: var(--control-size); height: var(--control-size); border: 1px solid var(--control-line); border-radius: 5px; font-size: 18px; list-style: none; cursor: pointer; }
+.jd-file > .more-actions > summary::-webkit-details-marker { display: none; }
+.jd-file > .more-actions > .more-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; display: grid; gap: 2px; min-width: 220px; padding: 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 6px 18px rgba(0, 0, 0, .12); }
+.jd-file > .cv-failure { grid-area: fail; margin: 4px 0 2px; }
+.jd-file .jd-file-name { color: var(--ink); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jd-file a.jd-file-name:hover { color: var(--forest); text-decoration: underline; text-underline-offset: 2px; }
+.jd-file .jd-file-meta { flex-wrap: wrap; row-gap: 4px; }
+.jd-file .batch-file-activity { margin: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jd-chip { display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px; border-radius: 4px; background: var(--subtle); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---- Failure block: cause with numbers, attempts, the fix ---- */
+.cv-tries { width: 100%; margin: 0 0 0 28px; max-width: calc(100% - 28px); border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.cv-tries th { color: var(--muted); font-weight: 500; text-align: left; padding: 2px 6px 2px 0; }
+.cv-tries td { padding: 2px 6px 2px 0; border-top: 1px solid var(--line); }
+.cv-tries .cv-try-setting { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+.cv-tries .cv-try-result { text-align: center; }
+.cv-fix { justify-self: start; margin-left: 28px; min-height: var(--control-size); padding: 2px 14px; border: 1px solid var(--forest); border-radius: 5px; background: var(--surface); color: var(--forest); font-weight: 600; }
+.cv-learned-head { font-weight: 600; color: var(--ink) !important; }
+
+/* ---- Streams: totals, pending sizes, subtitles folded ---- */
+.cv-stream-size.pending { color: var(--muted); font-style: italic; }
+.cv-fate { flex: 0 0 auto; padding: 0 5px; border-radius: 3px; background: var(--subtle); color: var(--muted); font-size: 11px; }
+.cv-fate-converted { background: var(--forest-wash-strong); color: var(--forest); }
+.cv-fate-dropped { background: var(--danger-wash); color: var(--danger); }
+.cv-totals { display: flex; gap: 6px; align-items: baseline; margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--line); font-size: 13px; font-variant-numeric: tabular-nums; }
+details.cv-subtitles { margin-top: 10px; }
+details.cv-subtitles > summary { display: flex; gap: 6px; align-items: baseline; min-height: 32px; font-size: 13px; cursor: pointer; list-style: none; }
+details.cv-subtitles > summary::-webkit-details-marker { display: none; }
+details.cv-subtitles > summary::after { content: "\25B8"; color: var(--muted); }
+details.cv-subtitles[open] > summary::after { content: "\25BE"; }
+.cv-subtitles-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+details.cv-subtitles > .cv-stream-list { margin-top: 6px; }
+
+/* ---- Attempts: one line each, opened for its numbers ---- */
+.cv-attempt-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.cv-attempt-row { border-top: 1px solid var(--line); }
+.cv-attempt-row:first-child { border-top: 0; }
+.cv-attempt-row > summary { display: flex; gap: 8px; align-items: center; min-height: 40px; font-size: 13px; cursor: pointer; list-style: none; }
+.cv-attempt-row > summary::-webkit-details-marker { display: none; }
+.cv-attempt-n { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.cv-attempt-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cv-attempt-now { flex: 0 0 auto; margin-left: auto; padding: 0 6px; border-radius: 3px; background: var(--forest-wash-strong); color: var(--forest); font-size: 11px; }
+.cv-attempt-body { display: grid; gap: 6px; padding: 0 0 10px; }
+.cv-attempt-body .cv-tries { margin-left: 0; max-width: 100%; }
+.cv-attempt-facts, .cv-attempt-cause { margin: 0; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.jd-file-main > .jd-file-name, .jd-file-main > .jd-file-meta { grid-area: auto; }
+.jd-file-main > .jd-file-name { display: block; font-size: 14px; font-weight: 500; line-height: 1.35; }
+
+/* ---- Live estimate under the goal: audio first, it is where big files weigh ---- */
+.goal-estimate { display: grid; gap: 4px; margin: 10px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); font-variant-numeric: tabular-nums; }
+.goal-estimate-head { margin: 0 0 2px; color: var(--muted); font-size: 12px; }
+.goal-estimate-line { display: flex; gap: 8px; align-items: baseline; margin: 0; font-size: 13px; }
+.goal-estimate-line > strong { font-weight: 500; min-width: 0; overflow-wrap: anywhere; }
+.goal-estimate-kind { flex: 0 0 52px; color: var(--muted); font-size: 12px; }
+.goal-estimate-line.lead > strong { font-size: 15px; font-weight: 650; color: var(--forest); }
+.goal-estimate-line.total { padding-top: 4px; border-top: 1px solid var(--line); }
+.reconfigure-goal { margin: 8px 0; padding: 0; border: 0; }
+.reconfigure-goal > legend { font-weight: 600; margin-bottom: 6px; }
+.reconfigure-advanced > summary, .stream-preview-box > summary { min-height: 36px; display: flex; align-items: center; cursor: pointer; color: var(--muted); }
+.jd-menu-note { margin: 0; padding: 6px 8px 8px; max-width: 260px; color: var(--muted); font-size: 12px; line-height: 1.4; border-bottom: 1px solid var(--line); }
+/* Narrow screens: every card is as wide as the page, never its widest line. */
+.cv-card { grid-template-columns: minmax(0, 1fr); }
+.cv-card > *, .cv-failure > *, .cv-attempt-list > li, .cv-attempt-row { min-width: 0; }
+details.cv-subtitles { display: block; min-width: 0; }
+details.cv-subtitles > summary { min-width: 0; }
+.cv-totals { flex-wrap: wrap; }
+.cv-tries { table-layout: fixed; }
+.cv-tries .cv-try-setting { max-width: none; }
+.cv-tries th.cv-try-setting { width: 38%; }
+.cv-tries td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cv-tries th.cv-try-result { width: 28px; }
+.jd-file > .more-actions > .more-menu { min-width: min(220px, calc(100vw - 24px)); max-width: calc(100vw - 24px); }
+/* The file name is the row's link: a full-height target without a taller row. */
+.jd-file-main > a.jd-file-name { line-height: 28px; }
+@media (max-width: 360px) {
+  .cv-stream { grid-template-columns: minmax(0, 1fr); }
+  .cv-stream-size { grid-column: 1; grid-row: auto; }
+  .cv-tries { margin-left: 0; max-width: 100%; }
+  .cv-tries th:nth-child(3), .cv-tries td:nth-child(3) { display: none; }
+}
+.cv-attempt-head > * { flex: 0 0 auto; }
+.cv-attempt-head > .cv-attempt-facts { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 360px) { .cv-attempt-row > summary { flex-wrap: wrap; row-gap: 2px; padding-block: 4px; } }
+.jd-file > .jd-file-main { grid-template-columns: minmax(0, 1fr); }
+.jd-file > .more-actions > .more-menu { gap: 6px; }
+.cv-attempt-list { gap: 6px; }
 
 /* One button size everywhere, with a mouse or a finger: every button, the
    dialog's and the rest, takes the same compact height, type and corner. Last in
@@ -3684,4 +3777,3 @@ button, .jd-primary, .jd-secondary, .jd-menu-item, .jd-files .pagination button,
 .jd-actions .more-actions > summary { width: var(--control-size); height: var(--control-size); border-radius: 5px; font-size: 18px; }
 .jd-file-actions { gap: 6px; }
 .jd-file-actions > .jd-primary, .jd-file-actions > .jd-secondary { padding-inline: 10px; }
-
