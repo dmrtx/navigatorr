@@ -137,6 +137,13 @@ func TestRerunReplaysTheSameKeyAndRefusesAnActiveJobOnTheSameFile(t *testing.T) 
 	if code, again := post("click-one"); code != 202 || again != first {
 		t.Fatal("replay created or refused", code, again, first)
 	}
+	// The earlier job's switch changing since does not break the replay.
+	if err := st.SetReplaceWhenDone("stopped", true); err != nil {
+		t.Fatal(err)
+	}
+	if code, again := post("click-one"); code != 202 || again != first {
+		t.Fatal("replay after a switch change refused", code, again, first)
+	}
 	// A different key while the first job is still active is refused.
 	w := request(h, "POST", "/api/maintenance/rerun", `{"id":"stopped","key":"click-two"}`, true)
 	if w.Code != 409 {

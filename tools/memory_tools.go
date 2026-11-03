@@ -1,11 +1,10 @@
 package tools
 
 import (
-	"github.com/jakenesler/navigatorr/store"
-
 	"context"
 	"time"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )

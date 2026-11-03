@@ -399,8 +399,9 @@ func TestTheReconcilerLoopSubmitsALeftoverAutomaticReplacement(t *testing.T) {
 	}
 }
 
-// Review 2, item 6: a note that has to wait for the job's lease is still
-// written, and not under the replacement lock.
+// Review 2, item 6, and the final review: a note that has to wait for the
+// job's lease is still written, neither under the replacement lock nor
+// holding up the reconciler's tick.
 func TestASkippedNoteWaitsForTheJobsLease(t *testing.T) {
 	e, st := reviewEngine(t)
 	seedReady(t, st, "file-a", "")
@@ -416,9 +417,11 @@ func TestASkippedNoteWaitsForTheJobsLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	go func() { time.Sleep(3 * time.Second); release() }()
-	submitted := make(chan struct{})
-	go func() { e.submitAutoReplacement(context.Background(), "file-a", false); close(submitted) }()
-	time.Sleep(200 * time.Millisecond)
+	began := time.Now()
+	e.drainAutoReplacements(context.Background())
+	if waited := time.Since(began); waited > time.Second {
+		t.Fatalf("the drain waited %s for a job's lease", waited)
+	}
 	locked := make(chan struct{})
 	go func() { e.replaceMu.Lock(); e.replaceMu.Unlock(); close(locked) }()
 	select {
@@ -426,23 +429,27 @@ func TestASkippedNoteWaitsForTheJobsLease(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("the replacement lock is held while waiting for a job's lease")
 	}
-	<-submitted
+	e.notes.Wait()
 	inst, _ := st.GetActionInstance("file-a")
 	if !strings.Contains(getString(decodeInputs(inst.OutputsJSON), "replace_when_done_skipped"), "admission is closed") {
 		t.Fatal("the note was dropped")
 	}
 }
 
-// Review 2, item 8: replaying a submission after its replace_when_done was
-// switched (a rerun freezes the value it had) returns the admitted job.
-func TestAReplayIgnoresAChangedReplaceWhenDone(t *testing.T) {
+// Review 2, item 8, and the final review: a replay that omits
+// replace_when_done matches whatever the job took; one that sends a
+// different value is refused, never answered with a job that replaces when
+// it was asked not to.
+func TestAReplayMatchesReplaceWhenDoneOnlyWhenOmitted(t *testing.T) {
 	e, media := finishingTranscode(t, true)
-	first, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": false}, "rerun-key")
+	first, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true}, "rerun-key")
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true}, "rerun-key")
-	if err != nil || again.ID != first.ID {
-		t.Fatalf("a replay was refused or admitted again: %v %v", again, err)
+	if again, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt"}, "rerun-key"); err != nil || again.ID != first.ID {
+		t.Fatalf("a replay without the field was refused: %v %v", again, err)
+	}
+	if again, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": false}, "rerun-key"); err == nil {
+		t.Fatalf("an explicit false returned a job that replaces by itself: %v", again)
 	}
 }

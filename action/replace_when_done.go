@@ -253,9 +253,21 @@ func (e *Engine) drainAutoReplacements(ctx context.Context) {
 // caller holds the transcode's execution lease (its own completion). A note
 // on the job, when there is one, is written after the lock is released.
 func (e *Engine) submitAutoReplacement(ctx context.Context, id string, leased bool) {
+	loop := ctx // the reconciler's: a note still waiting stops with it
 	ctx = context.WithoutCancel(ctx)
-	if note := e.submitAutoReplacementLocked(ctx, id); note != "" {
-		e.noteAutoReplaceSkipped(ctx, id, note, leased)
+	note := e.submitAutoReplacementLocked(ctx, id)
+	switch {
+	case note == "":
+	case leased:
+		e.noteAutoReplaceSkipped(ctx, id, note, true)
+	default:
+		// From the reconciler: waiting for the job's lease must not hold up
+		// the tick, so the note is written on its own.
+		e.notes.Add(1)
+		go func() {
+			defer e.notes.Done()
+			e.noteAutoReplaceSkipped(loop, id, note, false)
+		}()
 	}
 }
 

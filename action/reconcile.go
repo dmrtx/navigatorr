@@ -41,6 +41,7 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 	e.reconcilerOnce.Do(func() {
 		go func() {
 			defer close(e.reconcilerDone)
+			defer e.notes.Wait()
 			ticker := time.NewTicker(e.pollInterval())
 			defer ticker.Stop()
 			d := newReconcileDispatcher()

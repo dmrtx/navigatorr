@@ -41,6 +41,8 @@ type Engine struct {
 	afterBatchPlanLock func()
 	// beforeAutoEnqueue, in tests, can fail an automatic submission.
 	beforeAutoEnqueue func(id string) error
+	// notes tracks skipped-replacement notes still being written.
+	notes sync.WaitGroup
 
 	mu             sync.RWMutex
 	deps           EngineDeps
@@ -401,14 +403,16 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 	// dedicated Run argument or inside inputs. It does not change workflow
 	// semantics and therefore is excluded from the immutable payload check.
 	delete(existing, "idempotency_key")
-	// replace_when_done is not part of the request's identity: a submission
-	// without it takes the server default, frozen into the stored inputs, and
-	// a rerun freezes the earlier job's value, which can be switched since.
-	// A replay returns the admitted job, whose value only the switch changes.
-	delete(existing, "replace_when_done")
+	// A submission without replace_when_done takes the server default, which
+	// is frozen into the stored inputs; replaying it without the field is the
+	// same request even after the default changed. Sent explicitly, it must
+	// match, so a replay never returns a job that replaces when it said not to.
+	if _, sent := requested["replace_when_done"]; !sent {
+		delete(existing, "replace_when_done")
+	}
 	requestedCopy := make(map[string]any, len(requested))
 	for key, value := range requested {
-		if key != "idempotency_key" && key != "replace_when_done" {
+		if key != "idempotency_key" {
 			requestedCopy[key] = value
 		}
 	}
