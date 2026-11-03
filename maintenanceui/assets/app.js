@@ -2537,7 +2537,7 @@ $("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
 // on the server, so every client starts new jobs the same way; each job keeps
 // its own choice, which can change while it runs. A server that does not know
 // the option shows none of it.
-const replaceAuto = {supported: false, value: false, saving: false, touched: false, request: 0};
+const replaceAuto = {supported: false, known: false, value: false, saving: false, touched: false, request: 0};
 async function loadReplaceAuto() {
   const r = replaceAuto, auth = state.authRevision, request = ++r.request;
   try {
@@ -2545,8 +2545,18 @@ async function loadReplaceAuto() {
     if (auth !== state.authRevision || request !== r.request) return;
     r.supported = typeof data?.replace_when_done_default === "boolean";
     if (r.supported) r.value = data.replace_when_done_default;
-  } catch {
+    r.known = true;
+  } catch (error) {
     if (auth !== state.authRevision || request !== r.request) return;
+    // The server answered with an error of its own: it has the option, but
+    // its default could not be read, so a job says off rather than nothing.
+    // An older server has no such answer (no JSON), and an unreachable one
+    // is asked again on the next submit.
+    if (error?.status) {
+      r.supported = true;
+      if (!r.known) r.value = false;
+      r.known = true;
+    } else if (error instanceof SyntaxError) r.known = true;
   }
   renderReplaceAuto();
 }
@@ -3383,6 +3393,7 @@ async function buildAndSubmitJob(mode = "encode") {
       inputs.min_savings_percent = numeric("min-savings");
     inputs.max_size_increase_percent = numeric("max-growth");
   }
+  if (!replaceAuto.known) await loadReplaceAuto();
   Object.assign(inputs, mode === "preview" ? replaceAutoValue(false) : replaceAutoInput("replace-auto"));
   const request = JSON.stringify({ name, inputs });
   let receipt;
@@ -4521,8 +4532,13 @@ async function replaceOnServerOrChoice(row) {
     if (state.detail) await refreshOpenDetail();
     return "started";
   }
-  if (answer.failed?.length) throw new Error(`Nothing was replaced: ${answer.failed[0].error || "it could not start"}.`);
-  const entry = arrayOf(answer.refused.not_ready).find(item => item.id === row.id);
+  const failure = answer.failed?.[0];
+  if (failure && !replanned(failure) && failure.reason !== "needs_decision") throw new Error(`Nothing was replaced: ${failure.error || notReadyReasons[failure.reason] || "it could not start"}.`);
+  if (replanned(failure)) {
+    await showNotReady([row], {ready: [], not_ready: [failure]});
+    return "started";
+  }
+  const entry = failure || arrayOf(answer.refused?.not_ready).find(item => item.id === row.id);
   if (entry?.reason === "needs_library_choice") return "choose";
   if (replanned(entry)) {
     await showNotReady([row], answer.refused);
@@ -4540,8 +4556,15 @@ async function replaceOnServerOrChoice(row) {
 }
 // Replace shows the file's result first; only Confirm starts it. A file the
 // person already accepted on its own review passes that review as `reviewed`.
-async function prepareReplacement(job, {reviewed = null} = {}) {
-  if (jobIsBusy(job.id)) return;
+// One Replace of a file at a time: a second tap while one is open or sent does nothing.
+const replacingFiles = new Set();
+async function prepareReplacement(job, options = {}) {
+  if (jobIsBusy(job.id) || replacingFiles.has(job.id)) return;
+  replacingFiles.add(job.id);
+  try { return await prepareReplacementOnce(job, options); }
+  finally { replacingFiles.delete(job.id); }
+}
+async function prepareReplacementOnce(job, {reviewed = null} = {}) {
   if (job.replacement_action_id) {
     // A replacement waiting on its plan (planned again, or one that was to
     // run by itself) is approved like any other: the file's before → after,
@@ -4553,8 +4576,8 @@ async function prepareReplacement(job, {reviewed = null} = {}) {
       return;
     }
     const full = job.streams || job.outcome ? job : (await api(`operations?id=${encodeURIComponent(job.id)}`)).jobs?.[0] || job;
-    const row = {...replaceReviewRow(full), digest: promotion.promotion.plan_digest};
-    if (await confirmReplaceReview([row])) await replaceOnServerOrChoice(row);
+    const row = waitingPlanRow(full, promotion);
+    if (await confirmReplaceReview([row]) && !row.blocked) await replaceOnServerOrChoice(row);
     return;
   }
   if (!reviewed) {
@@ -8819,7 +8842,7 @@ function replaceReviewQuality(o) {
 // each and the total. Only the files shown are replaced.
 function replaceReviewContent(rows) {
   const content = [];
-  const known = rows.filter(r => r.before > 0 && Number.isFinite(r.after));
+  const known = rows.filter(r => !r.blocked && r.before > 0 && Number.isFinite(r.after));
   const before = known.reduce((n, r) => n + r.before, 0), after = known.reduce((n, r) => n + r.after, 0);
   if (rows.length === 1) {
     const [row] = rows, job = row.job || {};
@@ -8832,31 +8855,54 @@ function replaceReviewContent(rows) {
     fact("Audio", replaceReviewAudio(job.streams));
     fact("Quality", replaceReviewQuality(job.outcome));
     content.push(facts);
+    if (row.blocked) content.push(node("p", row.blocked, "rr-blocked"));
   } else {
     const list = node("ul", "", "rr-list");
     list.dataset.allowRepeat = "";
     for (const row of rows) {
       const item = node("li", "", "rr-row");
-      item.append(node("span", row.name, "rr-file"), node("span", replaceReviewSizes(row.before, row.after), "rr-sizes"));
+      item.append(node("span", row.name, "rr-file"), node("span", row.blocked || replaceReviewSizes(row.before, row.after), "rr-sizes"));
       item.title = row.name;
+      if (row.blocked) item.dataset.unavailable = "true";
       list.append(item);
     }
     content.push(list);
     const total = node("p", "", "rr-total");
-    total.append(node("strong", "Total"), node("span", known.length ? `${replaceReviewSizes(before, after)}${known.length < rows.length ? ` · ${rows.length - known.length} not measured` : ""}` : "Sizes not measured"));
+    const measured = rows.filter(r => !r.blocked).length;
+    total.append(node("strong", "Total"), node("span", known.length ? `${replaceReviewSizes(before, after)}${known.length < measured ? ` · ${measured - known.length} not measured` : ""}` : "Sizes not measured"));
     content.push(total);
   }
-  content.push(node("p", rows.length === 1 ? "The original is replaced by this smaller file." : `Only these ${rows.length} files are replaced. A file that finishes later waits for its own review.`, "metadata"));
+  const sendable = rows.filter(r => !r.blocked).length;
+  if (sendable) content.push(node("p", rows.length === 1 ? "The original is replaced by this smaller file." : `Only these ${sendable} files are replaced. A file that finishes later waits for its own review.`, "metadata"));
   return content;
 }
 // True when the person confirmed replacing exactly these rows.
+// A row marked `blocked` is shown with its reason and never sent; with none
+// left to send, Confirm is greyed and says why.
 function confirmReplaceReview(rows, {title} = {}) {
-  const n = rows.length;
-  return reviewAction({
+  const n = rows.length, sendable = rows.filter(row => !row.blocked).length;
+  const answer = reviewAction({
     title: title || (n === 1 ? "Replace this file?" : `Replace ${n} files?`),
     content: replaceReviewContent(rows),
-    confirmLabel: n === 1 ? "Replace" : `Replace ${n}`,
+    confirmLabel: sendable === 1 && n === 1 ? "Replace" : `Replace ${sendable}`,
   });
+  if (!sendable) {
+    const confirm = $("confirm-action-review");
+    confirm.disabled = true;
+    confirm.title = rows[0]?.blocked || "Nothing can be replaced";
+  }
+  return answer;
+}
+const sendableRows = rows => rows.filter(row => !row.blocked);
+// A replacement that waits on a plan is shown with that plan's own sizes,
+// since its digest is what Confirm sends. Sizes it does not say cannot be
+// confirmed.
+function waitingPlanRow(job, promotion, digest = promotion?.promotion?.plan_digest) {
+  const p = promotion?.promotion || {};
+  const row = {...replaceReviewRow(job), before: p.original_bytes, after: p.candidate_bytes, digest};
+  if (!(p.original_bytes > 0) || !Number.isFinite(p.candidate_bytes)) return {...row, digest: "", blocked: "Its plan's sizes could not be read: open the replacement"};
+  if (digest && p.plan_digest !== digest) return {...row, digest: "", blocked: "Its plan changed again: refresh and try again"};
+  return row;
 }
 // The server replaces exactly the files reviewed, all or none, from a running
 // batch too. A server from before review-first replacement has no such call:
@@ -8879,10 +8925,17 @@ const notReadyReasons = {
 // A file whose plan is new since it was shown: it is shown again, as it is now.
 const replanned = entry => entry?.reason === "plan_changed" && Boolean(entry.plan_digest);
 // Each file read again, with the digest of its new plan.
+// The new plan's own sizes are shown with its digest; a file that cannot be
+// read again is shown with why and left out, never sent with the old numbers.
 async function rowsShownAgain(rows, entries) {
   const byId = new Map(rows.map(row => [row.id, row]));
   const fresh = entries.length ? await readJobsById(entries.map(entry => entry.id)) : [];
-  return entries.map((entry, i) => ({...(fresh[i] ? replaceReviewRow(fresh[i]) : byId.get(entry.id) || {id: entry.id, name: entry.id}), digest: entry.plan_digest}));
+  const plans = await readJobsById(fresh.map(job => job?.replacement_action_id || "").map(String)).catch(() => []);
+  return entries.map((entry, i) => {
+    const old = byId.get(entry.id) || {id: entry.id, name: entry.id};
+    if (!fresh[i] || !plans[i]) return {id: entry.id, name: old.name, job: old.job, blocked: "Could not be read again: refresh and try again"};
+    return waitingPlanRow(fresh[i], plans[i], entry.plan_digest);
+  });
 }
 // The one request that replaces reviewed files; every Replace path ends here.
 // A file whose replacement already waits on a plan carries the digest of the
@@ -8911,6 +8964,8 @@ async function postReplace(rows) {
   return {started: rest.filter(file => file.started !== false), failed: rest.filter(file => file.started === false), replanning};
 }
 async function replaceOnServer(rows, {control = null} = {}) {
+  rows = sendableRows(rows);
+  if (!rows.length) return {started: 0, asked: 0, gone: 0, failed: 0, replacements: []};
   let answer;
   replaceAllRunning = true;
   markReplaceAllButtons();
@@ -8932,8 +8987,16 @@ async function replaceOnServer(rows, {control = null} = {}) {
     await loadJobs();
     if (state.detail) await refreshOpenDetail();
   }
-  if (failed.length) await showNotStarted(rows, failed, started.length);
-  return {started: started.length, asked: 0, gone: 0, failed: failed.length, replanning: replanning.length, replacements: started};
+  // A file refused while it was submitted, for a plan that changed, is shown
+  // again like a refused one; the others are named with why.
+  const changed = failed.filter(replanned), others = failed.filter(file => !replanned(file));
+  if (others.length) await showNotStarted(rows, others, started.length);
+  const result = {started: started.length, asked: 0, gone: 0, failed: others.length, replanning: replanning.length, replacements: started};
+  if (!changed.length) return result;
+  const shown = await rowsShownAgain(rows, changed);
+  if (!await confirmReplaceReview(shown, {title: shown.length === 1 ? "The plan changed: replace this file?" : `Plans changed: replace these ${shown.length} files?`})) return {...result, failed: failed.length};
+  const next = await replaceOnServer(shown, {control});
+  return {...result, started: result.started + next.started, failed: result.failed + next.failed, replacements: [...started, ...(next.replacements || [])]};
 }
 // A replacement rejected before is planned again; its new plan is reviewed
 // once it waits, with the file's own Replace.
@@ -8961,7 +9024,7 @@ function showNotStarted(rows, failed, started) {
   const lead = started ? `${started} started. ${n === 1 ? "This file" : `These ${n} files`} did not:` : `Nothing was replaced. ${n === 1 ? "This file" : `These ${n} files`} could not start:`;
   return reviewAction({
     title: started ? `${n} not started` : "Nothing was replaced",
-    content: [node("p", lead), replaceLines(rows, failed, entry => entry.error || "Could not start")],
+    content: [node("p", lead), replaceLines(rows, failed, entry => entry.error || notReadyReasons[entry.reason] || "Could not start")],
     confirmLabel: "Close", cancelLabel: "Close",
   });
 }
@@ -8980,13 +9043,14 @@ async function showNotReady(rows, refused, {control = null} = {}) {
   const result = {started: 0, asked: blocked.filter(entry => entry.reason === "needs_library_choice").length, gone: blocked.length, failed: 0, notReady: blocked};
   if (!blocked.length) {
     const n = replaceable.length;
+    if (!n) return result;
     const again = await confirmReplaceReview(replaceable, {title: n === 1 ? "The plan changed: replace this file?" : `A plan changed: replace these ${n} files?`});
     return again ? replaceOnServer(replaceable, {control}) : result;
   }
   const content = [node("p", blocked.length === 1 ? "Nothing was replaced. This file is not ready now:" : `Nothing was replaced. These ${blocked.length} files are not ready now:`), replaceLines(rows, blocked, entry => notReadyReasons[entry.reason] || "Not ready")];
   if (ready.length) content.push(node("p", `${ready.length === 1 ? "The other file is" : `The other ${ready.length} files are`} still ready, as reviewed.`, "metadata"));
-  if (shownAgain.length) content.push(node("p", shownAgain.length === 1 ? "This file's plan changed; this is it now:" : `These ${shownAgain.length} files' plans changed; this is them now:`, "metadata"), replaceLines(shownAgain, shownAgain, row => replaceReviewSizes(row.before, row.after)));
-  const n = replaceable.length;
+  if (shownAgain.length) content.push(node("p", shownAgain.length === 1 ? "This file's plan changed; this is it now:" : `These ${shownAgain.length} files' plans changed; this is them now:`, "metadata"), replaceLines(shownAgain, shownAgain, row => row.blocked || replaceReviewSizes(row.before, row.after)));
+  const n = sendableRows(replaceable).length;
   const again = await reviewAction({title: "Nothing was replaced", content, confirmLabel: n ? `Replace the ${n} ready` : "Close", cancelLabel: n ? "Back" : "Close"});
   if (!again || !n) return result;
   const next = await replaceOnServer(replaceable, {control});
@@ -8999,6 +9063,7 @@ async function readJobsById(ids, limit = 4) {
   const worker = async () => {
     while (next < ids.length) {
       const i = next++;
+      if (!ids[i]) continue;
       try { found[i] = (await api(`operations?id=${encodeURIComponent(ids[i])}`)).jobs?.[0] || null; }
       catch (error) { if (!serverReachable) throw error; }
     }
@@ -9128,7 +9193,7 @@ function renderDetailAutoReplace(job) {
   const open = autoReplaceApplies(job) || (job.replace_when_done === true && !job.archived && !job.replaced);
   input.checked = job.replace_when_done === true;
   input.dataset.jobId = job.id;
-  input.disabled = !open || jobIsBusy(job.id) || !serverReachable;
+  input.disabled = !open || jobIsBusy(job.id) || !serverReachable || (replaceAllRunning && !input.checked);
   row.dataset.unavailable = open ? "" : "true";
   row.title = !open ? (job.archived ? "Archived · restore it first" : "Nothing is left to replace") : job.replace_when_done ? "Each file is replaced once it passes its checks" : "Each finished file waits for you to review it";
 }
@@ -9152,6 +9217,12 @@ async function readyIdsOf(job) {
 // replaced by the server either way.
 async function toggleAutoReplace(job, on) {
   if (jobIsBusy(job.id)) { $("detail-auto-replace-input").checked = !on; return; }
+  // While a Replace all runs its files cannot be asked about: wait for it.
+  if (on && replaceAllRunning) {
+    $("detail-auto-replace-input").checked = false;
+    notify("Wait for the replacement under way to finish, then switch it on.");
+    return;
+  }
   const ids = on ? await readyIdsOf(job) : [];
   let decided = null;
   const ask = async rows => {
@@ -9864,7 +9935,8 @@ async function approveReviewedPlan(id, reviewed) {
     }
     if (replacementReady(job)) {
       const p = job.promotion;
-      const sameFile = reviewed && (!p.transcode_action_id || !reviewed.id || p.transcode_action_id === reviewed.id) && (!Number.isFinite(reviewed.after) || !Number.isFinite(p.candidate_bytes) || p.candidate_bytes === reviewed.after);
+      // Only the very file reviewed, at the size shown: anything unknown opens its own review.
+      const sameFile = Boolean(reviewed?.id && p.transcode_action_id === reviewed.id && Number.isFinite(reviewed.after) && Number.isFinite(p.candidate_bytes) && p.candidate_bytes === reviewed.after);
       if (!sameFile || p.regrab_warning) return reviewFilePromotion(id, {unprompted: true});
       return jobControl(id, "action_resume", { decision: "approve", plan_digest: job.promotion.plan_digest }, {decision: {label: "Replace file", verb: "Replacing file", failure: "Replacement failed"}});
     }

@@ -73,6 +73,7 @@ function harness({ integrations = [], latest, legacy = null } = {}) {
       status: "waiting_decision",
       waiting_options: [{ decision: "approve" }],
       promotion: {
+        transcode_action_id: latest?.id,
         original_path: "/media/one.mkv",
         candidate_path: "/media/.candidates/one.mkv",
         original_sha256: "original",
@@ -119,6 +120,7 @@ test("an agent's durable Sonarr child uses its parent integration without browse
   const job = {
     id: "agent",
     candidate_ready: true,
+    outcome: { source_bytes: 1000, candidate_bytes: 400 },
     replacement_context: {
       service: "sonarr",
       series_id: 77,
@@ -148,6 +150,7 @@ test("unknown history offers an explicit local or library choice before creating
   const job = {
     id: "history",
     candidate_ready: true,
+    outcome: { source_bytes: 1000, candidate_bytes: 400 },
     source_path: "/media/file.mp4",
   };
   const h = harness({
@@ -293,12 +296,19 @@ test("a candidate consumed while the selection dialog was open cannot create ano
 });
 
 test("a file that was not reviewed, or a plan for another size, opens its own review instead of approving", async () => {
-  const h = harness({ integrations: [] });
-  for (const reviewed of ["null", '{id: "file", after: 999}']) {
+  const h = harness({ integrations: [], latest: { id: "file" } });
+  // Unknown sizes or files fail closed: the plan opens its own review.
+  for (const reviewed of ["null", '{id: "file", after: 999}', '{id: "file"}', '{id: "other", after: 400}', '{after: 400}']) {
     const seen = watch(h, { jobs: [h.context.planned] });
     h.elements.get("file-review").open = false;
     await h.run(`approveReviewedPlan("planned", ${reviewed})`);
     assert.deepEqual(seen.resumes(), []);
     assert.equal(h.elements.get("file-review").open, true);
   }
+});
+test("the same file at the size shown is approved without a second review", async () => {
+  const h = harness({ integrations: [], latest: { id: "file" } });
+  const seen = watch(h, { jobs: [h.context.planned] });
+  await h.run('approveReviewedPlan("planned", {id: "file", after: 400})');
+  assert.equal(seen.resumes().length, 1);
 });

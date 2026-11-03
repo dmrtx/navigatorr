@@ -3755,6 +3755,8 @@ details.cv-subtitles > summary { min-width: 0; }
 .rr-sizes { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .rr-total { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin: 0 0 8px; font-variant-numeric: tabular-nums; }
 @media (max-width: 420px) { .rr-row { grid-template-columns: minmax(0, 1fr); gap: 2px; } }
+.rr-row[data-unavailable] .rr-file, .rr-row[data-unavailable] .rr-sizes { opacity: .6; }
+.rr-blocked { margin: 0 0 8px; color: var(--muted); }
 
 /* Replace automatically when done: a switch row under the job's title. */
 .jd-auto-replace { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 28px; margin-top: 2px; color: var(--muted); font-size: 13px; cursor: pointer; }
