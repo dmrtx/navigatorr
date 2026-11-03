@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -132,5 +133,93 @@ func TestWorkerSlotSettingsKeepTheCoreBudget(t *testing.T) {
 	}
 	if _, err := s.SetWorkerSlotSettings("node-a", 0, 0, 0, 0, -1); err == nil {
 		t.Fatal("a negative budget was stored")
+	}
+}
+
+func TestWorkerSlotSettingsCompareAndSwap(t *testing.T) {
+	s := openTest(t)
+	row := WorkerSlotSettings{Node: "node-a", VideoSlots: 1, PodcastSlots: 1, Ceiling: 4}
+	first, err := s.CompareAndSwapWorkerSlotSettings(row)
+	if err != nil || first.Revision != 1 {
+		t.Fatalf("first save: %+v %v", first, err)
+	}
+	if _, err := s.CompareAndSwapWorkerSlotSettings(row); !errors.Is(err, ErrWorkerSlotSettingsChanged) {
+		t.Fatalf("revision zero overwrote an existing row: %v", err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, cores := range []int{4, 6} {
+		go func() {
+			<-start
+			update := first
+			update.CoreBudget = cores
+			_, err := s.CompareAndSwapWorkerSlotSettings(update)
+			results <- err
+		}()
+	}
+	close(start)
+	saved, conflicted := 0, 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			saved++
+		case errors.Is(err, ErrWorkerSlotSettingsChanged):
+			conflicted++
+		default:
+			t.Fatal(err)
+		}
+	}
+	got, err := s.GetWorkerSlotSettings("node-a")
+	if saved != 1 || conflicted != 1 || err != nil || got == nil || got.Revision != 2 {
+		t.Fatalf("concurrent saves: saved %d, conflicted %d, row %+v, error %v", saved, conflicted, got, err)
+	}
+	first.Node = "node-b"
+	if _, err := s.CompareAndSwapWorkerSlotSettings(first); !errors.Is(err, ErrWorkerSlotSettingsChanged) {
+		t.Fatalf("a missing row accepted a positive revision: %v", err)
+	}
+}
+
+func TestWorkerSlotSettingsRestoreOnlyCurrentRevision(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unconfigured", true: "configured"}[configured], func(t *testing.T) {
+			s := openTest(t)
+			var previous *WorkerSlotSettings
+			if configured {
+				row, err := s.SetWorkerSlotSettings("node-a", 1, 1, 4, 1, 6)
+				if err != nil {
+					t.Fatal(err)
+				}
+				previous = &row
+			}
+			saved, err := s.SetWorkerSlotSettings("node-a", 3, 1, 0, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RestoreWorkerSlotSettings("node-a", saved.Revision, previous); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.GetWorkerSlotSettings("node-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if previous == nil {
+				if got != nil {
+					t.Fatalf("a refused first save must leave no row: %+v", got)
+				}
+			} else if got == nil || got.VideoSlots != previous.VideoSlots || got.PodcastSlots != previous.PodcastSlots || got.Ceiling != previous.Ceiling || got.X265Slots != previous.X265Slots || got.CoreBudget != previous.CoreBudget || got.Revision != saved.Revision+1 {
+				t.Fatalf("previous settings not restored: %+v", got)
+			}
+			newer, err := s.SetWorkerSlotSettings("node-a", 0, 0, 2, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.RestoreWorkerSlotSettings("node-a", newer.Revision+1, previous); err != nil {
+				t.Fatal(err)
+			}
+			got, err = s.GetWorkerSlotSettings("node-a")
+			if err != nil || got == nil || *got != newer {
+				t.Fatalf("a revision mismatch changed settings: %+v %v", got, err)
+			}
+		})
 	}
 }
