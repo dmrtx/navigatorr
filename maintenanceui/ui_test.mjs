@@ -1778,8 +1778,8 @@ test("a failed queue load stays on screen with a retry when there is nothing els
 
 test("an empty library says whether a search, a folder or the service is empty", () => {
   const h = harness();
-  h.run('$("search").value = "silo"; $("service").value = "sonarr";');
-  assert.match(h.run("emptyLibrary()").children[0].textContent, /Nothing matches “silo”\./);
+  h.run('$("search").value = "kiln"; $("service").value = "sonarr";');
+  assert.match(h.run("emptyLibrary()").children[0].textContent, /Nothing matches “kiln”\./);
   h.run('$("search").value = ""; state.media = null;');
   assert.equal(h.run("emptyLibrary()").children[0].textContent, "Sonarr has no series yet.");
   h.run('$("service").value = "radarr";');
