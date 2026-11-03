@@ -401,15 +401,14 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 	// dedicated Run argument or inside inputs. It does not change workflow
 	// semantics and therefore is excluded from the immutable payload check.
 	delete(existing, "idempotency_key")
-	// A submission without replace_when_done takes the server default, which
-	// is frozen into the stored inputs; replaying it without the field is the
-	// same request even after the default changed.
-	if _, sent := requested["replace_when_done"]; !sent {
-		delete(existing, "replace_when_done")
-	}
+	// replace_when_done is not part of the request's identity: a submission
+	// without it takes the server default, frozen into the stored inputs, and
+	// a rerun freezes the earlier job's value, which can be switched since.
+	// A replay returns the admitted job, whose value only the switch changes.
+	delete(existing, "replace_when_done")
 	requestedCopy := make(map[string]any, len(requested))
 	for key, value := range requested {
-		if key != "idempotency_key" {
+		if key != "idempotency_key" && key != "replace_when_done" {
 			requestedCopy[key] = value
 		}
 	}
@@ -1035,6 +1034,7 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 			if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
 				return nil, saveErr
 			}
+			e.revokeUnusedApproval(inst)
 			// The rejection is durable now; nothing promotes this candidate.
 			if getBool(res.Outputs, candidateRejectedKey) {
 				e.retireCandidate(ctx, inst, ec, candidateRetiredRejected)

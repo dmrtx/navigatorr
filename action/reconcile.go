@@ -47,6 +47,8 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 			defer d.wg.Wait()
 			for {
 				e.startWorkerHoldSync(ctx)
+				// Automatic replacements a crash or an error left behind.
+				e.drainAutoReplacements(ctx)
 				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}

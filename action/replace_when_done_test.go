@@ -19,16 +19,7 @@ func TestPromotionApprovedAheadReplacesOnlyWhileAllowed(t *testing.T) {
 	run := func(h *promotionHarness, approval string) *ActionResult {
 		t.Helper()
 		h.engine.deps.Registry = nil
-		if approval != "" {
-			if err := h.st.GrantReplacementApproval("source-transcode", approval); err != nil {
-				t.Fatal(err)
-			}
-		}
-		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return r
+		return approvedPromotion(t, h, map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode"}, approval)
 	}
 	t.Run("reviewed", func(t *testing.T) {
 		h := newPromotionHarness(t)
@@ -72,13 +63,7 @@ func TestPromotionApprovedAheadReplacesOnlyWhileAllowed(t *testing.T) {
 		h := newPromotionHarness(t)
 		h.tracking = map[string]any{"monitored": true, "qualityProfileId": 4}
 		markCompactSource(t, h)
-		if err := h.st.GrantReplacementApproval("source-transcode", ApprovalReviewed); err != nil {
-			t.Fatal(err)
-		}
-		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"transcode_action_id": "source-transcode", "series_id": 1})
-		if err != nil {
-			t.Fatal(err)
-		}
+		r := approvedPromotion(t, h, map[string]any{"transcode_action_id": "source-transcode", "series_id": 1}, ApprovalReviewed)
 		if r.Status != StatusWaitingDecision || !strings.Contains(r.WaitingReason, CompactRegrabWarning) {
 			t.Fatalf("regrab warning skipped: %s %q", r.Status, r.WaitingReason)
 		}
@@ -212,23 +197,74 @@ func TestReplaceWhenDoneStartsTheReplacementOnlyWhenAsked(t *testing.T) {
 	})
 }
 
-// An approval granted ahead is used once: the first promotion to reach its
-// approval keeps it, and another promotion of the file waits.
-func TestAnApprovalAheadIsBoundToOnePromotion(t *testing.T) {
-	h := newPromotionHarness(t)
-	h.engine.deps.Registry = nil
-	if err := h.st.GrantReplacementApproval("source-transcode", ApprovalReviewed); err != nil {
+// approvedPromotion admits a promotion, grants it an approval ahead the way
+// the server does (after admission, bound to that promotion), then runs it.
+func approvedPromotion(t *testing.T, h *promotionHarness, inputs map[string]any, approval string) *ActionResult {
+	t.Helper()
+	r, err := h.engine.Enqueue(context.Background(), "promote_transcode_candidate", inputs, "approved-ahead")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := h.st.BindReplacementApproval("source-transcode", ApprovalReviewed, "someone-else"); err != nil || !ok {
-		t.Fatal(ok, err)
+	if approval != "" {
+		if err := h.st.GrantReplacementApproval("source-transcode", approval, r.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r, err = h.engine.Resume(context.Background(), r.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// Review 2, item 3: an approval belongs to the promotion it was granted for;
+// another promotion of the file waits, and a rejected plan drops it.
+func TestAnApprovalAheadBelongsToItsPromotion(t *testing.T) {
+	h := newPromotionHarness(t)
+	h.engine.deps.Registry = nil
+	if err := h.st.GrantReplacementApproval("source-transcode", ApprovalReviewed, "someone-else"); err != nil {
+		t.Fatal(err)
 	}
 	r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.Status != StatusWaitingDecision {
-		t.Fatalf("an approval kept by another promotion was used again: %s", r.Status)
+		t.Fatalf("an approval granted for another promotion was used: %s", r.Status)
+	}
+
+	h = newPromotionHarness(t)
+	h.tracking = map[string]any{"monitored": true, "qualityProfileId": 4}
+	markCompactSource(t, h)
+	r = approvedPromotion(t, h, map[string]any{"transcode_action_id": "source-transcode", "series_id": 1}, ApprovalReviewed)
+	if r.Status != StatusWaitingDecision {
+		t.Fatalf("not waiting: %s", r.Status)
+	}
+	if r, err = h.engine.Resume(context.Background(), r.ID, "reject", nil); err != nil || r.Status != StatusFailed {
+		t.Fatal(r, err)
+	}
+	if a, _ := h.st.GetReplacementApproval("source-transcode"); a != nil {
+		t.Fatal("a rejected plan kept its approval", a)
+	}
+}
+
+// Review 2, item 5: an approval its promotion went ahead on counts as
+// approved, even before the promotion saved that.
+func TestSwitchingOffAfterTheApprovalWasUsedIsRefused(t *testing.T) {
+	e, media := finishingTranscode(t, false)
+	r, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true})
+	if err != nil || r.Status != StatusCompleted {
+		t.Fatal(r, err)
+	}
+	promote, _ := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:filesystem:"+r.ID)
+	if promote == nil {
+		t.Fatal("no automatic replacement")
+	}
+	// The approval step took it; the promotion has not saved Approved yet.
+	if ok, why := e.promotionApprovedAhead(&ExecutionContext{InstanceID: promote.ID}, &promotionState{SourceActionID: r.ID}); !ok {
+		t.Fatal("not approved ahead", why)
+	}
+	if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, false); err != ErrReplaceWhenDoneFinished {
+		t.Fatalf("switching off said it would stop a replacement already approved: %v", err)
 	}
 }
 
@@ -285,8 +321,9 @@ func TestAnAutomaticReplacementLeftBehindIsSubmittedLater(t *testing.T) {
 		if err := e.ReconcileOnce(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if inputs := autoPromotion(t, e, r.ID); inputs == nil || inputs["server_approval"] != ApprovalAutomatic {
-			t.Fatalf("the reconciler did not submit it: %v", inputs)
+		// (It then runs and, on this synthetic file, fails its plan.)
+		if inputs := autoPromotion(t, e, r.ID); inputs == nil {
+			t.Fatal("the reconciler did not submit it")
 		}
 		if pending, _, _ := e.deps.Store.AutoReplacePending(r.ID); pending {
 			t.Fatal("still pending")

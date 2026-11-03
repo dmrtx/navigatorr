@@ -5,8 +5,8 @@ import (
 	"errors"
 )
 
-// ReplaceWhenDoneDefaultKey is the preference (scope "maintenance") a job
-// submitted without replace_when_done takes its value from.
+// ReplaceWhenDoneDefaultKey names the setting a job submitted without
+// replace_when_done takes its value from.
 const ReplaceWhenDoneDefaultKey = "replace_when_done_default"
 
 // SetReplaceWhenDone records that a job or batch replaces each finished file
@@ -61,23 +61,30 @@ func (s *Store) ListReplaceWhenDone() (map[string]bool, error) {
 }
 
 // ReplaceWhenDoneDefault is the value a job submitted without
-// replace_when_done takes: false until it is set.
+// replace_when_done takes: false until it is set. It is kept apart from the
+// preferences, which agents can write through memory_set; only
+// PUT /api/maintenance/preferences changes it.
 func (s *Store) ReplaceWhenDoneDefault() (bool, error) {
-	p, err := s.GetPreference("maintenance", ReplaceWhenDoneDefaultKey)
-	if err != nil {
-		// No such preference: never set.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM replace_settings WHERE key=?`, ReplaceWhenDoneDefaultKey).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	return p.ValueJSON == "true", nil
+	return v == "true", err
 }
 
 // SetReplaceWhenDoneDefault stores the default.
 func (s *Store) SetReplaceWhenDoneDefault(value bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	raw := "false"
 	if value {
 		raw = "true"
 	}
-	_, err := s.SetPreference("maintenance", ReplaceWhenDoneDefaultKey, raw, "user", 0)
+	_, err := s.db.Exec(`INSERT INTO replace_settings(key, value, updated_at) VALUES(?, ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, ReplaceWhenDoneDefaultKey, raw, nowStr())
 	return err
 }
 
@@ -86,24 +93,26 @@ func (s *Store) SetReplaceWhenDoneDefault(value bool) error {
 type ReplacementApproval struct {
 	TranscodeActionID string
 	Approval          string
-	PromoteActionID   string // the promotion that used it; "" while unused
+	PromoteActionID   string // the one promotion that can use it
+	Used              bool   // that promotion went ahead on it
 }
 
-// GrantReplacementApproval records a fresh approval for a file, replacing
-// any earlier one; no promotion uses it yet.
-func (s *Store) GrantReplacementApproval(transcodeID, approval string) error {
+// GrantReplacementApproval records a file's approval for one promotion,
+// replacing any earlier one. Only that promotion can use it.
+func (s *Store) GrantReplacementApproval(transcodeID, approval, promoteID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO replacement_approvals(transcode_action_id, approval, promote_action_id, created_at) VALUES(?, ?, '', ?)
-		ON CONFLICT(transcode_action_id) DO UPDATE SET approval=excluded.approval, promote_action_id='', created_at=excluded.created_at`, transcodeID, approval, nowStr())
+	_, err := s.db.Exec(`INSERT INTO replacement_approvals(transcode_action_id, approval, promote_action_id, used, created_at) VALUES(?, ?, ?, 0, ?)
+		ON CONFLICT(transcode_action_id) DO UPDATE SET approval=excluded.approval, promote_action_id=excluded.promote_action_id, used=0, created_at=excluded.created_at`, transcodeID, approval, promoteID, nowStr())
 	return err
 }
 
-// RevokeReplacementApproval drops a file's approval that no promotion used.
-func (s *Store) RevokeReplacementApproval(transcodeID string) error {
+// RevokeReplacementApproval drops a file's approval held by one promotion:
+// its plan was rejected, it failed before its approval, or it never started.
+func (s *Store) RevokeReplacementApproval(transcodeID, promoteID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM replacement_approvals WHERE transcode_action_id=? AND promote_action_id=''`, transcodeID)
+	_, err := s.db.Exec(`DELETE FROM replacement_approvals WHERE transcode_action_id=? AND promote_action_id=?`, transcodeID, promoteID)
 	return err
 }
 
@@ -112,22 +121,24 @@ func (s *Store) GetReplacementApproval(transcodeID string) (*ReplacementApproval
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a := ReplacementApproval{TranscodeActionID: transcodeID}
-	err := s.db.QueryRow(`SELECT approval, promote_action_id FROM replacement_approvals WHERE transcode_action_id=?`, transcodeID).Scan(&a.Approval, &a.PromoteActionID)
+	var used int
+	err := s.db.QueryRow(`SELECT approval, promote_action_id, used FROM replacement_approvals WHERE transcode_action_id=?`, transcodeID).Scan(&a.Approval, &a.PromoteActionID, &used)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	a.Used = used == 1
 	return &a, nil
 }
 
-// BindReplacementApproval marks a file's approval as used by one promotion.
-// It is true when the approval is that promotion's: unused, or already its.
-func (s *Store) BindReplacementApproval(transcodeID, approval, promoteID string) (bool, error) {
+// UseReplacementApproval marks the approval its promotion went ahead on,
+// true when it was that promotion's.
+func (s *Store) UseReplacementApproval(transcodeID, approval, promoteID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE replacement_approvals SET promote_action_id=? WHERE transcode_action_id=? AND approval=? AND (promote_action_id='' OR promote_action_id=?)`, promoteID, transcodeID, approval, promoteID)
+	res, err := s.db.Exec(`UPDATE replacement_approvals SET used=1 WHERE transcode_action_id=? AND approval=? AND promote_action_id=?`, transcodeID, approval, promoteID)
 	if err != nil {
 		return false, err
 	}
@@ -139,7 +150,7 @@ func (s *Store) BindReplacementApproval(transcodeID, approval, promoteID string)
 func (s *Store) ListReplacementApprovals() (map[string]ReplacementApproval, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT transcode_action_id, approval, promote_action_id FROM replacement_approvals`)
+	rows, err := s.db.Query(`SELECT transcode_action_id, approval, promote_action_id, used FROM replacement_approvals`)
 	if err != nil {
 		return nil, err
 	}
@@ -147,9 +158,11 @@ func (s *Store) ListReplacementApprovals() (map[string]ReplacementApproval, erro
 	out := map[string]ReplacementApproval{}
 	for rows.Next() {
 		var a ReplacementApproval
-		if err := rows.Scan(&a.TranscodeActionID, &a.Approval, &a.PromoteActionID); err != nil {
+		var used int
+		if err := rows.Scan(&a.TranscodeActionID, &a.Approval, &a.PromoteActionID, &used); err != nil {
 			return nil, err
 		}
+		a.Used = used == 1
 		out[a.TranscodeActionID] = a
 	}
 	return out, rows.Err()

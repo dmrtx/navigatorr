@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 21
+const SchemaVersion = 22
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -424,16 +424,25 @@ var migrations = []migration{
 		// changed after it was submitted. Its inputs keep the choice it was
 		// submitted with; this row, when present, overrides it.
 		`CREATE TABLE action_replace_when_done (action_id TEXT PRIMARY KEY, value INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+	}},
+	{version: 22, statements: []string{
+		// IF NOT EXISTS: an unreleased build created these under 21.
 		// The approval a file's replacement carries before its plan exists:
 		// reviewed (a person approved the file after seeing its result) or
-		// automatic (its job replaces each file when done). Only the server
-		// writes it; the first promotion to use it is bound to it.
-		`CREATE TABLE replacement_approvals (transcode_action_id TEXT PRIMARY KEY, approval TEXT NOT NULL, promote_action_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		// automatic (its job replaces each file when done), for one
+		// promotion. Only the server writes it.
+		// Recreated: an unreleased build made it without used. Losing one
+		// only makes its replacement wait for a decision.
+		`DROP TABLE IF EXISTS replacement_approvals`,
+		`CREATE TABLE replacement_approvals (transcode_action_id TEXT PRIMARY KEY, approval TEXT NOT NULL, promote_action_id TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)`,
 		// A finished file whose automatic replacement is still to be
 		// submitted; the reconciler picks up any a crash or an error left.
-		`CREATE TABLE auto_replace_pending (transcode_action_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS auto_replace_pending (transcode_action_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
 		// The answer to a POST /api/maintenance/replace, by its submission key.
-		`CREATE TABLE replace_receipts (key TEXT PRIMARY KEY, request TEXT NOT NULL, status INTEGER NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS replace_receipts (key TEXT PRIMARY KEY, request TEXT NOT NULL, status INTEGER NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL)`,
+		// Settings only the maintenance API writes (never memory_set): the
+		// value a job submitted without replace_when_done takes.
+		`CREATE TABLE IF NOT EXISTS replace_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 	}},
 }
 

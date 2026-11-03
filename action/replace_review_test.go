@@ -307,14 +307,18 @@ func TestReplaceKeepsTheAnswerToAKey(t *testing.T) {
 }
 
 // Review item 8: a replacement that was rejected, or refused before its
-// approval, can be replaced again from the list.
+// approval, can be replaced again from the list. Review 2, item 7: its new
+// plan is one nobody saw, so it is planned again and waits for a decision.
 func TestReplaceRetriesARejectedOrRefusedReplacement(t *testing.T) {
 	for _, step := range []int{0, 1} {
 		e, st := reviewEngine(t)
 		seedReady(t, st, "file-a", "")
 		seedPromotion(t, st, "earlier", "file-a", StatusFailed, step, map[string]any{})
+		if err := st.GrantReplacementApproval("file-a", ApprovalReviewed, "earlier"); err != nil {
+			t.Fatal(err)
+		}
 		a := mustReplace(t, e, replaceIDs("file-a"))
-		if files := answerFiles(t, a); a.Status != 202 || len(files) != 1 || files[0].Approved != replaceRetry || files[0].ReplacementActionID != "earlier" {
+		if files := answerFiles(t, a); a.Status != 202 || len(files) != 1 || files[0].Approved != "" || files[0].Reason != ReplaceNeedsReview || !files[0].Started || files[0].ReplacementActionID != "earlier" {
 			t.Fatal(step, a.Status, a.Body)
 		}
 		if inst, _ := st.GetActionInstance("earlier"); inst.CurrentStep != 0 {
@@ -324,8 +328,8 @@ func TestReplaceRetriesARejectedOrRefusedReplacement(t *testing.T) {
 		if cmd == nil || decodeInputs(cmd.InputsJSON)["kind"] != "retry" {
 			t.Fatal("no retry queued", cmd)
 		}
-		if got, _ := st.GetReplacementApproval("file-a"); got == nil || got.Approval != ApprovalReviewed {
-			t.Fatal("not approved", got)
+		if got, _ := st.GetReplacementApproval("file-a"); got != nil {
+			t.Fatal("a plan nobody saw was approved", got)
 		}
 	}
 	// Past its approval, a failed replacement is not started again from here.
@@ -364,4 +368,81 @@ func TestABatchPlanLeavesOutAFileReplacedByItself(t *testing.T) {
 	}
 	e.replaceMu.Unlock()
 	<-built
+}
+
+// Review 2, item 1: the service's own reconciler loop submits an automatic
+// replacement a crash left behind.
+func TestTheReconcilerLoopSubmitsALeftoverAutomaticReplacement(t *testing.T) {
+	e, st := reviewEngine(t)
+	e.deps.ReconcileInterval = 20 * time.Millisecond
+	seedReady(t, st, "file-a", "")
+	if err := st.SetReplaceWhenDone("file-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAutoReplacePending("file-a"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := e.StartReconciler(ctx)
+	defer func() { cancel(); <-done }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if pending, _, _ := st.AutoReplacePending("file-a"); !pending {
+			if p, _ := st.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:filesystem:file-a"); p != nil {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the reconciler loop never submitted it")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Review 2, item 6: a note that has to wait for the job's lease is still
+// written, and not under the replacement lock.
+func TestASkippedNoteWaitsForTheJobsLease(t *testing.T) {
+	e, st := reviewEngine(t)
+	seedReady(t, st, "file-a", "")
+	if err := st.SetReplaceWhenDone("file-a", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAutoReplacePending("file-a"); err != nil {
+		t.Fatal(err)
+	}
+	e.beforeAutoEnqueue = func(string) error { return errors.New("admission is closed") }
+	_, release, err := e.claimExecution(context.Background(), "file-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(3 * time.Second); release() }()
+	submitted := make(chan struct{})
+	go func() { e.submitAutoReplacement(context.Background(), "file-a", false); close(submitted) }()
+	time.Sleep(200 * time.Millisecond)
+	locked := make(chan struct{})
+	go func() { e.replaceMu.Lock(); e.replaceMu.Unlock(); close(locked) }()
+	select {
+	case <-locked:
+	case <-time.After(time.Second):
+		t.Fatal("the replacement lock is held while waiting for a job's lease")
+	}
+	<-submitted
+	inst, _ := st.GetActionInstance("file-a")
+	if !strings.Contains(getString(decodeInputs(inst.OutputsJSON), "replace_when_done_skipped"), "admission is closed") {
+		t.Fatal("the note was dropped")
+	}
+}
+
+// Review 2, item 8: replaying a submission after its replace_when_done was
+// switched (a rerun freezes the value it had) returns the admitted job.
+func TestAReplayIgnoresAChangedReplaceWhenDone(t *testing.T) {
+	e, media := finishingTranscode(t, true)
+	first, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": false}, "rerun-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := e.Enqueue(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true}, "rerun-key")
+	if err != nil || again.ID != first.ID {
+		t.Fatalf("a replay was refused or admitted again: %v %v", again, err)
+	}
 }

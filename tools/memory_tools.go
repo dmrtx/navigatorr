@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"github.com/jakenesler/navigatorr/store"
+
 	"context"
 	"time"
 
@@ -30,6 +32,9 @@ func registerMemoryTools(s *server.MCPServer, d *Deps) {
 			source := argString(args, "source", "user")
 			if key == "" {
 				return toolErr("key is required"), nil
+			}
+			if key == store.ReplaceWhenDoneDefaultKey {
+				return toolErr("%s is a maintenance setting: change it in the web app's preferences", key), nil
 			}
 			value, err := argJSON(args, "value")
 			if err != nil {

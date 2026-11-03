@@ -169,7 +169,8 @@ func (e *Engine) autoReplacementOutstanding(transcodeID string) bool {
 		return true
 	}
 	approval, err := e.deps.Store.GetReplacementApproval(transcodeID)
-	if err != nil || approval == nil || approval.Approval != ApprovalAutomatic {
+	if err != nil || approval == nil || approval.Approval != ApprovalAutomatic || approval.Used {
+		// Used: its promotion went ahead on it, even if not saved yet.
 		return false
 	}
 	prior, err := e.priorPromotion(transcodeID)
@@ -249,72 +250,81 @@ func (e *Engine) drainAutoReplacements(ctx context.Context) {
 
 // submitAutoReplacement submits one pending automatic replacement, under the
 // replacement lock and after every check again. leased is true while the
-// caller holds the transcode's execution lease (its own completion).
+// caller holds the transcode's execution lease (its own completion). A note
+// on the job, when there is one, is written after the lock is released.
 func (e *Engine) submitAutoReplacement(ctx context.Context, id string, leased bool) {
 	ctx = context.WithoutCancel(ctx)
+	if note := e.submitAutoReplacementLocked(ctx, id); note != "" {
+		e.noteAutoReplaceSkipped(ctx, id, note, leased)
+	}
+}
+
+func (e *Engine) submitAutoReplacementLocked(ctx context.Context, id string) (note string) {
 	e.replaceMu.Lock()
 	defer e.replaceMu.Unlock()
 	pending, attempts, err := e.deps.Store.AutoReplacePending(id)
 	if err != nil || !pending {
-		return
+		return ""
 	}
 	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
 	if err != nil {
-		return
+		return ""
 	}
 	if inst == nil || inst.Status == StatusFailed || inst.Status == StatusCancelled {
 		_ = e.deps.Store.DoneAutoReplacePending(id)
-		return
+		return ""
 	}
 	if inst.Status != StatusCompleted {
-		return // it completes again and is judged then
+		return "" // it completes again and is judged then
 	}
 	if !e.ReplaceWhenDone(inst) {
 		_ = e.deps.Store.DoneAutoReplacePending(id)
-		return
+		return ""
 	}
 	if !e.AllowDestructive() {
 		_ = e.deps.Store.DoneAutoReplacePending(id)
-		e.noteAutoReplaceSkipped(ctx, id, "replacement is disabled in the server settings", leased)
-		return
+		return "replacement is disabled in the server settings"
 	}
 	check := e.replacement(inst, decodeInputs(inst.InputsJSON), decodeInputs(inst.StateJSON), decodeInputs(inst.OutputsJSON), nil)
 	if check.Code != "" || check.Prior != nil {
 		// Another job replaces it, or it is no longer ready: nothing to do.
 		_ = e.deps.Store.DoneAutoReplacePending(id)
 		if check.Code == ReplaceNeedsLibrary {
-			e.noteAutoReplaceSkipped(ctx, id, "it needs a library choice: use its Replace", leased)
+			return "it needs a library choice: use its Replace"
 		}
-		return
+		return ""
 	}
-	if err = e.deps.Store.GrantReplacementApproval(id, ApprovalAutomatic); err == nil {
-		if e.beforeAutoEnqueue != nil {
-			err = e.beforeAutoEnqueue(id)
-		}
-		if err == nil {
-			_, err = e.Enqueue(WithOrigin(ctx, "automatic"), "promote_transcode_candidate", check.Inputs, "auto-replace:"+id)
-		}
-		if err == nil {
+	if e.beforeAutoEnqueue != nil {
+		err = e.beforeAutoEnqueue(id)
+	}
+	var r *ActionResult
+	if err == nil {
+		r, err = e.Enqueue(WithOrigin(ctx, "automatic"), "promote_transcode_candidate", check.Inputs, "auto-replace:"+id)
+	}
+	if err != nil {
+		log.Printf("replace when done: %s: %v", id, err)
+		_ = e.deps.Store.FailAutoReplacePending(id, err.Error())
+		if attempts+1 >= autoReplaceAttempts {
 			_ = e.deps.Store.DoneAutoReplacePending(id)
-			e.WakeReconciler()
-			return
 		}
-		_ = e.deps.Store.RevokeReplacementApproval(id)
+		return "the automatic replacement could not be started: " + err.Error()
 	}
-	log.Printf("replace when done: %s: %v", id, err)
-	_ = e.deps.Store.FailAutoReplacePending(id, err.Error())
-	if attempts+1 >= autoReplaceAttempts {
-		_ = e.deps.Store.DoneAutoReplacePending(id)
+	// Still under the lock, so the promotion cannot reach its approval first.
+	_ = e.deps.Store.DoneAutoReplacePending(id)
+	e.WakeReconciler()
+	if err := e.deps.Store.GrantReplacementApproval(id, ApprovalAutomatic, r.ID); err != nil {
+		return "the automatic approval could not be recorded, so its replacement waits for a decision: " + err.Error()
 	}
-	e.noteAutoReplaceSkipped(ctx, id, "the automatic replacement could not be started: "+err.Error(), leased)
+	return ""
 }
 
 // noteAutoReplaceSkipped says on a finished job why it was not replaced by
-// itself.
+// itself. Never under the replacement lock: it can wait for the job's lease.
 func (e *Engine) noteAutoReplaceSkipped(ctx context.Context, id, why string, leased bool) {
 	if !leased {
-		lease, release, err := e.claimExecutionWithin(ctx, id, 2*time.Second)
+		lease, release, err := e.claimExecutionWithin(ctx, id, 30*time.Second)
 		if err != nil {
+			log.Printf("replace when done: %s: note not saved: %s", id, why)
 			return
 		}
 		defer release()
@@ -347,6 +357,10 @@ const (
 	ReplaceNeedsLibrary     = "needs_library_choice" // its library is not known: replace it from its own review
 	ReplacePlanChanged      = "plan_changed"         // its planned replacement is not the plan the client sent
 	ReplaceNeedsDecision    = "needs_decision"       // its plan carries a regrab warning: decide on it in its review
+	// ReplaceNeedsReview: a replacement that was rejected or refused before
+	// its approval is planned again and waits; show its new plan, then send
+	// its plan_digest.
+	ReplaceNeedsReview = "needs_review"
 )
 
 // How a replacement of a file goes ahead.
@@ -548,10 +562,13 @@ type ReplaceFile struct {
 	ReplacementActionID string `json:"replacement_action_id,omitempty"`
 	// Approved: new (a new replacement), queued (one already submitted, now
 	// approved), waiting_plan (one waiting on the plan sent, approved),
-	// retry (one rejected or refused before approval, planned again and
-	// approved).
+	// "" with reason needs_review (one rejected or refused before approval,
+	// planned again and waiting for a decision).
 	Approved string `json:"approved,omitempty"`
-	Error    string `json:"error,omitempty"`
+	// Reason is needs_review for a file that started without an approval:
+	// its replacement waits on a plan the client has not seen.
+	Reason string `json:"reason,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // ReplaceRequest is what a person reviewed: the files, and for a file whose
@@ -675,31 +692,29 @@ func (e *Engine) submitReviewed(ctx context.Context, req ReplaceRequest, id stri
 		}
 		return ReplaceFile{ID: id, Started: true, ReplacementActionID: check.Prior.ID, Approved: replaceWaiting}, nil
 	case replaceQueued:
-		if err := e.deps.Store.GrantReplacementApproval(id, ApprovalReviewed); err != nil {
+		if err := e.deps.Store.GrantReplacementApproval(id, ApprovalReviewed, check.Prior.ID); err != nil {
 			return ReplaceFile{}, err
 		}
 		return ReplaceFile{ID: id, Started: true, ReplacementActionID: check.Prior.ID, Approved: replaceQueued}, nil
 	case replaceRetry:
-		if err := e.deps.Store.GrantReplacementApproval(id, ApprovalReviewed); err != nil {
-			return ReplaceFile{}, err
-		}
+		// Its new plan is one nobody saw: it is planned again and waits for
+		// a decision, which the client takes after showing it.
+		_ = e.deps.Store.RevokeReplacementApproval(id, check.Prior.ID)
 		if err := e.replanPromotion(ctx, check.Prior.ID); err != nil {
-			_ = e.deps.Store.RevokeReplacementApproval(id)
 			return ReplaceFile{}, err
 		}
 		if _, err := e.QueueMaintenanceCommand(ctx, map[string]any{"id": check.Prior.ID, "kind": "retry"}, "replace-"+req.Key+"-"+check.Prior.ID); err != nil {
-			_ = e.deps.Store.RevokeReplacementApproval(id)
 			return ReplaceFile{}, err
 		}
-		return ReplaceFile{ID: id, Started: true, ReplacementActionID: check.Prior.ID, Approved: replaceRetry}, nil
-	}
-	if err := e.deps.Store.GrantReplacementApproval(id, ApprovalReviewed); err != nil {
-		return ReplaceFile{}, err
+		return ReplaceFile{ID: id, Started: true, ReplacementActionID: check.Prior.ID, Reason: ReplaceNeedsReview}, nil
 	}
 	r, err := e.Enqueue(WithOrigin(ctx, "web"), "promote_transcode_candidate", check.Inputs, "replace:"+id)
 	if err != nil {
-		_ = e.deps.Store.RevokeReplacementApproval(id)
 		return ReplaceFile{}, err
+	}
+	// Still under the lock, so the promotion cannot reach its approval first.
+	if err := e.deps.Store.GrantReplacementApproval(id, ApprovalReviewed, r.ID); err != nil {
+		return ReplaceFile{ID: id, Started: true, ReplacementActionID: r.ID, Reason: ReplaceNeedsReview, Error: "the approval could not be recorded; the replacement waits for a decision: " + err.Error()}, nil
 	}
 	return ReplaceFile{ID: id, Started: true, ReplacementActionID: r.ID, Approved: replaceNew}, nil
 }
@@ -746,7 +761,7 @@ func (e *Engine) promotionApprovedAhead(ec *ExecutionContext, p *promotionState)
 	e.replaceMu.Lock()
 	defer e.replaceMu.Unlock()
 	approval, err := e.deps.Store.GetReplacementApproval(p.SourceActionID)
-	if err != nil || approval == nil || approval.PromoteActionID != "" && approval.PromoteActionID != ec.InstanceID {
+	if err != nil || approval == nil || approval.PromoteActionID != ec.InstanceID {
 		return false, ""
 	}
 	switch approval.Approval {
@@ -762,13 +777,32 @@ func (e *Engine) promotionApprovedAhead(ec *ExecutionContext, p *promotionState)
 	if p.RegrabWarning != "" {
 		return false, ""
 	}
-	bound, err := e.deps.Store.BindReplacementApproval(p.SourceActionID, approval.Approval, ec.InstanceID)
-	return err == nil && bound, ""
+	// Marked used under the lock: a switch made after this sees it approved.
+	used, err := e.deps.Store.UseReplacementApproval(p.SourceActionID, approval.Approval, ec.InstanceID)
+	return err == nil && used, ""
+}
+
+// revokeUnusedApproval drops the approval a promotion held when its plan was
+// rejected or it failed before its approval: a later replacement of the file
+// needs one of its own.
+func (e *Engine) revokeUnusedApproval(inst *store.ActionInstance) {
+	if inst.ActionName != "promote_transcode_candidate" || inst.CurrentStep > 1 || e.deps.Store == nil {
+		return
+	}
+	source := getString(decodeInputs(inst.InputsJSON), "transcode_action_id")
+	if source == "" {
+		return
+	}
+	e.replaceMu.Lock()
+	defer e.replaceMu.Unlock()
+	if a, err := e.deps.Store.GetReplacementApproval(source); err == nil && a != nil && a.PromoteActionID == inst.ID && !a.Used {
+		_ = e.deps.Store.RevokeReplacementApproval(source, inst.ID)
+	}
 }
 
 // ReplacedAutomatically says a promotion went ahead on its job's automatic
 // approval.
 func ReplacedAutomatically(promoteID, transcodeID string, approvals map[string]store.ReplacementApproval) bool {
 	a, ok := approvals[transcodeID]
-	return ok && a.Approval == ApprovalAutomatic && a.PromoteActionID == promoteID
+	return ok && a.Approval == ApprovalAutomatic && a.PromoteActionID == promoteID && a.Used
 }
