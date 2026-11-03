@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 23
+const SchemaVersion = 24
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -449,6 +449,11 @@ var migrations = []migration{
 		// while it is paused, none otherwise. mode is 'graceful' (finish what
 		// is encoding) or 'immediate' (send it back to the queue now).
 		`CREATE TABLE IF NOT EXISTS worker_pauses (worker TEXT PRIMARY KEY, mode TEXT NOT NULL, since TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
+	}},
+	{version: 24, statements: []string{
+		// How many of a node's CPUs encodes may use together, so the rest of the
+		// machine stays free for other work. 0 is all of them.
+		`ALTER TABLE worker_slot_settings ADD COLUMN core_budget INTEGER NOT NULL DEFAULT 0`,
 	}},
 }
 

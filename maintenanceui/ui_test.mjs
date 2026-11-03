@@ -2330,6 +2330,50 @@ test("the x265 limit is offered only by a worker that reports it, keeps unsaved 
   assert.equal(h.elements.get("worker-x265-row").hidden,false);
 });
 
+test("the core budget is offered only by a worker that reports it, keeps unsaved picks and is saved without touching the split", async () => {
+  const h=harness();
+  h.context.calls=[];
+  h.context.stored={video_slots:2,podcast_slots:1};
+  h.run('api=async(path,body)=>{if(!body)return {settings:stored};calls.push([path,body]);return {applied:true,warnings:["Four threads each."]}};refreshWorkerActivity=async()=>{};');
+  const slots=cores=>({ceiling:2,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:false,video:{total:2,used:1},podcast:{total:2,used:0},...(cores===undefined?{}:{core_budget:cores})});
+  h.context.activity={available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:1,jobs:[],slots:slots(0)}};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-cores-row").hidden,false);
+  const pick=h.elements.get("core-budget");
+  assert.deepEqual(pick.children.map(o=>[o.value,o.textContent]),[["0","All 10 cores"],["9","9 of 10 cores"],["8","8 of 10 cores"],["7","7 of 10 cores"],["6","6 of 10 cores"],["5","5 of 10 cores"],["4","4 of 10 cores"]]);
+  assert.equal(pick.value,"0");
+  assert.equal(h.elements.get("worker-cores-limit").textContent,"All 10 cores.");
+  // A budget is shown as the pick and as text.
+  h.context.activity.activity.slots=slots(6);
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(pick.value,"6");
+  assert.match(h.elements.get("worker-cores-limit").textContent,/At most 6 of 10 cores, at a lower priority/);
+  // An unsaved pick survives the next poll.
+  pick.value="8";
+  pick.listeners.get("change")();
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(pick.value,"8");
+  // Saving sends the budget with the stored split and nothing else.
+  await h.run('saveCoreBudget(8)');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:2,podcast_slots:1,core_budget:8}]);
+  assert.match(h.elements.get("worker-cores-note").textContent,/Applied\. Takes effect as the next job starts; running jobs keep the cores they have\. Four threads each\./);
+  h.context.activity.activity.slots=slots(8);
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(pick.value,"8");
+  // The other forms leave the budget alone: they send no core field.
+  await h.run('saveParallelJobs(3)');
+  assert.equal("core_budget" in h.context.calls[1][1],false);
+  await h.run('saveX265Limit(1)');
+  assert.equal("core_budget" in h.context.calls[2][1],false);
+  // A worker that predates the budget never shows it, nor does one with nothing to limit.
+  h.context.activity.activity.slots=slots(undefined);
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-cores-row").hidden,true);
+  h.context.activity.activity.slots={...slots(0),host_cpus:4};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-cores-row").hidden,true);
+});
+
 test("the slot table names the encoder of a full conversion", () => {
   const h=harness();
   h.elements.get("x265-limit").options=[{value:"0"},{value:"1"}];

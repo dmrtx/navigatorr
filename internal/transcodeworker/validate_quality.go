@@ -427,7 +427,7 @@ func (w *Worker) finalValidationConcurrency(windows int) int {
 		}
 		perPass = w.cfg.MetricThreads
 	}
-	return max(1, min(maxFinalValidationConcurrency, windows, hostCPUCount()/jobs/perPass))
+	return max(1, min(maxFinalValidationConcurrency, windows, w.cpuBudget()/jobs/perPass))
 }
 
 // runFinalWindows measures windows 0..n-1 with at most concurrency in flight

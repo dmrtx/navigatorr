@@ -35,6 +35,9 @@ type WorkerSlots struct {
 	// X265 is the cap on x265 encodes inside the video pool (Total 0: no
 	// cap). Nil from a worker that predates the cap.
 	X265 *SlotPool `json:"x265,omitempty"`
+	// CoreBudget is how many of the host's CPUs encodes may use together (0:
+	// all of them). Nil from a worker that predates the budget.
+	CoreBudget *int `json:"core_budget,omitempty"`
 }
 
 // Ceiling sources a worker reports.
@@ -49,6 +52,17 @@ func (s WorkerSlots) CeilingAdjustable() bool { return s.CeilingLimit > 0 }
 // X265Capable reports whether the worker accepts an x265 cap.
 func (s WorkerSlots) X265Capable() bool { return s.X265 != nil }
 
+// CoreBudgetCapable reports whether the worker accepts a core budget.
+func (s WorkerSlots) CoreBudgetCapable() bool { return s.CoreBudget != nil }
+
+// Cores is the budget the worker runs, 0 for none or an older worker.
+func (s WorkerSlots) Cores() int {
+	if s.CoreBudget == nil {
+		return 0
+	}
+	return *s.CoreBudget
+}
+
 // SlotSplit is the per-kind slot assignment the server pushes to a worker.
 // Zero values for both clear the split and return the worker to one shared
 // pool. Ceiling, when positive, also sets how many jobs the worker runs at
@@ -59,11 +73,18 @@ func (s WorkerSlots) X265Capable() bool { return s.X265 != nil }
 // inside the video pool, so a VideoToolbox encode can run beside one; zero is
 // no cap. A worker that predates it refuses the field, so it is only sent to
 // one that reports X265.
+//
+// CoreBudget, when positive, limits the CPUs encodes use together so the rest
+// of the host stays free for other work (a build, say): x265 thread pools and
+// quality checks are sized from it instead of from every CPU, and the job
+// processes run at a lower priority. Zero is no limit. A worker that predates
+// it refuses the field, so it is only sent to one that reports CoreBudget.
 type SlotSplit struct {
 	VideoSlots   int `json:"video_slots"`
 	PodcastSlots int `json:"podcast_slots"`
 	Ceiling      int `json:"ceiling,omitempty"`
 	X265Slots    int `json:"x265_slots,omitempty"`
+	CoreBudget   int `json:"core_budget,omitempty"`
 }
 
 // Shared reports whether the assignment clears the video/podcast split (the
@@ -83,6 +104,22 @@ func (s SlotSplit) VideoPool(ceiling int) int {
 func ValidateSlotCeiling(ceiling, limit int) error {
 	if ceiling < 1 || ceiling > limit {
 		return fmt.Errorf("parallel jobs must be between 1 and %d on this worker", max(limit, 1))
+	}
+	return nil
+}
+
+// ValidateCoreBudget checks a core budget against the host. Zero is no limit.
+// A limit has to leave x265 at least MinX265PoolThreads threads (fewer would
+// change the encoded bitstream) and be lower than the host's CPUs to limit
+// anything. hostCPUs <= 0 means the CPU count is unknown.
+func ValidateCoreBudget(budget, hostCPUs int) error {
+	switch {
+	case budget == 0:
+		return nil
+	case budget < MinX265PoolThreads:
+		return fmt.Errorf("cores must be at least %d, or 0 to use them all", MinX265PoolThreads)
+	case hostCPUs > 0 && budget >= hostCPUs:
+		return fmt.Errorf("cores must be fewer than the worker's %d CPUs, or 0 to use them all", hostCPUs)
 	}
 	return nil
 }
@@ -118,8 +155,20 @@ func ValidateSlotSplit(split SlotSplit, ceiling, hostCPUs int) (warnings []strin
 	if pool := split.VideoPool(ceiling); split.X265Slots < 0 || split.X265Slots > pool {
 		return nil, fmt.Errorf("x265_slots must be between 0 and the %d video slots", pool)
 	}
+	if err := ValidateCoreBudget(split.CoreBudget, hostCPUs); err != nil {
+		return nil, err
+	}
+	if split.CoreBudget > 0 {
+		encodes := split.VideoPool(ceiling)
+		if split.X265Slots > 0 && split.X265Slots < encodes {
+			encodes = split.X265Slots
+		}
+		if encodes > 1 && split.CoreBudget/encodes < MinX265PoolThreads {
+			warnings = append(warnings, fmt.Sprintf("%d cores for up to %d encodes at once leave fewer than %d threads each, so every encode still gets %d and together they can use more than %d cores", split.CoreBudget, encodes, MinX265PoolThreads, MinX265PoolThreads, split.CoreBudget))
+		}
+	}
 	if split.Shared() {
-		return nil, nil
+		return warnings, nil
 	}
 	switch {
 	case split.VideoSlots < 1:

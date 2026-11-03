@@ -90,8 +90,8 @@ func (w *Worker) x265ThreadParams() string {
 	// changes meanwhile.
 	limits := w.slotLimits()
 	pool := limits.x265Pool()
-	params := w.x265ThreadParamsForJobs(min(w.x265JobsSharingCPU(limits), pool))
-	if params == "" || w.x265PartitionDisabled(strings.Join(w.x265PartitionCandidatesFor(pool), ",")) {
+	params := w.x265ThreadParamsWithBudget(min(w.x265JobsSharingCPU(limits), pool), limits.CoreBudget)
+	if params == "" || w.x265PartitionDisabled(strings.Join(w.x265PartitionCandidatesWithBudget(pool, limits.CoreBudget), ",")) {
 		return ""
 	}
 	return params
@@ -103,18 +103,39 @@ func (w *Worker) configuredX265ThreadParams() string {
 	if w == nil || w.cfg == nil {
 		return ""
 	}
-	return w.x265ThreadParamsForJobs(w.slotLimits().x265Pool())
+	limits := w.slotLimits()
+	return w.x265ThreadParamsWithBudget(limits.x265Pool(), limits.CoreBudget)
 }
 
 // x265ThreadParamsForJobs partitions x265 thread pools between jobs x265 encodes
-// running together: x265_pools wins when positive, -1 disables partitioning,
-// and 0 splits the host CPUs evenly across jobs.
+// running together under the stored core budget. See x265ThreadParamsWithBudget.
 func (w *Worker) x265ThreadParamsForJobs(jobs int) string {
+	if w == nil || w.cfg == nil {
+		return ""
+	}
+	return w.x265ThreadParamsWithBudget(jobs, w.slotLimits().CoreBudget)
+}
+
+// x265ThreadParamsWithBudget partitions x265 thread pools between jobs x265
+// encodes running together: x265_pools wins when positive, -1 disables
+// partitioning, and 0 splits the host CPUs evenly across jobs. A core budget
+// (0: none) splits only that many CPUs, never giving a job fewer than
+// minX265PoolThreads, and caps an explicit x265_pools the same way; unlike the
+// host it also partitions a single job, since one job alone must not take
+// every CPU.
+func (w *Worker) x265ThreadParamsWithBudget(jobs, budget int) string {
 	if w == nil || w.cfg == nil || w.cfg.X265Pools < 0 {
 		return ""
 	}
 	cpus := hostCPUCount()
 	pools := w.cfg.X265Pools
+	if budget > 0 && budget < cpus {
+		share := max(minX265PoolThreads, budget/max(jobs, 1))
+		if pools == 0 || share < pools {
+			pools = share
+		}
+		return x265ThreadParamsFor(cpus, pools)
+	}
 	if pools == 0 {
 		if jobs <= 1 {
 			return ""
@@ -131,26 +152,41 @@ func (w *Worker) x265PartitionCandidates() []string {
 	if w == nil || w.cfg == nil {
 		return nil
 	}
-	return w.x265PartitionCandidatesFor(w.slotLimits().x265Pool())
+	limits := w.slotLimits()
+	return w.x265PartitionCandidatesWithBudget(limits.x265Pool(), limits.CoreBudget)
 }
 
 // x265PartitionCandidatesFor is x265PartitionCandidates for an x265 pool of
-// pool slots.
+// pool slots, under the stored core budget.
 func (w *Worker) x265PartitionCandidatesFor(pool int) []string {
+	if w == nil || w.cfg == nil {
+		return nil
+	}
+	return w.x265PartitionCandidatesWithBudget(pool, w.slotLimits().CoreBudget)
+}
+
+// x265PartitionCandidatesWithBudget is x265PartitionCandidatesFor under a core
+// budget. With one, a single encode is partitioned too.
+func (w *Worker) x265PartitionCandidatesWithBudget(pool, budget int) []string {
 	if w == nil || w.cfg == nil || w.cfg.X265Pools < 0 {
 		return nil
 	}
-	if w.cfg.X265Pools > 0 {
+	limited := budget > 0 && budget < hostCPUCount()
+	if w.cfg.X265Pools > 0 && !limited {
 		// An explicit pool does not depend on the job count.
-		if params := w.x265ThreadParamsForJobs(1); params != "" {
+		if params := w.x265ThreadParamsWithBudget(1, 0); params != "" {
 			return []string{params}
 		}
 		return nil
 	}
+	first := 2
+	if limited {
+		first = 1
+	}
 	var out []string
 	seen := map[string]bool{}
-	for jobs := 2; jobs <= pool; jobs++ {
-		if params := w.x265ThreadParamsForJobs(jobs); params != "" && !seen[params] {
+	for jobs := first; jobs <= pool; jobs++ {
+		if params := w.x265ThreadParamsWithBudget(jobs, budget); params != "" && !seen[params] {
 			seen[params] = true
 			out = append(out, params)
 		}

@@ -15,6 +15,7 @@ func TestADatabaseAtTwentyOneGetsTheReplacementTables(t *testing.T) {
 	}
 	for _, stmt := range []string{
 		`DROP TABLE replacement_approvals`, `DROP TABLE auto_replace_pending`, `DROP TABLE replace_receipts`, `DROP TABLE replace_settings`,
+		`ALTER TABLE worker_slot_settings DROP COLUMN core_budget`,
 		`DELETE FROM schema_version WHERE version > 21`,
 	} {
 		if _, err := st.db.Exec(stmt); err != nil {

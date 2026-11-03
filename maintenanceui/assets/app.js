@@ -7182,19 +7182,20 @@ function renderNodePicker(nodes, selected) {
 // A picked node that does not report: its settings cannot be read or saved.
 function renderUnavailableNode(selected) {
   state.workerSlots = null;
-  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = false;
+  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = state.coresFormDirty = false;
   $("settings-node").hidden = false;
   $("worker-parallel-summary").hidden = true;
   $("worker-parallel-form").hidden = true;
   $("worker-x265-row").hidden = true;
+  $("worker-cores-row").hidden = true;
   $("worker-slot-split").hidden = true;
   $("worker-slot-usage").hidden = true;
   $("worker-parallel-limit").textContent = `${selected.name} is unavailable. Its settings can be changed once it reports again.`;
 }
 $("settings-node-pick").addEventListener("change", () => {
   state.slotNode = $("settings-node-pick").value;
-  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = false;
-  $("worker-parallel-note").textContent = $("worker-slot-note").textContent = $("worker-x265-note").textContent = "";
+  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = state.coresFormDirty = false;
+  $("worker-parallel-note").textContent = $("worker-slot-note").textContent = $("worker-x265-note").textContent = $("worker-cores-note").textContent = "";
   renderWorkerActivity(state.activityData);
 });
 async function saveWorkerSlots(video, podcast) {
@@ -7278,6 +7279,48 @@ $("worker-x265-form").addEventListener("submit", event => {
   void saveX265Limit(Number($("x265-limit").value));
 });
 $("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; });
+// How many of the node's CPUs encodes may use together, so the rest stays free
+// for other work (a build, say) without pausing the node. Only a worker that
+// reports the budget takes it, and only a host with more CPUs than x265's
+// smallest pool has anything to limit.
+function renderCoreBudget(activity) {
+  const slots = activity.slots, cpus = Number(slots?.host_cpus) || 0;
+  const row = $("worker-cores-row"), pick = $("core-budget");
+  row.hidden = !slots || slots.core_budget == null || cpus <= 4;
+  if (row.hidden) { $("worker-cores-note").textContent = ""; return; }
+  const budget = Number(slots.core_budget) || 0;
+  $("worker-cores-limit").textContent = budget
+    ? `At most ${budget} of ${cpus} cores, at a lower priority so other work on this machine wins the CPU.`
+    : `All ${cpus} cores.`;
+  // Never overwrite what is being picked and has not been saved.
+  if (state.coresFormDirty || $("worker-cores-form").contains(document.activeElement)) return;
+  const values = [0];
+  for (let n = cpus - 1; n >= 4; n--) values.push(n);
+  const labels = values.map(n => n ? `${n} of ${cpus} cores` : `All ${cpus} cores`);
+  if ([...pick.children].map(o => o.textContent).join() !== labels.join()) pick.replaceChildren(...values.map((n, i) => { const option = node("option", labels[i]); option.value = String(n); return option; }));
+  pick.value = String(budget);
+}
+async function saveCoreBudget(cores) {
+  const note = $("worker-cores-note");
+  note.textContent = "Saving…";
+  try {
+    // The split to send back is the stored one, as for the x265 limit.
+    const stored = (await api(workerSlotsPath()))?.settings;
+    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
+    state.coresFormDirty = false;
+    const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs keep the cores they have." : (result.message || "Saved. The worker has not confirmed yet.")];
+    for (const warning of result.warnings || []) parts.push(warning);
+    note.textContent = parts.join(" ");
+    void refreshWorkerActivity(true);
+  } catch (e) {
+    note.textContent = e.message;
+  }
+}
+$("worker-cores-form").addEventListener("submit", event => {
+  event.preventDefault();
+  void saveCoreBudget(Number($("core-budget").value));
+});
+$("core-budget").addEventListener("change", () => { state.coresFormDirty = true; });
 // The rule a lower ceiling applies to the split (transcode.FitSlotSplit),
 // shown before saving.
 function parallelSplitNote(ceiling) {
@@ -7342,6 +7385,7 @@ function renderWorkerActivity(data) {
   if (selected.available && selected.activity) {
     renderParallelJobs(selected.activity);
     renderX265Limit(selected.activity);
+    renderCoreBudget(selected.activity);
     renderSlotUsage(selected.activity);
   } else {
     renderUnavailableNode(selected);

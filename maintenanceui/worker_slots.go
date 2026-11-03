@@ -38,13 +38,15 @@ func (s *Server) slotNode(r *http.Request) (transcode.NamedWorker, bool) {
 }
 
 // Configured is about the split; Ceiling 0 means the node follows its own
-// max_parallel_jobs and X265Slots 0 means no limit on x265 encodes.
+// max_parallel_jobs, X265Slots 0 means no limit on x265 encodes and CoreBudget
+// 0 means encodes may use every CPU of the node.
 type workerSlotSettingsView struct {
 	Configured   bool   `json:"configured"`
 	VideoSlots   int    `json:"video_slots"`
 	PodcastSlots int    `json:"podcast_slots"`
 	Ceiling      int    `json:"ceiling"`
 	X265Slots    int    `json:"x265_slots"`
+	CoreBudget   int    `json:"core_budget"`
 	Revision     int64  `json:"revision"`
 	UpdatedAt    string `json:"updated_at,omitempty"`
 }
@@ -53,12 +55,12 @@ func slotSettingsView(row *store.WorkerSlotSettings) workerSlotSettingsView {
 	if row == nil {
 		return workerSlotSettingsView{}
 	}
-	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Ceiling: row.Ceiling, X265Slots: row.X265Slots, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
+	return workerSlotSettingsView{Configured: !row.Shared(), VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots, Ceiling: row.Ceiling, X265Slots: row.X265Slots, CoreBudget: row.CoreBudget, Revision: row.Revision, UpdatedAt: row.UpdatedAt}
 }
 
-// slotsMatch reports whether the worker runs the stored ceiling, split and
-// x265 limit. A worker that cannot take a ceiling or an x265 limit is only
-// compared on the rest.
+// slotsMatch reports whether the worker runs the stored ceiling, split, x265
+// limit and core budget. A worker that cannot take a ceiling, an x265 limit or
+// a core budget is only compared on the rest.
 func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) bool {
 	if row != nil && row.Ceiling > 0 && worker.CeilingAdjustable() && worker.Ceiling != row.Ceiling {
 		return false
@@ -72,15 +74,24 @@ func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) boo
 			return false
 		}
 	}
+	if worker.CoreBudgetCapable() {
+		stored := 0
+		if row != nil {
+			stored = row.CoreBudget
+		}
+		if worker.Cores() != stored {
+			return false
+		}
+	}
 	if row == nil || row.Shared() {
 		return !worker.Split
 	}
 	return worker.Split && worker.Video.Total == row.VideoSlots && worker.Podcast.Total == row.PodcastSlots
 }
 
-// slotPush is what the server sends for a stored row: the ceiling and the x265
-// limit only to a worker that accepts them, since an older one refuses the
-// unknown fields.
+// slotPush is what the server sends for a stored row: the ceiling, the x265
+// limit and the core budget only to a worker that accepts them, since an older
+// one refuses the unknown fields.
 func slotPush(row store.WorkerSlotSettings, worker transcode.WorkerSlots) transcode.SlotSplit {
 	split := transcode.SlotSplit{VideoSlots: row.VideoSlots, PodcastSlots: row.PodcastSlots}
 	if worker.CeilingAdjustable() {
@@ -88,6 +99,9 @@ func slotPush(row store.WorkerSlotSettings, worker transcode.WorkerSlots) transc
 	}
 	if worker.X265Capable() {
 		split.X265Slots = row.X265Slots
+	}
+	if worker.CoreBudgetCapable() {
+		split.CoreBudget = row.CoreBudget
 	}
 	return split
 }
@@ -129,6 +143,7 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 		view["available"], view["worker"], view["applied"] = true, slots, slotsMatch(row, slots)
 		view["ceiling_adjustable"] = slots.CeilingAdjustable()
 		view["x265_adjustable"] = slots.X265Capable()
+		view["core_budget_adjustable"] = slots.CoreBudgetCapable()
 		if !slots.CeilingAdjustable() {
 			view["ceiling_message"] = "The video worker predates setting parallel jobs here. Update it to change them."
 		}
@@ -150,6 +165,8 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		Ceiling      int `json:"ceiling"`
 		// X265Slots omitted keeps the stored limit.
 		X265Slots *int `json:"x265_slots"`
+		// CoreBudget omitted keeps the stored one; 0 uses every CPU again.
+		CoreBudget *int `json:"core_budget"`
 	}
 	if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid slot assignment")
@@ -166,6 +183,10 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 	}
 	if body.X265Slots != nil && *body.X265Slots < 0 {
 		fail(w, 400, "x265 at a time must be at least 1, or 0 for no limit")
+		return
+	}
+	if body.CoreBudget != nil && *body.CoreBudget < 0 {
+		fail(w, 400, "cores must be at least 1, or 0 to use them all")
 		return
 	}
 	current, err := ctrl.Slots(r.Context())
@@ -188,6 +209,18 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		split.X265Slots = *body.X265Slots
 	case previous != nil:
 		split.X265Slots = previous.X265Slots
+	}
+	switch {
+	case body.CoreBudget != nil:
+		split.CoreBudget = *body.CoreBudget
+	case previous != nil && transcode.ValidateCoreBudget(previous.CoreBudget, current.HostCPUs) == nil:
+		// A stored budget the node no longer fits is dropped, as the worker
+		// ignores it, so saving something else is not refused over it.
+		split.CoreBudget = previous.CoreBudget
+	}
+	if body.CoreBudget != nil && *body.CoreBudget > 0 && !current.CoreBudgetCapable() {
+		fail(w, 409, "The video worker predates limiting cores here. Update it first.")
+		return
 	}
 	// Only a limit asked for now needs the worker to take it; one inherited from
 	// the stored row is kept (slotPush never sends it to a worker that cannot).
@@ -220,7 +253,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		return
 	}
 	warnings = append(notes, warnings...)
-	row, err := st.SetWorkerSlotSettings(node, split.VideoSlots, split.PodcastSlots, ceiling, split.X265Slots)
+	row, err := st.SetWorkerSlotSettings(node, split.VideoSlots, split.PodcastSlots, ceiling, split.X265Slots, split.CoreBudget)
 	if err != nil {
 		fail(w, 500, "worker slot settings not saved")
 		return
@@ -236,7 +269,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		// "shared" row would make the resync clear a split the worker runs.
 		var revertErr error
 		if previous != nil {
-			_, revertErr = st.SetWorkerSlotSettings(node, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling, previous.X265Slots)
+			_, revertErr = st.SetWorkerSlotSettings(node, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling, previous.X265Slots, previous.CoreBudget)
 		} else {
 			revertErr = st.DeleteWorkerSlotSettings(node)
 		}
