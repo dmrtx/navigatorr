@@ -2230,7 +2230,8 @@ test("worker activity labels video and podcast slots and shows each pool's use",
 test("parallel jobs on the node are always shown and editable from one, and a lower value says the split resets", async () => {
   const h=harness();
   h.context.calls=[];
-  h.run('api=async(path,body)=>{calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
+  h.context.stored={video_slots:0,podcast_slots:0};
+  h.run('api=async(path,body)=>{if(!body)return {settings:stored};calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
   h.context.activity={available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:1,jobs:[],
     slots:{ceiling:1,ceiling_limit:10,ceiling_source:"config",host_cpus:10,split:false,video:{total:1,used:1},podcast:{total:1,used:0}}}};
   h.run('renderWorkerActivity(activity)');
@@ -2245,6 +2246,7 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   await h.run('saveParallelJobs(2)');
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])),["worker-slots",{video_slots:0,podcast_slots:0,ceiling:2}]);
   assert.match(h.elements.get("worker-parallel-note").textContent,/Applied\. Takes effect as the next job starts/);
+  h.context.stored={video_slots:2,podcast_slots:1};
   // Raised and split: the split editor appears and a lower value warns before saving.
   h.run('activity.activity.worker_slots_total=3;activity.activity.slots={ceiling:3,ceiling_limit:10,ceiling_source:"override",host_cpus:10,split:true,video:{total:2,used:1},podcast:{total:1,used:0}};renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-slot-split").hidden,false);
@@ -2275,6 +2277,29 @@ test("parallel jobs on the node are always shown and editable from one, and a lo
   // Disconnected: nothing to show.
   h.run('renderWorkerActivity({available:false})');
   assert.equal(h.elements.get("settings-node").hidden,true);
+});
+
+test("parallel jobs preserves the stored split while the worker reports another", async () => {
+  for (const split of [false, true]) {
+    const h = harness();
+    h.context.calls = [];
+    h.context.observed = {split, video:{total:1}, podcast:{total:1}};
+    h.run('state.slotNode="a";state.workerSlots=observed;api=async(path,body)=>{calls.push([path,body]);return body?{applied:true}:{settings:{video_slots:2,podcast_slots:1}}};refreshWorkerActivity=async()=>{};');
+    await h.run('saveParallelJobs(4)');
+    const writes = h.context.calls.filter(([,body]) => body);
+    assert.equal(writes.length, 1);
+    assert.deepEqual(JSON.parse(JSON.stringify(writes[0])), ["worker-slots?node=a", {video_slots:2,podcast_slots:1,ceiling:4}]);
+    assert.equal(h.context.calls[0][1], undefined, "the saved split is read before writing");
+  }
+});
+
+test("parallel jobs does not replace the split when reading stored settings fails", async () => {
+  const h = harness();
+  h.context.calls = [];
+  h.run('state.workerSlots={split:false};api=async(path,body)=>{if(!body)throw new Error("Settings unavailable");calls.push([path,body]);return {applied:true}};refreshWorkerActivity=async()=>{};');
+  await h.run('saveParallelJobs(4)');
+  assert.equal(h.context.calls.length, 0);
+  assert.equal(h.elements.get("worker-parallel-note").textContent, "Settings unavailable");
 });
 
 test("the x265 limit is offered only by a worker that reports it, keeps unsaved picks and is saved without touching the split", async () => {
@@ -2401,6 +2426,104 @@ test("a batch headline does not say the originals are kept for failures it did n
   assert.match(h.run("replacementHeadline(probe)"), /originals kept/);
 });
 
+const settingsForms = [
+  {save:"saveWorkerSlots(2, 1)", flag:"slotFormDirty", note:"worker-slot-note", input:"slot-video", event:"input", value:3},
+  {save:"saveWorkerSlots(2, 1)", flag:"slotFormDirty", note:"worker-slot-note", input:"slot-podcast", event:"input", value:2},
+  {save:"saveParallelJobs(4)", flag:"parallelFormDirty", note:"worker-parallel-note", input:"parallel-jobs", event:"input", value:5},
+  {save:"saveX265Limit(1)", flag:"x265FormDirty", note:"worker-x265-note", input:"x265-limit", event:"change", value:"2"},
+  {save:"saveCoreBudget(6)", flag:"coresFormDirty", note:"worker-cores-note", input:"core-budget", event:"change", value:"8"},
+];
+function settingsHarness() {
+  const h = harness();
+  h.elements.get("settings-node-pick").options = [];
+  h.elements.get("x265-limit").options = [{value:"0"}, {value:"1"}, {value:"2"}];
+  const activity = {details_available:true, worker_slots_total:4, worker_slots_used:0, jobs:[],
+    slots:{ceiling:4, ceiling_limit:10, host_cpus:10, split:true, video:{total:2,used:0}, podcast:{total:1,used:0}, x265:{total:1,used:0}, core_budget:6}};
+  h.context.activity = {available:true, workers:[{name:"a", available:true, activity}, {name:"b", available:true, activity}]};
+  h.run('state.slotNode="a";renderWorkerActivity(activity);');
+  return h;
+}
+
+for (const form of settingsForms) {
+  for (const failed of [false, true]) {
+    test(`late ${form.input} save ${failed ? "error" : "answer"} preserves a newer edit`, async () => {
+      const h = settingsHarness(), pending = deferred(), started = deferred();
+      h.context.pending = pending.promise;
+      h.context.started = started.resolve;
+      h.run('api=async(path,body)=>{if(!body)return {settings:{video_slots:2,podcast_slots:1}};started();const result=await pending;if(result.error)throw new Error(result.error);return result};refreshWorkerActivity=async()=>{};');
+      const saving = h.run(form.save);
+      await started.promise;
+      const input = h.elements.get(form.input), note = h.elements.get(form.note);
+      h.document.activeElement = input;
+      input.value = form.value;
+      input.listeners.get(form.event)();
+      h.document.activeElement = null;
+      const message = note.textContent;
+      pending.resolve(failed ? {error:"Save failed"} : {applied:true});
+      await saving;
+      assert.equal(h.run(`state.${form.flag}`), true);
+      assert.equal(note.textContent, message);
+      h.run('renderWorkerActivity(activity)');
+      assert.equal(input.value, form.value);
+    });
+
+    test(`late ${form.input} save ${failed ? "error" : "answer"} stays stale after switching a to b to a`, async () => {
+      const h = settingsHarness(), pending = deferred(), started = deferred();
+      h.context.pending = pending.promise;
+      h.context.started = started.resolve;
+      h.run('api=async(path,body)=>{if(!body)return {settings:{video_slots:2,podcast_slots:1}};started();const result=await pending;if(result.error)throw new Error(result.error);return result};refreshWorkerActivity=async()=>{};');
+      const saving = h.run(form.save);
+      await started.promise;
+      const pick = h.elements.get("settings-node-pick");
+      for (const name of ["b", "a"]) {
+        pick.value = name;
+        pick.listeners.get("change")();
+      }
+      pending.resolve(failed ? {error:"Save failed"} : {applied:true});
+      await saving;
+      assert.equal(h.elements.get(form.note).textContent, "");
+    });
+  }
+
+  test(`a newer ${form.input} save owns the pending message and dirty flag`, async () => {
+    const h = settingsHarness(), older = deferred(), newer = deferred();
+    h.context.responses = [older.promise, newer.promise];
+    h.run('api=async(path,body)=>body?responses.shift():{settings:{video_slots:2,podcast_slots:1}};refreshWorkerActivity=async()=>{};');
+    h.elements.get(form.input).listeners.get(form.event)();
+    const first = h.run(form.save), second = h.run(form.save);
+    older.resolve({applied:true});
+    await first;
+    assert.equal(h.run(`state.${form.flag}`), true);
+    assert.equal(h.elements.get(form.note).textContent, "Saving…");
+    newer.resolve({applied:false, message:"Latest save pending"});
+    await second;
+    assert.equal(h.run(`state.${form.flag}`), false);
+    assert.equal(h.elements.get(form.note).textContent, "Latest save pending");
+  });
+}
+
+for (const form of settingsForms) {
+  test(`a transient node disconnect preserves the ${form.input} draft until an intentional node pick`, () => {
+    const h = settingsHarness(), input = h.elements.get(form.input);
+    input.value = form.value;
+    input.listeners.get(form.event)();
+    h.run('activity.workers[0].available=false;renderWorkerActivity(activity)');
+    assert.equal(h.run(`state.${form.flag}`), true);
+    assert.equal(h.run('state.slotNode'), "a");
+    for (const id of ["worker-slot-split", "worker-parallel-form", "worker-x265-row", "worker-cores-row"]) {
+      assert.equal(h.elements.get(id).hidden, true);
+    }
+    h.run('activity.workers[0].available=true;renderWorkerActivity(activity)');
+    assert.equal(input.value, form.value);
+    assert.equal(h.run(`state.${form.flag}`), true);
+    const pick = h.elements.get("settings-node-pick");
+    pick.value = "b";
+    pick.listeners.get("change")();
+    assert.equal(h.run(`state.${form.flag}`), false);
+    assert.notEqual(input.value, form.value);
+  });
+}
+
 test("the answer to a save for a node left behind does not touch the forms of the node picked now", async () => {
   for (const [save, flag, noteId] of [["saveX265Limit(1)", "x265FormDirty", "worker-x265-note"], ["saveCoreBudget(6)", "coresFormDirty", "worker-cores-note"], ["saveWorkerSlots(2, 1)", "slotFormDirty", "worker-slot-note"], ["saveParallelJobs(3)", "parallelFormDirty", "worker-parallel-note"]]) {
     const h = harness();
@@ -2414,8 +2537,22 @@ test("the answer to a save for a node left behind does not touch the forms of th
   }
 });
 
+test("an answer made stale by an edit leaves no Saving… note behind", async () => {
+  for (const [save, flag, noteId] of [["saveX265Limit(1)", "x265FormDirty", "worker-x265-note"], ["saveCoreBudget(6)", "coresFormDirty", "worker-cores-note"], ["saveWorkerSlots(2, 1)", "slotFormDirty", "worker-slot-note"], ["saveParallelJobs(3)", "parallelFormDirty", "worker-parallel-note"]]) {
+    const h = harness();
+    h.run(`state.slotNode="a";api=async(path,body)=>{if(!body)return {settings:{video_slots:0,podcast_slots:0}};return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};`);
+    const inputs = {x265FormDirty: "x265-limit", coresFormDirty: "core-budget", slotFormDirty: "slot-video", parallelFormDirty: "parallel-jobs"};
+    // The edit lands while the save is in flight.
+    const running = h.run(save);
+    h.elements.get(inputs[flag]).listeners.get(flag === "x265FormDirty" || flag === "coresFormDirty" ? "change" : "input")();
+    await running;
+    assert.equal(h.elements.get(noteId).textContent === "Saving…", false, save);
+    assert.equal(h.run(`state.${flag}`), true, `${save}: the edit stays pending`);
+  }
+});
+
 test("a save goes to the node it started on even when another node is picked while the stored split loads", async () => {
-  for (const save of ["saveX265Limit(1)", "saveCoreBudget(6)"]) {
+  for (const save of ["saveX265Limit(1)", "saveCoreBudget(6)", "saveParallelJobs(3)"]) {
     const h = harness();
     h.context.calls = [];
     // The stored split of node a arrives after the user picked node b.
@@ -2600,6 +2737,59 @@ test("opening Settings refreshes the worker report that fills the node block", (
   assert.equal(h.context.refreshed,1);
   h.run('state.activityCheckedAt=Date.now();selectTab("advanced")');
   assert.equal(h.context.refreshed,1);
+});
+
+test("Settings keeps polling worker activity after an unconfirmed save at the existing cadence", async () => {
+  const h = harness();
+  h.context.now = 100000;
+  h.context.calls = [];
+  h.run('Date.now=()=>now;state.tab="advanced";refreshWorkers=async()=>{};renderSavings=()=>{};renderDecisionCount=()=>{};renderJobsList=()=>true;refreshFileMarks=async()=>{};api=async(path,body)=>{calls.push({path,body,at:now});if(path==="worker-slots")return {applied:false,message:"Saved; waiting for worker"};if(path==="worker-activity")return {available:false};return {jobs:[],has_more:false}};');
+  await h.run('saveWorkerSlots(2,1)');
+  const activityCalls = () => h.context.calls.filter(c => c.path === "worker-activity");
+  assert.equal(activityCalls().length, 1, "the save immediately checks activity");
+  h.context.now += 5000;
+  await h.interval();
+  assert.equal(activityCalls().length, 1, "a fresh report is not requested again");
+  h.context.now += 5000;
+  await h.interval();
+  assert.equal(activityCalls().length, 2, "Settings polls again once the server can retry the saved settings");
+  assert.equal(activityCalls()[1].at - activityCalls()[0].at, 10000);
+  assert.equal(h.context.calls.filter(c => c.body).length, 1, "only activity is retried, not the save");
+  h.context.now += 10000;
+  h.document.hidden = true;
+  await h.interval();
+  assert.equal(activityCalls().length, 2);
+  h.document.hidden = false;
+  h.elements.get("workspace").hidden = true;
+  await h.interval();
+  assert.equal(activityCalls().length, 2);
+  h.elements.get("workspace").hidden = false;
+  for (const tab of ["library", "recipes", "more"]) {
+    h.run(`state.tab=${JSON.stringify(tab)}`);
+    await h.interval();
+    assert.equal(activityCalls().length, 2);
+  }
+  h.run('state.tab="jobs"');
+  await h.interval();
+  assert.equal(activityCalls().length, 3, "Jobs keeps its existing activity refresh");
+});
+
+test("Settings activity polls do not overlap a pending activity read", async () => {
+  const h = harness(), pending = deferred();
+  h.context.now = 100000;
+  h.context.pending = pending.promise;
+  h.context.reads = 0;
+  h.run('Date.now=()=>now;state.tab="advanced";refreshWorkers=async()=>{};renderSavings=()=>{};renderDecisionCount=()=>{};renderJobsList=()=>true;api=async(path)=>{if(path==="worker-activity"){reads++;return pending}return {jobs:[],has_more:false}};');
+  await h.interval();
+  assert.equal(h.context.reads, 1);
+  h.context.now += 10000;
+  await h.interval();
+  assert.equal(h.context.reads, 1);
+  pending.resolve({available:false});
+  for (let i = 0; i < 4; i++) await Promise.resolve();
+  h.context.now += 10000;
+  await h.interval();
+  assert.equal(h.context.reads, 2);
 });
 
 test("the parallel jobs editor and the slot split live in Settings, not Activity", () => {
