@@ -100,3 +100,13 @@ func TestSlotSplitJSONOmitsAnUnsetX265Cap(t *testing.T) {
 		t.Fatalf("a worker with the pool is x265 capable: %+v %v", cur, err)
 	}
 }
+
+func TestFitSlotSplitKeepsTheCoreBudgetWhenTheSplitIsReset(t *testing.T) {
+	got, notes := FitSlotSplit(SlotSplit{VideoSlots: 2, PodcastSlots: 1, CoreBudget: 6, Ceiling: 3}, 2)
+	if !got.Shared() || len(notes) != 1 {
+		t.Fatalf("a split over the ceiling must return to shared slots: %+v %v", got, notes)
+	}
+	if got.CoreBudget != 6 || got.Ceiling != 3 {
+		t.Fatalf("lowering the ceiling changed the core budget or the ceiling: %+v", got)
+	}
+}
