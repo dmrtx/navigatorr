@@ -1000,6 +1000,10 @@
             <div id="worker-parallel" class="node-settings-node">
               <strong id="settings-node-title" class="node-settings-title" tabindex="-1">Transcode node</strong>
               <label id="settings-node-pick-label" class="node-settings-pick" hidden><span>Node</span> <select id="settings-node-pick" aria-label="Node whose settings are shown"></select></label>
+              <div id="settings-node-paused" class="node-paused" role="status" hidden>
+                <p id="settings-node-paused-text"></p>
+                <button id="settings-node-resume" type="button">Resume</button>
+              </div>
               <div class="settings-row">
                 <span>Parallel jobs<span id="worker-parallel-limit" class="metadata"></span></span>
                 <strong id="worker-parallel-summary" hidden></strong>

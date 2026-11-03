@@ -7188,6 +7188,7 @@ function renderUnavailableNode(selected) {
   $("worker-parallel-form").hidden = true;
   $("worker-x265-row").hidden = true;
   $("worker-cores-row").hidden = true;
+  $("settings-node-paused").hidden = true;
   $("worker-slot-split").hidden = true;
   $("worker-slot-usage").hidden = true;
   $("worker-parallel-limit").textContent = `${selected.name} is unavailable. Its settings can be changed once it reports again.`;
@@ -7279,6 +7280,18 @@ $("worker-x265-form").addEventListener("submit", event => {
   void saveX265Limit(Number($("x265-limit").value));
 });
 $("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; });
+// A paused node takes no files, so none of the limits below do anything until
+// it resumes. Say so here, where the limits are, with the way out.
+function renderNodePausedNotice(selected) {
+  const worker = (state.workerInfo?.nodes || []).find(n => n.worker === selected.name || n.name === selected.name);
+  const paused = Boolean(worker?.pause?.paused);
+  $("settings-node-paused").hidden = !paused;
+  if (!paused) return;
+  $("settings-node-paused-text").textContent = worker.pause.idle
+    ? `${worker.name} is paused. Nothing starts on it until you resume, so the limits below apply from then on.`
+    : `${worker.name} is pausing. Files already encoding finish and nothing new starts until you resume.`;
+  $("settings-node-resume").onclick = () => setNodePause(worker, "off").then(() => refreshWorkerActivity(true));
+}
 // How many of the node's CPUs encodes may use together, so the rest stays free
 // for other work (a build, say) without pausing the node. Only a worker that
 // reports the budget takes it, and only a host with more CPUs than x265's
@@ -7388,6 +7401,7 @@ function renderWorkerActivity(data) {
     renderX265Limit(selected.activity);
     renderCoreBudget(selected.activity);
     renderSlotUsage(selected.activity);
+    renderNodePausedNotice(selected);
   } else {
     renderUnavailableNode(selected);
   }
