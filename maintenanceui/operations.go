@@ -1115,11 +1115,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				if progress := s.batchReplacementProgress(r, recordsByID, existingReplacements); progress != nil {
 					job["replacement"] = progress
 				}
-				remaining, replacedFiles := 0, 0
+				remaining, replacedFiles, failedReplacements := 0, 0, 0
 				for _, item := range items {
 					child := recordsByID[item.ChildActionID]
 					if replacement := recordsByID[existingReplacements[item.ChildActionID]]; replacement.inst.Status == "completed" && replacement.savings.RealizedSavedBytes != nil {
 						replacedFiles++
+					} else if replacement.inst.Status == store.ActionStatusFailed {
+						failedReplacements++
 					}
 					if item.Status == "completed" && item.Decision == "transcode" && child.inst.Status == "completed" && child.outputs["original_intact"] == true && item.CandidatePath != "" && existingReplacements[item.ChildActionID] == "" {
 						remaining++
@@ -1132,6 +1134,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 					job["ready_item_ids"] = batchReadyItems(r, items, recordsByID, existingReplacements, replacedActions, replaced)
 				}
 				job["replaced_files"] = replacedFiles
+				job["failed_replacements"] = failedReplacements
 				// A file handed to a worker counts as running in the batch, but one
 				// that is still in the worker's line is not being encoded yet.
 				if queued := queuedOnWorker(items, recordsByID); queued > 0 {
