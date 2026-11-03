@@ -9793,3 +9793,38 @@ test("an unread default still sends the switch off; one Replace at a time; the s
   assert.deepEqual(plain(h.context.saved), ["Wait for the replacement under way to finish, then switch it on."]);
   h.run("replaceAllRunning=false;");
 });
+
+// A node's own pause: its card names what is left, offers the pause or the
+// resume, and sending encodes back needs a second tap.
+test("a node card offers pause after current files and pause now, and Resume once paused", async () => {
+  const h = harness();
+  const nodes = (pause) => [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause }];
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: false, mode: "", message: "Not paused. The node takes new jobs." }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  const buttons = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent);
+  assert.deepEqual(buttons(), ["Pause after current files", "Pause now"]);
+
+  h.context.calls = [];
+  h.run('api = async (...args) => { calls.push(args); return {}; }; refreshWorkers = async () => {};');
+  const press = (label) => flatten(h.elements.get("worker-nodes")).find((e) => e.textContent === label || e.textContent.startsWith(label));
+  await press("Pause after current files").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])), ["worker-pause", { node: "m1", mode: "graceful" }]);
+
+  // Pause now asks first: nothing is sent on the first tap.
+  h.context.calls = [];
+  const now = press("Pause now");
+  await now.listeners.get("click")();
+  assert.equal(h.context.calls.length, 0);
+  assert.match(now.textContent, /Tap again/);
+  await now.listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])), ["worker-pause", { node: "m1", mode: "immediate" }]);
+
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "graceful", idle: false, message: "Paused: 1 job(s) still finishing. Nothing new starts here." }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.deepEqual(buttons(), ["Resume", "Send running files back"]);
+  const badges = flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "badge").map((e) => e.textContent);
+  assert.deepEqual(badges, ["Pausing", "Reachable · Ready"]);
+  h.context.calls = [];
+  await press("Resume").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])), ["worker-pause", { node: "m1", mode: "off" }]);
+});

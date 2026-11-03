@@ -924,16 +924,75 @@ function renderWorkerDetails(host, info) {
   for (const worker of info?.nodes || []) {
     const fresh = workerObservationFresh(worker);
     const row = node("div", "", "worker-node");
-    row.append(node("strong", worker.name), node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
+    const head = node("div", "", "worker-node-head");
+    const badges = node("span", "", "worker-node-badges");
+    if (worker.pause?.paused) badges.append(node("span", worker.pause.idle ? "Paused · idle" : "Pausing", "badge"));
+    badges.append(node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
+    head.append(node("strong", worker.name), badges);
+    row.append(head);
     if (serverReachable && worker.admission_note) row.append(node("p", worker.admission_note, "worker-admission"));
-    row.append(node("p", `Scheduler: ${fresh ? worker.scheduler_health || "unknown" : "unknown (outdated observation)"}`, "metadata"));
-    row.append(node("p", `Last successful sweep: ${worker.last_success_at ? new Date(worker.last_success_at).toLocaleString() : "Unknown"}`, "metadata"));
-    row.append(node("p", `Observation: ${worker.observed_at ? new Date(worker.observed_at).toLocaleString() : "Unknown"}${Number.isFinite(Date.parse(worker.observed_at)) ? ` · ${Math.max(0,Math.floor((Date.now()-Date.parse(worker.observed_at))/1000))}s old` : ""}`, "metadata"));
-    for (const [name, sweep] of Object.entries(worker.sweeps || {})) row.append(node("p", `${name === "post_encode" ? "Post-encode" : "Queue"} sweep: ${fresh && sweep.observed_at ? sweep.last_error || sweep.consecutive_errors > 0 ? "degraded" : "normal" : "unknown"}${sweep.consecutive_errors ? ` · ${sweep.consecutive_errors} consecutive errors` : ""}`, "metadata"));
+    const age = Number.isFinite(Date.parse(worker.observed_at)) ? ` · checked ${Math.max(0, Math.floor((Date.now() - Date.parse(worker.observed_at)) / 1000))}s ago` : "";
+    row.append(node("p", `Scheduler ${fresh ? worker.scheduler_health || "unknown" : "unknown (outdated)"}${age}`, "metadata"));
     if (worker.last_error?.message) row.append(node("p", `${fresh ? "Last error" : "Previous error"}: ${worker.last_error.class || "scheduler"} · ${worker.last_error.message}`, "muted"));
+    const pause = nodePauseControls(worker);
+    if (pause) row.append(pause);
+    const details = node("details", "", "worker-node-details");
+    details.append(node("summary", "Scheduler details"));
+    details.append(node("p", `Last successful sweep: ${worker.last_success_at ? new Date(worker.last_success_at).toLocaleString() : "Unknown"}`, "metadata"));
+    if (worker.observed_at) details.append(node("p", `Observation: ${new Date(worker.observed_at).toLocaleString()}`, "metadata"));
+    for (const [name, sweep] of Object.entries(worker.sweeps || {})) details.append(node("p", `${name === "post_encode" ? "Post-encode" : "Queue"} sweep: ${fresh && sweep.observed_at ? sweep.last_error || sweep.consecutive_errors > 0 ? "degraded" : "normal" : "unknown"}${sweep.consecutive_errors ? ` · ${sweep.consecutive_errors} consecutive errors` : ""}`, "metadata"));
+    row.append(details);
     host.append(row);
   }
   if (!info) host.append(node("p", serverReachable ? "Checking shared worker observation…" : "Server disconnected; worker and scheduler status are unknown. Jobs may continue remotely.", "muted"));
+}
+// A node's own pause, to free its CPU for other work while the others keep
+// encoding. "After current files" lets what is encoding finish; "Now" sends it
+// back to the queue to start again on another node (nothing is cancelled).
+function nodePauseControls(worker) {
+  const pause = worker.pause;
+  if (!pause || !worker.worker) return null;
+  const box = node("div", "", "worker-pause");
+  if (pause.paused) box.dataset.paused = pause.idle ? "idle" : "pausing";
+  box.append(node("p", pause.message || "", "metadata"));
+  const buttons = node("div", "", "worker-pause-actions");
+  const add = (label, mode, title) => {
+    const button = node("button", label);
+    button.type = "button";
+    button.title = title;
+    button.disabled = !serverReachable;
+    // Sending encodes back loses their progress: the first tap asks, the
+    // second (within a few seconds) does it.
+    button.addEventListener("click", () => {
+      if (mode !== "immediate" || button.dataset.armed) {
+        clearTimeout(button.armTimer);
+        return setNodePause(worker, mode);
+      }
+      button.dataset.armed = "true";
+      button.textContent = "Tap again: files restart on another node";
+      button.armTimer = setTimeout(() => {
+        delete button.dataset.armed;
+        button.textContent = label;
+      }, 6000);
+    });
+    buttons.append(button);
+  };
+  if (!pause.paused) {
+    add("Pause after current files", "graceful", "Nothing new starts on this node; what is encoding finishes.");
+    add("Pause now", "immediate", "Encodes on this node go back to the queue and start again on another node.");
+  } else {
+    add("Resume", "off", "This node takes files again.");
+    if (pause.mode === "graceful") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
+  }
+  box.append(buttons);
+  return box;
+}
+function setNodePause(worker, mode) {
+  return safe(async () => {
+    await api("worker-pause", {node: worker.worker, mode});
+    notify(mode === "off" ? `${worker.name} resumed.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
+    await refreshWorkers();
+  });
 }
 // Pause all (worker drain): nothing new goes to the workers, files already
 // encoding finish and are saved, and paused batches stay paused after Resume.
