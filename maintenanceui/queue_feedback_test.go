@@ -315,6 +315,19 @@ func TestQueueGroupsDurableWorkflowsBeforeFilteringAndPaging(t *testing.T) {
 	if stages[2].(map[string]any)["name"] != "preserve_original" || stages[2].(map[string]any)["status"] != "running" || stages[3].(map[string]any)["status"] != "pending" {
 		t.Fatal("missing live replacement stage", stages)
 	}
+	// A running replacement says nothing about its original; one that stopped
+	// says where it is, from its promotion's state (none recorded: untouched).
+	if run, _ := read("id=source").Jobs[0]["replacement_run"].(map[string]any); run["original_state"] != nil {
+		t.Fatal("a running replacement reported where the original is", run)
+	}
+	inst, _ = st.GetActionInstance("replace")
+	inst.Status = store.ActionStatusFailed
+	if err := st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	if run, _ := read("id=source").Jobs[0]["replacement_run"].(map[string]any); run["status"] != "failed" || run["original_state"] != originalInPlace {
+		t.Fatal("a stopped replacement did not report where the original is", run)
+	}
 }
 
 func TestBatchQueueNamesAndReasonsAreBoundedAndSurvivePaging(t *testing.T) {

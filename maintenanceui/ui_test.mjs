@@ -2377,6 +2377,55 @@ test("the core budget is offered only by a worker that reports it, keeps unsaved
   assert.equal(h.elements.get("worker-cores-row").hidden,true);
 });
 
+test("a stopped single-file replacement says where the original is only from the state the server read", () => {
+  const h = harness();
+  const row = (run, status = "replace_failed") => { h.context.probe = { replacement_run: run }; return h.run(`(() => { const r = conversionReplacementRow(probe, ${JSON.stringify(status)}); return r.children[1].textContent; })()`); };
+  assert.match(row({ status: "failed", original_state: "in_place" }), /the original is still in place/);
+  assert.match(row({ status: "failed", original_state: "recovery" }), /the original is in Recovery/);
+  assert.match(row({ status: "failed", original_state: "unclear" }), /check Recovery to see where the original is/);
+  assert.match(row({ status: "failed" }), /check Recovery/);
+  assert.doesNotMatch(row({ status: "failed" }), /in place/);
+  assert.match(row({ status: "cancelled", original_state: "in_place" }, "replacing"), /Replacement cancelled · the original is still in place/);
+  assert.match(row({ status: "cancelled", original_state: "recovery" }, "replacing"), /Replacement cancelled · the original is in Recovery/);
+  assert.doesNotMatch(row({ status: "cancelled" }, "replacing"), /in place/);
+});
+
+test("a batch headline does not say the originals are kept for failures it did not describe", () => {
+  const h = harness();
+  const member = (original_state) => ({ phase: "failed", failure: { reason: "x", original_state } });
+  h.context.probe = { replacement: { approved: true, total: 4, done: 2, failed: 2, members: [member("in_place")] } };
+  const text = h.run("replacementHeadline(probe)");
+  assert.match(text, /check Recovery/);
+  assert.doesNotMatch(text, /kept/);
+  h.context.probe = { replacement: { approved: true, total: 4, done: 2, failed: 2, members: [member("in_place"), member("in_place")] } };
+  assert.match(h.run("replacementHeadline(probe)"), /originals kept/);
+});
+
+test("the answer to a save for a node left behind does not touch the forms of the node picked now", async () => {
+  for (const [save, flag, noteId] of [["saveX265Limit(1)", "x265FormDirty", "worker-x265-note"], ["saveCoreBudget(6)", "coresFormDirty", "worker-cores-note"], ["saveWorkerSlots(2, 1)", "slotFormDirty", "worker-slot-note"], ["saveParallelJobs(3)", "parallelFormDirty", "worker-parallel-note"]]) {
+    const h = harness();
+    h.context.calls = [];
+    // The save starts on node a; node b is picked, and edited, before the answer.
+    h.run(`state.slotNode="a";state.workerSlots={split:false};api=async(path,body)=>{if(!body)return {settings:{video_slots:0,podcast_slots:0}};calls.push(path);state.slotNode="b";state.${flag}=true;$("${noteId}").textContent="b edit";return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};`);
+    await h.run(save);
+    assert.deepEqual(h.context.calls, ["worker-slots?node=a"], save);
+    assert.equal(h.run(`state.${flag}`), true, `${save}: the edit on b is still pending`);
+    assert.equal(h.elements.get(noteId).textContent, "b edit", save);
+  }
+});
+
+test("a save goes to the node it started on even when another node is picked while the stored split loads", async () => {
+  for (const save of ["saveX265Limit(1)", "saveCoreBudget(6)"]) {
+    const h = harness();
+    h.context.calls = [];
+    // The stored split of node a arrives after the user picked node b.
+    h.run('state.slotNode="a";api=async(path,body)=>{if(!body){state.slotNode="b";return {settings:{video_slots:2,podcast_slots:1}};}calls.push([path,body]);return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};');
+    await h.run(save);
+    assert.equal(h.context.calls.length, 1, save);
+    assert.equal(h.context.calls[0][0], "worker-slots?node=a", save);
+  }
+});
+
 test("a paused node says so where its limits are and can be resumed from there", async () => {
   const h=harness();
   h.context.calls=[];
@@ -6168,6 +6217,7 @@ test("a batch with files still waiting is not Replaced because one file was", ()
 
 test("a batch with a failed replacement is not Replaced or verified", () => {
   const h = harness();
+  const failed = (original_state) => ({ replacement: { approved: true, total: 3, done: 2, failed: 1, members: [{ phase: "failed", failure: { reason: "a file changed while it was being replaced", original_state } }] } });
   const job = { id: "b", action_name: "transcode_batch", status: "completed", batch: { total: 3, completed: 3 }, savings: { realized_saved_bytes: 1000 }, replaced_files: 2, remaining_candidates: 0, failed_replacements: 1 };
   h.context.probe = job;
   const view = h.run("queuePresentation(probe)");
@@ -6175,11 +6225,34 @@ test("a batch with a failed replacement is not Replaced or verified", () => {
   assert.equal(h.run('statusClass("Partly replaced")'), "waiting_decision");
   assert.match(view.summary, /2 replaced · 1 replacement failed/);
   assert.doesNotMatch(h.run("queueOutcome(probe)"), /Replacement verified/);
+  h.context.probe = { ...job, ...failed("in_place") };
   assert.match(h.run("queueOutcome(probe)"), /2 replacements verified · 1 failed; its original remains in place/);
   h.run("state.info={allow_destructive:true}");
   const reason = h.run("batchReplaceReason(probe, 0)");
-  assert.match(reason, /1 replacement failed/);
+  assert.match(reason, /1 replacement failed · its original remains in place/);
   assert.doesNotMatch(reason, /Every ready file/);
+  // Where the original is comes from what each failed replacement says, never
+  // from the failure count: a copy in Recovery or an unknown state is not "in place".
+  for (const [state, queue] of [["recovery", /1 failed; its original is in Recovery/], ["unclear", /1 failed; check Recovery to see where the originals are/]]) {
+    h.context.probe = { ...job, ...failed(state) };
+    assert.match(h.run("queueOutcome(probe)"), queue);
+    assert.doesNotMatch(h.run("queueOutcome(probe)"), /in place/);
+    assert.doesNotMatch(h.run("batchReplaceReason(probe, 0)"), /in place/);
+  }
+  // A failure the batch does not describe, or an older server's job with no
+  // replacement block, is not claimed to be in place either.
+  h.context.probe = { ...job, replacement: undefined };
+  assert.doesNotMatch(h.run("queueOutcome(probe)"), /in place/);
+  assert.match(h.run("batchReplaceReason(probe, 0)"), /check Recovery/);
+  h.context.probe = { ...job, failed_replacements: 2 };
+  assert.doesNotMatch(h.run("queueOutcome(probe)"), /in place/);
+  // Several failures speak in the plural only when all agree.
+  const two = (a, b) => ({ ...job, failed_replacements: 2, replacement: { approved: true, total: 4, done: 2, failed: 2, members: [a, b].map((original_state) => ({ phase: "failed", failure: { reason: "x", original_state } })) } });
+  h.context.probe = two("in_place", "in_place");
+  assert.match(h.run("queueOutcome(probe)"), /2 failed; their originals remain in place/);
+  h.context.probe = two("in_place", "recovery");
+  assert.match(h.run("queueOutcome(probe)"), /check Recovery/);
+  assert.doesNotMatch(h.run("queueOutcome(probe)"), /in place/);
   h.context.probe = { ...job, failed_replacements: 0 };
   assert.equal(h.run("queuePresentation(probe).status"), "Replaced");
   assert.equal(h.run("batchReplaceReason(probe, 0)"), "Every ready file is replaced");

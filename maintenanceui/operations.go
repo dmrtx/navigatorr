@@ -1007,6 +1007,11 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
 				job["conversion_status"] = conversions.conversionStatus(r)
 				if run := conversions.conversionReplacement(r); run != nil {
+					// Where the original is once a replacement stopped, from the
+					// promotion's own state (as for a batch's failed files).
+					if status := operationString(run["status"]); status == store.ActionStatusFailed || status == store.ActionStatusCancelled {
+						run["original_state"] = s.originalState(recordsByID[operationString(run["id"])])
+					}
 					job["replacement_run"] = run
 				}
 				if resolved := conversions.resolvedBy(r); resolved != nil {

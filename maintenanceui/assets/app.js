@@ -3611,6 +3611,22 @@ function remainingLabel(seconds) {
 function originalStateOf(failure) {
   return failure?.original_state || (failure?.original_intact ? "in_place" : "unclear");
 }
+// Where the originals of a batch's failed replacements are: "in_place" or
+// "recovery" only when every failed replacement says so, else "unclear". A
+// failure the batch does not describe counts as unclear, never as in place.
+function failedOriginalsState(job) {
+  const failures = (job.replacement?.members || []).filter((m) => m.failure).map((m) => originalStateOf(m.failure));
+  if (!failures.length || failures.length < (job.failed_replacements || 0)) return "unclear";
+  return failures.every((x) => x === "in_place") ? "in_place" : failures.every((x) => x === "recovery") ? "recovery" : "unclear";
+}
+function failedOriginalsPhrase(job) {
+  const one = job.failed_replacements === 1;
+  return {
+    in_place: one ? "its original remains in place" : "their originals remain in place",
+    recovery: one ? "its original is in Recovery" : "their originals are in Recovery",
+    unclear: "check Recovery to see where the originals are",
+  }[failedOriginalsState(job)];
+}
 // What an approved batch replacement is doing, in words about the files. The
 // server places each file in a short fixed sequence; none of this is a time
 // estimate.
@@ -3638,7 +3654,7 @@ function replacementHeadline(job) {
     // "Kept" is only said when every failure left the original in place; "in
     // Recovery" only when a recovery copy holds it.
     const states = failures.map(originalStateOf);
-    const kept = !failures.length ? "" : states.every((x) => x === "in_place") ? (failures.length === 1 ? " · original kept" : " · originals kept") : states.every((x) => x === "recovery") ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · check Recovery";
+    const kept = !failures.length ? "" : failures.length < r.failed ? " · check Recovery" : states.every((x) => x === "in_place") ? (failures.length === 1 ? " · original kept" : " · originals kept") : states.every((x) => x === "recovery") ? (failures.length === 1 ? " · original in Recovery" : " · originals in Recovery") : " · check Recovery";
     if (!settled) return `Replacing ${fileCount(r.total)} · ${r.failed} failed`;
     return `${r.done} of ${r.total} replaced · ${r.failed} failed${reasons.length === 1 ? `: ${reasons[0]}` : ""}${kept}`;
   }
@@ -6731,7 +6747,7 @@ function queueOutcome(job) {
   if (job.status === "cancelled") return ["Stopped by user", cleanup].filter(Boolean).join(" · ");
   if (job.status === "pending") return "Waiting to start";
   if (job.replaced_files > 0 && job.remaining_candidates > 0) return `${job.replaced_files} replacements verified · ${job.remaining_candidates} candidates still available; their originals remain in place`;
-  if (job.failed_replacements > 0) return `${job.replaced_files || 0} replacements verified · ${job.failed_replacements} failed; ${job.failed_replacements === 1 ? "its original remains" : "their originals remain"} in place`;
+  if (job.failed_replacements > 0) return `${job.replaced_files || 0} replacements verified · ${job.failed_replacements} failed; ${failedOriginalsPhrase(job)}`;
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
   if (job.batch?.dry_run) return job.preview_execution_action_id ? "Batch started · View its progress" : job.batch.queued > 0 ? "Preview finished · Nothing starts automatically" : "Preview finished · No eligible files";
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
@@ -7163,6 +7179,10 @@ function renderSlotUsage(activity) {
 function workerSlotsPath() {
   return state.slotNode ? `worker-slots?node=${encodeURIComponent(state.slotNode)}` : "worker-slots";
 }
+// The slot forms show the node picked now. A save started on another node
+// must not mark them saved or write its answer into them: the save is the
+// node's, the forms are not.
+const stillOnNode = path => path === workerSlotsPath();
 // The node Settings edits. With several nodes it is always named, so a save
 // goes to the node shown: the one picked, else the first that reports. A
 // picked node that stops reporting stays picked, its editors hidden, rather
@@ -7204,15 +7224,17 @@ $("settings-node-pick").addEventListener("change", () => {
 async function saveWorkerSlots(video, podcast) {
   const note = $("worker-slot-note");
   note.textContent = "Saving…";
+  const path = workerSlotsPath();
   try {
-    const result = await api(workerSlotsPath(), {video_slots: video, podcast_slots: podcast});
+    const result = await api(path, {video_slots: video, podcast_slots: podcast});
+    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
     state.slotFormDirty = false;
     const parts = [result.applied ? (video ? "Applied. Takes effect as the next job starts." : "Slots are shared again.") : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    note.textContent = e.message;
+    if (stillOnNode(path)) note.textContent = e.message;
   }
 }
 $("worker-slot-form").addEventListener("submit", event => {
@@ -7263,18 +7285,22 @@ function renderX265Limit(activity) {
 async function saveX265Limit(limit) {
   const note = $("worker-x265-note");
   note.textContent = "Saving…";
+  // Taken once: picking another node while the stored split loads must not
+  // send this node's split to the new one.
+  const path = workerSlotsPath();
   try {
     // The split to send back is the stored one, not what the worker runs: they
     // differ while the worker has not yet taken a saved split.
-    const stored = (await api(workerSlotsPath()))?.settings;
-    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
+    const stored = (await api(path))?.settings;
+    const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
+    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
     state.x265FormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    note.textContent = e.message;
+    if (stillOnNode(path)) note.textContent = e.message;
   }
 }
 $("worker-x265-form").addEventListener("submit", event => {
@@ -7319,17 +7345,19 @@ function renderCoreBudget(activity) {
 async function saveCoreBudget(cores) {
   const note = $("worker-cores-note");
   note.textContent = "Saving…";
+  const path = workerSlotsPath();
   try {
     // The split to send back is the stored one, as for the x265 limit.
-    const stored = (await api(workerSlotsPath()))?.settings;
-    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
+    const stored = (await api(path))?.settings;
+    const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
+    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
     state.coresFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs keep the cores they have." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    note.textContent = e.message;
+    if (stillOnNode(path)) note.textContent = e.message;
   }
 }
 $("worker-cores-form").addEventListener("submit", event => {
@@ -7347,16 +7375,18 @@ function parallelSplitNote(ceiling) {
 async function saveParallelJobs(ceiling) {
   const note = $("worker-parallel-note"), slots = state.workerSlots;
   note.textContent = "Saving…";
+  const path = workerSlotsPath();
   try {
     const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
-    const result = await api(workerSlotsPath(), {...split, ceiling});
+    const result = await api(path, {...split, ceiling});
+    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
     state.parallelFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    note.textContent = e.message;
+    if (stillOnNode(path)) note.textContent = e.message;
   }
 }
 $("worker-parallel-form").addEventListener("submit", event => {
@@ -8389,6 +8419,11 @@ function conversionHero(job, status) {
 }
 // A file the job's "Replace automatically when done" replaced, not a person.
 const replacedAutomatically = job => job.replaced_automatically === true || job.replacement_run?.replaced_automatically === true || job.replacement_run?.automatic === true || state.operationJobs?.get?.(job.replacement_run?.id || job.replacement_action_id)?.replaced_automatically === true;
+// Where the original is after a replacement stopped, from the state the server
+// read off that replacement; without one (an older server) it is not claimed.
+function originalWhereText(run) {
+  return {in_place: "the original is still in place", recovery: "the original is in Recovery"}[run?.original_state] || "check Recovery to see where the original is";
+}
 // The replacement, as a state of this page.
 function conversionReplacementRow(job, status) {
   const run = job.replacement_run;
@@ -8396,9 +8431,9 @@ function conversionReplacementRow(job, status) {
   let tone = "run", text = "Replacing…";
   const when = run?.completed_at ? ` · ${agoText(run.completed_at)}` : "";
   if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = replacedAutomatically(job) ? `Replaced automatically${when}` : `The smaller file is in place${when}`; }
-  else if (run?.status === "failed" || status === "replace_failed") { tone = "bad"; text = `Replace failed: ${causeOf(job)?.summary || (run?.error ? shortLine(run.error, 70) : "the original is still in place")}`; }
+  else if (run?.status === "failed" || status === "replace_failed") { tone = "bad"; text = `Replace failed: ${causeOf(job)?.summary || (run?.error ? shortLine(run.error, 70) : originalWhereText(run))}`; }
   else if (run?.status === "waiting_decision") { tone = "warn"; text = "Replacement is waiting for your approval"; }
-  else if (run?.status === "cancelled") { tone = "muted"; text = "Replacement cancelled · the original is in place"; }
+  else if (run?.status === "cancelled") { tone = "muted"; text = `Replacement cancelled · ${originalWhereText(run)}`; }
   const row = node("p", "", `cv-replace cv-${tone}`);
   row.dataset.replacementRun = run?.status || status;
   const icon = node("span", {ok: "✓", bad: "!", warn: "!", muted: "–", run: ""}[tone], "cv-replace-icon");
@@ -8852,7 +8887,7 @@ function batchReplaceReason(job, n) {
   if (n > 0) return "";
   if (job.replacement?.approved && operationIsActive(job.status)) return "Replacing now";
   if (operationIsActive(job.status)) return "Available when files finish encoding";
-  if (job.failed_replacements > 0) return `${job.failed_replacements} ${job.failed_replacements === 1 ? "replacement" : "replacements"} failed · the original${job.failed_replacements === 1 ? " is" : "s are"} still in place`;
+  if (job.failed_replacements > 0) return `${job.failed_replacements} ${job.failed_replacements === 1 ? "replacement" : "replacements"} failed · ${failedOriginalsPhrase(job)}`;
   if (job.replaced_files > 0) return "Every ready file is replaced";
   return "No file is ready to replace";
 }
