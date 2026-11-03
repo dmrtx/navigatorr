@@ -306,3 +306,39 @@ func TestPreparedPlanReadIsAuthenticatedAndEmptyBeforePreparing(t *testing.T) {
 		t.Fatal("a plan was read for a batch that does not exist")
 	}
 }
+
+// A batch replaced file by file ("Replace automatically when done") has no
+// approved plan: its summary still counts the files whose replacement failed
+// next to the ones that were replaced, so the screen cannot call it all done.
+func TestBatchCountsFailedReplacementsNextToReplacedOnes(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "completed", map[string]any{"mode": "size"}, nil, nil)
+	for _, key := range []string{"file-a", "file-b", "file-c"} {
+		child := "t-" + key
+		seedOperation(t, st, child, "transcode_media", "completed", map[string]any{"parent_action_id": "batch", "path": "/media/" + key + ".mkv"}, map[string]any{"original_intact": true}, nil)
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: key, FilePath: "/media/" + key + ".mkv", Status: "completed", ChildActionID: child, Decision: "transcode", DisplayLabel: "Sample Show " + key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := `{"promotion":{"original_bytes":3000,"candidate_bytes":1000,"recovery_cleanup_completed":true,"recovery_verified_before_replacement":true}}`
+	for key, status := range map[string]string{"file-a": "completed", "file-b": "completed", "file-c": "failed"} {
+		outputs := "{}"
+		state := "{}"
+		if status == "completed" {
+			outputs, state = `{"promoted":true,"recovery_retained":false}`, done
+		}
+		if err := st.CreateActionInstance(store.ActionInstance{ID: "promotion-" + key, ActionName: "promote_transcode_candidate", Status: status, InputsJSON: `{"transcode_action_id":"t-` + key + `"}`, OutputsJSON: outputs, StateJSON: state, IdempotencyKey: "promote:filesystem:t-" + key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/operations?id=batch", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	job := page.Jobs[0]
+	if job["replaced_files"] != float64(2) || job["failed_replacements"] != float64(1) {
+		t.Fatalf("replaced %v failed %v, want 2 replaced and 1 failed", job["replaced_files"], job["failed_replacements"])
+	}
+}

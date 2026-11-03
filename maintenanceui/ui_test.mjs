@@ -6166,6 +6166,25 @@ test("a batch with files still waiting is not Replaced because one file was", ()
   assert.equal(h.run("queuePresentation(probe).status"), "Replaced");
 });
 
+test("a batch with a failed replacement is not Replaced or verified", () => {
+  const h = harness();
+  const job = { id: "b", action_name: "transcode_batch", status: "completed", batch: { total: 3, completed: 3 }, savings: { realized_saved_bytes: 1000 }, replaced_files: 2, remaining_candidates: 0, failed_replacements: 1 };
+  h.context.probe = job;
+  const view = h.run("queuePresentation(probe)");
+  assert.equal(view.status, "Partly replaced");
+  assert.equal(h.run('statusClass("Partly replaced")'), "waiting_decision");
+  assert.match(view.summary, /2 replaced · 1 replacement failed/);
+  assert.doesNotMatch(h.run("queueOutcome(probe)"), /Replacement verified/);
+  assert.match(h.run("queueOutcome(probe)"), /2 replacements verified · 1 failed; its original remains in place/);
+  h.run("state.info={allow_destructive:true}");
+  const reason = h.run("batchReplaceReason(probe, 0)");
+  assert.match(reason, /1 replacement failed/);
+  assert.doesNotMatch(reason, /Every ready file/);
+  h.context.probe = { ...job, failed_replacements: 0 };
+  assert.equal(h.run("queuePresentation(probe).status"), "Replaced");
+  assert.equal(h.run("batchReplaceReason(probe, 0)"), "Every ready file is replaced");
+});
+
 // ---- One-step batch replacement approval ----
 const flatten = (el) => [el, ...(el.children || []).flatMap(flatten)];
 const textOf = (el) => flatten(el).map((e) => e.textContent).filter(Boolean).join(" ");

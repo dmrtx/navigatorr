@@ -4793,7 +4793,7 @@ function statusClass(status) {
   if (["failed", "Failed", "Worker offline"].includes(status)) return "failed";
   // Missing telemetry is worth attention, but nothing has failed: the worker
   // keeps the job and the original is untouched.
-  if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "partial", "Partial", "Cancelling", "No heartbeat", "No updates"].includes(status)) return "waiting_decision";
+  if (["review", "waiting_decision", "Needs review", "Needs decision", "Needs attention", "Partly replaced", "partial", "Partial", "Cancelling", "No heartbeat", "No updates"].includes(status)) return "waiting_decision";
   if (["Preview", "Preview complete", "Eligible"].includes(status)) return "preview";
   return "neutral";
 }
@@ -5987,7 +5987,7 @@ function queuePresentation(job) {
     (job.replaced && job.status === "completed"));
   // Nothing was made, so there are no savings to report.
   const leftNoFile = notConverted(job);
-  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.paused === true ? "Paused" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.paused === true ? "Paused" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.failed_replacements > 0 && !operationIsActive(job.status) ? "Partly replaced" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : declinedReplacement(job) ? "Kept original" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -6030,9 +6030,10 @@ function queuePresentation(job) {
     result = job.promotion ? "Review replacement before files change" : "Your decision is needed";
   else if (job.status === "cancelled") result = "Stopped";
   if (job.workflow_actions?.length && replacement && job.status !== "failed") {
-    result = `Conversion complete · ${job.savings?.realized_saved_bytes != null ? "Replacement verified" : result || "Replacement in progress"}`;
+    result = `Conversion complete · ${job.savings?.realized_saved_bytes != null && !job.failed_replacements ? "Replacement verified" : result || "Replacement in progress"}`;
   }
-  if (job.replaced_files > 0 && !replacingHeadline) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
+  if (job.failed_replacements > 0 && !replacingHeadline) result += ` · ${job.replaced_files || 0} replaced · ${job.failed_replacements} replacement${job.failed_replacements === 1 ? "" : "s"} failed`;
+  else if (job.replaced_files > 0 && !replacingHeadline) result += ` · ${job.replaced_files} replaced${job.remaining_candidates > 0 ? ` · ${job.remaining_candidates} candidates available` : ""}`;
   if (job.batch?.dry_run) result += " · Originals unchanged";
   else if (job.batch?.outcome === "no_changes") result += " · Originals kept";
   const summary = [kind, result, metrics.join(" · ")]
@@ -6730,6 +6731,7 @@ function queueOutcome(job) {
   if (job.status === "cancelled") return ["Stopped by user", cleanup].filter(Boolean).join(" · ");
   if (job.status === "pending") return "Waiting to start";
   if (job.replaced_files > 0 && job.remaining_candidates > 0) return `${job.replaced_files} replacements verified · ${job.remaining_candidates} candidates still available; their originals remain in place`;
+  if (job.failed_replacements > 0) return `${job.replaced_files || 0} replacements verified · ${job.failed_replacements} failed; ${job.failed_replacements === 1 ? "its original remains" : "their originals remain"} in place`;
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
   if (job.batch?.dry_run) return job.preview_execution_action_id ? "Batch started · View its progress" : job.batch.queued > 0 ? "Preview finished · Nothing starts automatically" : "Preview finished · No eligible files";
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
@@ -8850,6 +8852,7 @@ function batchReplaceReason(job, n) {
   if (n > 0) return "";
   if (job.replacement?.approved && operationIsActive(job.status)) return "Replacing now";
   if (operationIsActive(job.status)) return "Available when files finish encoding";
+  if (job.failed_replacements > 0) return `${job.failed_replacements} ${job.failed_replacements === 1 ? "replacement" : "replacements"} failed · the original${job.failed_replacements === 1 ? " is" : "s are"} still in place`;
   if (job.replaced_files > 0) return "Every ready file is replaced";
   return "No file is ready to replace";
 }
