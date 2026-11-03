@@ -132,13 +132,14 @@ func ValidateCoreBudget(budget, hostCPUs int) error {
 
 // FitSlotSplit applies a new ceiling to a split: a split whose pools add up to
 // more than the ceiling returns to one shared pool rather than being scaled,
-// so the worker only ever runs pools the operator chose. An x265 cap larger
-// than the video pool that is left is cleared the same way. It returns notes
+// so the worker only ever runs pools the operator chose. The core budget does
+// not depend on the pools and is kept. An x265 cap larger than the video pool
+// that is left is cleared the same way. It returns notes
 // describing what it reset.
 func FitSlotSplit(split SlotSplit, ceiling int) (SlotSplit, []string) {
 	var notes []string
 	if !split.Shared() && split.VideoSlots+split.PodcastSlots > ceiling {
-		split = SlotSplit{Ceiling: split.Ceiling, X265Slots: split.X265Slots}
+		split = SlotSplit{Ceiling: split.Ceiling, X265Slots: split.X265Slots, CoreBudget: split.CoreBudget}
 		notes = append(notes, SlotSplitResetNote(ceiling))
 	}
 	if split.X265Slots > split.VideoPool(ceiling) {
