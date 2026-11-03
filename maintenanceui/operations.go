@@ -637,6 +637,16 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read archive state")
 		return
 	}
+	replaceWhenDone, err := s.engine.Deps().Store.ListReplaceWhenDone()
+	if err != nil {
+		fail(w, 500, "read replacement settings")
+		return
+	}
+	approvals, err := s.engine.Deps().Store.ListReplacementApprovals()
+	if err != nil {
+		fail(w, 500, "read replacement approvals")
+		return
+	}
 	timing.since("snapshot", began)
 	began = time.Now()
 	now := time.Now().UTC()
@@ -984,6 +994,15 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if parent, found := recordsByID[operationString(r.inputs["parent_action_id"])]; found && parent.inst.ActionName == "transcode_batch" {
 				job["parent_batch_id"] = parent.inst.ID
 			}
+			switch r.inst.ActionName {
+			case "transcode_media", "transcode_batch":
+				job["replace_when_done"] = s.replaceWhenDoneOf(r, recordsByID, replaceWhenDone)
+				if skipped := operationString(operationValue(r, "replace_when_done_skipped")); skipped != "" {
+					job["replace_when_done_skipped"] = skipped
+				}
+			case "promote_transcode_candidate":
+				job["replaced_automatically"] = action.ReplacedAutomatically(r.inst.ID, operationString(r.inputs["transcode_action_id"]), approvals)
+			}
 			if r.inst.ActionName == "transcode_media" {
 				job["replaced"] = replacedActions[r.inst.ID] || replaced[operationSourceKey(r)]
 				job["conversion_status"] = conversions.conversionStatus(r)
@@ -1187,4 +1206,20 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	timing.since("jobs", began)
 	timing.set(w)
 	writeJSON(w, http.StatusOK, page)
+}
+
+// replaceWhenDoneOf is whether a job or batch replaces each file by itself
+// once it is done, by the rule Engine.ReplaceWhenDone reads it with. A batch
+// that is not in this snapshot is read from the store.
+func (s *Server) replaceWhenDoneOf(r operationRecord, byID map[string]operationRecord, switched map[string]bool) bool {
+	return action.ResolveReplaceWhenDone(r.inst.ID, r.inst.ActionName, r.inputs, switched, func(id string) (string, map[string]any, bool) {
+		if parent, ok := byID[id]; ok {
+			return parent.inst.ActionName, parent.inputs, true
+		}
+		parent, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
+		if err != nil || parent == nil {
+			return "", nil, false
+		}
+		return parent.ActionName, decodeOperationJSON(parent.InputsJSON), true
+	})
 }

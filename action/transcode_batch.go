@@ -52,6 +52,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 			"max_items",
 			"promote_candidates",
 			"promotion_parallelism",
+			"replace_when_done",
 		},
 		Destructive: true,
 		Steps: []StepDefinition{

@@ -388,6 +388,11 @@ func (e *Engine) BatchItemReplacementReserved(item store.TranscodeBatchItem) (bo
 	if item.ChildActionID == "" {
 		return false, nil
 	}
+	// Its job replaces it by itself and has yet to submit that: the file's
+	// own replacement goes first.
+	if pending, _, err := e.deps.Store.AutoReplacePending(item.ChildActionID); err != nil || pending {
+		return pending, err
+	}
 	for _, service := range []string{"sonarr", "radarr", "filesystem"} {
 		old, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+item.ChildActionID)
 		if err != nil {

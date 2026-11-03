@@ -24,6 +24,14 @@ type batchItemView struct {
 	SavedBytes int64 `json:"saved_bytes,omitempty"`
 	// SourceBytes is the file's size when the batch planned it (0 when unknown).
 	SourceBytes int64 `json:"source_bytes,omitempty"`
+	// CandidateBytes is the finished new file's size, shown with SourceBytes
+	// as before -> after (0 while there is none).
+	CandidateBytes int64 `json:"candidate_bytes,omitempty"`
+	// ReplaceWhenDone says the file is replaced by itself once it is done.
+	ReplaceWhenDone bool `json:"replace_when_done"`
+	// ReplacedAutomatically says its replacement started by itself, not
+	// from a person's review.
+	ReplacedAutomatically bool `json:"replaced_automatically,omitempty"`
 	// SizeBudgetOutcome says a candidate came from the operation's size budget
 	// (for example below_quality_target_within_budget).
 	SizeBudgetOutcome string `json:"size_budget_outcome,omitempty"`
@@ -121,6 +129,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 	state := decodeOperationJSON(inst.StateJSON)
 	settings := operationMap(state["batch_item_settings"])
 	history, pending := operationMap(state["batch_attempt_history"]), operationMap(state["batch_retry_pending"])
+	batchReplaces := s.engine.ReplaceWhenDone(inst)
 	views := []batchItemView{}
 	end := min(offset, len(items)) + min(limit, max(0, len(items)-offset))
 	if offset < len(items) {
@@ -215,6 +224,9 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								}
 								view.Where = whereOf(pr)
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
+								if approval, err := s.engine.Deps().Store.GetReplacementApproval(child.ID); err == nil && approval != nil {
+									view.ReplacedAutomatically = action.ReplacedAutomatically(prior.ID, child.ID, map[string]store.ReplacementApproval{child.ID: *approval})
+								}
 								break
 							}
 						}
@@ -222,6 +234,13 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 						if saved := projectOperationSavings(r, time.Now()).CandidateSavedBytes; saved != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && (operationValue(r, "candidate_removed") != true || view.Replaced) {
 							view.SavedBytes = *saved
 						}
+						if savings := projectOperationSavings(r, time.Now()); savings.CandidateBytes != nil && child.Status == store.ActionStatusCompleted && !view.RetryPending && operationValue(r, "skip_transcode") != true && operationValue(r, "skipped") != true && (operationValue(r, "candidate_removed") != true || view.Replaced) {
+							view.CandidateBytes = *savings.CandidateBytes
+							if view.SourceBytes == 0 && savings.SourceBytes != nil {
+								view.SourceBytes = *savings.SourceBytes
+							}
+						}
+						view.ReplaceWhenDone = s.engine.ReplaceWhenDone(child)
 					}
 				}
 			}
@@ -238,12 +257,15 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					view.CandidateReady = false
 				}
 			}
+			if item.ChildActionID == "" {
+				view.ReplaceWhenDone = batchReplaces
+			}
 			views = append(views, view)
 		}
 	}
 	timing.since("views", began)
 	timing.set(w)
-	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items)})
+	writeJSON(w, 200, map[string]any{"items": views, "total": len(items), "offset": offset, "has_more": end < len(items), "replace_when_done": batchReplaces})
 }
 
 // compactMaxHeight reads a frozen compact policy's output height; the

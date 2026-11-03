@@ -63,3 +63,28 @@ func TestActionRunReportsInvalidParamsWithoutReservingTheKey(t *testing.T) {
 		t.Fatal("corrected request not admitted")
 	}
 }
+
+// action_run cannot approve a replacement ahead: approval is the server's.
+func TestActionRunRefusesAPromotionApproval(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "approval.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	e := action.NewEngine(action.EngineDeps{Store: st, Config: &config.Config{AllowDestructive: true}, Transcode: readyAdmissionWorker{}})
+	s := server.NewMCPServer("test", "1")
+	registerActionTools(s, e)
+	for _, approval := range []string{"reviewed", "automatic"} {
+		result := callTool(t, s, "action_run", map[string]any{"action": "promote_transcode_candidate", "inputs": `{"transcode_action_id":"some-transcode","service":"filesystem","approval":"` + approval + `"}`, "idempotency_key": "self-approve-" + approval})
+		var body struct {
+			Error string `json:"error"`
+			Field string `json:"field"`
+		}
+		if !result.IsError || json.Unmarshal([]byte(resultText(t, result)), &body) != nil || body.Error != "invalid_params" || body.Field != "approval" {
+			t.Fatalf("approval %q accepted: %+v", approval, result)
+		}
+	}
+	if rows, _ := st.ListActionInstances("", 100); len(rows) != 0 {
+		t.Fatalf("rows persisted: %+v", rows)
+	}
+}

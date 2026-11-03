@@ -41,12 +41,15 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 	e.reconcilerOnce.Do(func() {
 		go func() {
 			defer close(e.reconcilerDone)
+			defer e.notes.Wait()
 			ticker := time.NewTicker(e.pollInterval())
 			defer ticker.Stop()
 			d := newReconcileDispatcher()
 			defer d.wg.Wait()
 			for {
 				e.startWorkerHoldSync(ctx)
+				// Automatic replacements a crash or an error left behind.
+				e.drainAutoReplacements(ctx)
 				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}
@@ -155,6 +158,7 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 // dispatchReconcile instead, so one slow continuation never delays the next
 // poll of other actions.
 func (e *Engine) ReconcileOnce(ctx context.Context) error {
+	e.drainAutoReplacements(ctx)
 	ids, err := e.reconcilableIDs(ctx)
 	if err != nil {
 		return err

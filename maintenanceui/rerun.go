@@ -312,6 +312,10 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Running it again keeps whether it replaces its file by itself when done.
+	if old.inputs["dry_run"] != true {
+		inputs["replace_when_done"] = s.engine.ReplaceWhenDone(inst)
+	}
 	ctx := action.WithOrigin(r.Context(), "web")
 	// A lost response replays the same key: return that action, never a
 	// second job and never "worker busy" for work that is already admitted.
@@ -319,6 +323,9 @@ func (s *Server) rerun(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "read earlier attempt")
 		return
 	} else if prior != nil {
+		// The earlier job's switch may have changed since the first answer;
+		// the replay is still that request, so it does not send the value.
+		delete(inputs, "replace_when_done")
 		res, err := s.engine.Enqueue(ctx, inst.ActionName, inputs, body.Key)
 		if err != nil {
 			failAdmission(w, 409, err)

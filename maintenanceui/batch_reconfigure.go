@@ -56,6 +56,9 @@ func (s *Server) reconfigurePlan(id string) (batchReconfigurePlan, map[string]an
 	}
 	delete(inputs, "idempotency_key")
 	inputs["dry_run"], inputs["paused"] = false, false
+	// The new batch keeps whether it replaces each file by itself when done,
+	// as last switched.
+	inputs["replace_when_done"] = s.engine.ReplaceWhenDone(inst)
 	items, err := st.ListTranscodeBatchItems(id)
 	if err != nil {
 		return p, nil, err
@@ -114,7 +117,7 @@ func (s *Server) reconfigurePlan(id string) (batchReconfigurePlan, map[string]an
 	} else if operationString(inputs["profile"]) == "" || inputs["profile"] == "auto" {
 		p.Settings["profile_label"] = "Original automatic selection"
 	}
-	for _, key := range []string{"priority", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "promote_candidates"} {
+	for _, key := range []string{"priority", "min_savings_percent", "max_size_increase_percent", "preserve_source_bit_depth", "promote_candidates", "replace_when_done"} {
 		if value, ok := inputs[key]; ok {
 			p.Settings[key] = value
 		}
