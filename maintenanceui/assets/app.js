@@ -7018,7 +7018,7 @@ async function loadJobs(more = false) {
     return;
   const revision = ++state.jobsRevision;
   state.jobsLoading = true;
-  if (state.tab === "jobs" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
+  if ((state.tab === "jobs" || state.tab === "advanced") && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
   $("jobs-more").disabled = true;
   markQueueFilter();
   const status = $("job-filter").value;
@@ -7183,6 +7183,8 @@ function workerSlotsPath() {
 // must not mark them saved or write its answer into them: the save is the
 // node's, the forms are not.
 const stillOnNode = path => path === workerSlotsPath();
+// An edit, another save or a node pick also makes a form's old answer stale.
+let slotFormRevision = 0, parallelFormRevision = 0, x265FormRevision = 0, coresFormRevision = 0;
 // The node Settings edits. With several nodes it is always named, so a save
 // goes to the node shown: the one picked, else the first that reports. A
 // picked node that stops reporting stays picked, its editors hidden, rather
@@ -7204,7 +7206,6 @@ function renderNodePicker(nodes, selected) {
 // A picked node that does not report: its settings cannot be read or saved.
 function renderUnavailableNode(selected) {
   state.workerSlots = null;
-  state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = state.coresFormDirty = false;
   $("settings-node").hidden = false;
   $("worker-parallel-summary").hidden = true;
   $("worker-parallel-form").hidden = true;
@@ -7217,6 +7218,10 @@ function renderUnavailableNode(selected) {
 }
 $("settings-node-pick").addEventListener("change", () => {
   state.slotNode = $("settings-node-pick").value;
+  slotFormRevision++;
+  parallelFormRevision++;
+  x265FormRevision++;
+  coresFormRevision++;
   state.slotFormDirty = state.parallelFormDirty = state.x265FormDirty = state.coresFormDirty = false;
   $("worker-parallel-note").textContent = $("worker-slot-note").textContent = $("worker-x265-note").textContent = $("worker-cores-note").textContent = "";
   renderWorkerActivity(state.activityData);
@@ -7224,17 +7229,19 @@ $("settings-node-pick").addEventListener("change", () => {
 async function saveWorkerSlots(video, podcast) {
   const note = $("worker-slot-note");
   note.textContent = "Saving…";
-  const path = workerSlotsPath();
+  const path = workerSlotsPath(), revision = ++slotFormRevision;
   try {
     const result = await api(path, {video_slots: video, podcast_slots: podcast});
-    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
+    if (!stillOnNode(path) || revision !== slotFormRevision) {
+      return void refreshWorkerActivity(true);
+    }
     state.slotFormDirty = false;
     const parts = [result.applied ? (video ? "Applied. Takes effect as the next job starts." : "Slots are shared again.") : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    if (stillOnNode(path)) note.textContent = e.message;
+    if (stillOnNode(path) && revision === slotFormRevision) note.textContent = e.message;
   }
 }
 $("worker-slot-form").addEventListener("submit", event => {
@@ -7242,7 +7249,9 @@ $("worker-slot-form").addEventListener("submit", event => {
   void saveWorkerSlots(Number($("slot-video").value), Number($("slot-podcast").value));
 });
 $("worker-slot-share").addEventListener("click", () => void saveWorkerSlots(0, 0));
-for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; });
+// An edit makes the answer to the save in flight stale, so its "Saving…" no longer says anything true.
+const clearSaving = note => { if (note.textContent === "Saving…") note.textContent = ""; };
+for (const id of ["slot-video", "slot-podcast"]) $(id).addEventListener("input", () => { state.slotFormDirty = true; slotFormRevision++; clearSaving($("worker-slot-note")); });
 // How many jobs the node runs at once, in the Transcode node block of
 // Settings. Shown whenever the worker is connected; editable when the worker
 // reports a limit (older workers only show it).
@@ -7287,27 +7296,29 @@ async function saveX265Limit(limit) {
   note.textContent = "Saving…";
   // Taken once: picking another node while the stored split loads must not
   // send this node's split to the new one.
-  const path = workerSlotsPath();
+  const path = workerSlotsPath(), revision = ++x265FormRevision;
   try {
     // The split to send back is the stored one, not what the worker runs: they
     // differ while the worker has not yet taken a saved split.
     const stored = (await api(path))?.settings;
     const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
-    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
+    if (!stillOnNode(path) || revision !== x265FormRevision) {
+      return void refreshWorkerActivity(true);
+    }
     state.x265FormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    if (stillOnNode(path)) note.textContent = e.message;
+    if (stillOnNode(path) && revision === x265FormRevision) note.textContent = e.message;
   }
 }
 $("worker-x265-form").addEventListener("submit", event => {
   event.preventDefault();
   void saveX265Limit(Number($("x265-limit").value));
 });
-$("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; });
+$("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; x265FormRevision++; clearSaving($("worker-x265-note")); });
 // A paused node takes no files, so none of the limits below do anything until
 // it resumes. Say so here, where the limits are, with the way out.
 function renderNodePausedNotice(selected) {
@@ -7345,26 +7356,28 @@ function renderCoreBudget(activity) {
 async function saveCoreBudget(cores) {
   const note = $("worker-cores-note");
   note.textContent = "Saving…";
-  const path = workerSlotsPath();
+  const path = workerSlotsPath(), revision = ++coresFormRevision;
   try {
     // The split to send back is the stored one, as for the x265 limit.
     const stored = (await api(path))?.settings;
     const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
-    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
+    if (!stillOnNode(path) || revision !== coresFormRevision) {
+      return void refreshWorkerActivity(true);
+    }
     state.coresFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs keep the cores they have." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    if (stillOnNode(path)) note.textContent = e.message;
+    if (stillOnNode(path) && revision === coresFormRevision) note.textContent = e.message;
   }
 }
 $("worker-cores-form").addEventListener("submit", event => {
   event.preventDefault();
   void saveCoreBudget(Number($("core-budget").value));
 });
-$("core-budget").addEventListener("change", () => { state.coresFormDirty = true; });
+$("core-budget").addEventListener("change", () => { state.coresFormDirty = true; coresFormRevision++; clearSaving($("worker-cores-note")); });
 // The rule a lower ceiling applies to the split (transcode.FitSlotSplit),
 // shown before saving.
 function parallelSplitNote(ceiling) {
@@ -7373,20 +7386,23 @@ function parallelSplitNote(ceiling) {
   return `The video and podcast split (${slots.video.total} + ${slots.podcast.total}) does not fit ${ceiling} parallel jobs, so all slots will be shared again.`;
 }
 async function saveParallelJobs(ceiling) {
-  const note = $("worker-parallel-note"), slots = state.workerSlots;
+  const note = $("worker-parallel-note");
   note.textContent = "Saving…";
-  const path = workerSlotsPath();
+  const path = workerSlotsPath(), revision = ++parallelFormRevision;
   try {
-    const split = slots?.split ? {video_slots: slots.video.total, podcast_slots: slots.podcast.total} : {video_slots: 0, podcast_slots: 0};
-    const result = await api(path, {...split, ceiling});
-    if (!stillOnNode(path)) return void refreshWorkerActivity(true);
+    // Keep the stored split, as for the x265 limit and core budget.
+    const stored = (await api(path))?.settings;
+    const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, ceiling});
+    if (!stillOnNode(path) || revision !== parallelFormRevision) {
+      return void refreshWorkerActivity(true);
+    }
     state.parallelFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
     note.textContent = parts.join(" ");
     void refreshWorkerActivity(true);
   } catch (e) {
-    if (stillOnNode(path)) note.textContent = e.message;
+    if (stillOnNode(path) && revision === parallelFormRevision) note.textContent = e.message;
   }
 }
 $("worker-parallel-form").addEventListener("submit", event => {
@@ -7395,6 +7411,7 @@ $("worker-parallel-form").addEventListener("submit", event => {
 });
 $("parallel-jobs").addEventListener("input", () => {
   state.parallelFormDirty = true;
+  parallelFormRevision++;
   $("worker-parallel-note").textContent = parallelSplitNote(Number($("parallel-jobs").value));
 });
 $("worker-open-settings").addEventListener("click", () => {
