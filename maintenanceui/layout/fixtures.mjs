@@ -9,7 +9,7 @@
 const GB = 1e9, MB = 1e6;
 
 export const nameVariants = {
-  short: { show: "Silo", season: "Season 2", file: n => `Silo - S02E0${n} - Pilot.mkv`, batchTitle: "Silo · Season 2" },
+  short: { show: "Kiln", season: "Season 2", file: n => `Kiln - S02E0${n} - Pilot.mkv`, batchTitle: "Kiln · Season 2" },
   long: {
     show: "The Extraordinarily Long Running Documentary Series About Everything",
     season: "Season 12 — The Complete Remastered Extended Edition",
