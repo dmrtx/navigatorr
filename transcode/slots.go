@@ -9,6 +9,10 @@ import (
 // bitstream, so a video job is never given fewer threads than this.
 const MinX265PoolThreads = 4
 
+// MaxBudgetCPUs is the host size from which x265 is not partitioned (its own
+// thread layout is kept there), so a core budget could not limit its encodes.
+const MaxBudgetCPUs = 32
+
 // SlotPool is one kind of work's share of a worker's slots.
 type SlotPool struct {
 	Total int `json:"total"`
@@ -118,6 +122,8 @@ func ValidateCoreBudget(budget, hostCPUs int) error {
 		return nil
 	case budget < MinX265PoolThreads:
 		return fmt.Errorf("cores must be at least %d, or 0 to use them all", MinX265PoolThreads)
+	case hostCPUs >= MaxBudgetCPUs:
+		return fmt.Errorf("cores cannot be limited on a host with %d CPUs: x265 is not partitioned there", hostCPUs)
 	case hostCPUs > 0 && budget >= hostCPUs:
 		return fmt.Errorf("cores must be fewer than the worker's %d CPUs, or 0 to use them all", hostCPUs)
 	}

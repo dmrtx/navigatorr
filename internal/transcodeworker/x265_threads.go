@@ -90,7 +90,14 @@ func (w *Worker) x265ThreadParams() string {
 	// changes meanwhile.
 	limits := w.slotLimits()
 	pool := limits.x265Pool()
-	params := w.x265ThreadParamsWithBudget(min(w.x265JobsSharingCPU(limits), pool), limits.CoreBudget)
+	sharing := min(w.x265JobsSharingCPU(limits), pool)
+	if limits.CoreBudget > 0 {
+		// Encodes start at different times, so a pool sized from those running
+		// now would let a later one push the total past the budget: size for
+		// every encode the slots allow.
+		sharing = pool
+	}
+	params := w.x265ThreadParamsWithBudget(sharing, limits.CoreBudget)
 	if params == "" || w.x265PartitionDisabled(strings.Join(w.x265PartitionCandidatesWithBudget(pool, limits.CoreBudget), ",")) {
 		return ""
 	}

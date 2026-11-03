@@ -77,7 +77,7 @@ func slotsMatch(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) boo
 	if worker.CoreBudgetCapable() {
 		stored := 0
 		if row != nil {
-			stored = row.CoreBudget
+			stored = fittingCoreBudget(row.CoreBudget, worker)
 		}
 		if worker.Cores() != stored {
 			return false
@@ -101,9 +101,19 @@ func slotPush(row store.WorkerSlotSettings, worker transcode.WorkerSlots) transc
 		split.X265Slots = row.X265Slots
 	}
 	if worker.CoreBudgetCapable() {
-		split.CoreBudget = row.CoreBudget
+		split.CoreBudget = fittingCoreBudget(row.CoreBudget, worker)
 	}
 	return split
+}
+
+// fittingCoreBudget is the stored budget, or 0 when it no longer fits the
+// node's CPUs (the hardware changed): the worker ignores such a budget, and
+// pushing it would get the whole split refused.
+func fittingCoreBudget(budget int, worker transcode.WorkerSlots) int {
+	if transcode.ValidateCoreBudget(budget, worker.HostCPUs) != nil {
+		return 0
+	}
+	return budget
 }
 
 // workerSlots serves GET (the stored ceiling and split, what the worker runs

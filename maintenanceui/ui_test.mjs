@@ -2372,6 +2372,9 @@ test("the core budget is offered only by a worker that reports it, keeps unsaved
   h.context.activity.activity.slots={...slots(0),host_cpus:4};
   h.run('renderWorkerActivity(activity)');
   assert.equal(h.elements.get("worker-cores-row").hidden,true);
+  h.context.activity.activity.slots={...slots(0),host_cpus:32};
+  h.run('renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-cores-row").hidden,true);
 });
 
 test("the slot table names the encoder of a full conversion", () => {

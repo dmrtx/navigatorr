@@ -30,26 +30,36 @@ func TestCoreBudgetSizesX265FromTheBudget(t *testing.T) {
 	if _, err := w.SetSlotSplit(transcode.SlotSplit{CoreBudget: 6}); err != nil {
 		t.Fatal(err)
 	}
-	if got := w.x265ThreadParams(); got != "pools=6:frame-threads=3" {
+	// Encodes start at different times, so the pool is sized for every encode
+	// the slots allow, not for those running now: together they stay inside
+	// the budget. 6/2=3 is raised to the floor.
+	for _, running := range []int{1, 2} {
+		inUse = running
+		if got := w.x265ThreadParams(); got != "pools=4:frame-threads=3" {
+			t.Errorf("%d running of 2 slots: want the two-encode share, got %q", running, got)
+		}
+	}
+	// With one slot a lone encode takes the whole budget.
+	one := newBudgetWorker(t, 1)
+	one.videoInUseFn = func() (int, bool) { return 1, true }
+	if _, err := one.SetSlotSplit(transcode.SlotSplit{CoreBudget: 6}); err != nil {
+		t.Fatal(err)
+	}
+	if got := one.x265ThreadParams(); got != "pools=6:frame-threads=3" {
 		t.Errorf("a lone job takes the whole budget: %q", got)
 	}
-	inUse = 2
-	if got := w.x265ThreadParams(); got != "pools=4:frame-threads=3" {
-		t.Errorf("two jobs get 6/2=3 threads, raised to the %d floor: %q", minX265PoolThreads, got)
-	}
 	// An explicit x265_pools above the budget share is brought down to it.
-	w.cfg.X265Pools = 8
-	inUse = 1
-	if got := w.x265ThreadParams(); got != "pools=6:frame-threads=3" {
+	one.cfg.X265Pools = 8
+	if got := one.x265ThreadParams(); got != "pools=6:frame-threads=3" {
 		t.Errorf("explicit pools over the budget: %q", got)
 	}
 	// And one below the share stays what the operator asked for.
-	w.cfg.X265Pools = 5
-	if got := w.x265ThreadParams(); got != "pools=5:frame-threads=3" {
+	one.cfg.X265Pools = 5
+	if got := one.x265ThreadParams(); got != "pools=5:frame-threads=3" {
 		t.Errorf("explicit pools under the budget: %q", got)
 	}
-	w.cfg.X265Pools = -1
-	if got := w.x265ThreadParams(); got != "" {
+	one.cfg.X265Pools = -1
+	if got := one.x265ThreadParams(); got != "" {
 		t.Errorf("x265_pools -1 still turns partitioning off: %q", got)
 	}
 }

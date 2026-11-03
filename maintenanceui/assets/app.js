@@ -7282,11 +7282,12 @@ $("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; }
 // How many of the node's CPUs encodes may use together, so the rest stays free
 // for other work (a build, say) without pausing the node. Only a worker that
 // reports the budget takes it, and only a host with more CPUs than x265's
-// smallest pool has anything to limit.
+// smallest pool has anything to limit, and below the size where x265 is not
+// partitioned.
 function renderCoreBudget(activity) {
   const slots = activity.slots, cpus = Number(slots?.host_cpus) || 0;
   const row = $("worker-cores-row"), pick = $("core-budget");
-  row.hidden = !slots || slots.core_budget == null || cpus <= 4;
+  row.hidden = !slots || slots.core_budget == null || cpus <= 4 || cpus >= 32;
   if (row.hidden) { $("worker-cores-note").textContent = ""; return; }
   const budget = Number(slots.core_budget) || 0;
   $("worker-cores-limit").textContent = budget

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
@@ -609,5 +610,29 @@ func TestWorkerSlotsCoreBudgetIsNotPushedToAnOldWorker(t *testing.T) {
 	s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
 	if worker.puts != 0 {
 		t.Fatalf("an old worker was pushed %+v", worker.lastPush)
+	}
+}
+
+func TestSlotPushDropsAStoredBudgetTheNodeNoLongerFits(t *testing.T) {
+	worker := transcode.WorkerSlots{HostCPUs: 8, CoreBudget: new(int)}
+	row := store.WorkerSlotSettings{VideoSlots: 1, PodcastSlots: 1, CoreBudget: 12}
+	if got := slotPush(row, worker); got.CoreBudget != 0 || got.VideoSlots != 1 {
+		t.Fatalf("an unfitting budget must not travel with the split: %+v", got)
+	}
+	if !slotsMatch(&store.WorkerSlotSettings{CoreBudget: 12}, worker) {
+		t.Fatal("a worker that ignores an unfitting budget is in sync")
+	}
+	row.CoreBudget = 6
+	if got := slotPush(row, worker); got.CoreBudget != 6 {
+		t.Fatalf("a fitting budget is pushed: %+v", got)
+	}
+}
+
+func TestCoreBudgetIsRefusedOnHostsX265IsNotPartitionedOn(t *testing.T) {
+	if err := transcode.ValidateCoreBudget(8, 32); err == nil {
+		t.Fatal("a budget on a 32-CPU host limits nothing and must be refused")
+	}
+	if err := transcode.ValidateCoreBudget(8, 31); err != nil {
+		t.Fatal(err)
 	}
 }
