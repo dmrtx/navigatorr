@@ -140,3 +140,32 @@ func TestBatchRowsCarrySizeTotals(t *testing.T) {
 		t.Fatalf("fresh batch %+v", fresh)
 	}
 }
+
+// A job the engine skipped can still carry candidate_size_bytes (the size it
+// would have reached); through the trimmed snapshot it lists no result, and a
+// batch does not count it as one.
+func TestSkippedJobsListNoResult(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "running", map[string]any{"paths": []string{"/media/s.mkv"}}, nil, nil)
+	skipped := map[string]any{"original": map[string]any{"size_bytes": 4000}, "skipped": true, "candidate_size_bytes": 3900, "original_intact": true, "original_sha256": "s"}
+	seedOperation(t, st, "skipped", "transcode_media", "completed", map[string]any{"parent_action_id": "batch", "path": "/media/s.mkv"}, skipped, skipped)
+	seedOperation(t, st, "alone", "transcode_media", "completed", map[string]any{"path": "/media/alone.mkv"}, map[string]any{"original": map[string]any{"size_bytes": 2000}, "skipped": true, "candidate_size_bytes": 1900, "original_sha256": "alone"}, nil)
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: "s", FilePath: "/media/s.mkv", ChildActionID: "skipped", Status: "completed", Decision: "transcode"}); err != nil {
+		t.Fatal(err)
+	}
+	rows := sizedRows(t, h, "/api/maintenance/operations?limit=100")
+	for _, id := range []string{"skipped", "alone"} {
+		if row := rows[id]; row.OriginalBytes == nil || row.ResultBytes != nil {
+			t.Errorf("%s: %+v", id, row)
+		}
+	}
+	if batch := rows["batch"]; bytesOf(batch.OriginalBytesTotal) != 4000 || batch.ResultBytesTotal != nil || batch.FilesWithResult == nil || *batch.FilesWithResult != 0 {
+		t.Fatalf("batch counted a skipped file's size as a result: %+v", batch)
+	}
+	w := request(h, "GET", "/api/maintenance/batch-items?id=batch", "", true)
+	var page struct{ Items []batchItemView }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Items) != 1 || page.Items[0].ResultBytes != 0 || page.Items[0].OriginalBytes != 4000 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}

@@ -83,9 +83,10 @@ func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
 }
 
 // maintenanceListKeys are the output and state keys the snapshot keeps:
-// maintenanceOutputKeys, and submitted_source_bytes, a transcode job's file
-// size from its submission until its preflight records the original.
-var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes")
+// maintenanceOutputKeys; submitted_source_bytes, a transcode job's file size
+// from its submission until its preflight records the original; and skipped,
+// which says a job's candidate_size_bytes is not a result to list.
+var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped")
 
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage
