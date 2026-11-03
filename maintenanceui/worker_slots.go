@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -116,6 +117,15 @@ func fittingCoreBudget(budget int, worker transcode.WorkerSlots) int {
 	return budget
 }
 
+// slotCeilingError keeps an impossible ceiling stored for a future deployment,
+// without retrying it against a worker whose current limit cannot take it.
+func slotCeilingError(row *store.WorkerSlotSettings, worker transcode.WorkerSlots) string {
+	if row != nil && worker.CeilingAdjustable() && row.Ceiling > worker.CeilingLimit {
+		return fmt.Sprintf("The stored %d parallel jobs exceed this worker's current limit of %d. The settings are kept and will be applied when they fit again.", row.Ceiling, worker.CeilingLimit)
+	}
+	return ""
+}
+
 // workerSlots serves GET (the stored ceiling and split, what the worker runs
 // and whether they agree) and POST (validate against the worker's limits and
 // CPUs, store, push). The worker applies a change at its next admission and
@@ -139,7 +149,7 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		s.setWorkerSlots(w, r, node, ctrl)
+		s.setWorkerSlots(w, r, node, ctrl, row)
 		return
 	}
 	view := map[string]any{"supported": true, "node": node, "settings": slotSettingsView(row)}
@@ -157,7 +167,9 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 		if !slots.CeilingAdjustable() {
 			view["ceiling_message"] = "The video worker predates setting parallel jobs here. Update it to change them."
 		}
-		if msg := s.slotSyncError(node); msg != "" && !slotsMatch(row, slots) {
+		if msg := slotCeilingError(row, slots); msg != "" {
+			view["sync_error"] = msg
+		} else if msg := s.slotSyncError(node); msg != "" && !slotsMatch(row, slots) {
 			view["sync_error"] = msg
 		}
 	}
@@ -168,7 +180,7 @@ func (s *Server) workerSlots(w http.ResponseWriter, r *http.Request) {
 // node's parallel jobs. Without a ceiling the stored one is kept. A split that
 // does not fit a ceiling set in the same request returns to shared slots
 // (transcode.FitSlotSplit); a split over an unchanged ceiling is refused.
-func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node string, ctrl workerSlotController) {
+func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node string, ctrl workerSlotController, previous *store.WorkerSlotSettings) {
 	var body struct {
 		VideoSlots   int `json:"video_slots"`
 		PodcastSlots int `json:"podcast_slots"`
@@ -176,7 +188,8 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		// X265Slots omitted keeps the stored limit.
 		X265Slots *int `json:"x265_slots"`
 		// CoreBudget omitted keeps the stored one; 0 uses every CPU again.
-		CoreBudget *int `json:"core_budget"`
+		CoreBudget *int   `json:"core_budget"`
+		Revision   *int64 `json:"revision"`
 	}
 	if decode(w, r, &body) != nil {
 		fail(w, 400, "invalid slot assignment")
@@ -199,6 +212,15 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		fail(w, 400, "cores must be at least 1, or 0 to use them all")
 		return
 	}
+	revision := int64(0)
+	if previous != nil {
+		revision = previous.Revision
+	}
+	const changed = "The worker slot settings changed; refresh and retry."
+	if body.Revision != nil && *body.Revision != revision {
+		fail(w, 409, changed)
+		return
+	}
 	current, err := ctrl.Slots(r.Context())
 	if errors.Is(err, httpclient.ErrSlotsUnsupported) {
 		fail(w, 409, "The video worker predates slot assignment. Update it first.")
@@ -209,7 +231,6 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		return
 	}
 	st := s.engine.Deps().Store
-	previous, _ := st.GetWorkerSlotSettings(node)
 	ceiling := 0
 	if previous != nil {
 		ceiling = previous.Ceiling
@@ -263,7 +284,18 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		return
 	}
 	warnings = append(notes, warnings...)
-	row, err := st.SetWorkerSlotSettings(node, split.VideoSlots, split.PodcastSlots, ceiling, split.X265Slots, split.CoreBudget)
+	// Older pages echo the split when changing only cores or x265, without a
+	// revision. Refuse a stale echo rather than overwrite a newer split.
+	if body.Revision == nil && body.Ceiling == 0 && (body.CoreBudget != nil || body.X265Slots != nil) && previous != nil &&
+		(body.VideoSlots != previous.VideoSlots || body.PodcastSlots != previous.PodcastSlots) {
+		fail(w, 409, changed)
+		return
+	}
+	row, err := st.CompareAndSwapWorkerSlotSettings(store.WorkerSlotSettings{Node: node, VideoSlots: split.VideoSlots, PodcastSlots: split.PodcastSlots, Ceiling: ceiling, X265Slots: split.X265Slots, CoreBudget: split.CoreBudget, Revision: revision})
+	if errors.Is(err, store.ErrWorkerSlotSettingsChanged) {
+		fail(w, 409, changed)
+		return
+	}
 	if err != nil {
 		fail(w, 500, "worker slot settings not saved")
 		return
@@ -277,13 +309,7 @@ func (s *Server) setWorkerSlots(w http.ResponseWriter, r *http.Request, node str
 		// would otherwise push again every few seconds.
 		// A node that was never configured goes back to that state: a stored
 		// "shared" row would make the resync clear a split the worker runs.
-		var revertErr error
-		if previous != nil {
-			_, revertErr = st.SetWorkerSlotSettings(node, previous.VideoSlots, previous.PodcastSlots, previous.Ceiling, previous.X265Slots, previous.CoreBudget)
-		} else {
-			revertErr = st.DeleteWorkerSlotSettings(node)
-		}
-		if revertErr != nil {
+		if revertErr := st.RestoreWorkerSlotSettings(node, row.Revision, previous); revertErr != nil {
 			log.Printf("worker slot settings not reverted after the worker refused the split: %v", revertErr)
 		}
 		fail(w, 400, rejected.Message)
@@ -346,6 +372,9 @@ func (s *Server) syncWorkerSlots(ctx context.Context, worker transcode.NamedWork
 	}
 	row, err := s.engine.Deps().Store.GetWorkerSlotSettings(worker.Name)
 	if err != nil || row == nil || slotsMatch(row, *observed) {
+		return
+	}
+	if slotCeilingError(row, *observed) != "" {
 		return
 	}
 	s.slotSync.mu.Lock()

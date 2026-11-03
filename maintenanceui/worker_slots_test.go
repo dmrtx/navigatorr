@@ -5,14 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // fakeSlotWorker stands in for the HTTP worker: it keeps one split and can be
@@ -89,13 +95,20 @@ func (f *fakeSlotWorker) SetSlots(_ context.Context, split transcode.SlotSplit) 
 	return f.slots(), nil, nil
 }
 
-func slotUI(t *testing.T, worker *fakeSlotWorker) (*Server, http.Handler) {
+func slotUI(t *testing.T, worker transcode.Executor) (*Server, http.Handler) {
 	t.Helper()
-	s, h := testUI(t)
-	deps := s.engine.Deps()
-	deps.Transcode = worker
-	s.engine = action.NewEngine(deps)
-	return s, h
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{Web: config.WebConfig{Enabled: true, Token: testToken}}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: cfg, Transcode: worker})
+	s, err := New(cfg, arrservice.NewRegistry(cfg), engine, server.NewMCPServer("test", "1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, s.Handler()
 }
 
 func slotsGet(t *testing.T, h http.Handler) map[string]any {
@@ -634,5 +647,201 @@ func TestCoreBudgetIsRefusedOnHostsX265IsNotPartitionedOn(t *testing.T) {
 	}
 	if err := transcode.ValidateCoreBudget(8, 31); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type delayedSlotWorker struct {
+	*fakeSlotWorker
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *delayedSlotWorker) SetSlots(ctx context.Context, split transcode.SlotSplit) (transcode.WorkerSlots, []string, error) {
+	if split.VideoSlots == 3 {
+		close(f.entered)
+		<-f.release
+		if _, err := transcode.ValidateSlotSplit(split, f.slots().Ceiling, f.cpus); err != nil {
+			return transcode.WorkerSlots{}, nil, &httpclient.SlotSplitRejectedError{Message: err.Error()}
+		}
+	}
+	return f.fakeSlotWorker.SetSlots(ctx, split)
+}
+
+func TestWorkerSlotsLateRefusalKeepsNewerSave(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unconfigured", true: "configured"}[configured], func(t *testing.T) {
+			worker := &delayedSlotWorker{fakeSlotWorker: &fakeSlotWorker{ceiling: 4, limit: 10, cpus: 10}, entered: make(chan struct{}), release: make(chan struct{})}
+			s, h := slotUI(t, worker)
+			st := s.engine.Deps().Store
+			if configured {
+				if _, err := st.SetWorkerSlotSettings(transcode.DefaultWorkerName, 1, 1, 0, 0, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() {
+				done <- request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":3,"podcast_slots":1}`, true)
+			}()
+			select {
+			case <-worker.entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("first save did not reach the worker")
+			}
+			w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":0,"podcast_slots":0,"ceiling":2}`, true)
+			saved, err := st.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+			close(worker.release)
+			if w.Code != 200 || err != nil || saved == nil {
+				t.Fatal(w.Code, w.Body.String(), saved, err)
+			}
+			select {
+			case w = <-done:
+				if w.Code != 400 {
+					t.Fatal(w.Code, w.Body.String())
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("first save did not finish")
+			}
+			row, err := st.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+			if err != nil || row == nil || *row != *saved {
+				t.Fatalf("late refusal reverted a newer save: got %+v, want %+v, error %v", row, saved, err)
+			}
+		})
+	}
+}
+
+func TestWorkerSlotsPartialSaveRefusesStaleSplit(t *testing.T) {
+	for _, field := range []string{"core_budget", "x265_slots"} {
+		t.Run(field, func(t *testing.T) {
+			worker := &fakeSlotWorker{ceiling: 4, limit: 10, cpus: 10, coreCapable: true, x265Capable: true}
+			s, h := slotUI(t, worker)
+			if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1}`, true); w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			stored := slotsGet(t, h)["settings"].(map[string]any)
+			if w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":3,"podcast_slots":1}`, true); w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			body := map[string]any{"video_slots": stored["video_slots"], "podcast_slots": stored["podcast_slots"], field: map[string]int{"core_budget": 6, "x265_slots": 1}[field]}
+			data, _ := json.Marshal(body)
+			w := request(h, "POST", "/api/maintenance/worker-slots", string(data), true)
+			if w.Code != 409 || !strings.Contains(w.Body.String(), "changed") || !strings.Contains(w.Body.String(), "retry") {
+				t.Fatalf("a partial save with an old split must ask for a retry: %d %s", w.Code, w.Body.String())
+			}
+			row, err := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+			if err != nil || row == nil || row.VideoSlots != 3 || row.Revision != 2 || worker.puts != 2 {
+				t.Fatalf("a stale partial save changed settings: %+v, error %v, pushes %d", row, err, worker.puts)
+			}
+			body["video_slots"] = 3
+			data, _ = json.Marshal(body)
+			if w := request(h, "POST", "/api/maintenance/worker-slots", string(data), true); w.Code != 200 {
+				t.Fatal("retry failed", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+type delayedSlotsReadWorker struct {
+	*fakeSlotWorker
+	delayed atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (f *delayedSlotsReadWorker) Slots(context.Context) (transcode.WorkerSlots, error) {
+	if f.delayed.CompareAndSwap(false, true) {
+		observed := f.slots()
+		close(f.entered)
+		<-f.release
+		return observed, nil
+	}
+	return f.slots(), nil
+}
+
+func TestWorkerSlotsConcurrentPartialSaveRefusesChangedRevision(t *testing.T) {
+	worker := &delayedSlotsReadWorker{fakeSlotWorker: &fakeSlotWorker{ceiling: 4, limit: 10, cpus: 10, coreCapable: true, x265Capable: true}, entered: make(chan struct{}), release: make(chan struct{})}
+	s, h := slotUI(t, worker)
+	if _, err := s.engine.Deps().Store.SetWorkerSlotSettings(transcode.DefaultWorkerName, 1, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1,"core_budget":6}`, true)
+	}()
+	select {
+	case <-worker.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first save did not read the worker")
+	}
+	w := request(h, "POST", "/api/maintenance/worker-slots", `{"video_slots":1,"podcast_slots":1,"x265_slots":1}`, true)
+	close(worker.release)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	select {
+	case w = <-done:
+		if w.Code != 409 {
+			t.Fatalf("a concurrent change must ask for a retry: %d %s", w.Code, w.Body.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first save did not finish")
+	}
+	row, err := s.engine.Deps().Store.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+	if err != nil || row == nil || row.Revision != 2 || row.X265Slots != 1 || row.CoreBudget != 0 || worker.puts != 1 {
+		t.Fatalf("a concurrent partial save overwrote settings: %+v, error %v, pushes %d", row, err, worker.puts)
+	}
+}
+
+type strictCeilingSlotWorker struct{ *fakeSlotWorker }
+
+func (f *strictCeilingSlotWorker) SetSlots(ctx context.Context, split transcode.SlotSplit) (transcode.WorkerSlots, []string, error) {
+	if split.Ceiling > 0 {
+		if err := transcode.ValidateSlotCeiling(split.Ceiling, f.limit); err != nil {
+			f.puts++
+			return transcode.WorkerSlots{}, nil, &httpclient.SlotSplitRejectedError{Message: err.Error()}
+		}
+	}
+	return f.fakeSlotWorker.SetSlots(ctx, split)
+}
+
+func TestWorkerSlotsSyncWaitsForStoredCeilingToFit(t *testing.T) {
+	for _, split := range []transcode.SlotSplit{{}, {VideoSlots: 6, PodcastSlots: 2, X265Slots: 5}} {
+		worker := &strictCeilingSlotWorker{&fakeSlotWorker{ceiling: 2, limit: 4, cpus: 16, x265Capable: true}}
+		s, h := slotUI(t, worker)
+		st := s.engine.Deps().Store
+		saved, err := st.SetWorkerSlotSettings(transcode.DefaultWorkerName, split.VideoSlots, split.PodcastSlots, 8, split.X265Slots, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 3 {
+			s.slotSync.mu.Lock()
+			s.slotSyncStateLocked(transcode.DefaultWorkerName).last = time.Time{}
+			s.slotSync.mu.Unlock()
+			observed := worker.slots()
+			s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+		}
+		if worker.puts != 0 {
+			t.Fatalf("resync keeps pushing a ceiling over the worker's limit: %d pushes", worker.puts)
+		}
+		if got := slotsGet(t, h); got["applied"] != false || !strings.Contains(got["sync_error"].(string), "limit") {
+			t.Fatalf("the incompatible ceiling must be explained: %v", got)
+		}
+		row, err := st.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+		if err != nil || row == nil || *row != saved {
+			t.Fatalf("the preference must survive a smaller limit: %+v, error %v", row, err)
+		}
+		worker.limit = 10
+		observed := worker.slots()
+		s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+		if worker.puts != 1 || worker.lastPush.Ceiling != 8 || worker.split != split {
+			t.Fatalf("the preference was not restored when it fit again: pushes %d, push %+v", worker.puts, worker.lastPush)
+		}
+		observed = worker.slots()
+		s.syncWorkerSlots(context.Background(), defaultNode(s), &observed)
+		if worker.puts != 1 {
+			t.Fatal("a matching worker was pushed again")
+		}
+		if got := slotsGet(t, h); got["applied"] != true || got["sync_error"] != nil {
+			t.Fatalf("the recovered worker must be in sync: %v", got)
+		}
 	}
 }
