@@ -4067,7 +4067,11 @@ function renderReadyList(items, waiting, archived = {}) {
   const count = Math.max(waiting, items.length);
   const open = $("ready-open");
   $("ready-open-label").textContent = count ? `${count} ${count === 1 ? "file" : "files"} ready to replace` : archived.count > 0 ? `${archived.count} archived ${archived.count === 1 ? "copy" : "copies"} to clean up` : "No finished encodes are waiting";
-  open.disabled = !count && !(archived.count > 0);
+  // Nothing waiting is a plain line, not a button that does nothing.
+  const none = !count && !(archived.count > 0);
+  open.hidden = none;
+  open.disabled = none;
+  $("ready-none").hidden = !none;
   // Archived jobs are discarded ones, so they do not wait here, but their
   // smaller copies still use disk until they are deleted.
   if (archived.count > 0) {
@@ -5856,7 +5860,16 @@ function moreActionsMenu(items, menuFor, {toggleClass = "more-toggle", icon = nu
   toggle.title = "More actions";
   if (icon) toggle.append(icon);
   const menu = node("div", "", "more-menu");
-  menu.append(...items);
+  // A greyed item stays one line at the shared size; its reason sits under it.
+  for (const item of items) {
+    menu.append(item);
+    const reason = /\bjd-menu-item\b/.test(item.className || "") ? item.dataset?.unavailable || item.dataset?.reason : "";
+    if (reason) {
+      const caption = reasonCaption(reason);
+      caption.setAttribute("aria-hidden", "true");
+      menu.append(caption);
+    }
+  }
   more.append(toggle, menu);
   // Capture runs before the item's own handler: the menu closes and focus
   // returns to its toggle, so a confirmation dialog hands focus back there.
@@ -8108,7 +8121,7 @@ function conversionReplacementRow(job, status) {
   const run = job.replacement_run;
   if (!run && !["replacing", "replaced", "replace_failed"].includes(status)) return null;
   let tone = "run", text = "Replacing…";
-  if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = `Replaced${run?.completed_at ? ` · ${agoText(run.completed_at)}` : ""}`; }
+  if (run?.status === "completed" || status === "replaced") { tone = "ok"; text = `The smaller file is in place${run?.completed_at ? ` · ${agoText(run.completed_at)}` : ""}`; }
   else if (run?.status === "failed" || status === "replace_failed") { tone = "bad"; text = `Replace failed: ${causeOf(job)?.summary || (run?.error ? shortLine(run.error, 70) : "the original is still in place")}`; }
   else if (run?.status === "waiting_decision") { tone = "warn"; text = "Replacement is waiting for your approval"; }
   else if (run?.status === "cancelled") { tone = "muted"; text = "Replacement cancelled · the original is in place"; }
@@ -8389,7 +8402,6 @@ function unavailableAction(label, reason, className) {
   b.title = reason;
   b.setAttribute("aria-label", `${label} · ${reason}`);
   b.append(node("span", label, "jd-label"));
-  if (className.includes("jd-menu-item")) b.append(reasonCaption(reason));
   return b;
 }
 function pageAction(label, fn, target) {
@@ -9074,7 +9086,7 @@ function batchFileRow(item, id) {
   for (const b of menu) {
     if (b.dataset.unavailable) continue;
     const reason = disabledReason(b);
-    if (reason) { b.title = reason; b.append(reasonCaption(reason)); }
+    if (reason) { b.title = reason; b.dataset.reason = reason; }
   }
   row.append(moreActionsMenu(menu, item.item_key));
 

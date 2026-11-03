@@ -8823,7 +8823,8 @@ test("a finished conversion leads with the size, then streams, quality and the s
   assert.equal(nodesWithClass(hero, "cv-shrink")[0].children[0].style.width, "40.0%");
   // The replacement is a state row on this page, not a link.
   const replaced = nodesWithClass(summary, "cv-replace")[0];
-  assert.match(saidBy(replaced), /Replaced · 1 h ago/);
+  // The status badge already says Replaced; this row says what that means, and when.
+  assert.match(saidBy(replaced), /The smaller file is in place · 1 h ago/);
   assert.equal(replaced.dataset.replacementRun, "completed");
   assert.equal(nodesWithClass(replaced, "job-title").length, 0);
   // Streams: video codec change, audio fates, subtitles inline.
@@ -8896,7 +8897,10 @@ test("a conversion keeps its actions in fixed slots, and an unavailable one is d
   assert.ok(cancel);
   assert.equal(items.at(-1), cancel);
   assert.equal(cancel.disabled, true);
-  assert.deepEqual(nodesWithClass(cancel, "jd-reason").map((n) => n.textContent), ["Nothing is running"]);
+  // The reason sits under the greyed item, outside it, so the item keeps the shared size.
+  assert.deepEqual(nodesWithClass(cancel, "jd-reason"), []);
+  const menuChildren = nodesWithClass(done.more, "more-menu")[0].children;
+  assert.equal(menuChildren[menuChildren.indexOf(cancel) + 1].textContent, "Nothing is running");
   for (const job of [conversionJob(), conversionJob({ status: "running", conversion_status: "encoding" })]) {
     const [next, change] = bar(job);
     assert.ok(![next, change].some((slot) => /Cancel/.test(saidBy(slot))));
@@ -9081,10 +9085,15 @@ test("Stats says how many files are ready in one row, and the list it opens can 
   h.run("renderReadyList(items, 5)");
   assert.equal(h.elements.get("ready-open-label").textContent, "5 files ready to replace");
   assert.equal(h.elements.get("ready-open").disabled, false);
+  assert.equal(h.elements.get("ready-open").hidden, false);
+  assert.equal(h.elements.get("ready-none").hidden, true);
   assert.equal(saidBy(h.elements.get("ready-replace-all")), "Replace these 3");
   h.run("renderReadyList([], 0)");
-  assert.equal(h.elements.get("ready-open-label").textContent, "No finished encodes are waiting");
-  assert.equal(h.elements.get("ready-open").disabled, true);
+  // Nothing waiting is a plain line; the button is gone, not greyed.
+  assert.equal(h.elements.get("ready-open").hidden, true);
+  assert.equal(h.elements.get("ready-none").hidden, false);
+  assert.equal(h.elements.get("ready-none").textContent || "No finished encodes are waiting", "No finished encodes are waiting");
+  assert.match(markup, /<p id="ready-none"[^>]*>No finished encodes are waiting<\/p>/);
   // The long list lives in its own dialog, opened from the summary row.
   assert.match(markup, /<button id="ready-open"[^>]*>[\s\S]*?<span id="ready-open-label">/);
   assert.match(markup, /<dialog id="ready-dialog"[\s\S]*?<ul id="ready-list"/);

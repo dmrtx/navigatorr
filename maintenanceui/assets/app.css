@@ -3619,8 +3619,7 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .jd-actions { align-items: flex-start; }
 .jd-actions .more-actions { align-self: flex-start; }
 .jd-menu-item[data-unavailable] { cursor: not-allowed; color: var(--on-disabled); opacity: 1; }
-.jd-menu-item:has(.jd-reason) { flex-direction: column; align-items: flex-start; justify-content: center; gap: 0; padding-block: 4px; }
-.jd-menu-item .jd-reason { text-align: left; }
+.more-menu > .jd-reason { margin-top: -2px; padding: 0 12px 2px; text-align: left; }
 
 /* A batch file that is ready: Replace beside its head, without opening it.
    While any row offers it, every row keeps that column, so the chevrons line up. */
@@ -3635,9 +3634,10 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .jd-files-head { align-items: center; }
 
 /* Stats: one row that opens the ready list. */
-.stat-open { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--subtle); color: var(--ink); font-size: 14px; font-weight: 500; text-align: left; }
-.stat-open > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.stat-open-arrow { flex: 0 0 auto; color: var(--forest); font-size: 16px; }
+.stat-open { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: 100%; height: var(--control-size, 30px); padding: 0 12px; border: 1px solid var(--line); border-radius: 5px; background: var(--subtle); color: var(--ink); font-size: 13px; font-weight: 500; text-align: left; }
+.stat-open > span:first-child { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stat-open-arrow { flex: 0 0 auto; color: var(--forest); font-size: 13px; }
+.stat-open[hidden] { display: none; }
 .stat-open:not(:disabled):hover { border-color: var(--forest); }
 .stat-open:disabled { opacity: 1; color: var(--muted); background: transparent; }
 .stat-open:disabled .stat-open-arrow { display: none; }
