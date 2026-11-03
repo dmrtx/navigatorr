@@ -2377,6 +2377,43 @@ test("the core budget is offered only by a worker that reports it, keeps unsaved
   assert.equal(h.elements.get("worker-cores-row").hidden,true);
 });
 
+test("a stopped single-file replacement says where the original is only from the state the server read", () => {
+  const h = harness();
+  const row = (run, status = "replace_failed") => { h.context.probe = { replacement_run: run }; return h.run(`(() => { const r = conversionReplacementRow(probe, ${JSON.stringify(status)}); return r.children[1].textContent; })()`); };
+  assert.match(row({ status: "failed", original_state: "in_place" }), /the original is still in place/);
+  assert.match(row({ status: "failed", original_state: "recovery" }), /the original is in Recovery/);
+  assert.match(row({ status: "failed", original_state: "unclear" }), /check Recovery to see where the original is/);
+  assert.match(row({ status: "failed" }), /check Recovery/);
+  assert.doesNotMatch(row({ status: "failed" }), /in place/);
+  assert.match(row({ status: "cancelled", original_state: "in_place" }, "replacing"), /Replacement cancelled · the original is still in place/);
+  assert.match(row({ status: "cancelled", original_state: "recovery" }, "replacing"), /Replacement cancelled · the original is in Recovery/);
+  assert.doesNotMatch(row({ status: "cancelled" }, "replacing"), /in place/);
+});
+
+test("a batch headline does not say the originals are kept for failures it did not describe", () => {
+  const h = harness();
+  const member = (original_state) => ({ phase: "failed", failure: { reason: "x", original_state } });
+  h.context.probe = { replacement: { approved: true, total: 4, done: 2, failed: 2, members: [member("in_place")] } };
+  const text = h.run("replacementHeadline(probe)");
+  assert.match(text, /check Recovery/);
+  assert.doesNotMatch(text, /kept/);
+  h.context.probe = { replacement: { approved: true, total: 4, done: 2, failed: 2, members: [member("in_place"), member("in_place")] } };
+  assert.match(h.run("replacementHeadline(probe)"), /originals kept/);
+});
+
+test("the answer to a save for a node left behind does not touch the forms of the node picked now", async () => {
+  for (const [save, flag, noteId] of [["saveX265Limit(1)", "x265FormDirty", "worker-x265-note"], ["saveCoreBudget(6)", "coresFormDirty", "worker-cores-note"], ["saveWorkerSlots(2, 1)", "slotFormDirty", "worker-slot-note"], ["saveParallelJobs(3)", "parallelFormDirty", "worker-parallel-note"]]) {
+    const h = harness();
+    h.context.calls = [];
+    // The save starts on node a; node b is picked, and edited, before the answer.
+    h.run(`state.slotNode="a";state.workerSlots={split:false};api=async(path,body)=>{if(!body)return {settings:{video_slots:0,podcast_slots:0}};calls.push(path);state.slotNode="b";state.${flag}=true;$("${noteId}").textContent="b edit";return {applied:true,warnings:[]}};refreshWorkerActivity=async()=>{};`);
+    await h.run(save);
+    assert.deepEqual(h.context.calls, ["worker-slots?node=a"], save);
+    assert.equal(h.run(`state.${flag}`), true, `${save}: the edit on b is still pending`);
+    assert.equal(h.elements.get(noteId).textContent, "b edit", save);
+  }
+});
+
 test("a save goes to the node it started on even when another node is picked while the stored split loads", async () => {
   for (const save of ["saveX265Limit(1)", "saveCoreBudget(6)"]) {
     const h = harness();
