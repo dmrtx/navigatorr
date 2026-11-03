@@ -176,6 +176,11 @@ func (e *Engine) beginAdmission(ctx context.Context, ec *ExecutionContext, phase
 	if held, reason := e.drainHold(); held {
 		return nil, drainBlockedResult(phase, reason), true
 	}
+	// A paused node takes no new job either; the file is released back to the
+	// queue by the pause sweep.
+	if held, reason := e.pauseHold(assignedWorker(ec.State)); held {
+		return nil, pauseBlockedResult(phase, reason), true
+	}
 	parentID, known, err := e.resolveParentBatchID(ec)
 	if err != nil {
 		return nil, stepFailClosed(fmt.Errorf("%s parent link check failed (fail closed): %w", phase, err)), true

@@ -194,6 +194,9 @@ func (e *Engine) podcastWorkerStage(ctx context.Context, ec *ExecutionContext, o
 		if held, reason := e.drainHold(); held {
 			return drainBlockedResult("podcast "+op, reason), nil
 		}
+		if held, reason := e.pauseHold(assignedWorker(ec.State)); held {
+			return pauseBlockedResult("podcast "+op, reason), nil
+		}
 		id = fmt.Sprintf("podcast-%s-%s-%d", ec.InstanceID, op, getInt(ec.State, "podcast_"+op+"_attempt"))
 		ec.State[key] = id
 		ec.State["job_id"] = id

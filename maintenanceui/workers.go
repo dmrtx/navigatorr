@@ -69,12 +69,17 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	transport := s.cfg.Transcode.Executor
 	observation := s.engine.WorkerObservation(r.Context())
 	nodes := []map[string]any{}
+	pauses := s.engine.NodePauseStatuses(r.Context())
 	for _, o := range observation.Workers {
 		address := ""
 		if worker, ok := s.engine.Deps().Workers.Get(o.Name); ok {
 			address = worker.Address
 		}
-		nodes = append(nodes, workerNode(o, address, transport))
+		node := workerNode(o, address, transport)
+		if pause, ok := pauses[o.Name]; ok {
+			node["pause"] = pause
+		}
+		nodes = append(nodes, node)
 	}
 	if len(nodes) == 0 {
 		nodes = append(nodes, workerNode(observation, "", transport))

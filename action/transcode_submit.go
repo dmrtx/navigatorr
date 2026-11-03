@@ -58,6 +58,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	jobID := getString(ec.State, "job_id")
 	if jobID == "" {
 		jobID = fmt.Sprintf("job-%s", ec.InstanceID)
+		// A conversion sent back to the queue by a node pause starts over with
+		// a job identity of its own: the node still knows the cancelled one.
+		if n := getInt(ec.State, requeueRetryCountKey); n > 0 {
+			jobID = fmt.Sprintf("job-%s-retry-%d", ec.InstanceID, n)
+		}
 		for _, key := range []string{"phase", "progress", "speed", "fps", "last_progress_at", "last_known_progress", "worker_heartbeat_at", "progress_is_stale"} {
 			delete(ec.State, key)
 			delete(ec.Outputs, key)

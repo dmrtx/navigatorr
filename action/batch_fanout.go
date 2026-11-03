@@ -94,8 +94,14 @@ func (e *Engine) batchAvailableSlots(ctx context.Context, items []store.Transcod
 // workerVideoCapacity is how many conversions the server keeps on a worker at
 // once: its video pool, capped by its max_parallel_jobs when set. Without a
 // pool reported (an older worker, or one never reached) it is the worker's
-// max_parallel_jobs, else transcode.max_parallel_jobs, else 1.
+// max_parallel_jobs, else transcode.max_parallel_jobs, else 1. A paused node
+// has none.
 func (e *Engine) workerVideoCapacity(ctx context.Context, w transcode.NamedWorker) int {
+	// A paused node takes no new conversion, so every count of free slots (the
+	// queue, a batch, the pick of a node) sees none there.
+	if e.workerPaused(w.Name) {
+		return 0
+	}
 	pool := e.workerVideoPool(ctx, w)
 	switch {
 	case pool > 0 && w.MaxParallelJobs > 0:
