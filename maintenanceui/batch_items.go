@@ -241,12 +241,12 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					view.ReplacementFailure = &replacementFailure{Reason: plainReplacementReason(detail), Detail: batchReasonText(detail, true), OriginalState: originalInPlace, OriginalIntact: true}
 				}
 			}
+			view.OriginalBytes, view.ResultBytes = batchFileSizes(item, attempt, view.Replaced, view.RetryPending)
 			if view.ReplacementActionID == "" && view.ReplacementFailure == nil && item.ChildActionID != "" {
 				if view.ReplacementPlan = replacementPlanState(state, item.ChildActionID); view.ReplacementPlan != "" {
 					view.CandidateReady = false
 				}
 			}
-			view.OriginalBytes, view.ResultBytes = batchFileSizes(item, attempt, view.Replaced, view.RetryPending)
 			views = append(views, view)
 		}
 	}
