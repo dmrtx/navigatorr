@@ -186,7 +186,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 				e.FinalQuality = summarizeFinalQuality(&evidence, nil)
 			}
 			if len(e.FinalQuality.Failures) > 0 {
-				e.Message = "The encoded result did not meet the quality requirements on the whole file: " + strings.Join(e.FinalQuality.Failures, "; ") + ". Original preserved."
+				e.Message = "The encoded result did not meet the quality requirements on the sampled windows: " + strings.Join(e.FinalQuality.Failures, "; ") + ". Original preserved."
 			}
 		}
 	case reason == "preservation_not_met":

@@ -114,7 +114,7 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 			}
 		}
 		s.ProgressScope = fmt.Sprintf("Worker progress is for the full encode with %s.", recipeStep)
-		s.NextStep = "Monitor this action. The whole file is encoded with the goal's fixed settings and checked against its quality limits on the whole file; a quality miss encodes it again one step better. The original is never replaced without the usual approval."
+		s.NextStep = "Monitor this action. The whole file is encoded with the goal's fixed settings and checked against its quality limits on sampled windows of the result; a quality miss encodes it again one step better. The original is never replaced without the usual approval."
 		s.UserNextStep = fmt.Sprintf("Nothing to do yet. The whole file is being encoded with %s and then checked against this goal's quality limits before you approve any replacement.", recipeStep)
 		if res.Status == action.StatusFailed {
 			s.Outcome, s.Message = "execution_error", "The encode could not finish."
