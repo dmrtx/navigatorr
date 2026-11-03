@@ -319,7 +319,7 @@ func (e *Engine) advanceSizeBudgetRung(ec *ExecutionContext, candidateBytes int6
 	delete(ec.State, "skip_transcode")
 	delete(ec.State, "reason_code")
 	previous := getString(ec.State, "job_id")
-	jobID := fmt.Sprintf("job-%s-budget-r%d", ec.InstanceID, rec.Rung)
+	jobID := fmt.Sprintf("job-%s-budget-r%d%s", ec.InstanceID, rec.Rung, requeueGeneration(ec.State))
 	ec.State[sizeBudgetKey] = rec
 	ec.State["plan"], ec.State["plan_digest"] = next, next.PlanDigest
 	ec.State["previous_job_id"], ec.State["job_id"], ec.State["external_reference"] = previous, jobID, jobID

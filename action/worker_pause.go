@@ -44,7 +44,21 @@ const (
 	requeueCountKey      = "pause_requeues"
 	requeueLeftoversKey  = "requeue_leftover_candidates"
 	requeueRetryCountKey = "manual_retry_count"
+	// requeuePendingKey marks the job being moved, saved before it is
+	// cancelled, so a sweep that finds the reset undone finishes it instead of
+	// reading the cancelled job as the action's own end.
+	requeuePendingKey = "pause_requeue_pending"
 )
+
+// requeueGeneration is the suffix that keeps the job identities of a file sent
+// back to the queue apart from the ones the node already holds as cancelled
+// (the rungs of a quality or size ladder build theirs from the action id).
+func requeueGeneration(state map[string]any) string {
+	if n := getInt(state, requeueCountKey); n > 0 {
+		return fmt.Sprintf("-g%d", n)
+	}
+	return ""
+}
 
 // pauseSettle (a variable so tests can end it at once) is how long after a
 // pause starts the node is not yet reported idle: an admission that passed the
@@ -219,6 +233,16 @@ func (e *Engine) requeueForPause(ctx context.Context, id string, pause store.Wor
 		return false, err
 	}
 	defer release()
+	// The pause may have been lifted or changed since the sweep listed it.
+	pauses, err := e.workerPauses()
+	if err != nil {
+		return false, err
+	}
+	current, ok := pauses[pause.Worker]
+	if !ok {
+		return false, nil
+	}
+	pause = current
 	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
 	if err != nil || inst == nil {
 		return false, err
@@ -251,9 +275,20 @@ func (e *Engine) requeueForPause(ctx context.Context, id string, pause store.Wor
 		jobID = getString(ec.State, "external_reference")
 	}
 	if jobID != "" && holdsWorkerJob(ec.State) {
-		cancelled, err := e.cancelForPause(ctx, ec, jobID, pause.Mode)
-		if err != nil || !cancelled {
-			return false, err
+		// A reset that did not finish after the cancel went through: the job
+		// is already gone from the node, so only the reset is left.
+		if getString(ec.State, requeuePendingKey) != jobID {
+			cancelled, err := e.cancelForPause(ctx, ec, jobID, pause.Mode)
+			if err != nil || !cancelled {
+				return false, err
+			}
+			// Saved before anything else changes, so a failed reset below
+			// leaves a record that the cancel already happened.
+			ec.State[requeuePendingKey] = jobID
+			inst.StateJSON = toJSON(ec.State)
+			if err := e.updateInstance(ctx, inst); err != nil {
+				return false, fmt.Errorf("recording the move of %s: %w", id, err)
+			}
 		}
 		// The worker removes what it wrote for the job; this removes what the
 		// server knows of, and the paths that stay are kept on the action.
@@ -279,7 +314,10 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 	st, err := worker.Status(ctx, jobID)
 	if err != nil {
 		if he, ok := transcodeHTTPError(err); ok && he.StatusCode == 404 {
-			return true, nil
+			// A submit the server never saw answered may still land on the node
+			// later; moving the file now could encode it twice. Leave it until
+			// the node says what it has (or the node is resumed).
+			return !getBool(ec.State, "transcode_reconcile"), nil
 		}
 		return false, fmt.Errorf("reading job %s before moving it: %w", jobID, err)
 	}
@@ -292,6 +330,10 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 		if mode != store.WorkerPauseImmediate {
 			return false, nil
 		}
+	case transcode.StatusCancelled, transcode.StatusFailed:
+		// Nothing runs on the node for it, and the action would only start it
+		// again on this paused node: let it start over on another.
+		return true, nil
 	default:
 		return false, nil
 	}
@@ -307,7 +349,7 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 // own job identity, since the node still knows the cancelled one.
 func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, node string) error {
 	fresh := map[string]any{}
-	for _, key := range []string{"request_origin", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey} {
+	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey} {
 		if v, ok := ec.State[key]; ok {
 			fresh[key] = v
 		}

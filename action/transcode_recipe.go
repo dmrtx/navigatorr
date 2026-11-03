@@ -637,7 +637,7 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building the next encode of the goal: %v", err)}, true
 	}
 	rec.Message = fmt.Sprintf("%s missed the quality limits (%s); encoding at %s (step %d of %d).", was, qualityLadderFailures(tried.Final), recipeRungShort(rec.VideoCodec, rec.Values[rec.Rung]), rec.Rung+1, len(rec.Values))
-	return e.rewindQualityLadder(ec, rec, next, fmt.Sprintf("job-%s-recipe-r%d", ec.InstanceID, rec.Rung)), true
+	return e.rewindQualityLadder(ec, rec, next, fmt.Sprintf("job-%s-recipe-r%d%s", ec.InstanceID, rec.Rung, requeueGeneration(ec.State))), true
 }
 
 // rewindQualityLadder makes plan the action's encode and sends the action back
@@ -681,7 +681,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 				if transcode.IsAudioLevelMode(plan.AudioMode) {
 					rec.Message = message + " The video is copied unchanged and only the audio is re-encoded instead."
 				}
-				out := e.rewindQualityLadder(ec, rec, plan, fmt.Sprintf("job-%s-recipe-audio", ec.InstanceID))
+				out := e.rewindQualityLadder(ec, rec, plan, fmt.Sprintf("job-%s-recipe-audio%s", ec.InstanceID, requeueGeneration(ec.State)))
 				ec.State["plan_source"] = "audio_only"
 				mergeMap(out.Outputs, map[string]any{"plan": plan, "plan_source": "audio_only", "plan_digest": plan.PlanDigest})
 				return out

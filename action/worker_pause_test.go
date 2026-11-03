@@ -9,6 +9,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 func pauseEngine(t *testing.T, m1, m4 transcode.Executor) *Engine {
@@ -104,6 +105,7 @@ func TestGracefulPauseReleasesAJobThatHasNotStarted(t *testing.T) {
 	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusQueued)}
 	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
 	seedEncoding(t, e, "waiting", "m1", "job-waiting")
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
 	if _, err := e.requeueForPause(context.Background(), "waiting", store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseGraceful}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,5 +288,104 @@ func TestNodePauseHoldsOnlyThatNodesQueue(t *testing.T) {
 	pauseNode(t, e, "m1", "")
 	if m1.hold {
 		t.Fatalf("resume must lift the node's hold: %v", m1.calls)
+	}
+}
+
+// If the pause is lifted (or softened) between the sweep's listing and its
+// turn on the action, a running encode is not cancelled.
+func TestRequeueReadsThePauseAgainAfterTheClaim(t *testing.T) {
+	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusRunning)}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	stale := store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseImmediate}
+
+	if moved, err := e.requeueForPause(context.Background(), "enc", stale); err != nil || moved {
+		t.Fatalf("a resumed node keeps its encode: moved=%v %v", moved, err)
+	}
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+	if moved, err := e.requeueForPause(context.Background(), "enc", stale); err != nil || moved || m1.cancelCalls != 0 {
+		t.Fatalf("a softened pause keeps the running encode: moved=%v %v cancels=%d", moved, err, m1.cancelCalls)
+	}
+}
+
+// A job the node has already ended (cancelled or failed) is not waiting for
+// anything: the file moves without another cancel.
+func TestPauseMovesAFileWhoseJobAlreadyEnded(t *testing.T) {
+	for _, status := range []string{transcode.StatusCancelled, transcode.StatusFailed} {
+		m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(status)}
+		e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+		seedEncoding(t, e, "ended", "m1", "job-ended")
+		pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+		if moved, err := e.requeueForPause(context.Background(), "ended", store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseGraceful}); err != nil || !moved || m1.cancelCalls != 0 {
+			t.Fatalf("%s: moved=%v %v cancels=%d", status, moved, err, m1.cancelCalls)
+		}
+	}
+}
+
+// A submit the server never saw answered may still land on the node, so a 404
+// does not release the file.
+func TestPauseKeepsAFileWhoseSubmitIsUnconfirmed(t *testing.T) {
+	m1 := &mockTranscodeExecutor{statusFunc: func(_ context.Context, jobID string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+	}}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "maybe", "m1", "job-maybe")
+	inst := mustInstance(t, e.deps.Store, "maybe")
+	state := parseExecutionContextMust(t, e, "maybe").State
+	state["transcode_reconcile"] = true
+	inst.StateJSON = toJSON(state)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	if moved, err := e.requeueForPause(context.Background(), "maybe", store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseImmediate}); err != nil || moved {
+		t.Fatalf("an unconfirmed submit must stay: moved=%v %v", moved, err)
+	}
+	// A job the node has never heard of (no pending submit) is released.
+	seedEncoding(t, e, "gone", "m1", "job-gone")
+	if moved, err := e.requeueForPause(context.Background(), "gone", store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseImmediate}); err != nil || !moved {
+		t.Fatalf("a job the node does not have is released: moved=%v %v", moved, err)
+	}
+}
+
+// A reset that failed after the cancel is finished by the next sweep, without
+// reading the (now cancelled) job again.
+func TestPauseFinishesAMoveWhoseResetWasUndone(t *testing.T) {
+	m1 := &mockTranscodeExecutor{statusFunc: jobStatusFunc(transcode.StatusRunning)}
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "half", "m1", "job-half")
+	inst := mustInstance(t, e.deps.Store, "half")
+	state := parseExecutionContextMust(t, e, "half").State
+	state[requeuePendingKey] = "job-half"
+	inst.StateJSON = toJSON(state)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+	if moved, err := e.requeueForPause(context.Background(), "half", store.WorkerPause{Worker: "m1", Mode: store.WorkerPauseGraceful}); err != nil || !moved {
+		t.Fatalf("the reset must be finished: moved=%v %v", moved, err)
+	}
+	fresh := parseExecutionContextMust(t, e, "half").State
+	if m1.cancelCalls != 0 || holdsWorkerJob(fresh) || getString(fresh, requeuePendingKey) != "" || getString(fresh, "previous_job_id") != "job-half" {
+		t.Fatalf("cancels=%d state=%+v", m1.cancelCalls, fresh)
+	}
+}
+
+// The ladder rungs of a requeued file are new identities, so the node's
+// idempotent submit cannot hand back a cancelled rung.
+func TestRequeueGenerationSeparatesLadderJobIdentities(t *testing.T) {
+	if requeueGeneration(map[string]any{}) != "" {
+		t.Fatal("a file never requeued keeps its identities")
+	}
+	if got := requeueGeneration(map[string]any{requeueCountKey: float64(2)}); got != "-g2" {
+		t.Fatalf("second requeue: %q", got)
+	}
+}
+
+// A row waiting on a node's pause is held back, not a running job.
+func TestRowsWaitingOnAPauseAreNotRunning(t *testing.T) {
+	r := store.DrainActionRow{ActionName: "transcode_media", Status: StatusWaitingExternal, WaitingCondition: pauseWaitCondition, JobID: "job-x"}
+	if got := classifyDrainRow(r); got != transcode.DrainJobQueued {
+		t.Fatalf("classified %q", got)
 	}
 }
