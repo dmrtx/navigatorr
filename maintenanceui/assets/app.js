@@ -3611,6 +3611,22 @@ function remainingLabel(seconds) {
 function originalStateOf(failure) {
   return failure?.original_state || (failure?.original_intact ? "in_place" : "unclear");
 }
+// Where the originals of a batch's failed replacements are: "in_place" or
+// "recovery" only when every failed replacement says so, else "unclear". A
+// failure the batch does not describe counts as unclear, never as in place.
+function failedOriginalsState(job) {
+  const failures = (job.replacement?.members || []).filter((m) => m.failure).map((m) => originalStateOf(m.failure));
+  if (!failures.length || failures.length < (job.failed_replacements || 0)) return "unclear";
+  return failures.every((x) => x === "in_place") ? "in_place" : failures.every((x) => x === "recovery") ? "recovery" : "unclear";
+}
+function failedOriginalsPhrase(job) {
+  const one = job.failed_replacements === 1;
+  return {
+    in_place: one ? "its original remains in place" : "their originals remain in place",
+    recovery: one ? "its original is in Recovery" : "their originals are in Recovery",
+    unclear: "check Recovery to see where the originals are",
+  }[failedOriginalsState(job)];
+}
 // What an approved batch replacement is doing, in words about the files. The
 // server places each file in a short fixed sequence; none of this is a time
 // estimate.
@@ -6731,7 +6747,7 @@ function queueOutcome(job) {
   if (job.status === "cancelled") return ["Stopped by user", cleanup].filter(Boolean).join(" · ");
   if (job.status === "pending") return "Waiting to start";
   if (job.replaced_files > 0 && job.remaining_candidates > 0) return `${job.replaced_files} replacements verified · ${job.remaining_candidates} candidates still available; their originals remain in place`;
-  if (job.failed_replacements > 0) return `${job.replaced_files || 0} replacements verified · ${job.failed_replacements} failed; ${job.failed_replacements === 1 ? "its original remains" : "their originals remain"} in place`;
+  if (job.failed_replacements > 0) return `${job.replaced_files || 0} replacements verified · ${job.failed_replacements} failed; ${failedOriginalsPhrase(job)}`;
   if (job.savings?.realized_saved_bytes != null || job.replaced) return "Replacement verified";
   if (job.batch?.dry_run) return job.preview_execution_action_id ? "Batch started · View its progress" : job.batch.queued > 0 ? "Preview finished · Nothing starts automatically" : "Preview finished · No eligible files";
   if (job.batch?.outcome === "no_changes") return "Originals preserved";
@@ -7263,11 +7279,14 @@ function renderX265Limit(activity) {
 async function saveX265Limit(limit) {
   const note = $("worker-x265-note");
   note.textContent = "Saving…";
+  // Taken once: picking another node while the stored split loads must not
+  // send this node's split to the new one.
+  const path = workerSlotsPath();
   try {
     // The split to send back is the stored one, not what the worker runs: they
     // differ while the worker has not yet taken a saved split.
-    const stored = (await api(workerSlotsPath()))?.settings;
-    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
+    const stored = (await api(path))?.settings;
+    const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, x265_slots: limit});
     state.x265FormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs are never interrupted." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
@@ -7319,10 +7338,11 @@ function renderCoreBudget(activity) {
 async function saveCoreBudget(cores) {
   const note = $("worker-cores-note");
   note.textContent = "Saving…";
+  const path = workerSlotsPath();
   try {
     // The split to send back is the stored one, as for the x265 limit.
-    const stored = (await api(workerSlotsPath()))?.settings;
-    const result = await api(workerSlotsPath(), {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
+    const stored = (await api(path))?.settings;
+    const result = await api(path, {video_slots: stored?.video_slots || 0, podcast_slots: stored?.podcast_slots || 0, core_budget: cores});
     state.coresFormDirty = false;
     const parts = [result.applied ? "Applied. Takes effect as the next job starts; running jobs keep the cores they have." : (result.message || "Saved. The worker has not confirmed yet.")];
     for (const warning of result.warnings || []) parts.push(warning);
@@ -8852,7 +8872,7 @@ function batchReplaceReason(job, n) {
   if (n > 0) return "";
   if (job.replacement?.approved && operationIsActive(job.status)) return "Replacing now";
   if (operationIsActive(job.status)) return "Available when files finish encoding";
-  if (job.failed_replacements > 0) return `${job.failed_replacements} ${job.failed_replacements === 1 ? "replacement" : "replacements"} failed · the original${job.failed_replacements === 1 ? " is" : "s are"} still in place`;
+  if (job.failed_replacements > 0) return `${job.failed_replacements} ${job.failed_replacements === 1 ? "replacement" : "replacements"} failed · ${failedOriginalsPhrase(job)}`;
   if (job.replaced_files > 0) return "Every ready file is replaced";
   return "No file is ready to replace";
 }
