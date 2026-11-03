@@ -97,7 +97,7 @@ function harness({ integrations = [], latest, legacy = null } = {}) {
   };
 }
 
-// Lets the unawaited replaceWhenPlanned loop run to its next stop.
+// Lets the unawaited approval loop run to its next stop.
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
 // Records what the replacement flow does instead of doing it: approvals, notices, opened jobs.
 function watch(h, { jobs } = {}) {
@@ -128,7 +128,7 @@ test("an agent's durable Sonarr child uses its parent integration without browse
   const h = harness({ integrations: [{ name: "sonarr" }], latest: job });
   const seen = watch(h);
   h.context.job = job;
-  await h.run("prepareReplacement(job)");
+  await h.run("prepareReplacement(job, {reviewed: replaceReviewRow(job)})");
   await settle();
   assert.equal(h.calls.length, 1);
   assert.deepEqual(JSON.parse(h.calls[0].args.inputs), {
@@ -136,7 +136,7 @@ test("an agent's durable Sonarr child uses its parent integration without browse
     service: "sonarr",
     series_id: 77,
   });
-  // The plan is ready, so it is approved as it is read: no second dialog, no second click.
+  // The file was reviewed and confirmed, so its plan is approved as it is read: no second dialog.
   assert.deepEqual(h.opened, []);
   assert.equal(h.elements.get("file-review").open, false);
   assert.equal(h.elements.get("replacement-choice").open, false);
@@ -155,7 +155,7 @@ test("unknown history offers an explicit local or library choice before creating
     latest: job,
   });
   h.context.job = job;
-  await h.run("prepareReplacement(job)");
+  await h.run("prepareReplacement(job, {reviewed: replaceReviewRow(job)})");
   assert.equal(h.calls.length, 0);
   assert.equal(h.elements.get("replacement-choice").open, true);
   assert.deepEqual(
@@ -187,7 +187,7 @@ test("legacy browser hints preselect an import but cannot silently choose its ro
     legacy: { service: "sonarr", id: 12 },
   });
   h.context.job = job;
-  await h.run("prepareReplacement(job)");
+  await h.run("prepareReplacement(job, {reviewed: replaceReviewRow(job)})");
   assert.equal(h.calls.length, 0);
   assert.equal(h.elements.get("replacement-method").value, "sonarr");
   assert.equal(h.elements.get("replacement-library-id").value, "12");
@@ -209,7 +209,7 @@ test("an existing promotion is opened without changing its route or creating ano
   assert.deepEqual(h.opened, ["prior-review"]);
 });
 
-test("one tap replaces the file: the plan is approved once it is ready, not before", async () => {
+test("a reviewed file's plan is approved once it is ready, not before", async () => {
   const job = { id: "file", candidate_ready: true };
   const h = harness({ integrations: [], latest: job });
   const running = { id: "planned", status: "running" };
@@ -217,7 +217,7 @@ test("one tap replaces the file: the plan is approved once it is ready, not befo
   h.context.job = job;
   h.context.refreshed = 0;
   h.run('$("job-detail").open = true; state.detail = "file"; refreshDetail = async () => { refreshed++; };');
-  await h.run('enqueueReplacement(job,{service:"filesystem"})');
+  await h.run('enqueueReplacement(job,{service:"filesystem"},{id:"file",after:400})');
   await settle();
   // The open batch is read again at once, so the file shows as replacing.
   assert.equal(h.context.refreshed, 1);
@@ -225,7 +225,7 @@ test("one tap replaces the file: the plan is approved once it is ready, not befo
   assert.equal(h.elements.get("replacement-choice").open, false);
   assert.equal(h.elements.get("file-review").open, false);
   assert.deepEqual(seen.resumes(), [["planned", "action_resume", { decision: "approve", plan_digest: "sha256:plan" }, approveDecision]]);
-  assert.equal(seen.notes()[0], "Preparing the replacement. It starts by itself.");
+  assert.equal(seen.notes()[0], "Preparing the replacement.");
 });
 
 test("starting a replacement leaves a dialog that shows some other job alone", async () => {
@@ -245,7 +245,7 @@ test("a replacement whose library may re-download the old file is shown for revi
   const h = harness({ integrations: [{ name: "sonarr" }], latest: job });
   const warned = { ...h.context.planned, promotion: { ...h.context.planned.promotion, regrab_warning: { service: "sonarr", message: "Sonarr may download this episode again." } } };
   const seen = watch(h, { jobs: [warned] });
-  await h.run('replaceWhenPlanned("planned")');
+  await h.run('approveReviewedPlan("planned", {id: "file", after: 400})');
   assert.deepEqual(seen.resumes(), []);
   assert.equal(h.elements.get("file-review").open, true);
 });
@@ -254,7 +254,7 @@ test("a plan that fails or is withdrawn is reported and approves nothing", async
   const h = harness({ integrations: [] });
   for (const gone of [{ id: "planned", status: "failed", error: "Source file is missing" }, { id: "planned", status: "cancelled" }, { id: "planned", status: "completed" }]) {
     const seen = watch(h, { jobs: [gone] });
-    await h.run('replaceWhenPlanned("planned")');
+    await h.run('approveReviewedPlan("planned", {id: "file", after: 400})');
     assert.deepEqual(seen.resumes(), []);
     assert.equal(seen.notes().length, 2);
     assert.match(seen.notes()[1], gone.status === "failed" ? /Source file is missing/ : /no longer be approved\. Nothing was changed/);
@@ -264,7 +264,7 @@ test("a plan that fails or is withdrawn is reported and approves nothing", async
 test("a plan waiting on something other than approval opens its job", async () => {
   const h = harness({ integrations: [] });
   const seen = watch(h, { jobs: [{ id: "planned", status: "waiting_decision", waiting_options: [{ decision: "reject" }] }] });
-  await h.run('replaceWhenPlanned("planned")');
+  await h.run('approveReviewedPlan("planned", {id: "file", after: 400})');
   assert.deepEqual(seen.resumes(), []);
   assert.deepEqual(h.opened, ["planned"]);
 });
@@ -272,7 +272,7 @@ test("a plan waiting on something other than approval opens its job", async () =
 test("a plan that never finishes preparing stops waiting and says where to look", async () => {
   const h = harness({ integrations: [] });
   const seen = watch(h, { jobs: [{ id: "planned", status: "running" }] });
-  await h.run('replaceWhenPlanned("planned")');
+  await h.run('approveReviewedPlan("planned", {id: "file", after: 400})');
   assert.deepEqual(seen.resumes(), []);
   assert.equal(seen.notes().at(-1), "The replacement is still being prepared. Open the job to follow it.");
 });
@@ -284,10 +284,21 @@ test("a candidate consumed while the selection dialog was open cannot create ano
     latest: { ...job, candidate_ready: false },
   });
   h.context.job = job;
-  await h.run("prepareReplacement(job)");
+  await h.run("prepareReplacement(job, {reviewed: replaceReviewRow(job)})");
   await assert.rejects(
     h.run('enqueueReplacement(job,{service:"filesystem"})'),
     /no longer ready/,
   );
   assert.equal(h.calls.length, 0);
+});
+
+test("a file that was not reviewed, or a plan for another size, opens its own review instead of approving", async () => {
+  const h = harness({ integrations: [] });
+  for (const reviewed of ["null", '{id: "file", after: 999}']) {
+    const seen = watch(h, { jobs: [h.context.planned] });
+    h.elements.get("file-review").open = false;
+    await h.run(`approveReviewedPlan("planned", ${reviewed})`);
+    assert.deepEqual(seen.resumes(), []);
+    assert.equal(h.elements.get("file-review").open, true);
+  }
 });
