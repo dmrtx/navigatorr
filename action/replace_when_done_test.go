@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,12 @@ func TestPromotionApprovedAheadReplacesOnlyWhileAllowed(t *testing.T) {
 	run := func(h *promotionHarness, approval string) *ActionResult {
 		t.Helper()
 		h.engine.deps.Registry = nil
-		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode", "approval": approval})
+		if approval != "" {
+			if err := h.st.GrantReplacementApproval("source-transcode", approval); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +72,10 @@ func TestPromotionApprovedAheadReplacesOnlyWhileAllowed(t *testing.T) {
 		h := newPromotionHarness(t)
 		h.tracking = map[string]any{"monitored": true, "qualityProfileId": 4}
 		markCompactSource(t, h)
-		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"transcode_action_id": "source-transcode", "series_id": 1, "approval": ApprovalReviewed})
+		if err := h.st.GrantReplacementApproval("source-transcode", ApprovalReviewed); err != nil {
+			t.Fatal(err)
+		}
+		r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"transcode_action_id": "source-transcode", "series_id": 1})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +123,11 @@ func autoPromotion(t *testing.T, e *Engine, id string) map[string]any {
 	if inst == nil {
 		return nil
 	}
-	return decodeInputs(inst.InputsJSON)
+	inputs := decodeInputs(inst.InputsJSON)
+	if a, _ := e.deps.Store.GetReplacementApproval(id); a != nil {
+		inputs["server_approval"] = a.Approval
+	}
+	return inputs
 }
 
 func TestReplaceWhenDoneStartsTheReplacementOnlyWhenAsked(t *testing.T) {
@@ -125,7 +138,7 @@ func TestReplaceWhenDoneStartsTheReplacementOnlyWhenAsked(t *testing.T) {
 			t.Fatal(r, err)
 		}
 		inputs := autoPromotion(t, e, r.ID)
-		if inputs == nil || inputs["approval"] != ApprovalAutomatic || inputs["service"] != "filesystem" {
+		if inputs == nil || inputs["server_approval"] != ApprovalAutomatic || inputs["service"] != "filesystem" {
 			t.Fatalf("no automatic replacement: %v", inputs)
 		}
 	})
@@ -171,8 +184,8 @@ func TestReplaceWhenDoneStartsTheReplacementOnlyWhenAsked(t *testing.T) {
 		if inputs := autoPromotion(t, e, r.ID); inputs == nil {
 			t.Fatal("switching on was ignored")
 		}
-		if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, false); err != ErrReplaceWhenDoneFinished {
-			t.Fatalf("a finished job was switched: %v", err)
+		if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, true); err != ErrReplaceWhenDoneFinished {
+			t.Fatalf("a finished job was switched on: %v", err)
 		}
 	})
 	t.Run("switched off while encoding", func(t *testing.T) {
@@ -195,6 +208,113 @@ func TestReplaceWhenDoneStartsTheReplacementOnlyWhenAsked(t *testing.T) {
 		e, media := finishingTranscode(t, false)
 		if _, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": "yes"}); err == nil {
 			t.Fatal("accepted a string")
+		}
+	})
+}
+
+// An approval granted ahead is used once: the first promotion to reach its
+// approval keeps it, and another promotion of the file waits.
+func TestAnApprovalAheadIsBoundToOnePromotion(t *testing.T) {
+	h := newPromotionHarness(t)
+	h.engine.deps.Registry = nil
+	if err := h.st.GrantReplacementApproval("source-transcode", ApprovalReviewed); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := h.st.BindReplacementApproval("source-transcode", ApprovalReviewed, "someone-else"); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	r, err := h.engine.Run(context.Background(), "promote_transcode_candidate", map[string]any{"service": "filesystem", "transcode_action_id": "source-transcode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusWaitingDecision {
+		t.Fatalf("an approval kept by another promotion was used again: %s", r.Status)
+	}
+}
+
+// Review item 5: switching off a job that has already finished still stops
+// its automatic replacement while that has not been approved.
+func TestSwitchingOffAFinishedJobHoldsItsAutomaticReplacement(t *testing.T) {
+	e, media := finishingTranscode(t, false)
+	r, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true})
+	if err != nil || r.Status != StatusCompleted {
+		t.Fatal(r, err)
+	}
+	promote, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:filesystem:"+r.ID)
+	if err != nil || promote == nil {
+		t.Fatal("no automatic replacement", err)
+	}
+	if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, false); err != nil {
+		t.Fatalf("a finished job whose replacement is not approved could not be switched off: %v", err)
+	}
+	inst, _ := e.deps.Store.GetActionInstance(r.ID)
+	if e.ReplaceWhenDone(inst) {
+		t.Fatal("still on")
+	}
+	// At its approval the promotion now waits for a decision (the harness
+	// in TestPromotionApprovedAheadReplacesOnlyWhileAllowed runs that step).
+	if ok, why := e.promotionApprovedAhead(&ExecutionContext{InstanceID: promote.ID}, &promotionState{SourceActionID: r.ID}); ok || !strings.Contains(why, "switched off") {
+		t.Fatalf("the replacement would go ahead after the switch: %v %q", ok, why)
+	}
+	// Once nothing is outstanding, an ended job cannot be switched.
+	if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, false); err != nil {
+		t.Fatalf("switching off again: %v", err)
+	}
+	if _, err := e.SetReplaceWhenDone(context.Background(), r.ID, true); err != ErrReplaceWhenDoneFinished {
+		t.Fatalf("a finished job was switched on: %v", err)
+	}
+}
+
+// Review item 6: an automatic replacement that could not be submitted when
+// its job finished (a crash, an admission error) is said on the job and
+// submitted by the reconciler.
+func TestAnAutomaticReplacementLeftBehindIsSubmittedLater(t *testing.T) {
+	t.Run("crash after the job was saved", func(t *testing.T) {
+		e, media := finishingTranscode(t, false)
+		r, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": false})
+		if err != nil || r.Status != StatusCompleted {
+			t.Fatal(r, err)
+		}
+		// As the completion leaves it just before submitting.
+		if err := e.deps.Store.SetReplaceWhenDone(r.ID, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.deps.Store.AddAutoReplacePending(r.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := e.ReconcileOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if inputs := autoPromotion(t, e, r.ID); inputs == nil || inputs["server_approval"] != ApprovalAutomatic {
+			t.Fatalf("the reconciler did not submit it: %v", inputs)
+		}
+		if pending, _, _ := e.deps.Store.AutoReplacePending(r.ID); pending {
+			t.Fatal("still pending")
+		}
+	})
+	t.Run("admission error", func(t *testing.T) {
+		e, media := finishingTranscode(t, false)
+		e.beforeAutoEnqueue = func(string) error { return errors.New("admission is closed") }
+		r, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "profile": "hevc-vt", "replace_when_done": true})
+		if err != nil || r.Status != StatusCompleted {
+			t.Fatal(r, err)
+		}
+		inst, _ := e.deps.Store.GetActionInstance(r.ID)
+		if skipped := getString(decodeInputs(inst.OutputsJSON), "replace_when_done_skipped"); !strings.Contains(skipped, "admission is closed") {
+			t.Fatalf("the failure is not said on the job: %q", skipped)
+		}
+		if inputs := autoPromotion(t, e, r.ID); inputs != nil {
+			t.Fatal("submitted anyway", inputs)
+		}
+		if a, _ := e.deps.Store.GetReplacementApproval(r.ID); a != nil {
+			t.Fatal("an approval outlived the failed submission", a)
+		}
+		e.beforeAutoEnqueue = nil
+		if err := e.ReconcileOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if inputs := autoPromotion(t, e, r.ID); inputs == nil {
+			t.Fatal("not submitted once admission worked")
 		}
 	})
 }

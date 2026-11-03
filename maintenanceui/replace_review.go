@@ -10,26 +10,36 @@ import (
 )
 
 // replace replaces exactly the files the person reviewed: POST
-// {"ids": [transcode job ids], "key": "..."}. All of them or none: when one
-// is not ready now, the answer is 409 with every file's readiness and nothing
-// is started. A file of a batch that is still encoding is replaced now; the
-// batch's other files are untouched and wait for their own review.
+// {"ids": [transcode job ids], "digests": {"<id>": "sha256:..."}, "key": "..."}.
+// digests carries, for a file whose replacement already waits on a plan, the
+// digest of the plan shown; without it, or with another, that file is
+// refused as plan_changed with the plan's digest, and a plan with a regrab
+// warning is refused as needs_decision. All of them or none: when one is not
+// ready now, the answer is 409 with every file's readiness and nothing is
+// started. If a submission still fails partway, the answer is 207 and says
+// which files started. A key's answer is kept: sent again with the same
+// files, the same answer; with other files, 409 key_reused.
 func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		IDs []string `json:"ids"`
-		Key string   `json:"key"`
-	}
+	var body action.ReplaceRequest
 	if decode(w, r, &body) != nil || len(body.IDs) == 0 || len(body.IDs) > 1000 {
-		fail(w, 400, `send {"ids": [the file jobs reviewed], "key": "..."}`)
+		fail(w, 400, `send {"ids": [the file jobs reviewed], "digests": {"<id>": "<plan digest>"}, "key": "..."}`)
 		return
 	}
 	seen := map[string]bool{}
-	for _, id := range body.IDs {
-		if strings.TrimSpace(id) == "" || seen[strings.TrimSpace(id)] {
+	for i, id := range body.IDs {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
 			fail(w, 400, "list each file once")
 			return
 		}
-		seen[strings.TrimSpace(id)] = true
+		seen[id] = true
+		body.IDs[i] = id
+	}
+	for id := range body.Digests {
+		if !seen[id] {
+			fail(w, 400, "send a digest only for a listed file")
+			return
+		}
 	}
 	if !reconfigureKey.MatchString(body.Key) {
 		fail(w, 400, "a valid submission key is required")
@@ -39,24 +49,20 @@ func (s *Server) replace(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "replacement is disabled in the server settings")
 		return
 	}
-	started, err := s.engine.ReplaceReviewed(r.Context(), body.IDs, body.Key)
-	var refused *action.ErrReplaceRefused
-	switch {
-	case errors.As(err, &refused):
-		writeJSON(w, 409, map[string]any{"error": refused.Error(), "code": "not_ready", "ready": refused.Ready, "not_ready": refused.NotReady})
-		return
-	case err != nil:
-		writeJSON(w, 409, map[string]any{"error": err.Error(), "replacements": started})
+	answer, err := s.engine.ReplaceReviewed(r.Context(), body)
+	if err != nil {
+		fail(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 202, map[string]any{"replacements": started})
+	writeJSON(w, answer.Status, answer.Body)
 }
 
 // replaceWhenDone switches whether a job or batch that has not ended replaces
 // each file by itself once that file is done: POST {"id", "replace_when_done"}.
 // On, it replaces only files that finish from now on: files already ready
 // still need POST /api/maintenance/replace. Off, it stops the replacements not
-// yet approved; one already under way finishes.
+// yet approved, also on a job that has ended while one of its automatic
+// replacements is not approved yet; one already under way finishes.
 func (s *Server) replaceWhenDone(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ID    string `json:"id"`

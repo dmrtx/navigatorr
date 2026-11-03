@@ -21,7 +21,8 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 		AutoReconcile:   true,
 		ImmutableInputs: true,
 		Description:     "Replaces a completed, validated transcode locally with service=filesystem (no library IDs), or promotes it into Sonarr/Radarr, after explicit approval, keeping the verified original recoverable (moved into a private recovery directory, or copied when it cannot be moved) until import, old-file cleanup, rename and rescan are verified. Persists external command intents and never blindly resubmits uncertain imports.",
-		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest", "approval"},
+		RequiredInputs:  []string{"transcode_action_id"}, OptionalInputs: []string{"service", "series_id", "movie_id", "batch_promote_parent_id", "batch_promote_item_key", "batch_promote_digest"},
+		Validate: validatePromoteInputs,
 		Steps: []StepDefinition{
 			{Name: "plan_promotion", Description: "Verify original and candidate, and resolve the movie or all episodes sharing the original file", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromotePlan)},
 			{Name: "approve_promotion", Description: "Present the exact replacement for an explicit approve decision", Run: e.stepPromoteApprove},
@@ -33,6 +34,16 @@ func (e *Engine) registerPromoteTranscodeTemplate() {
 			{Name: "finalize_promotion", Description: "Verify one active file per affected library item, record savings and remove the recovery copy", Run: e.measureCoordinatorPhase("coordinator_promotion", e.stepPromoteFinalize)},
 		},
 	})
+}
+
+// validatePromoteInputs refuses an approval sent as an input: a replacement
+// is approved ahead only by the server (POST /api/maintenance/replace, or a
+// job that replaces each file when done), never by whoever starts it.
+func validatePromoteInputs(ctx context.Context, e *Engine, inputs map[string]any) (map[string]any, error) {
+	if _, sent := inputs["approval"]; sent {
+		return nil, inputErr("approval", "approval cannot be sent: approve the plan once it waits, or use Replace on the reviewed file")
+	}
+	return inputs, nil
 }
 
 type promotionCommand struct {

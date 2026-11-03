@@ -2,10 +2,22 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
 )
+
+func countPromotions(rows []store.ActionInstance) int {
+	n := 0
+	for _, row := range rows {
+		if row.ActionName == "promote_transcode_candidate" {
+			n++
+		}
+	}
+	return n
+}
 
 // readyFile is what a finished transcode keeps when its new file is ready.
 func readyFile(original string) map[string]any {
@@ -59,17 +71,28 @@ func TestReplaceFromARunningBatchReplacesOnlyTheListedReadyFiles(t *testing.T) {
 	if json.Unmarshal(w.Body.Bytes(), &started) != nil || len(started.Replacements) != 1 || started.Replacements[0].ID != "file-a" || started.Replacements[0].ReplacementActionID == "" {
 		t.Fatal(w.Body.String())
 	}
-	if p := promotionOf(t, st, "file-a"); p["approval"] != "reviewed" || p["service"] != "filesystem" || p["batch_promote_parent_id"] != nil {
-		t.Fatal("reviewed file not replaced as reviewed", p)
+	if p := promotionOf(t, st, "file-a"); p == nil || p["approval"] != nil || p["service"] != "filesystem" || p["batch_promote_parent_id"] != nil {
+		t.Fatal("reviewed file not replaced", p)
+	}
+	if a, _ := st.GetReplacementApproval("file-a"); a == nil || a.Approval != action.ApprovalReviewed {
+		t.Fatal("reviewed file not approved as reviewed", a)
 	}
 	for _, id := range []string{"file-b", "file-c"} {
 		if p := promotionOf(t, st, id); p != nil {
 			t.Fatal("a file nobody listed is being replaced", id, p)
 		}
 	}
-	// The same review sent again starts nothing new.
-	if w := request(h, "POST", "/api/maintenance/replace", `{"ids":["file-a"],"key":"review-a"}`, true); w.Code != 409 {
-		t.Fatal("a file already being replaced was replaced again", w.Code, w.Body.String())
+	// The same review sent again gets the same answer and starts nothing new;
+	// the key cannot be used for other files.
+	first := w.Body.String()
+	if w := request(h, "POST", "/api/maintenance/replace", `{"ids":["file-a"],"key":"review-a"}`, true); w.Code != 202 || w.Body.String() != first {
+		t.Fatal("a replay answered differently", w.Code, w.Body.String(), first)
+	}
+	if w := request(h, "POST", "/api/maintenance/replace", `{"ids":["file-b"],"key":"review-a"}`, true); w.Code != 409 || !strings.Contains(w.Body.String(), "key_reused") {
+		t.Fatal("a key was reused for other files", w.Code, w.Body.String())
+	}
+	if rows, _ := st.ListActionInstances("", 100); countPromotions(rows) != 1 {
+		t.Fatal("a replay started another replacement")
 	}
 
 	// All or nothing: one file still encoding refuses the whole request.
@@ -127,7 +150,16 @@ func TestReplaceApprovesAPlanAlreadyWaiting(t *testing.T) {
 	if err := st.CreateActionInstance(store.ActionInstance{ID: "waiting-plan", ActionName: "promote_transcode_candidate", Status: store.ActionStatusWaitingDecision, CurrentStep: 1, IdempotencyKey: "promote:filesystem:single", InputsJSON: mustJSON(t, map[string]any{"transcode_action_id": "single", "service": "filesystem"}), StateJSON: mustJSON(t, map[string]any{"promotion": promotion}), OutputsJSON: "{}"}); err != nil {
 		t.Fatal(err)
 	}
-	w := request(h, "POST", "/api/maintenance/replace", `{"ids":["single"],"key":"review-single"}`, true)
+	// Without the digest of the plan shown, the plan is sent back.
+	w := request(h, "POST", "/api/maintenance/replace", `{"ids":["single"],"key":"review-unseen"}`, true)
+	digest := action.PromotionPlanDigest(promotion)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), `"reason":"plan_changed"`) || !strings.Contains(w.Body.String(), digest) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := request(h, "POST", "/api/maintenance/replace", `{"ids":["single"],"digests":{"other":"x"},"key":"review-stray"}`, true); w.Code != 400 {
+		t.Fatal("a digest for an unlisted file", w.Code)
+	}
+	w = request(h, "POST", "/api/maintenance/replace", mustJSON(t, map[string]any{"ids": []string{"single"}, "digests": map[string]string{"single": digest}, "key": "review-single"}), true)
 	if w.Code != 202 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -143,7 +175,7 @@ func TestReplaceApprovesAPlanAlreadyWaiting(t *testing.T) {
 		t.Fatal("no approval queued")
 	}
 	inputs := decodeOperationJSON(command.InputsJSON)
-	if inputs["kind"] != "resume" || inputs["decision"] != "approve" || inputs["id"] != "waiting-plan" || operationString(inputs["plan_digest"]) == "" {
+	if inputs["kind"] != "resume" || inputs["decision"] != "approve" || inputs["id"] != "waiting-plan" || inputs["plan_digest"] != digest {
 		t.Fatal(inputs)
 	}
 }
@@ -341,5 +373,46 @@ func TestReplaceWhenDoneSwitchesOnARunningJobOrBatch(t *testing.T) {
 	}
 	if w := request(h, "POST", "/api/maintenance/replace-when-done", `{"id":"switch-batch"}`, true); w.Code != 400 {
 		t.Fatal("missing value accepted", w.Code)
+	}
+}
+
+// The web's generic endpoint cannot approve a replacement ahead either.
+func TestToolEndpointRefusesAPromotionApproval(t *testing.T) {
+	s, h := testUI(t)
+	s.cfg.AllowDestructive = true
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "ready", "transcode_media", store.ActionStatusCompleted, map[string]any{"path": "/media/ready.mkv"}, readyFile("/media/ready.mkv"), nil)
+	for _, approval := range []string{"reviewed", "automatic"} {
+		body := mustJSON(t, map[string]any{"name": "action_run", "arguments": map[string]any{"action": "promote_transcode_candidate", "inputs": `{"transcode_action_id":"ready","service":"filesystem","approval":"` + approval + `"}`, "idempotency_key": "self-" + approval}})
+		w := request(h, "POST", "/api/maintenance/tool", body, true)
+		if w.Code != 400 || !strings.Contains(w.Body.String(), `"field":"approval"`) {
+			t.Fatal(approval, w.Code, w.Body.String())
+		}
+	}
+	if p := promotionOf(t, st, "ready"); p != nil {
+		t.Fatal("a self-approved replacement was admitted", p)
+	}
+}
+
+// A batch's file reads replace_when_done from its batch's switch even when
+// the batch is not on the page.
+func TestReplaceWhenDoneOfAFileWhoseBatchIsNotListed(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "orphan-file", "transcode_media", store.ActionStatusRunning, map[string]any{"path": "/media/o.mkv", "parent_action_id": "gone-batch", "replace_when_done": false}, nil, nil)
+	if err := st.SetReplaceWhenDone("gone-batch", true); err != nil {
+		t.Fatal(err)
+	}
+	seedOperation(t, st, "paged-batch", "transcode_batch", store.ActionStatusRunning, map[string]any{"paths": []string{"/media/p.mkv"}, "replace_when_done": true}, nil, nil)
+	seedOperation(t, st, "paged-file", "transcode_media", store.ActionStatusRunning, map[string]any{"path": "/media/p.mkv", "parent_action_id": "paged-batch", "replace_when_done": false}, nil, nil)
+	for id, want := range map[string]bool{"orphan-file": true, "paged-file": true} {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if page.Jobs[0]["replace_when_done"] != want {
+			t.Fatal(id, "does not show its batch's switch", page.Jobs[0]["replace_when_done"])
+		}
 	}
 }

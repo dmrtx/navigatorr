@@ -152,6 +152,27 @@ func (e *Engine) buildBatchPromotionPlan(ec *ExecutionContext, items []store.Tra
 	return p, nil
 }
 
+// planBatchPromotion builds and saves a batch's replacement plan under the
+// replacement lock, so a file's own replacement (reviewed or automatic) and
+// the plan never both claim it: whichever is first keeps it.
+func (e *Engine) planBatchPromotion(ctx context.Context, ec *ExecutionContext) (*batchPromotionPlan, string) {
+	e.replaceMu.Lock()
+	defer e.replaceMu.Unlock()
+	items, err := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
+	if err != nil {
+		return nil, fmt.Sprintf("listing batch candidates: %v", err)
+	}
+	plan, err := e.buildBatchPromotionPlan(ec, items)
+	if err != nil {
+		return nil, err.Error()
+	}
+	ec.State["batch_promotion_plan"] = plan
+	if err := e.persistExecutionState(ctx, ec); err != nil {
+		return nil, fmt.Sprintf("persisting batch promotion plan: %v", err)
+	}
+	return plan, ""
+}
+
 func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
 	if err := e.validateBatchPromotionInputs(ec.Inputs); err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -166,17 +187,10 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	}
 	plan := getBatchPromotionPlan(ec.State["batch_promotion_plan"])
 	if plan == nil {
-		items, err := e.deps.Store.ListTranscodeBatchItems(ec.InstanceID)
-		if err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("listing batch candidates: %v", err)}, nil
-		}
-		plan, err = e.buildBatchPromotionPlan(ec, items)
-		if err != nil {
-			return StepResult{Status: StepFailed, Error: err.Error()}, nil
-		}
-		ec.State["batch_promotion_plan"] = plan
-		if err := e.persistExecutionState(ctx, ec); err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("persisting batch promotion plan: %v", err)}, nil
+		var failed string
+		plan, failed = e.planBatchPromotion(ctx, ec)
+		if failed != "" {
+			return StepResult{Status: StepFailed, Error: failed}, nil
 		}
 	}
 	if plan.BatchID != ec.InstanceID || (planService(plan) == "sonarr" && plan.SeriesID <= 0) {

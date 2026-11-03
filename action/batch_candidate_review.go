@@ -54,15 +54,9 @@ func (e *Engine) BatchCandidates(ctx context.Context, id string) (*BatchCandidat
 		if json.Unmarshal([]byte(child.OutputsJSON), &out) != nil || child.Status != StatusCompleted || !getBool(out, "original_intact") || getBool(out, candidateRemovedKey) {
 			continue
 		}
-		reserved := false
-		for _, service := range []string{"sonarr", "radarr", "filesystem"} {
-			prior, err := e.deps.Store.FindActionByIdempotencyKey("promote_transcode_candidate", "promote:"+service+":"+child.ID)
-			if err != nil {
-				return nil, err
-			}
-			if prior != nil {
-				reserved = true
-			}
+		reserved, err := e.BatchItemReplacementReserved(item)
+		if err != nil {
+			return nil, err
 		}
 		if !reserved {
 			eligible = append(eligible, item)
@@ -116,6 +110,13 @@ func (e *Engine) PrepareBatchPromotion(ctx context.Context, id, version, receipt
 		return nil, err
 	}
 	defer release()
+	// The plan is built and saved under the replacement lock: a file
+	// replaced on its own in between is left out, never claimed twice.
+	e.replaceMu.Lock()
+	defer e.replaceMu.Unlock()
+	if e.afterBatchPlanLock != nil {
+		e.afterBatchPlanLock()
+	}
 	inst, err := e.deps.Store.GetActionInstance(id)
 	if err != nil {
 		return nil, err

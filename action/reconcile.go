@@ -155,6 +155,7 @@ func (e *Engine) dispatchReconcile(ctx context.Context, d *reconcileDispatcher) 
 // dispatchReconcile instead, so one slow continuation never delays the next
 // poll of other actions.
 func (e *Engine) ReconcileOnce(ctx context.Context) error {
+	e.drainAutoReplacements(ctx)
 	ids, err := e.reconcilableIDs(ctx)
 	if err != nil {
 		return err

@@ -224,7 +224,9 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 								}
 								view.Where = whereOf(pr)
 								view.Replaced = prior.Status == store.ActionStatusCompleted && decodeOperationJSON(prior.OutputsJSON)["promoted"] == true
-								view.ReplacedAutomatically = pr.inputs["approval"] == action.ApprovalAutomatic
+								if approval, err := s.engine.Deps().Store.GetReplacementApproval(child.ID); err == nil && approval != nil {
+									view.ReplacedAutomatically = action.ReplacedAutomatically(prior.ID, child.ID, map[string]store.ReplacementApproval{child.ID: *approval})
+								}
 								break
 							}
 						}

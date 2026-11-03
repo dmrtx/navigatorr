@@ -424,6 +424,16 @@ var migrations = []migration{
 		// changed after it was submitted. Its inputs keep the choice it was
 		// submitted with; this row, when present, overrides it.
 		`CREATE TABLE action_replace_when_done (action_id TEXT PRIMARY KEY, value INTEGER NOT NULL, updated_at TEXT NOT NULL)`,
+		// The approval a file's replacement carries before its plan exists:
+		// reviewed (a person approved the file after seeing its result) or
+		// automatic (its job replaces each file when done). Only the server
+		// writes it; the first promotion to use it is bound to it.
+		`CREATE TABLE replacement_approvals (transcode_action_id TEXT PRIMARY KEY, approval TEXT NOT NULL, promote_action_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		// A finished file whose automatic replacement is still to be
+		// submitted; the reconciler picks up any a crash or an error left.
+		`CREATE TABLE auto_replace_pending (transcode_action_id TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
+		// The answer to a POST /api/maintenance/replace, by its submission key.
+		`CREATE TABLE replace_receipts (key TEXT PRIMARY KEY, request TEXT NOT NULL, status INTEGER NOT NULL, response TEXT NOT NULL, created_at TEXT NOT NULL)`,
 	}},
 }
 

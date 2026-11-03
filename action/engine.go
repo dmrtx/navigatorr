@@ -30,6 +30,17 @@ type Engine struct {
 	workerStates   map[string]*workerState
 	// bindMu serialises worker assignment, so each pick counts the last.
 	bindMu sync.Mutex
+	// replaceMu serialises every decision about which job replaces a file:
+	// a reviewed replacement, an automatic one, a batch's replacement plan
+	// and a switch of replace_when_done. Each checks and claims under it.
+	replaceMu sync.Mutex
+	// afterReplaceCheck, in tests, runs between the checks of a reviewed
+	// replacement and its submission.
+	afterReplaceCheck func()
+	// afterBatchPlanLock runs in tests once a batch plan holds the lock.
+	afterBatchPlanLock func()
+	// beforeAutoEnqueue, in tests, can fail an automatic submission.
+	beforeAutoEnqueue func(id string) error
 
 	mu             sync.RWMutex
 	deps           EngineDeps
@@ -1206,17 +1217,27 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 	inst.Status = StatusCompleted
 	inst.CurrentStep = totalSteps
 	// A job that replaces its file when done starts that replacement once it
-	// is saved as completed; when it cannot, the result says why.
+	// is saved as completed; when it cannot, the result says why. The file is
+	// listed as pending first, so a crash after the save leaves it for the
+	// reconciler instead of dropping it.
 	autoReplace, autoSkipped := e.autoReplacement(inst, ec)
 	if autoSkipped != "" {
 		ec.Outputs["replace_when_done_skipped"] = autoSkipped
+	}
+	if autoReplace {
+		if err := e.deps.Store.AddAutoReplacePending(inst.ID); err != nil {
+			autoReplace = false
+			ec.Outputs["replace_when_done_skipped"] = "the automatic replacement could not be recorded: " + err.Error()
+		}
 	}
 	inst.StateJSON = toJSON(ec.State)
 	inst.OutputsJSON = toJSON(ec.Outputs)
 	if saveErr := e.updateInstance(ctx, inst); saveErr != nil {
 		return nil, saveErr
 	}
-	e.startAutoReplacement(ctx, inst, autoReplace)
+	if autoReplace {
+		e.submitAutoReplacement(ctx, inst.ID, true)
+	}
 
 	_ = e.deps.Store.LogActionEnriched(
 		"action_completed",
