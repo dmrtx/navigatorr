@@ -1065,10 +1065,11 @@ func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
 	winner := seedCandidateAttempt(t, st, "winner", StatusCompleted, original, "job-winner", nil, nil)
 	done := map[string]any{"transcode_done": true}
 	loser := seedCandidateAttempt(t, st, "loser", StatusCompleted, original, "job-loser", nil, done)
+	failed := seedCandidateAttempt(t, st, "failed-loser", StatusFailed, original, "job-failed", nil, done)
 	running := seedCandidateAttempt(t, st, "running", StatusRunning, original, "job-running", nil, nil)
 	reserved := seedCandidateAttempt(t, st, "reserved", StatusCompleted, original, "job-reserved", nil, nil)
 	unrelated := seedCandidateAttempt(t, st, "unrelated", StatusCompleted, sameName, "job-unrelated", nil, nil)
-	for _, path := range []string{loser, running, reserved, unrelated} {
+	for _, path := range []string{winner, loser, failed, running, reserved, unrelated} {
 		writeCandidateFile(t, path, strings.Repeat("x", 50))
 	}
 	seedActionInstance(t, st, "replacement", "promote_transcode_candidate", StatusWaitingDecision, 1, "promote:filesystem:reserved", map[string]any{"transcode_action_id": "reserved"}, nil)
@@ -1077,6 +1078,12 @@ func TestPromotionRetiresTheOtherFinishedCandidatesOfTheSameFile(t *testing.T) {
 
 	if _, err := os.Lstat(loser); !os.IsNotExist(err) {
 		t.Fatalf("the other finished candidate was kept: %v", err)
+	}
+	if _, err := os.Lstat(failed); !os.IsNotExist(err) {
+		t.Fatalf("the other failed candidate was kept: %v", err)
+	}
+	if _, err := os.Stat(winner); err != nil {
+		t.Fatalf("the promoted attempt's own candidate was touched: %v", err)
 	}
 	for name, path := range map[string]string{"running": running, "reserved": reserved, "unrelated": unrelated} {
 		if _, err := os.Stat(path); err != nil {
