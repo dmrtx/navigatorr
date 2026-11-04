@@ -69,3 +69,13 @@ func TestOpeningAJobCanReturnItsBatchAndReplacementInTheSameRead(t *testing.T) {
 		t.Fatal("batch and replacement are returned", got)
 	}
 }
+
+func TestAskingForRelatedJobsOfAMissingJobIsEmpty(t *testing.T) {
+	s, h := testUI(t)
+	seedActionableFiles(t, s)
+	w := request(h, "GET", "/api/maintenance/operations?id=missing&related=1", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 0 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
