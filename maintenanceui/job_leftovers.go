@@ -1,6 +1,9 @@
 package maintenanceui
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 // workflowIndex reads every maintenance action once and groups them into queue
 // workflows: the root of each action and the members of each root.
@@ -10,12 +13,10 @@ func (s *Server) workflowIndex() (map[string]string, map[string][]operationRecor
 	if err != nil {
 		return nil, nil, err
 	}
-	records := make([]operationRecord, 0, len(instances))
-	byID := map[string]operationRecord{}
-	for _, inst := range instances {
-		r := operationRecord{inst: inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
-		records = append(records, r)
-		byID[inst.ID] = r
+	records := s.recordMemo.records(instances, time.Now().UTC())
+	byID := make(map[string]operationRecord, len(records))
+	for _, r := range records {
+		byID[r.inst.ID] = r
 	}
 	roots, _, members := queueWorkflows(records, byID, queueReplacementLinks(records))
 	return roots, members, nil

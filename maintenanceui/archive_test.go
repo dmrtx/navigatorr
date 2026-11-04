@@ -127,3 +127,23 @@ func TestJobLeftoversReportsAndRequiresAuthenticatedKnownJob(t *testing.T) {
 		t.Fatal("deletion must follow allow_destructive", w.Code, found.CanDelete)
 	}
 }
+
+// Archiving used to decode every action's JSON again on each tap. The index it
+// reads from must come from the decoded records the server already keeps.
+func TestArchiveReadsTheKeptRecordsInsteadOfDecodingAgain(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "candidate", "transcode_media", "completed", map[string]any{"path": "/media/one.mkv"}, map[string]any{"original_intact": true}, nil)
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"candidate","archived":true}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	s.recordMemo.mu.Lock()
+	kept := len(s.recordMemo.byID)
+	s.recordMemo.mu.Unlock()
+	if kept == 0 {
+		t.Fatal("archiving must decode through the shared record memo")
+	}
+	if err := s.WarmRecords(); err != nil {
+		t.Fatal(err)
+	}
+}

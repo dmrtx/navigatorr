@@ -88,3 +88,14 @@ func decodeOperationRecords(instances []store.ActionInstance, which []int, out [
 	}
 	wg.Wait()
 }
+
+// WarmRecords decodes every action once so the first request after a start
+// does not pay for it.
+func (s *Server) WarmRecords() error {
+	instances, err := s.engine.Deps().Store.ListMaintenanceActionSnapshot()
+	if err != nil {
+		return err
+	}
+	s.recordMemo.records(instances, time.Now().UTC())
+	return nil
+}

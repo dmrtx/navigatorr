@@ -249,6 +249,19 @@ func main() {
 			<-storageDone
 			webUI.WaitStorage()
 		}()
+		// Decode the ledger once now so the first job opened or archived after
+		// a start is served from memory like every later one.
+		recordsDone := make(chan struct{})
+		defer func() { <-recordsDone }() // registered after the store's close, so it runs first
+		go func() {
+			defer close(recordsDone)
+			began := time.Now()
+			if err := webUI.WarmRecords(); err != nil {
+				internal.Logf("maintenance records warm-up: %v", err)
+				return
+			}
+			internal.Logf("maintenance records warmed in %s", time.Since(began).Round(time.Millisecond))
+		}()
 	}
 
 	if transportOpts.Transport == "streamable-http" {
