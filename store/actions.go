@@ -195,6 +195,58 @@ func (s *Store) ListActionInstancesByName(name string, limit, offset int) ([]Act
 	return s.listActionInstances("", name, limit, offset)
 }
 
+// ListActionInstancesMentioning returns the instances of one workflow whose
+// state contains needle, limited to the statuses in `in` when it is not empty
+// and never in `notIn`, in no particular order. SQLite makes the match, so only the rows that match
+// are copied out and the store lock is taken once: paging a whole workflow
+// through listActionInstances copies every row's JSON and takes the lock once
+// per page, which holds up every other store call for as long as the scan runs.
+func (s *Store) ListActionInstancesMentioning(name, needle string, in, notIn []string) ([]ActionInstance, error) {
+	if needle == "" {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
+		state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances WHERE action_name=? AND instr(state_json, ?) > 0`
+	args := []any{name, needle}
+	for _, f := range []struct {
+		op       string
+		statuses []string
+	}{{"IN", in}, {"NOT IN", notIn}} {
+		if len(f.statuses) == 0 {
+			continue
+		}
+		q += ` AND status ` + f.op + ` (?` + strings.Repeat(`,?`, len(f.statuses)-1) + `)`
+		for _, st := range f.statuses {
+			args = append(args, st)
+		}
+	}
+
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ActionInstance
+	for rows.Next() {
+		var inst ActionInstance
+		if err := rows.Scan(
+			&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+			&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+			&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) listActionInstances(status, name string, limit, offset int) ([]ActionInstance, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

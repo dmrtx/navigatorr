@@ -497,26 +497,18 @@ func (e *Engine) retireReplacedSiblings(ctx context.Context, p *promotionState) 
 	// The state is stored with toJSON, so the file name appears in it exactly
 	// as this encodes it; only matching rows are parsed in full.
 	needle := strings.Trim(toJSON(filepath.Base(original)), `"`)
+	// SQLite does the match and the store lock is taken once. Reading every
+	// attempt ever made a page at a time copied each one's JSON and took the
+	// lock once per page, which held up every other store call for the whole scan.
+	matches, err := e.deps.Store.ListActionInstancesMentioning("transcode_media", needle, []string{StatusCompleted, StatusFailed, StatusCancelled}, nil)
+	if err != nil {
+		log.Printf("action %s: listing replaced attempts: %v", p.SourceActionID, err)
+		return
+	}
 	var siblings []string
-	const pageSize = 100
-	for offset := 0; ; offset += pageSize {
-		instances, err := e.deps.Store.ListActionInstancesByName("transcode_media", pageSize, offset)
-		if err != nil {
-			log.Printf("action %s: listing replaced attempts: %v", p.SourceActionID, err)
-			return
-		}
-		for i := range instances {
-			inst := &instances[i]
-			if inst.ID == p.SourceActionID || !strings.Contains(inst.StateJSON, needle) {
-				continue
-			}
-			switch inst.Status {
-			case StatusCompleted, StatusFailed, StatusCancelled:
-				siblings = append(siblings, inst.ID)
-			}
-		}
-		if len(instances) < pageSize {
-			break
+	for i := range matches {
+		if matches[i].ID != p.SourceActionID {
+			siblings = append(siblings, matches[i].ID)
 		}
 	}
 	for _, id := range siblings {
@@ -920,21 +912,16 @@ func (e *Engine) unpromotableOriginalReason(ec *ExecutionContext) string {
 // A store error counts as a replacement in progress.
 func (e *Engine) originalBeingReplaced(original string) bool {
 	needle := strings.Trim(toJSON(filepath.Base(filepath.Clean(original))), `"`)
-	const pageSize = 100
-	for offset := 0; ; offset += pageSize {
-		rows, err := e.deps.Store.ListActionInstancesByName("promote_transcode_candidate", pageSize, offset)
-		if err != nil {
+	rows, err := e.deps.Store.ListActionInstancesMentioning("promote_transcode_candidate", needle, nil, []string{StatusCompleted})
+	if err != nil {
+		return true
+	}
+	for i := range rows {
+		if !promotionCancelledBeforeApproval(&rows[i]) {
 			return true
 		}
-		for i := range rows {
-			if rows[i].Status != StatusCompleted && !promotionCancelledBeforeApproval(&rows[i]) && strings.Contains(rows[i].StateJSON, needle) {
-				return true
-			}
-		}
-		if len(rows) < pageSize {
-			return false
-		}
 	}
+	return false
 }
 
 // replacedBatchAttempts returns the children a batch's attempt history
