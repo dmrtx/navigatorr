@@ -768,6 +768,25 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	ready := []savingsCandidate{}
 	seenCandidates, seenEstimates, seenArchivedCandidates := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
+	// Opening a job also needs the attempt that replaces it and the batch it belongs to. `related=1`
+	// returns them with it from this one pass, instead of the client asking again for each. They are
+	// treated as opened jobs too (tracks, streams, ready files), exactly as when the client asked for each
+	// by id. Paging and `status` apply to the whole set, so a client that pages must read the job it asked
+	// for first, which is where it is put.
+	related := map[string]bool{}
+	if selectedID != "" && req.URL.Query().Get("related") == "1" {
+		selected := recordsByID[selectedID]
+		related[operationString(selected.inputs["parent_action_id"])] = true
+		related[existingReplacements[selectedID]] = true
+		// A replacement opened from its own side brings the attempt it replaces and the batch it came from.
+		related[operationString(selected.inputs["transcode_action_id"])] = true
+		related[operationString(selected.inputs["batch_promote_parent_id"])] = true
+		if run := conversions.conversionReplacement(selected); run != nil {
+			related[operationString(run["id"])] = true
+		}
+		delete(related, "")
+		delete(related, selectedID)
+	}
 	for _, r := range records {
 		key := operationSourceKey(r)
 		if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] && archives[roots[r.inst.ID]] != "" && !activeWorkflows[roots[r.inst.ID]] {
@@ -826,9 +845,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
-		if (selectedID == "" || selectedID == r.inst.ID) && matches {
+		if (selectedID == "" || selectedID == r.inst.ID || related[r.inst.ID]) && matches {
 			filtered = append(filtered, r)
 		}
+	}
+	// The job asked for stays first: a client that reads one job takes the first.
+	if selectedID != "" {
+		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].inst.ID == selectedID && filtered[j].inst.ID != selectedID })
 	}
 	if grouped {
 		// One fixed order: the newest submission first, by workflow number. It
@@ -950,7 +973,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			if tracks := operationTracks(r); tracks != nil {
 				// The queue lists the sentence; the lists of tracks belong to the
-				// one job being opened.
+				// job being opened, and to its related ones when asked for.
 				job["tracks_message"] = operationString(tracks["message"])
 				if selectedID != "" {
 					job["tracks"] = tracks
@@ -1045,7 +1068,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				if cause := conversions.cause(r, nil); cause != nil {
 					job["cause"] = cause
 				}
-				// How it ended, drawn by the client: the job being opened only.
+				// How it ended, drawn by the client: the job being opened (and its related ones) only.
 				// The snapshot keeps only the keys the queue lists; the plan, the
 				// source probe and the quality ladder these are read from are in
 				// the job's full record.
