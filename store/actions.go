@@ -35,6 +35,9 @@ type ActionInstance struct {
 	IdempotencyKey     string `json:"idempotency_key,omitempty"`
 	CreatedAt          string `json:"created_at"`
 	UpdatedAt          string `json:"updated_at"`
+	// Rev is the row's revision when it was read for the maintenance snapshot (0 elsewhere): two reads
+	// with the same Rev hold the same content, so what was derived from one is valid for the other.
+	Rev int64 `json:"-"`
 }
 
 // ActionStepLog records an individual step execution in an action workflow.

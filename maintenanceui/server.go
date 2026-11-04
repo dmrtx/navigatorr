@@ -63,6 +63,8 @@ type Server struct {
 	fileStatusCache fileStatusCache
 	// arrLists keeps the *arr collections the Files tab pages through.
 	arrLists arrListCache
+	// recordMemo keeps each action's decoded documents and savings between requests.
+	recordMemo recordMemo
 	// inFlight counts the requests being served, for the slow-request log.
 	inFlight atomic.Int64
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
