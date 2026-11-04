@@ -778,6 +778,9 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		selected := recordsByID[selectedID]
 		related[operationString(selected.inputs["parent_action_id"])] = true
 		related[existingReplacements[selectedID]] = true
+		// A replacement opened from its own side brings the attempt it replaces and the batch it came from.
+		related[operationString(selected.inputs["transcode_action_id"])] = true
+		related[operationString(selected.inputs["batch_promote_parent_id"])] = true
 		if run := conversions.conversionReplacement(selected); run != nil {
 			related[operationString(run["id"])] = true
 		}
