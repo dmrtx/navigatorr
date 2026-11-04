@@ -143,7 +143,16 @@ func TestArchiveReadsTheKeptRecordsInsteadOfDecodingAgain(t *testing.T) {
 	if kept == 0 {
 		t.Fatal("archiving must decode through the shared record memo")
 	}
+	s.recordMemo.mu.Lock()
+	s.recordMemo.byID = nil
+	s.recordMemo.mu.Unlock()
 	if err := s.WarmRecords(); err != nil {
 		t.Fatal(err)
+	}
+	s.recordMemo.mu.Lock()
+	warmed := len(s.recordMemo.byID)
+	s.recordMemo.mu.Unlock()
+	if warmed != kept {
+		t.Fatal("warming at start must fill the memo with every action", warmed, kept)
 	}
 }

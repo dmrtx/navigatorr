@@ -23,13 +23,19 @@ type memoRecord struct {
 	rec operationRecord
 }
 
+// sameAction tells apart two rows that carry the same id and revision. Deleting an action and inserting
+// another under its id starts the revision at 1 again, so the revision alone would serve the old one.
+func sameAction(a, b store.ActionInstance) bool {
+	return a.CreatedAt == b.CreatedAt && a.IdempotencyKey == b.IdempotencyKey && a.ActionName == b.ActionName
+}
+
 // records returns one record per instance, in the order of `instances`.
 func (m *recordMemo) records(instances []store.ActionInstance, now time.Time) []operationRecord {
 	out := make([]operationRecord, len(instances))
 	var missing []int
 	m.mu.Lock()
 	for i, inst := range instances {
-		if e, ok := m.byID[inst.ID]; ok && inst.Rev != 0 && e.rev == inst.Rev {
+		if e, ok := m.byID[inst.ID]; ok && inst.Rev != 0 && e.rev == inst.Rev && sameAction(e.rec.inst, inst) {
 			out[i] = e.rec
 			out[i].inst = inst
 		} else {

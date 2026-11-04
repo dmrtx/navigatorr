@@ -109,9 +109,11 @@ func TestRecordMemoServesConcurrentRequests(t *testing.T) {
 			for round := 0; round < 20; round++ {
 				seen := append([]store.ActionInstance(nil), instances...)
 				seen[round].Rev += int64(round + 1)
-				for _, r := range m.records(seen, now) {
-					_ = r.state["path"]
-					_ = r.inputs["n"]
+				for i, r := range m.records(seen, now) {
+					if i < 200 && (r.inst.ID != seen[i].ID || r.inputs["n"] != float64(i) || r.state["path"] != fmt.Sprintf("/m/%d.mkv", i)) {
+						t.Errorf("record %d answered with another action's content: %v %v", i, r.inst.ID, r.state)
+						return
+					}
 				}
 			}
 		}()
@@ -165,5 +167,36 @@ func withoutClockFields(v any) {
 		for _, child := range v {
 			withoutClockFields(child)
 		}
+	}
+}
+
+// Deleting an action and inserting another under its id starts the revision at 1 again; the memo must not
+// hand the old action's documents to the new one.
+func TestRecordMemoDoesNotServeADeletedActionsRecordToItsIDReused(t *testing.T) {
+	now := time.Now()
+	instances := memoInstances(3)
+	for i := range instances {
+		instances[i].CreatedAt = "2026-11-01T10:00:00Z"
+	}
+	var m recordMemo
+	m.records(instances, now)
+	reused := append([]store.ActionInstance(nil), instances...)
+	reused[1].CreatedAt = "2026-11-04T10:00:00Z"
+	reused[1].StateJSON = `{"path":"/m/new.mkv"}`
+	if got := m.records(reused, now); got[1].state["path"] != "/m/new.mkv" {
+		t.Fatal("an id reused after a delete must be read again", got[1].state)
+	}
+}
+
+// Running actions go through the memo like the rest; their clock-bound estimate is made again after it.
+func TestRecordMemoServesRunningActionsToo(t *testing.T) {
+	now := time.Now()
+	instances := memoInstances(2)
+	instances[0].Status = "running"
+	var m recordMemo
+	first := m.records(instances, now)
+	later := m.records(instances, now.Add(10*time.Minute))
+	if first[0].inst.Status != "running" || later[0].inst.Status != "running" || later[1].state["path"] != "/m/1.mkv" {
+		t.Fatal("running records are served from the memo", later[0].inst.Status)
 	}
 }
