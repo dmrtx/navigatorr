@@ -322,6 +322,7 @@ func (s *Store) ListMaintenanceActionSnapshot() ([]ActionInstance, error) {
 			inst.InputsJSON = maintenanceJSON(inst.InputsJSON, maintenanceInputKeys)
 			inst.OutputsJSON = maintenanceJSON(inst.OutputsJSON, maintenanceListKeys)
 			inst.StateJSON = maintenanceJSON(inst.StateJSON, maintenanceListKeys)
+			inst.Rev = rev
 			s.maintenanceMemo[inst.ID] = maintenanceMemo{rev: rev, inst: inst}
 		}
 		err = changed.Err()
