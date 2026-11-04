@@ -768,6 +768,19 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	ready := []savingsCandidate{}
 	seenCandidates, seenEstimates, seenArchivedCandidates := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
+	// Opening a job also needs the attempt that replaces it and the batch it belongs to. `related=1`
+	// returns them with it from this one pass, instead of the client asking again for each.
+	related := map[string]bool{}
+	if selectedID != "" && req.URL.Query().Get("related") == "1" {
+		selected := recordsByID[selectedID]
+		related[operationString(selected.inputs["parent_action_id"])] = true
+		related[existingReplacements[selectedID]] = true
+		if run := conversions.conversionReplacement(selected); run != nil {
+			related[operationString(run["id"])] = true
+		}
+		delete(related, "")
+		delete(related, selectedID)
+	}
 	for _, r := range records {
 		key := operationSourceKey(r)
 		if r.inst.ActionName == "transcode_media" && !replaced[key] && !replacedActions[r.inst.ID] && archives[roots[r.inst.ID]] != "" && !activeWorkflows[roots[r.inst.ID]] {
@@ -826,9 +839,13 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 		}
-		if (selectedID == "" || selectedID == r.inst.ID) && matches {
+		if (selectedID == "" || selectedID == r.inst.ID || related[r.inst.ID]) && matches {
 			filtered = append(filtered, r)
 		}
+	}
+	// The job asked for stays first: a client that reads one job takes the first.
+	if selectedID != "" {
+		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].inst.ID == selectedID && filtered[j].inst.ID != selectedID })
 	}
 	if grouped {
 		// One fixed order: the newest submission first, by workflow number. It
