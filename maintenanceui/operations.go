@@ -769,7 +769,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	seenCandidates, seenEstimates, seenArchivedCandidates := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	filtered := []operationRecord{}
 	// Opening a job also needs the attempt that replaces it and the batch it belongs to. `related=1`
-	// returns them with it from this one pass, instead of the client asking again for each.
+	// returns them with it from this one pass, instead of the client asking again for each. They are
+	// treated as opened jobs too (tracks, streams, ready files), exactly as when the client asked for each
+	// by id. Paging and `status` apply to the whole set, so a client that pages must read the job it asked
+	// for first, which is where it is put.
 	related := map[string]bool{}
 	if selectedID != "" && req.URL.Query().Get("related") == "1" {
 		selected := recordsByID[selectedID]
@@ -967,7 +970,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			}
 			if tracks := operationTracks(r); tracks != nil {
 				// The queue lists the sentence; the lists of tracks belong to the
-				// one job being opened.
+				// job being opened, and to its related ones when asked for.
 				job["tracks_message"] = operationString(tracks["message"])
 				if selectedID != "" {
 					job["tracks"] = tracks
@@ -1062,7 +1065,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				if cause := conversions.cause(r, nil); cause != nil {
 					job["cause"] = cause
 				}
-				// How it ended, drawn by the client: the job being opened only.
+				// How it ended, drawn by the client: the job being opened (and its related ones) only.
 				// The snapshot keeps only the keys the queue lists; the plan, the
 				// source probe and the quality ladder these are read from are in
 				// the job's full record.

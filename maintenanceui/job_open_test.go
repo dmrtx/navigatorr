@@ -61,6 +61,9 @@ func TestOpeningAJobCanReturnItsBatchAndReplacementInTheSameRead(t *testing.T) {
 	if len(got) != 3 || got[0] != "ready" {
 		t.Fatal("the job asked for comes first, with its batch and replacement", got)
 	}
+	if paged := ids("&related=1&limit=1"); len(paged) != 1 || paged[0] != "ready" {
+		t.Fatal("paging keeps the job asked for, which is first", paged)
+	}
 	seen := map[string]bool{}
 	for _, id := range got {
 		seen[id] = true
