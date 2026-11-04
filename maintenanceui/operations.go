@@ -6,10 +6,12 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -98,6 +100,29 @@ func decodeOperationJSON(raw string) map[string]any {
 	}
 	return out
 }
+
+// decodeOperationRecords parses the three JSON documents of every action. The ledger holds thousands
+// of finished actions with tens of kilobytes of state each, and decoding them one after another was
+// most of what a request cost; each record is independent, so they are split across the cores.
+// The records come back in the order of `instances`.
+func decodeOperationRecords(instances []store.ActionInstance) []operationRecord {
+	records := make([]operationRecord, len(instances))
+	workers := min(runtime.GOMAXPROCS(0), len(instances)/64+1)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := w; i < len(instances); i += workers {
+				inst := instances[i]
+				records[i] = operationRecord{inst: inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
+			}
+		}()
+	}
+	wg.Wait()
+	return records
+}
+
 func operationMap(v any) map[string]any { out, _ := v.(map[string]any); return out }
 func operationNumber(v any) float64     { f, _ := v.(float64); return f }
 func operationString(v any) string      { s, _ := v.(string); return s }
@@ -652,12 +677,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 	now := time.Now().UTC()
 	page := operationsPage{Jobs: []map[string]any{}, Offset: offset, History: []savingsReplacement{}, Daily: []savingsDay{}, Ready: []savingsCandidate{}, ReadyIDs: []string{}, ArchivedReady: []string{}, ObservedAt: now.Format(time.RFC3339Nano)}
 	page.Savings.Measurement = "verified_content_bytes_after_replacement_cleanup; not filesystem free space"
-	records := make([]operationRecord, 0, len(instances))
-	for _, inst := range instances {
-		r := operationRecord{inst: inst, inputs: decodeOperationJSON(inst.InputsJSON), outputs: decodeOperationJSON(inst.OutputsJSON), state: decodeOperationJSON(inst.StateJSON)}
-		r.savings = projectOperationSavings(r, now)
-		records = append(records, r)
-		if operationActive(inst.Status) {
+	records := decodeOperationRecords(instances)
+	for i := range records {
+		records[i].savings = projectOperationSavings(records[i], now)
+		if operationActive(records[i].inst.Status) {
 			page.ActiveCount++
 		}
 	}
