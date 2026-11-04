@@ -129,6 +129,10 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 		fail(w, 500, "read batch items")
 		return
 	}
+	// One file by its attempt's id: a client that opens an attempt finds its row here without paging through the batch.
+	if child := strings.TrimSpace(req.URL.Query().Get("child")); child != "" {
+		items = slices.DeleteFunc(slices.Clone(items), func(item store.TranscodeBatchItem) bool { return item.ChildActionID != child })
+	}
 	timing.since("items", began)
 	began = time.Now()
 	inputs := decodeOperationJSON(inst.InputsJSON)
