@@ -210,7 +210,7 @@ func TestPromotionValidationRefusesRealTruncatedAudio(t *testing.T) {
 		ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
 			"candidate_path": candidate,
 			"plan":           &transcode.Plan{VideoCodec: "h264_videotoolbox", AudioMode: "copy"},
-			"original":       map[string]any{"size_bytes": srcRep.SizeBytes * 2, "duration_sec": srcRep.DurationSec, "video": srcRep.Video, "audio": srcRep.Audio},
+			"original":       map[string]any{"path": source, "size_bytes": srcRep.SizeBytes * 2, "duration_sec": srcRep.DurationSec, "video": srcRep.Video, "audio": srcRep.Audio},
 		}}
 		result, err := e.validateCandidateDetailed(ctx, ec)
 		if err != nil {
@@ -246,8 +246,8 @@ func TestPromotionValidationComparesShortAudioWithTheSourceTrack(t *testing.T) {
 		{"candidate lost the start of a short source track", packetLine(1, 100, 1126) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1126.0s (294.0s short); the source track itself covers 1226.0s"},
 		{"start within tolerance still matches", packetLine(1, 0.3, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
 		{"source that starts late in its own timeline", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 1.4, 1226) + packetLine(2, 1.4, duration), StepCompleted, ""},
-		{"source read fails: the candidate is not measured, not truncated", packetLine(1, 0, 1226) + packetLine(2, 0, duration), sourceScanFails, StepWaitingDecision, "Audio source track not measured at stream 0:"},
-		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short)"},
+		{"source read fails: the candidate is not measured, not truncated", packetLine(1, 0, 1226) + packetLine(2, 0, duration), sourceScanFails, StepWaitingDecision, "Audio source track not measured at stream 0 ("},
+		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio source track not measured at stream 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, ec := validateWithSourcePackets(t, tc.candidate, "", tc.source)

@@ -471,6 +471,12 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 			if p, err := loadPromotion(ec); err == nil && p.PublishedAt == "" {
 				p.PublishedAt = time.Now().UTC().Format(time.RFC3339Nano)
 				_ = e.savePromotion(ctx, ec, p)
+				// The engine merges the step's outputs over the state when the
+				// step ends, so the copy in them must carry the stamp too.
+				if result.Outputs == nil {
+					result.Outputs = map[string]any{}
+				}
+				result.Outputs["promotion"] = p
 			}
 		} else if result.Status == StepFailed || resultErr != nil {
 			phase = "stopped"

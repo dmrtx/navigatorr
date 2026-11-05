@@ -766,8 +766,8 @@ func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabi
 		// A worker that accepts the connection and then stays silent would turn
 		// every attempt into a full request timeout, so only a refused or reset
 		// connection is repeated.
-		var ue *url.Error
-		if (errors.As(err, &ue) && ue.Timeout()) || attempt >= len(delays) || ctx.Err() != nil {
+		var ne net.Error
+		if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) || attempt >= len(delays) || ctx.Err() != nil {
 			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
 		}
 		select {

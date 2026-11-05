@@ -1,10 +1,12 @@
 package action
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFilesystemPromotionNewPathKeepsOriginalExtensionSpelling(t *testing.T) {
@@ -61,6 +63,21 @@ func TestFilesystemPromotionUppercaseExtensionReplacesInPlace(t *testing.T) {
 	got, err := os.ReadFile(h.original)
 	if err != nil || !strings.HasPrefix(string(got), "candidate-") {
 		t.Fatalf("original path does not hold the candidate: %q %v", got, err)
+	}
+	// The moment the replacement became final survives the step's own state
+	// merge: later conversions are compared against it.
+	done, err := h.st.GetActionInstance(r.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted struct {
+		Promotion promotionState `json:"promotion"`
+	}
+	if err := json.Unmarshal([]byte(done.StateJSON), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if at := parseStoreTime(persisted.Promotion.PublishedAt); at.IsZero() || time.Since(at) > time.Minute {
+		t.Fatalf("published_at = %q in the completed promotion", persisted.Promotion.PublishedAt)
 	}
 }
 

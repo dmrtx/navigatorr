@@ -173,19 +173,19 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	var ownSpans map[int]mediainspect.AudioPacketSpan
 	var ownScanErr error
 	ownMeasured := false
-	sourceSpan := func(streamIndex int) (span mediainspect.AudioPacketSpan, base float64, err error) {
+	sourceSpan := func(streamIndex int) (mediainspect.AudioPacketSpan, error) {
 		if !ownMeasured {
 			ownMeasured = true
 			ownSpans, ownScanErr = e.sourceTrackSpans(ctx, origMap)
 		}
 		if ownScanErr != nil {
-			return span, 0, ownScanErr
+			return mediainspect.AudioPacketSpan{}, ownScanErr
 		}
 		span, ok := ownSpans[streamIndex]
 		if !ok {
-			return span, 0, fmt.Errorf("original stream %d has no measurable packets", streamIndex)
+			return span, fmt.Errorf("original stream %d has no measurable packets", streamIndex)
 		}
-		return span, earliestStart(ownSpans), nil
+		return span, nil
 	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
@@ -251,36 +251,31 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 				// minutes before the video, and a faithful copy or re-encode
 				// of such a track is as short as it. The source track's own
 				// packets decide, read only now that the candidate is short.
-				own, ownBase, ownErr := sourceSpan(a.Index)
+				own, ownErr := sourceSpan(a.Index)
 				if ownErr != nil {
-					// A cancelled or stalled read of the original says nothing
-					// about the candidate: it is not measured, never "truncated".
+					// Nothing proves the candidate truncated when the source
+					// track could not be measured (a cancelled or stalled read,
+					// no packets, no path): it is refused as not measured.
 					if ctx.Err() != nil {
 						return StepResult{}, ctx.Err()
 					}
-					if _, probeFailed := mediainspect.AsProbeError(ownErr); probeFailed {
-						return waitDecision(fmt.Sprintf("Audio source track not measured at stream %d: %v", i, ownErr)), nil
-					}
+					return waitDecision(fmt.Sprintf("Audio source track not measured at stream %d (the candidate's is %.1fs short of the container): %v", i, short, ownErr)), nil
 				}
-				candBase := earliestStart(packets)
-				// The candidate must cover the same stretch of the timeline, not
-				// just as many seconds: a track that lost its first minutes and
-				// starts later is as long as the source and still wrong.
-				// Each file's times are taken from its own first audio packet: the
-				// candidate's container is renormalised to zero and the
-				// original's may not start there.
-				aligned := ownErr == nil && math.Abs((span.Start-candBase)-(own.Start-ownBase)) <= sourceTrackTolerance && span.End-candBase >= own.End-ownBase-sourceTrackTolerance
-				if ownErr == nil && own.Seconds() > 0 && span.Seconds() >= own.Seconds()-sourceTrackTolerance && !aligned {
-					return waitDecision(fmt.Sprintf("Audio out of place at stream %d: the source track runs %.1fs-%.1fs but the candidate's runs %.1fs-%.1fs", i, own.Start-ownBase, own.End-ownBase, span.Start-candBase, span.End-candBase)), nil
-				}
-				if aligned && own.Seconds() > 0 {
-					audioDuration = "matches_source_track"
-					ec.State["audio_shorter_than_container"] = append(stateStrings(ec.State["audio_shorter_than_container"]), fmt.Sprintf("stream %d: the source track covers %.1fs of the container's %.1fs; the candidate's %.1fs matches it", i, own.Seconds(), origDur, span.Seconds()))
-				} else if ownErr == nil && own.Seconds() > 0 {
+				if own.Seconds() <= 0 || span.Seconds() < own.Seconds()-sourceTrackTolerance {
 					return waitDecision(fmt.Sprintf("Audio truncated at stream %d: original runs %.1fs, the track's packets cover %.1fs (%.1fs short); the source track itself covers %.1fs", i, origDur, span.Seconds(), short, own.Seconds())), nil
-				} else {
-					return waitDecision(fmt.Sprintf("Audio truncated at stream %d: original runs %.1fs, the track's packets cover %.1fs (%.1fs short)", i, origDur, span.Seconds(), short)), nil
 				}
+				// The candidate must also cover the same stretch of the timeline:
+				// a track that starts minutes late is as long as the source and
+				// still wrong. The candidate's container is normalised to zero,
+				// so its times are compared as they are with a source track that
+				// starts at the origin; a source whose tracks start later in its
+				// own timeline (transport streams) has no common origin to
+				// compare, and only its length is checked.
+				if own.Start <= sourceTrackTolerance && math.Abs(span.Start-own.Start) > sourceTrackTolerance {
+					return waitDecision(fmt.Sprintf("Audio out of place at stream %d: the source track runs %.1fs-%.1fs but the candidate's runs %.1fs-%.1fs", i, own.Start, own.End, span.Start, span.End)), nil
+				}
+				audioDuration = "matches_source_track"
+				ec.State["audio_shorter_than_container"] = append(stateStrings(ec.State["audio_shorter_than_container"]), fmt.Sprintf("stream %d: the source track covers %.1fs of the container's %.1fs; the candidate's %.1fs matches it", i, own.Seconds(), origDur, span.Seconds()))
 			}
 		}
 		if !sameLanguage(a.Language, b.Language) {
@@ -431,17 +426,6 @@ func (e *Engine) sourceTrackSpans(ctx context.Context, origMap map[string]any) (
 		return nil, fmt.Errorf("original path unknown")
 	}
 	return mediainspect.MeasureAudioPackets(ctx, e.deps.Ffprobe, path)
-}
-
-// earliestStart is where a file's audio begins: the first packet of any track.
-func earliestStart(spans map[int]mediainspect.AudioPacketSpan) float64 {
-	first, seen := 0.0, false
-	for _, s := range spans {
-		if !seen || s.Start < first {
-			first, seen = s.Start, true
-		}
-	}
-	return first
 }
 
 func stateStrings(raw any) []string {

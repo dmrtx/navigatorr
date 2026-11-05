@@ -95,3 +95,31 @@ func TestCapabilitiesRetryStopsWhenCallerCancels(t *testing.T) {
 		t.Fatal("the retry wait ignored the caller's cancellation")
 	}
 }
+
+// stalledBodyTransport answers with headers and then a body whose read hits the
+// request deadline, as a worker that goes silent mid-response does.
+type stalledBodyTransport struct{ calls atomic.Int32 }
+
+func (s *stalledBodyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.calls.Add(1)
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(&deadlineReader{}), Request: r}, nil
+}
+
+type deadlineReader struct{}
+
+func (deadlineReader) Read([]byte) (int, error) { return 0, context.DeadlineExceeded }
+
+func TestCapabilitiesDoesNotRetryATimeoutInTheBody(t *testing.T) {
+	tr := &stalledBodyTransport{}
+	exec, err := NewHTTPExecutor(HTTPConfig{BaseURL: "http://worker.invalid:8097", RequestTimeout: 5 * time.Second, SubmitTimeout: 5 * time.Second, PathMappings: testHTTPMappings(), ReadRetryDelays: []time.Duration{time.Millisecond, time.Millisecond}},
+		WithHTTPClient(&http.Client{Transport: tr}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.Capabilities(context.Background()); err == nil {
+		t.Fatal("a stalled body must fail")
+	}
+	if got := tr.calls.Load(); got != 1 {
+		t.Fatalf("requests = %d, a timeout must not be repeated", got)
+	}
+}
