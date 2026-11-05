@@ -88,6 +88,10 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 		e.Happened = fmt.Sprintf("The file itself is damaged: %s.", why)
 		e.Learned = []string{"Every run of this file fails the same way. Replace it, for example by downloading it again, then choose a goal for the new file."}
 		return e, "This file is damaged; running it again fails the same way.", []nextStep{{ID: "tracks", Label: "Choose a goal", Detail: "Once the file is replaced, start a goal for the new one."}}
+	case class == string(resilience.WorkerSourceReadFault):
+		e.Happened = "The worker reported the file as damaged, but Navigatorr read the same file end to end and found nothing wrong: the worker's own read of it failed."
+		e.Learned = []string{"The file is fine. Running it again is safe, and can pass if the worker reads it correctly this time; if it keeps failing on one worker, that worker's copy or network path needs a look."}
+		return e, "", nil
 	case strings.Contains(text, "choosing the tracks to keep"):
 		_, detail, _ := strings.Cut(text, "choosing the tracks to keep: ")
 		e.Happened = shortTrackMismatch(detail)

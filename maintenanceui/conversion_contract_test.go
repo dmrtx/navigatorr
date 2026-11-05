@@ -148,9 +148,14 @@ func TestCauseOfFailuresAndFailedReplacements(t *testing.T) {
 	seedFailed(t, st, "changed", "transcode_media", map[string]any{"path": "/media/a.mkv"}, map[string]any{"resolved_path": "/media/a.mkv"}, "transcode failed (source_changed): size moved")
 	seedOperation(t, st, "ready", "transcode_media", "completed", map[string]any{"path": "/media/b.mkv"}, map[string]any{"original_intact": true}, map[string]any{"resolved_path": "/media/b.mkv", "original": map[string]any{"size_bytes": 1000}, "candidate_size_bytes": 400})
 	seedFailed(t, st, "promote", "promote_transcode_candidate", map[string]any{"transcode_action_id": "ready"}, nil, "transcode failed (worker_unreachable): dial timeout")
+	seedFailed(t, st, "misread", "transcode_media", map[string]any{"path": "/media/c.mkv"}, map[string]any{"resolved_path": "/media/c.mkv"}, "transcode failed (worker_source_read_fault): the worker called the file damaged; Navigatorr read it end to end and found it intact")
 	page := getOperations(t, h, "status=all&limit=100")
 	if c := operationMap(jobByID(t, page, "changed")["cause"]); c["kind"] != "file_changed" || c["summary"] != "The file changed while the job ran" {
 		t.Fatalf("failed cause %v", c)
+	}
+	// The worker's read fault is not the file's damage, and does not block Retry.
+	if c := operationMap(jobByID(t, page, "misread")["cause"]); c["kind"] != "worker_read_fault" {
+		t.Fatalf("misread cause %v", c)
 	}
 	detail := jobByID(t, getOperations(t, h, "id=ready"), "ready")
 	if detail["conversion_status"] != "replace_failed" {

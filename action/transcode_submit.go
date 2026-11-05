@@ -801,6 +801,13 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if class == "" {
 			class = string(resilience.Classify(msg))
 		}
+		if class == string(resilience.FFmpegInputCorrupt) || SourceDamaged(msg) {
+			// The worker's read of the file is not the file: read it here
+			// before leaving the job blamed on bytes that may be fine.
+			if c, m, overturned := e.recheckDamagedSource(ctx, ec, msg); overturned {
+				class, msg = c, m
+			}
+		}
 		ec.State["failure_classification"] = class
 		appendFailureHistory(ec, "worker", class, msg)
 		// Worker StatusFailed is always terminal: never coordinator retry/wait.

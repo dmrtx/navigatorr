@@ -100,6 +100,8 @@ func failureCause(r operationRecord) *conversionCause {
 		if strings.Contains(lower, "moov atom not found") {
 			c.Summary = "File damaged: its MP4 index (moov atom) is missing"
 		}
+	case class == string(resilience.WorkerSourceReadFault):
+		c.Kind, c.Summary = "worker_read_fault", "The worker reported the file as damaged, but Navigatorr read it whole and it is intact"
 	case strings.Contains(text, "choosing the tracks to keep"):
 		c.Kind, c.Summary = "tracks_mismatch", "The tracks picked for this job are not in the file"
 	case class == string(resilience.Cancelled):

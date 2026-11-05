@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
@@ -48,11 +49,9 @@ func (s sourceVideoScan) Seconds() float64 {
 var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?[: ]+(\d+)`)
 
 // packetDamagePattern is what a demuxer error says when the bytes it reads
-// are damaged. A demuxer also reports, at error level, header or metadata it
-// does not understand in files that play fine (a chapter track it cannot
-// find, a master element longer than its parent); those name no position in
-// the stream and are not damage.
-var packetDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?[: ]+\d+|EBML|corrupt|partial file|truncated`)
+// are damaged. It is shared with the coordinator, which reads a file this scan
+// called damaged again before the job is left blaming the file.
+var packetDamagePattern = mediainspect.PacketDamagePattern
 
 // timestampResetSeconds is how far a packet's timestamp may fall behind the
 // latest end seen before the timeline counts as restarted. Reordered
@@ -174,16 +173,7 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 // demuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
 // its context name and text, dropping the context's address.
 func demuxerTag(line string) (tag, text string, ok bool) {
-	rest, found := strings.CutPrefix(line, "[")
-	if !found {
-		return "", "", false
-	}
-	inside, text, found := strings.Cut(rest, "]")
-	if !found {
-		return "", "", false
-	}
-	tag, _, _ = strings.Cut(inside, " @ ")
-	return tag, strings.TrimSpace(text), tag != ""
+	return mediainspect.DemuxerTag(line)
 }
 
 // damage is the job's failure when the demuxer reported errors in the video.
