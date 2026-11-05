@@ -19,8 +19,9 @@ func TestRetainedPublishRequestOutlastsTheServerDeadlines(t *testing.T) {
 	f.retain("job-slow-1")
 
 	// A hash that takes three times as long as the server's deadlines.
+	prevHook := onLocalHashRead
 	onLocalHashRead = func(string) { time.Sleep(3 * deadline) }
-	t.Cleanup(func() { onLocalHashRead = nil })
+	t.Cleanup(func() { onLocalHashRead = prevHook })
 
 	ts := httptest.NewUnstartedServer(NewServer(f.w, "test-exe", "", "").Handler())
 	ts.Config.ReadTimeout = deadline
