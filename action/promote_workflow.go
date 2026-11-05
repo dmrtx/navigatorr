@@ -468,6 +468,10 @@ func (e *Engine) stepPromoteFinalize(ctx context.Context, ec *ExecutionContext) 
 		phase := "waiting_library"
 		if result.Status == StepCompleted {
 			phase = "completed"
+			if p, err := loadPromotion(ec); err == nil && p.PublishedAt == "" {
+				p.PublishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+				_ = e.savePromotion(ctx, ec, p)
+			}
 		} else if result.Status == StepFailed || resultErr != nil {
 			phase = "stopped"
 		}

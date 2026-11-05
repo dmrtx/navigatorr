@@ -119,6 +119,9 @@ func validateWithPackets(t *testing.T, packets, packetScript string) (StepResult
 	return validateWithSourcePackets(t, packets, packetScript, packetLine(1, 0, 1420)+packetLine(2, 0, 1420))
 }
 
+// sourceScanFails makes the fake ffprobe fail when it is asked about the original.
+const sourceScanFails = "<scan fails>"
+
 // validateWithSourcePackets is validateWithPackets with the packets the fake
 // ffprobe prints when asked about the original file instead of the candidate.
 func validateWithSourcePackets(t *testing.T, packets, packetScript, sourcePackets string) (StepResult, *ExecutionContext) {
@@ -139,7 +142,11 @@ func validateWithSourcePackets(t *testing.T, packets, packetScript, sourcePacket
 	}
 	ffprobe := filepath.Join(dir, "ffprobe")
 	original := filepath.Join(dir, "original.mkv")
-	script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) case \"$*\" in *original.mkv*) cat <<'SOURCE'\n" + sourcePackets + "SOURCE\nexit 0;; esac\n" + body + ";; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
+	sourceBody := "cat <<'SOURCE'\n" + sourcePackets + "SOURCE\nexit 0"
+	if sourcePackets == sourceScanFails {
+		sourceBody = "echo 'read error' >&2\nexit 1"
+	}
+	script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) case \"$*\" in *original.mkv*) " + sourceBody + ";; esac\n" + body + ";; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
 	if err := os.WriteFile(ffprobe, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -238,11 +245,13 @@ func TestPromotionValidationComparesShortAudioWithTheSourceTrack(t *testing.T) {
 		{"candidate track shifted later by as much as it is long", packetLine(1, 100, 1200) + packetLine(2, 0, duration), packetLine(1, 0, 1200) + packetLine(2, 0, duration), StepWaitingDecision, "Audio out of place at stream 0: the source track runs 0.0s-1200.0s but the candidate's runs 100.0s-1300.0s"},
 		{"candidate lost the start of a short source track", packetLine(1, 100, 1126) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1126.0s (294.0s short); the source track itself covers 1226.0s"},
 		{"start within tolerance still matches", packetLine(1, 0.3, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
+		{"source that starts late in its own timeline", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 1.4, 1226) + packetLine(2, 1.4, duration), StepCompleted, ""},
+		{"source read fails: the candidate is not measured, not truncated", packetLine(1, 0, 1226) + packetLine(2, 0, duration), sourceScanFails, StepWaitingDecision, "Audio source track not measured at stream 0:"},
 		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, ec := validateWithSourcePackets(t, tc.candidate, "", tc.source)
-			if result.Status != tc.want || (tc.reason != "" && result.WaitingReason != tc.reason) {
+			if result.Status != tc.want || (tc.reason != "" && !strings.HasPrefix(result.WaitingReason, tc.reason)) {
 				t.Fatalf("status %s reason %q (%s), want %s %q", result.Status, result.WaitingReason, result.Error, tc.want, tc.reason)
 			}
 			if tc.want != StepCompleted {

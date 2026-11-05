@@ -763,7 +763,11 @@ func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabi
 		}
 		// The read changes nothing on the worker, so repeating it is safe. The
 		// caller's own cancellation is never retried through.
-		if attempt >= len(delays) || ctx.Err() != nil {
+		// A worker that accepts the connection and then stays silent would turn
+		// every attempt into a full request timeout, so only a refused or reset
+		// connection is repeated.
+		var ue *url.Error
+		if (errors.As(err, &ue) && ue.Timeout()) || attempt >= len(delays) || ctx.Err() != nil {
 			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
 		}
 		select {

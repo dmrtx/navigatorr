@@ -70,6 +70,15 @@ func (q *queuedFile) promotedWithBytes(t *testing.T, id, original, newPath strin
 	})
 }
 
+// promotedAt records a promotion that was published at publishedAt, however
+// recently its row was saved afterwards.
+func (q *queuedFile) promotedAt(t *testing.T, id, original, newPath string, publishedAt time.Time) {
+	t.Helper()
+	seedActionInstance(t, q.st, id, "promote_transcode_candidate", StatusCompleted, 0, "", map[string]any{}, map[string]any{
+		"promotion": map[string]any{"transcode_action_id": "earlier-conversion", "original_path": original, "new_path": newPath, "published_at": publishedAt.UTC().Format(time.RFC3339Nano)},
+	})
+}
+
 func (q *queuedFile) preflight(t *testing.T, ec *ExecutionContext) StepResult {
 	t.Helper()
 	res, err := q.e.stepTranscodePreflight(context.Background(), ec)
@@ -214,6 +223,31 @@ func TestReplacementIsFoundWhateverTheLetterCase(t *testing.T) {
 	res := q.preflight(t, ec)
 	if res.Status != StepCompleted || res.Outputs["reason_code"] != reasonSourceReplaced {
 		t.Fatalf("case difference hid the replacement: %+v", res)
+	}
+}
+
+// A promotion published before the job existed is saved again later (its
+// recovery copy discarded, say): that moves its row, not the moment the file
+// was replaced, so the job is a legitimate conversion of what the promotion left.
+func TestPromotionSavedAgainAfterPublicationDoesNotSupersedeALaterJob(t *testing.T) {
+	q := newQueuedFile(t)
+	file := q.write(t, "Resaved.mkv")
+	ec := q.queue(t, "queued-12", file, nil)
+	q.promotedAt(t, "promotion-12", file, file, time.Now().Add(-time.Hour))
+	if res := q.preflight(t, ec); res.Status == StepCompleted && res.Outputs["reason_code"] == reasonSourceReplaced {
+		t.Fatalf("a promotion published an hour before the job superseded it: %+v", res)
+	}
+}
+
+// Published after the job was queued, it does supersede it.
+func TestPromotionPublishedAfterTheJobSupersedesIt(t *testing.T) {
+	q := newQueuedFile(t)
+	file := q.write(t, "Published.mkv")
+	ec := q.queue(t, "queued-13", file, nil)
+	q.promotedAt(t, "promotion-13", file, file, time.Now().Add(time.Minute))
+	res := q.preflight(t, ec)
+	if res.Status != StepCompleted || res.Outputs["reason_code"] != reasonSourceReplaced {
+		t.Fatalf("a promotion published after queueing must supersede: %+v", res)
 	}
 }
 

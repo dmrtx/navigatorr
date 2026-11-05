@@ -88,11 +88,19 @@ func (e *Engine) replacementSince(path, instanceID string) (*replacementRecord, 
 		if p.NewPath == "" || !strings.EqualFold(p.OriginalPath, path) {
 			continue
 		}
-		done := parseStoreTime(row.UpdatedAt)
-		// Updates are stored to the second while admission is stored to the
-		// nanosecond: a promotion that finished in the second of admission
-		// may be on either side, so it counts as after.
-		if !done.Add(time.Second).After(admitted) {
+		// The moment the replacement became final. Promotions from before
+		// published_at existed only have the row's updated_at, stored to the
+		// second and moved by any later save of the completed promotion; it
+		// can only make an old promotion look newer, which the published-size
+		// check and the exact-path match then still have to confirm.
+		done, slack := parseStoreTime(p.PublishedAt), time.Duration(0)
+		if done.IsZero() {
+			// Stored to the second while admission is stored to the
+			// nanosecond: a promotion that finished in the second of admission
+			// may be on either side, so it counts as after.
+			done, slack = parseStoreTime(row.UpdatedAt), time.Second
+		}
+		if !done.Add(slack).After(admitted) {
 			// Finished before this job existed: the job was admitted against
 			// the file as the promotion left it.
 			continue
