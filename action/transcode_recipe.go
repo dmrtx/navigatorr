@@ -502,6 +502,12 @@ func (t qualityLadderTrend) improved() bool {
 	return t.Last > t.Previous
 }
 
+// ladderProjectionMargin is how far short of a limit, in the metric's own
+// points, a projected score may land and still have the next rung encoded.
+// A straight line through two rungs is no measurement: one ladder lost its
+// last rung to a projection 0.1 points short of the p5 floor.
+const ladderProjectionMargin = 1.0
+
 // qualityLadderProjectedMiss extrapolates each check the last rung failed
 // along a straight line through the last two rungs, one rung step further. It
 // returns the first check that would still miss its limit on the next rung,
@@ -518,7 +524,7 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 		var t qualityLadderTrend
 		var before, now, limit *float64
 		switch code {
-		case "below_minimum_quality", "sample_below_minimum_quality":
+		case "quality_vmaf_mean_below_minimum", "below_minimum_quality", "sample_below_minimum_quality":
 			t.Metric, before, now, limit = "VMAF mean", p.VMAFMean, m.VMAFMean, l.VMAFMean
 		case "quality_vmaf_p5_below_minimum":
 			t.Metric, before, now, limit = "VMAF p5", p.VMAFP5, m.VMAFP5, l.VMAFP5
@@ -537,13 +543,16 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 		seen[t.Metric] = true
 		t.Previous, t.Last, t.Limit = *before, *now, *limit
 		t.Projected = t.Last + (t.Last - t.Previous)
-		// A hair of tolerance so a trend that lands exactly on the limit
-		// still gets its encode.
-		reaches := t.Projected >= t.Limit-1e-9
+		// The projection is a straight line through two scores, not a
+		// measurement: a trend that lands within ladderProjectionMargin of
+		// the limit still gets its encode, flat or not. A hair more absorbs
+		// float error at the margin itself.
+		margin := ladderProjectionMargin + 1e-9
+		reaches := t.Projected >= t.Limit-margin
 		if t.Maximum {
-			reaches = t.Projected <= t.Limit+1e-9
+			reaches = t.Projected <= t.Limit+margin
 		}
-		if !t.improved() || !reaches {
+		if !reaches {
 			return &t
 		}
 	}
@@ -748,9 +757,28 @@ func passQualityLadder(ec *ExecutionContext, candidateBytes int64) *QualityLadde
 		scores = fmt.Sprintf(" (VMAF %.1f, p5 %.1f)", *rec.Final.Measured.VMAFMean, *rec.Final.Measured.VMAFP5)
 	}
 	rec.Outcome = QualityLadderPassed
-	rec.Message = fmt.Sprintf("%s passed this goal's quality limits on the whole file%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
+	rec.Message = fmt.Sprintf("%s passed this goal's quality limits%s%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scoredWindowsWords(evidence.Windows), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
 	ec.State[qualityLadderKey] = rec
 	return rec
+}
+
+// scoredWindowsWords says what the verdict was measured on: the whole file is
+// encoded, but only the grid windows are scored and decide it ("on 5 windows,
+// 50 seconds in all"). Fresh windows only report and are not counted.
+func scoredWindowsWords(windows []transcode.FinalWindowScore) string {
+	n, seconds := 0, 0.0
+	for _, w := range windows {
+		if w.Role == "grid" {
+			n, seconds = n+1, seconds+w.DurationSeconds
+		}
+	}
+	switch {
+	case n == 0:
+		return " on windows sampled across the file"
+	case n == 1:
+		return fmt.Sprintf(" on 1 window of %.0f seconds", seconds)
+	}
+	return fmt.Sprintf(" on %d windows, %.0f seconds in all", n, seconds)
 }
 
 // stopQualityLadder records a rung the coordinator refused for its size.

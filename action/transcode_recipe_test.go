@@ -339,21 +339,33 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 		metric     string // empty: the ladder goes on
 		projected  float64
 	}{
-		// The production case: CRF 22 then 19 scored p5 80.7 then 82.2.
-		"p5 heading short of the floor": {rung(p5, QualityNumbers{VMAFP5: f(80.7)}), rung(p5, QualityNumbers{VMAFP5: f(82.2)}), "VMAF p5", 83.7},
-		"p5 heading past the floor":     {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82.5)}), "", 0},
-		"p5 landing on the floor":       {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82)}), "", 0},
-		"p5 not improving":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 80},
-		"p5 getting worse":              {rung(p5, QualityNumbers{VMAFP5: f(81)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 79},
-		"mean heading short":            {rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(84)}), rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(85.5)}), "VMAF mean", 87},
-		"worst window heading past":     {rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(80)}), rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(83)}), "", 0},
-		"CAMBI peak heading under":      {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(19)}), "", 0},
-		"CAMBI peak heading over":       {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(20)}), "CAMBI peak", 18},
-		"CAMBI mean getting worse":      {rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7)}), rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7.5)}), "CAMBI mean", 8},
+		// The production cases: CRF 22 then 19 scored p5 80.7 then 82.2, and
+		// 74.7 then 79.3; both land within a point of the floor, so the last
+		// rung is encoded rather than ruled out by a straight line.
+		"p5 heading just short of the floor": {rung(p5, QualityNumbers{VMAFP5: f(80.7)}), rung(p5, QualityNumbers{VMAFP5: f(82.2)}), "", 0},
+		"p5 heading 0.1 short of the floor":  {rung(p5, QualityNumbers{VMAFP5: f(74.7)}), rung(p5, QualityNumbers{VMAFP5: f(79.3)}), "", 0},
+		"p5 heading well short of the floor": {rung(p5, QualityNumbers{VMAFP5: f(79.7)}), rung(p5, QualityNumbers{VMAFP5: f(80.7)}), "VMAF p5", 81.7},
+		"p5 heading past the floor":          {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82.5)}), "", 0},
+		"p5 landing on the floor":            {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(82)}), "", 0},
+		"p5 not improving":                   {rung(p5, QualityNumbers{VMAFP5: f(80)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 80},
+		"p5 getting worse":                   {rung(p5, QualityNumbers{VMAFP5: f(81)}), rung(p5, QualityNumbers{VMAFP5: f(80)}), "VMAF p5", 79},
+		"worker mean code heading short":     {rung([]string{"quality_vmaf_mean_below_minimum"}, QualityNumbers{VMAFMean: f(84)}), rung([]string{"quality_vmaf_mean_below_minimum"}, QualityNumbers{VMAFMean: f(85)}), "VMAF mean", 86},
+		// One window below the minimum says nothing about the pooled mean.
+		"worker sample code":           {rung([]string{"quality_vmaf_sample_below_minimum"}, QualityNumbers{VMAFMean: f(80)}), rung([]string{"quality_vmaf_sample_below_minimum"}, QualityNumbers{VMAFMean: f(80)}), "", 0},
+		"p5 exactly a point short":     {rung(p5, QualityNumbers{VMAFP5: f(81.2)}), rung(p5, QualityNumbers{VMAFP5: f(82.1)}), "", 0},
+		"p5 just past the margin":      {rung(p5, QualityNumbers{VMAFP5: f(81.1)}), rung(p5, QualityNumbers{VMAFP5: f(82)}), "VMAF p5", 82.9},
+		"p5 flat within the margin":    {rung(p5, QualityNumbers{VMAFP5: f(83.5)}), rung(p5, QualityNumbers{VMAFP5: f(83.5)}), "", 0},
+		"CAMBI peak within the margin": {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(19)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(18)}), "", 0},
+		"worst window heading short":   {rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(80)}), rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(81)}), "VMAF worst 5-second window", 82},
+		"mean heading short":           {rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(84)}), rung([]string{"below_minimum_quality"}, QualityNumbers{VMAFMean: f(85)}), "VMAF mean", 86},
+		"worst window heading past":    {rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(80)}), rung([]string{"quality_vmaf_worst_window_below_minimum"}, QualityNumbers{VMAFWorstWindow: f(83)}), "", 0},
+		"CAMBI peak heading under":     {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(19)}), "", 0},
+		"CAMBI peak heading over":      {rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(22)}), rung([]string{"quality_cambi_peak_above_maximum"}, QualityNumbers{CAMBIPeak: f(20)}), "CAMBI peak", 18},
+		"CAMBI mean getting worse":     {rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7)}), rung([]string{"quality_cambi_mean_above_maximum"}, QualityNumbers{CAMBIMean: f(7.5)}), "CAMBI mean", 8},
 		// Any failed check heading short stops the ladder.
 		"mean on course, p5 not": {
 			rung([]string{"below_minimum_quality", "quality_vmaf_p5_below_minimum"}, QualityNumbers{VMAFMean: f(85), VMAFP5: f(80.7)}),
-			rung([]string{"below_minimum_quality", "quality_vmaf_p5_below_minimum"}, QualityNumbers{VMAFMean: f(87), VMAFP5: f(82.2)}), "VMAF p5", 83.7},
+			rung([]string{"below_minimum_quality", "quality_vmaf_p5_below_minimum"}, QualityNumbers{VMAFMean: f(87), VMAFP5: f(81.2)}), "VMAF p5", 81.7},
 		// A check the last rung passed is not projected, however it moved.
 		"passed check getting worse": {rung(p5, QualityNumbers{VMAFP5: f(80), VMAFMean: f(92)}), rung(p5, QualityNumbers{VMAFP5: f(82.5), VMAFMean: f(90)}), "", 0},
 		// Checks without a numeric limit, or without both scores, are not.
@@ -382,13 +394,13 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 func TestQualityLadderStopsOnTrend(t *testing.T) {
 	c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
 	planRecipe(t, c)
-	advanceRung(t, c, failedRung(90, 80.7))
-	res := advanceRung(t, c, failedRung(90, 82.2))
+	advanceRung(t, c, failedRung(90, 79.7))
+	res := advanceRung(t, c, failedRung(90, 80.7))
 	rec := QualityLadderOf(c.ec.State)
 	if res.RewindTo != "" || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != reasonQualityNotMet || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || len(rec.Tried) != 2 {
 		t.Fatalf("trend stop: %+v %+v", res, rec)
 	}
-	for _, want := range []string{"x265 CRF 22 (VMAF p5 80.7 is below the minimum 84.0)", "x265 CRF 19 (VMAF p5 82.2", "stops before CRF 16", "VMAF p5 went from 80.7 at x265 CRF 22 to 82.2 at CRF 19", "about 83.7 at CRF 16", "minimum 84.0", "original preserved"} {
+	for _, want := range []string{"x265 CRF 22 (VMAF p5 79.7 is below the minimum 84.0)", "x265 CRF 19 (VMAF p5 80.7", "stops before CRF 16", "VMAF p5 went from 79.7 at x265 CRF 22 to 80.7 at CRF 19", "about 81.7 at CRF 16", "minimum 84.0", "original preserved"} {
 		if !strings.Contains(rec.Message, want) {
 			t.Fatalf("message %q lacks %q", rec.Message, want)
 		}
@@ -400,8 +412,10 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 
 	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
 	planRecipe(t, c)
-	advanceRung(t, c, failedRung(90, 80))
-	res = advanceRung(t, c, failedRung(90, 82.5))
+	// p5 74.7 then 79.3 points to 83.9, 0.1 short of the floor;
+	// that is within the projection's margin, so CRF 16 is measured.
+	advanceRung(t, c, failedRung(90, 74.7))
+	res = advanceRung(t, c, failedRung(90, 79.3))
 	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || rec.Outcome != QualityLadderEncoding || getPlan(c.ec.State["plan"]).Quality != 16 {
 		t.Fatalf("trend on course: %+v %+v", res, rec)
 	}
@@ -432,7 +446,8 @@ func validateRecipeCase(t *testing.T, c *budgetCase, candidateBytes int) {
 	plan := getPlan(c.ec.State["plan"])
 	c.ec.State["candidate_path"], c.ec.State["candidate_sha256"] = candidate, "candidate"
 	c.ec.State["original_size"], c.ec.State["original"] = int64(100), map[string]any{"size_bytes": int64(100)}
-	c.ec.State["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": plan.PlanDigest, "benchmark_request_digest": c.ec.State["benchmark_request_digest"], "vmaf": map[string]any{"mean": 93.0, "p5": 88.0}}
+	c.ec.State["quality_evidence"] = map[string]any{"verdict": "pass", "candidate_sha256": "candidate", "plan_digest": plan.PlanDigest, "benchmark_request_digest": c.ec.State["benchmark_request_digest"], "vmaf": map[string]any{"mean": 93.0, "p5": 88.0},
+		"windows": []map[string]any{{"start_seconds": 60, "duration_seconds": 10, "role": "grid"}, {"start_seconds": 300, "duration_seconds": 10, "role": "fresh"}, {"start_seconds": 660, "duration_seconds": 10, "role": "grid"}}}
 }
 
 func TestQualityLadderValidation(t *testing.T) {
@@ -447,6 +462,10 @@ func TestQualityLadderValidation(t *testing.T) {
 	rec := QualityLadderOf(c.ec.State)
 	if rec == nil || rec.Outcome != QualityLadderPassed || rec.Rung != 1 || !strings.Contains(rec.Message, "x265 CRF 17 passed") || !strings.Contains(rec.Message, "VMAF 93.0") {
 		t.Fatalf("passed record %+v", rec)
+	}
+	// The pass names what was scored: the grid windows, never the whole file.
+	if !strings.Contains(rec.Message, "passed this goal's quality limits on 2 windows, 20 seconds in all") || strings.Contains(rec.Message, "whole file") {
+		t.Fatalf("passed message %q", rec.Message)
 	}
 
 	// An encode that is not the recorded rung fails closed.
@@ -873,4 +892,23 @@ func optimizingProfileConfig() map[string]any {
 	profile := testEphemeralBatchProfileConfig()
 	profile["optimization"] = map[string]any{"enabled": true, "search": map[string]any{"quality_values": []int{20, 22}, "max_candidates": 2}}
 	return profile
+}
+
+// The pass message counts only the grid windows that decided the verdict.
+func TestScoredWindowsWords(t *testing.T) {
+	grid := func(d float64) transcode.FinalWindowScore {
+		return transcode.FinalWindowScore{DurationSeconds: d, Role: "grid"}
+	}
+	fresh := transcode.FinalWindowScore{DurationSeconds: 10, Role: "fresh"}
+	for want, windows := range map[string][]transcode.FinalWindowScore{
+		" on windows sampled across the file":  nil,
+		" on windows sampled across the file ": {fresh},
+		" on 1 window of 10 seconds":           {grid(10), fresh},
+		" on 3 windows, 25 seconds in all":     {grid(10), grid(10), fresh, grid(4.6)},
+	} {
+		// A trailing space only keeps the map keys apart.
+		if got := scoredWindowsWords(windows); got != strings.TrimRight(want, " ") {
+			t.Fatalf("%v: got %q, want %q", windows, got, strings.TrimRight(want, " "))
+		}
+	}
 }
