@@ -82,10 +82,14 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 	switch {
 	// The worker's scan blamed the file and Navigatorr has not found it damaged
 	// itself: Retry reads the file here first. A file of a batch runs again from
-	// its batch row, which skips a file blamed this way.
-	case action.CanRecheckSource(r.inst.ErrorJSON, r.state) && operationString(r.inputs["parent_action_id"]) == "":
+	// its batch row, which skips a file blamed this way, so its own job's Retry
+	// is the way to the read.
+	case action.CanRecheckSource(r.inst.ErrorJSON, r.state):
 		e.Happened = "The worker reported the file as damaged: its own scan of the video found errors in the container. Navigatorr has not confirmed it."
 		e.Learned = []string{"The worker reads the file through its own copy or network path, which can fail where a read here does not. Retry reads the file here first: if it reads whole and clean, the job runs again; if it is damaged here too, nothing runs and Retry says what the read found."}
+		if operationString(r.inputs["parent_action_id"]) != "" {
+			e.Learned = []string{"The worker reads the file through its own copy or network path, which can fail where a read here does not. Running the batch again skips this file; retrying this file's own job reads it here first, and runs it if it reads whole and clean."}
+		}
 		return e, "", nil
 	case action.SourceDamaged(text):
 		why := "ffmpeg found broken data while reading it"

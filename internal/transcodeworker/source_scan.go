@@ -45,7 +45,7 @@ func (s sourceVideoScan) Seconds() float64 {
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
-// 27835247", "pos: 1234", "Read error at pos. 4021").
+// 27835247", "pos: 1234", "File ended prematurely at pos. 4021").
 var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?\.?[: ]+(\d+)`)
 
 // packetDamagePattern is what a demuxer error says when the bytes it reads
@@ -126,6 +126,9 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		first string
 	}
 	byTag := map[string]*tagErrors{}
+	// readFaults are the demuxer's failed reads: the scan stopped where the
+	// read did, so it judged nothing about the file.
+	readFaults := map[string]*tagErrors{}
 	var stderrTail []string
 	stderr := &lineWriter{line: func(line string) {
 		tag, text, ok := demuxerTag(line)
@@ -136,13 +139,16 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 			}
 			return
 		}
-		if !packetDamagePattern.MatchString(text) {
+		target := byTag
+		if mediainspect.ReadFaultPattern.MatchString(text) {
+			target = readFaults
+		} else if !packetDamagePattern.MatchString(text) {
 			return
 		}
-		e := byTag[tag]
+		e := target[tag]
 		if e == nil {
 			e = &tagErrors{first: "[" + tag + "] " + text}
-			byTag[tag] = e
+			target[tag] = e
 		}
 		e.count++
 	}}
@@ -160,6 +166,11 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	}
 	if formatName == "" {
 		return scan, errors.New("ffprobe video packet scan printed no format name")
+	}
+	if e := readFaults[formatName]; e != nil {
+		// Not the file's damage, so not the permanent class: the read of it
+		// failed, and a retry reads it again.
+		return scan, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its video was fully scanned (%s); the scan judged nothing about the file", e.count, truncateForLog(e.first, 200))
 	}
 	if e := byTag[formatName]; e != nil {
 		scan.DemuxErrors, scan.FirstError = e.count, e.first

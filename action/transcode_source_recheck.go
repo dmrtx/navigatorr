@@ -64,17 +64,18 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 		return "", "", false
 	}
 	jobID := getString(ec.State, "job_id")
-	record, _ := ec.State[sourceRecheckKey].(map[string]any)
-	if getString(record, "job_id") == jobID {
-		// Already read for this failure; a read that could not judge is made again.
-		switch getString(record, "verdict") {
-		case "intact":
+	// Already read for this failure; a read that could not judge is made again,
+	// and so is a clean one of a file that is no longer the one it read.
+	switch recheckVerdict(ec.State, jobID) {
+	case "intact":
+		if coordinatorFoundSourceIntact(ec.State, jobID) {
+			record, _ := ec.State[sourceRecheckKey].(map[string]any)
 			return string(resilience.WorkerSourceReadFault), intactMessage(record), true
-		case "damaged":
-			return "", "", false
 		}
+	case "damaged":
+		return "", "", false
 	}
-	record = map[string]any{"job_id": jobID, "worker_report": truncateText(workerMessage, 600), "checked_at": time.Now().UTC().Format(time.RFC3339)}
+	record := map[string]any{"job_id": jobID, "worker_report": truncateText(workerMessage, 600), "checked_at": time.Now().UTC().Format(time.RFC3339)}
 	defer func() {
 		if ctx.Err() == nil {
 			ec.State[sourceRecheckKey] = record
@@ -121,8 +122,6 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 		return unchecked("the demuxer printed %d message(s) this check cannot rule out as damage, the first: %s", damage.Unrecognised, damage.FirstUnrecognised)
 	case damage.Packets == 0:
 		return unchecked("the stream has no packets to read")
-	case target.videoSeconds <= 0:
-		return unchecked("the original's video length was not measured, so a read that stopped early cannot be told from a whole one")
 	case damage.Seconds < target.videoSeconds-recheckCoverageSlack:
 		return unchecked("the read covered %.0f of the video's %.0f seconds", damage.Seconds, target.videoSeconds)
 	}
@@ -142,9 +141,19 @@ func recheckVerdict(state map[string]any, jobID string) string {
 
 // coordinatorFoundSourceIntact is whether the coordinator read this job's
 // source whole and clean after the worker called it damaged, so the worker's
-// class is not the file's.
+// class is not the file's, and the file is still the one it read: a verdict
+// kept across a failed retry or a resubmission says nothing about a file that
+// changed or went away since.
 func coordinatorFoundSourceIntact(state map[string]any, jobID string) bool {
-	return recheckVerdict(state, jobID) == "intact"
+	if recheckVerdict(state, jobID) != "intact" {
+		return false
+	}
+	target, why := recheckTargetOf(&ExecutionContext{State: state})
+	if why != "" {
+		return false
+	}
+	fi, err := os.Stat(target.path)
+	return err == nil && target.sameFile(fi)
 }
 
 // storedFailureText is the message inside a failed job's stored error.
@@ -165,7 +174,10 @@ func storedFailureText(errorJSON string) string {
 // decides. A job the coordinator already read as damaged is not, nor is one
 // that recorded nothing to tell its file by (a preflight that never read it).
 func CanRecheckSource(errorJSON string, state map[string]any) bool {
-	if !recheckable(storedFailureText(errorJSON)) || recheckVerdict(state, getString(state, "job_id")) == "damaged" {
+	// The failure must still read as the file's damage: one the coordinator
+	// already overturned keeps the worker's words but not its class.
+	text := storedFailureText(errorJSON)
+	if !SourceDamaged(text) || !recheckable(text) || recheckVerdict(state, getString(state, "job_id")) == "damaged" {
 		return false
 	}
 	_, why := recheckTargetOf(&ExecutionContext{State: state})
@@ -178,20 +190,23 @@ const damagedFileRefusal = "this file is damaged, so running it again fails the 
 // recheckOnRetry decides a Retry of a job blamed on its file. A worker's scan
 // report is checked by reading the file here, now: only a whole, clean read
 // lets the retry go on, with the record kept for the retry to follow. Any other
-// outcome refuses it, with what the read found. inst carries the record on
-// return so the retry continues from it.
-func (e *Engine) recheckOnRetry(ctx context.Context, inst *store.ActionInstance) error {
+// outcome refuses it, with what the read found. The record is kept in ec and in
+// the stored job, so the retry continues from it and a refused one is not read
+// again.
+func (e *Engine) recheckOnRetry(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext) error {
 	message := storedFailureText(inst.ErrorJSON)
 	if !recheckable(message) {
 		return errors.New(damagedFileRefusal)
 	}
-	ec := parseExecutionContext(inst, e)
-	before := recheckVerdict(ec.State, getString(ec.State, "job_id"))
+	// A verdict kept for this failure is reused as it is; anything else is a
+	// new read, and its record is stored.
+	jobID := getString(ec.State, "job_id")
+	reused := recheckVerdict(ec.State, jobID) == "damaged" || coordinatorFoundSourceIntact(ec.State, jobID)
 	class, text, overturned := e.recheckDamagedSource(ctx, ec, message)
 	if err := ctx.Err(); err != nil && !overturned {
 		return err
 	}
-	if before == "" || before == "unchecked" {
+	if !reused {
 		if overturned {
 			appendFailureHistory(ec, "recheck", class, text)
 		}
@@ -256,6 +271,9 @@ func recheckTargetOf(ec *ExecutionContext) (t recheckTarget, why string) {
 		return t, "the job recorded no programme video to read"
 	}
 	t.videoIndex, t.videoSeconds = video[0].Index, rep.VideoSeconds
+	if t.videoSeconds <= 0 {
+		return t, "the original's video length was not measured, so a read that stopped early cannot be told from a whole one"
+	}
 	var ok bool
 	if t.size, t.mod, ok = recordedOriginalStat(ec.State); !ok {
 		t.size = rep.SizeBytes

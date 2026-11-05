@@ -105,8 +105,11 @@ func TestWorkerDamageReportStandsUnlessTheCoordinatorReadsTheFileCleanAndWhole(t
 		{name: "the read fails", stderr: "Invalid data found when processing input\n", exit: 1, verdict: "unchecked"},
 		{name: "the file changes while it is read", stdout: cleanScan, extra: `printf x >> $FILE`, verdict: "unchecked"},
 		{name: "nothing to read", stdout: "format|format_name=matroska,webm\n", verdict: "unchecked"},
-		// ffprobe takes a read error for the end of the file and exits 0.
-		{name: "the read failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "damaged"},
+		// ffprobe takes a read error for the end of the file and exits 0. A
+		// position in the message does not make it damage: the I/O layer failed,
+		// which says nothing about the bytes.
+		{name: "the read failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "unchecked"},
+		{name: "the file ends in the middle of an element", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n", verdict: "damaged"},
 		// A line that is not damage by the worker's test is still no proof of a whole read.
 		{name: "a message the check cannot rule out", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Seek failed\n", verdict: "unchecked"},
 		{name: "the read ended early without a word", stdout: "packet|pts_time=0.000000|duration_time=0.040000\npacket|pts_time=29.960000|duration_time=0.040000\nformat|format_name=matroska,webm\n", verdict: "unchecked"},
@@ -300,15 +303,23 @@ func TestManualRetryFollowsTheCoordinatorsRead(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		record    map[string]any
+		changed   bool // the file is no longer the one the verdict read
 		wantRetry bool
 	}{
-		{"read clean", map[string]any{"job_id": "job-old", "verdict": "intact"}, true},
-		{"read damaged", map[string]any{"job_id": "job-old", "verdict": "damaged"}, false},
-		{"read could not judge", map[string]any{"job_id": "job-old", "verdict": "unchecked"}, false},
-		{"another job's verdict", map[string]any{"job_id": "job-older", "verdict": "intact"}, false},
-		{"never read", nil, false},
+		{"read clean", map[string]any{"job_id": "job-old", "verdict": "intact"}, false, true},
+		{"read clean, then the file changed", map[string]any{"job_id": "job-old", "verdict": "intact"}, true, false},
+		{"read damaged", map[string]any{"job_id": "job-old", "verdict": "damaged"}, false, false},
+		{"read could not judge", map[string]any{"job_id": "job-old", "verdict": "unchecked"}, false, false},
+		{"another job's verdict", map[string]any{"job_id": "job-older", "verdict": "intact"}, false, false},
+		{"never read", nil, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			f := newRecheckFixture(t, cleanScan, "", 0, "")
+			if tc.changed {
+				if err := os.WriteFile(f.path, make([]byte, 65), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			st := setupTestStore(t)
 			mock := &mockTranscodeExecutor{
 				statusFunc: func(_ context.Context, id string) (transcode.JobStatus, error) {
@@ -317,7 +328,10 @@ func TestManualRetryFollowsTheCoordinatorsRead(t *testing.T) {
 			}
 			e := NewEngine(EngineDeps{Store: st, Transcode: mock})
 			ec := testReconcileEC("")
-			ec.State["resolved_path"] = "/media/source/Deleted Scenes.mkv"
+			// The job's record of its file, which the verdict is checked against.
+			for _, key := range []string{"resolved_path", "original", "original_stat"} {
+				ec.State[key] = f.ec.State[key]
+			}
 			ec.State["job_id"] = "job-old"
 			if tc.record != nil {
 				ec.State[sourceRecheckKey] = tc.record

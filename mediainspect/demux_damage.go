@@ -21,6 +21,15 @@ import (
 // the two cannot disagree about what damage is.
 var PacketDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?\.?[: ]+\d+|EBML|corrupt|partial file|truncated`)
 
+// ReadFaultPattern is what a demuxer says when its read of the file failed
+// ("Read error at pos. 4021": the I/O layer returned an error, as a dropped SMB
+// session does), as opposed to bytes it read and found wrong ("File ended
+// prematurely at pos. 4021" is a truncated file). A read fault names a
+// position too, but it is no evidence about the file: the scan stopped where
+// the read did, so it judged nothing, and it is tested before
+// PacketDamagePattern.
+var ReadFaultPattern = regexp.MustCompile(`(?i)\bread error\b`)
+
 // DemuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
 // its context name and text, dropping the context's address.
 func DemuxerTag(line string) (tag, text string, ok bool) {
@@ -51,7 +60,8 @@ type DemuxDamage struct {
 	// Unrecognised counts the other error lines the container's demuxer (or
 	// no context at all) printed: not damage by PacketDamagePattern, but not
 	// proof of a clean read either. ffprobe ends a read that fails mid-file
-	// as if the file ended, with only such a line to say so.
+	// as if the file ended, with only such a line to say so (a read fault,
+	// ReadFaultPattern, which is also counted here and never as damage).
 	Unrecognised      int
 	FirstUnrecognised string
 }
@@ -105,7 +115,7 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 			e = &tagLines{}
 			byTag[tag] = e
 		}
-		if PacketDamagePattern.MatchString(text) {
+		if !ReadFaultPattern.MatchString(text) && PacketDamagePattern.MatchString(text) {
 			if e.damaged++; e.damaged == 1 {
 				e.firstDamaged = "[" + tag + "] " + text
 			}

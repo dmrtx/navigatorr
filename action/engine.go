@@ -473,15 +473,6 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if removedSearchAction(inst, parseExecutionContext(inst, e)) {
 		return nil, errors.New(removedSearchMessage)
 	}
-	// A damaged file fails the same way every time; it is replaced first. A
-	// worker's report of it is read again here, because the same bytes can read
-	// cleanly from the NAS.
-	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
-		if err := e.recheckOnRetry(ctx, inst); err != nil {
-			return nil, err
-		}
-	}
-
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
@@ -497,6 +488,15 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if inst.ActionName == "transcode_media" && getBool(ec.State, candidateRemovedKey) {
 		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
+	}
+	// A damaged file fails the same way every time; it is replaced first. A
+	// worker's report of it is read again here, after the checks that would
+	// refuse the retry anyway (the read can take minutes), because the same
+	// bytes can read cleanly from the NAS.
+	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
+		if err := e.recheckOnRetry(ctx, inst, ec); err != nil {
+			return nil, err
+		}
 	}
 	if err := e.batchPromotionRetryOwner(inst, ec, tmpl); err != nil {
 		return nil, err

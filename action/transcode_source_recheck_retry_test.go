@@ -57,7 +57,8 @@ func TestRetryReadsAWorkersDamageReportAgain(t *testing.T) {
 	}{
 		{name: "the file reads whole and clean", stdout: cleanScan, verdict: "intact"},
 		{name: "the damage is there", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] EBML header parsing failed\n", refusal: "found the damage too: [matroska,webm] EBML header parsing failed", verdict: "damaged"},
-		{name: "a read that failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", refusal: "found the damage too", verdict: "damaged"},
+		{name: "a read that failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", refusal: "could not clear the file: the demuxer printed 1 message(s)", verdict: "unchecked"},
+		{name: "a file that ends in the middle of an element", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n", refusal: "found the damage too: [matroska,webm] File ended prematurely", verdict: "damaged"},
 		{name: "the read stopped early", stdout: "packet|pts_time=0.000000|duration_time=0.040000\nformat|format_name=matroska,webm\n", refusal: "could not clear the file: the read covered 0 of the video's 60 seconds", verdict: "unchecked"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,6 +120,73 @@ func TestRetryDoesNotReadTheSameFailureTwice(t *testing.T) {
 	}
 }
 
+// The decision itself, asked twice of the same failure: the verdict of the
+// first read is reused for the second while it still holds.
+func TestRecheckOnRetryReusesItsVerdictWhileItHolds(t *testing.T) {
+	for _, tc := range []struct{ name, stderr string }{{"damaged", "[matroska,webm @ 0x7f] EBML header parsing failed\n"}, {"intact", ""}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRecheckFixture(t, cleanScan, tc.stderr, 0, `echo call >> $FILE.calls`)
+			e := f.failedOnDamage(t, workerDamageReport)
+			inst, err := e.deps.Store.GetActionInstance(f.ec.InstanceID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := e.recheckOnRetry(context.Background(), inst, f.ec)
+			second := e.recheckOnRetry(context.Background(), inst, f.ec)
+			if (first == nil) != (tc.stderr == "") || (second == nil) != (tc.stderr == "") {
+				t.Fatalf("first=%v second=%v", first, second)
+			}
+			if first != nil && first.Error() != second.Error() {
+				t.Fatalf("the refusal changed between asks:\n%v\n%v", first, second)
+			}
+			calls, err := os.ReadFile(f.path + ".calls")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := strings.Count(string(calls), "call"); n != 1 {
+				t.Fatalf("ffprobe ran %d times for one failure", n)
+			}
+		})
+	}
+}
+
+// A clean read of a file is a statement about that file: once the file is not
+// the one it read, the verdict is read again instead of trusted.
+func TestAnIntactVerdictIsReadAgainOnceTheFileChanged(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, `echo call >> $FILE.calls`)
+	if _, _, overturned := f.e.recheckDamagedSource(context.Background(), f.ec, workerDamageReport); !overturned {
+		t.Fatalf("the first read did not clear the file: %v", f.ec.State[sourceRecheckKey])
+	}
+	// The file is replaced by a longer one.
+	if err := os.WriteFile(f.path, make([]byte, 65), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if coordinatorFoundSourceIntact(f.ec.State, "job-1") {
+		t.Fatal("a verdict about a file that changed was kept as intact")
+	}
+	_, _, overturned := f.e.recheckDamagedSource(context.Background(), f.ec, workerDamageReport)
+	record, _ := f.ec.State[sourceRecheckKey].(map[string]any)
+	if overturned || f.verdict() != "unchecked" || !strings.Contains(getString(record, "detail"), "not the one the job started with") {
+		t.Fatalf("a changed file was cleared by an old verdict: %v", record)
+	}
+	// The new file was not read either: it is not the one the job recorded.
+	calls, _ := os.ReadFile(f.path + ".calls")
+	if n := strings.Count(string(calls), "call"); n != 1 {
+		t.Fatalf("ffprobe ran %d times, want only the first read", n)
+	}
+}
+
+// A job that recorded no id has no verdict: a record with no id belongs to no job.
+func TestARecheckRecordWithoutAJobBelongsToNoJob(t *testing.T) {
+	state := map[string]any{sourceRecheckKey: map[string]any{"verdict": "intact"}}
+	if got := recheckVerdict(state, ""); got != "" {
+		t.Fatalf("verdict = %q for a job with no id", got)
+	}
+	if coordinatorFoundSourceIntact(state, "") {
+		t.Fatal("a record with no job was taken for a clean read")
+	}
+}
+
 // A damage claim no packet scan can answer is refused as it always was,
 // without reading anything.
 func TestRetryRefusesADamageClaimNoScanCanAnswer(t *testing.T) {
@@ -174,6 +242,9 @@ func TestCanRecheckSource(t *testing.T) {
 	}
 	unrecorded := state("", "")
 	delete(unrecorded, "original")
+	unmeasured := state("", "")
+	delete(unmeasured["original"].(map[string]any), "video_seconds")
+	overturned := toJSON(map[string]any{"error": "Transcode failed (worker_source_read_fault): the worker reported the source file as damaged, but the coordinator read the same file end to end. The worker said: [worker read error] the source file is damaged: reading its video the demuxer reported 3 errors"})
 	for _, tc := range []struct {
 		name  string
 		err   string
@@ -186,6 +257,9 @@ func TestCanRecheckSource(t *testing.T) {
 		{"damaged for another attempt", scan, state("job-0", "damaged"), true},
 		{"a bare stored message", workerDamageReport, state("", ""), true},
 		{"a file the job never recorded", scan, unrecorded, false},
+		// Without the video's length a read that stopped early looks whole.
+		{"a video whose length was never measured", scan, unmeasured, false},
+		{"a failure the read already overturned", overturned, state("job-1", "intact"), false},
 		{"another failure", `{"error":"worker unreachable"}`, state("", ""), false},
 	} {
 		if got := CanRecheckSource(tc.err, tc.state); got != tc.want {

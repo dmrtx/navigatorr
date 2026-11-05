@@ -36,10 +36,12 @@ func TestScanDemuxDamageSortsWhatTheDemuxerSaid(t *testing.T) {
 		"damaged":                    {"[matroska,webm @ 0x1] EBML header parsing failed\n[matroska,webm @ 0x1] Packet corrupt (stream = 0, dts = 42).\n", 2, "[matroska,webm] EBML header parsing failed", 0, ""},
 		"another context":            {"[h264 @ 0x2] corrupt decoded frame\n", 0, "", 0, ""},
 		"metadata the demuxer skips": {"[matroska,webm @ 0x1] Unknown-sized element in the chapters\n", 0, "", 1, "[matroska,webm] Unknown-sized element in the chapters"},
-		// ffprobe takes a read error for the end of the file and exits 0.
-		"a read that failed":          {"[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 1, "[matroska,webm] Read error at pos. 4021 (0xfb5)", 0, ""},
-		"a line of no context":        {"Input/output error\n", 0, "", 1, "Input/output error"},
-		"last line without a newline": {"[matroska,webm @ 0x1] Seek failed", 0, "", 1, "[matroska,webm] Seek failed"},
+		// ffprobe takes a read error for the end of the file and exits 0. It
+		// names a position, but it is the I/O layer failing, not bytes found wrong.
+		"a read that failed":           {"[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 0, "", 1, "[matroska,webm] Read error at pos. 4021 (0xfb5)"},
+		"a file that ends mid-element": {"[matroska,webm @ 0x1] File ended prematurely at pos. 4021 (0xfb5)\n", 1, "[matroska,webm] File ended prematurely at pos. 4021 (0xfb5)", 0, ""},
+		"a line of no context":         {"Input/output error\n", 0, "", 1, "Input/output error"},
+		"last line without a newline":  {"[matroska,webm @ 0x1] Seek failed", 0, "", 1, "[matroska,webm] Seek failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ffprobe := fakePacketProbe(t, "cat <<'OUT'\n"+scanPackets+"OUT\nprintf '%s' '"+tc.stderr+"' >&2\n")
