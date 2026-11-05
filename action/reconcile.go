@@ -39,6 +39,7 @@ func (e *Engine) pollInterval() time.Duration {
 // Cancel ctx and wait for the returned channel before closing the store.
 func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 	e.reconcilerOnce.Do(func() {
+		e.lifecycle.Store(&ctx)
 		go func() {
 			defer close(e.reconcilerDone)
 			defer e.notes.Wait()
@@ -347,6 +348,40 @@ func (e *Engine) claimExecution(ctx context.Context, id string, wait bool) (cont
 		<-done
 		_ = e.deps.Store.ReleaseActionExecution(id, owner)
 	}, nil
+}
+
+// outlivingRequest is ctx without the cancellation of the request that holds
+// it, for work that must run to its end although its client gives up. It ends
+// with the service instead, when the service's context is known.
+func (e *Engine) outlivingRequest(ctx context.Context) (context.Context, context.CancelFunc) {
+	run, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if life := e.lifecycle.Load(); life != nil {
+		stop := context.AfterFunc(*life, cancel)
+		return run, func() { stop(); cancel() }
+	}
+	return run, cancel
+}
+
+// claimWhileAsked claims the lease for a run that outlives its request: the
+// lease is the run's, but a busy one is waited for only as long as asked is
+// alive, so a client that gave up leaves nothing queued behind another run.
+func (e *Engine) claimWhileAsked(run, asked context.Context, id string) (context.Context, func(), error) {
+	for {
+		lease, release, err := e.claimExecution(run, id, false)
+		if !errors.Is(err, errActionBusy) {
+			return lease, release, err
+		}
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-asked.Done():
+			timer.Stop()
+			return nil, nil, asked.Err()
+		case <-run.Done():
+			timer.Stop()
+			return nil, nil, run.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (e *Engine) updateInstance(ctx context.Context, inst *store.ActionInstance) error {

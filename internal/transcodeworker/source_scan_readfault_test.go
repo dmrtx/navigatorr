@@ -63,6 +63,21 @@ func TestScanSourceVideoJudgesNothingWhenAReadFailedAfterDamage(t *testing.T) {
 	}
 }
 
+// A failed read counts as one whichever context logged it, or none: the line
+// carries no "[context @ address]" when the I/O layer logs it itself.
+func TestScanSourceVideoJudgesNothingWhenAnUntaggedReadFailed(t *testing.T) {
+	scan, err := scanWith(t, "[matroska,webm @ 0x7f] Packet corrupt (stream = 0, dts = 42).\nRead error at pos. 4021 (0xfb5)\n")
+	if err == nil {
+		t.Fatalf("a scan whose read failed judged the file: %+v", scan)
+	}
+	if class := resilience.Classify("scanning source video packets: " + err.Error()); class != resilience.StorageIOTransient {
+		t.Fatalf("class = %s, want a retryable read problem: %v", class, err)
+	}
+	if !strings.Contains(err.Error(), "failed 1 time(s)") || !strings.Contains(err.Error(), "Read error at pos. 4021") {
+		t.Fatalf("the error lost what the demuxer said: %v", err)
+	}
+}
+
 // A file that ends in the middle of an element is damaged.
 func TestScanSourceVideoCountsATruncatedFileAsDamage(t *testing.T) {
 	scan, err := scanWith(t, "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n")

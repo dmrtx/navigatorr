@@ -116,6 +116,8 @@ func TestWorkerDamageReportStandsUnlessTheCoordinatorReadsTheFileCleanAndWhole(t
 		{name: "a clock that restarts", stdout: "packet|pts_time=0.000000|duration_time=1.000000\npacket|pts_time=100.000000|duration_time=1.000000\npacket|pts_time=5.000000|duration_time=1.000000\nformat|format_name=matroska,webm\n", verdict: "unchecked"},
 		// Under two seconds the coverage slack alone would pass a read of nothing.
 		{name: "a short video whose packets carry no times", stdout: "packet|size=100\nformat|format_name=matroska,webm\n", mutate: func(f *recheckFixture) { f.original()["video_seconds"] = 1.5 }, verdict: "unchecked"},
+		{name: "a short video read for a fraction of its length", stdout: "packet|pts_time=0.000000|duration_time=0.040000\nformat|format_name=matroska,webm\n", mutate: func(f *recheckFixture) { f.original()["video_seconds"] = 1.5 }, verdict: "unchecked"},
+		{name: "a short video read through", stdout: "packet|pts_time=0.000000|duration_time=0.040000\npacket|pts_time=1.400000|duration_time=0.100000\nformat|format_name=matroska,webm\n", mutate: func(f *recheckFixture) { f.original()["video_seconds"] = 1.5 }, verdict: "intact"},
 		// With only a size recorded, the read's own before and after tell a rewrite.
 		{name: "rewritten to the same length while it is read", stdout: cleanScan, extra: `touch -t 200101010000 $FILE`, mutate: func(f *recheckFixture) { delete(f.ec.State, "original_stat") }, verdict: "unchecked"},
 		// A line that is not damage by the worker's test is still no proof of a whole read.

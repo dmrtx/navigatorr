@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"strings"
@@ -42,6 +43,13 @@ const (
 	// cannot clear that.
 	workerScanReport = "reading its video the demuxer reported"
 )
+
+// recheckSlack is the slack a read of a video of videoSeconds may fall short
+// by: never more than half of it, so a video shorter than the slack still has
+// to be read for the better part of its length.
+func recheckSlack(videoSeconds float64) float64 {
+	return math.Min(recheckCoverageSlack, videoSeconds/2)
+}
 
 // workerDamageWords are the phrases that make a failure read as the file's
 // own damage (SourceDamaged); a verdict that overturns it must not carry them.
@@ -96,6 +104,7 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 		return unchecked("the file could not be inspected: %v", err)
 	}
 	if !target.sameFile(before) {
+		record["file_changed"] = true
 		return unchecked("the file is not the one the job started with (it is %d bytes, modified %s)", before.Size(), before.ModTime().UTC().Format(time.RFC3339))
 	}
 	release, err := e.acquireHashSlot(ctx)
@@ -132,7 +141,7 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 		return unchecked("the stream's timestamps jump back, so the seconds read cannot be compared with the video's length")
 	case damage.Seconds <= 0:
 		return unchecked("the packets carried no timestamps, so how much of the video was read cannot be measured")
-	case damage.Seconds < target.videoSeconds-recheckCoverageSlack:
+	case damage.Seconds < target.videoSeconds-recheckSlack(target.videoSeconds):
 		return unchecked("the read covered %.0f of the video's %.0f seconds", damage.Seconds, target.videoSeconds)
 	}
 	// Cut short after the last packet: the verdict would not be stored, so the
@@ -182,7 +191,17 @@ func coordinatorFoundSourceIntact(state map[string]any, jobID string) bool {
 // the file that was read: the job is blamed on neither the worker nor the file
 // but on a file that has since changed.
 func verdictFileChanged(state map[string]any, jobID string) bool {
-	return recheckVerdict(state, jobID) == "intact" && !coordinatorFoundSourceIntact(state, jobID)
+	if recheckVerdict(state, jobID) != "intact" || coordinatorFoundSourceIntact(state, jobID) {
+		return false
+	}
+	// A file that cannot be reached now (a share that dropped for a moment) has
+	// not been shown to differ from the one that was read.
+	target, why := recheckTargetOf(&ExecutionContext{State: state})
+	if why != "" {
+		return false
+	}
+	_, err := os.Stat(target.path)
+	return err == nil || errors.Is(err, os.ErrNotExist)
 }
 
 // storedFailureText is the message inside a failed job's stored error.
@@ -250,6 +269,10 @@ func (e *Engine) recheckOnRetry(ctx context.Context, inst *store.ActionInstance,
 	record, _ := ec.State[sourceRecheckKey].(map[string]any)
 	if getString(record, "verdict") == "damaged" {
 		return fmt.Errorf("%s (Navigatorr read it again and found the damage too: %s)", damagedFileRefusal, getString(record, "detail"))
+	}
+	// The file the worker read is gone: what it said is no claim about this one.
+	if getBool(record, "file_changed") {
+		return fmt.Errorf("the file changed after this job started, so the worker's report says nothing about the file now there; choose a goal for it again (%s)", getString(record, "detail"))
 	}
 	return fmt.Errorf("%s (Navigatorr read it again to check the worker's report but could not clear the file: %s)", damagedFileRefusal, getString(record, "detail"))
 }

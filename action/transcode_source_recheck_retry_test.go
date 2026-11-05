@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -247,6 +248,107 @@ func TestRetryReadsToTheEndWhenTheClientGivesUp(t *testing.T) {
 	history, _ := state["failure_history"].([]any)
 	if len(history) == 0 || history[0].(map[string]any)["phase"] != "recheck" {
 		t.Fatalf("history = %v", history)
+	}
+}
+
+// waitForFile is whether path appeared within two seconds.
+func waitForFile(path string) bool {
+	for i := 0; i < 200; i++ {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+// A second Retry that finds the first one reading waits only as long as its own
+// client does: it is not queued behind a read nobody asked it to repeat.
+func TestRetryBehindARunningReadWaitsOnlyAsLongAsItsClient(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, `touch $FILE.started; sleep 2`)
+	e := f.failedOnDamage(t, workerDamageReport)
+	first := make(chan error, 1)
+	go func() { _, err := e.Retry(context.Background(), f.ec.InstanceID); first <- err }()
+	defer func() { <-first }()
+	if !waitForFile(f.path + ".started") {
+		t.Fatal("the first retry never began reading")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	began := time.Now()
+	_, err := e.Retry(ctx, f.ec.InstanceID)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(began) > time.Second {
+		t.Fatalf("the second retry waited %v for the first one's read: %v", time.Since(began), err)
+	}
+}
+
+// A read that outlives its client still ends with the service: shutting down
+// does not wait for twenty minutes of reading, and nothing is stored from it.
+func TestRetryReadEndsWithTheService(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, `touch $FILE.started; exec sleep 5`)
+	e := f.failedOnDamage(t, workerDamageReport)
+	service, shutDown := context.WithCancel(context.Background())
+	defer shutDown()
+	e.lifecycle.Store(&service)
+	request, giveUp := context.WithCancel(context.Background())
+	defer giveUp()
+	go func() {
+		waitForFile(f.path + ".started")
+		giveUp()
+		shutDown()
+	}()
+	began := time.Now()
+	_, err := e.Retry(request, f.ec.InstanceID)
+	if err == nil || time.Since(began) > 3*time.Second {
+		t.Fatalf("the read outlived the service (%v): %v", time.Since(began), err)
+	}
+	stored, state := f.stored(t, e)
+	if stored.Status != StatusFailed || state[sourceRecheckKey] != nil {
+		t.Fatalf("status=%s record=%v", stored.Status, state[sourceRecheckKey])
+	}
+}
+
+// A file replaced after the job started is not damaged: what the worker said
+// was about the file that was there.
+func TestRetryOfAReplacedFileDoesNotCallItDamaged(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, "")
+	f.ec.State["original_stat"] = map[string]any{"size_bytes": int64(9999), "mod_time": time.Now().UTC().Format(time.RFC3339Nano)}
+	e := f.failedOnDamage(t, workerDamageReport)
+	_, err := e.Retry(context.Background(), f.ec.InstanceID)
+	if err == nil || !strings.Contains(err.Error(), "changed after this job started") || strings.Contains(err.Error(), "this file is damaged") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// A file read clean and then gone or different has changed; one that cannot be
+// reached at this moment has not been shown to.
+func TestVerdictFileChangedNeedsAFileThatIsGoneOrDifferent(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, "")
+	if _, _, overturned := f.e.recheckDamagedSource(context.Background(), f.ec, workerDamageReport); !overturned {
+		t.Fatalf("the file did not read clean: %v", f.ec.State[sourceRecheckKey])
+	}
+	if verdictFileChanged(f.ec.State, "job-1") {
+		t.Fatal("a file as it was read counts as changed")
+	}
+	reachable := f.ec.State["resolved_path"]
+	f.ec.State["resolved_path"] = f.path + "/inside" // a path under a file: not "does not exist"
+	if verdictFileChanged(f.ec.State, "job-1") {
+		t.Fatal("a file that cannot be reached counts as changed")
+	}
+	f.ec.State["resolved_path"] = reachable
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(f.path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	// The recorded modification time no longer matches the file's.
+	if !verdictFileChanged(f.ec.State, "job-1") {
+		t.Fatal("a file touched since the read does not count as changed")
+	}
+	if err := os.Remove(f.path); err != nil {
+		t.Fatal(err)
+	}
+	if !verdictFileChanged(f.ec.State, "job-1") {
+		t.Fatal("a file removed since the read does not count as changed")
 	}
 }
 

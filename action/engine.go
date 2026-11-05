@@ -50,6 +50,9 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
+	// lifecycle is the service's context, known once StartReconciler runs: work
+	// that outlives the request that asked for it still ends with the service.
+	lifecycle atomic.Pointer[context.Context]
 	// hashSlots bounds whole-file hashes of NAS media across every caller, so
 	// parallel continuations never saturate the share the worker reads from.
 	hashSlots chan struct{}
@@ -449,12 +452,19 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	// A retry that reads a file the worker called damaged runs to its end: the
 	// read can outlast the client that asked for it, and a read thrown away on
 	// its timeout would be made again, and thrown away again, by the next ask.
-	// The lease still ends it if it is lost.
-	if peek, err := e.deps.Store.GetActionInstance(instanceID); err == nil && peek != nil && peek.ActionName == "transcode_media" && SourceDamaged(peek.ErrorJSON) && recheckable(storedFailureText(peek.ErrorJSON)) {
-		ctx = context.WithoutCancel(ctx)
+	// The service's shutdown and the loss of the lease still end it, and a retry
+	// that waits for a busy lease waits only as long as its client does.
+	var (
+		release func()
+		err     error
+	)
+	if peek, perr := e.deps.Store.GetActionInstance(instanceID); perr == nil && peek != nil && peek.ActionName == "transcode_media" && SourceDamaged(peek.ErrorJSON) && recheckable(storedFailureText(peek.ErrorJSON)) {
+		run, stop := e.outlivingRequest(ctx)
+		defer stop()
+		ctx, release, err = e.claimWhileAsked(run, ctx, instanceID)
+	} else {
+		ctx, release, err = e.claimExecution(ctx, instanceID, true)
 	}
-
-	ctx, release, err := e.claimExecution(ctx, instanceID, true)
 	if err != nil {
 		return nil, err
 	}

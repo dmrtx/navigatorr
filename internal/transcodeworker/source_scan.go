@@ -129,10 +129,17 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	// readFaults are the demuxer's failed reads: the scan stopped where the
 	// read did, so it judged nothing about the file.
 	readFaults := map[string]*tagErrors{}
+	// A failed read is the file's no matter which context logged it, or none.
+	var untaggedFaults tagErrors
 	var stderrTail []string
 	stderr := &lineWriter{line: func(line string) {
 		tag, text, ok := demuxerTag(line)
 		if !ok {
+			if mediainspect.ReadFaultPattern.MatchString(line) {
+				if untaggedFaults.count++; untaggedFaults.count == 1 {
+					untaggedFaults.first = line
+				}
+			}
 			// The last lines: ffprobe ends with the reason it stopped.
 			if stderrTail = append(stderrTail, line); len(stderrTail) > 5 {
 				stderrTail = stderrTail[1:]
@@ -167,10 +174,17 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	if formatName == "" {
 		return scan, errors.New("ffprobe video packet scan printed no format name")
 	}
+	faults := untaggedFaults
 	if e := readFaults[formatName]; e != nil {
+		if faults.count == 0 {
+			faults.first = e.first
+		}
+		faults.count += e.count
+	}
+	if faults.count > 0 {
 		// Not the file's damage, so not the permanent class: the read of it
 		// failed, and a retry reads it again.
-		return scan, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its video was fully scanned (%s); the scan judged nothing about the file", e.count, truncateForLog(e.first, 200))
+		return scan, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its video was fully scanned (%s); the scan judged nothing about the file", faults.count, truncateForLog(faults.first, 200))
 	}
 	if e := byTag[formatName]; e != nil {
 		scan.DemuxErrors, scan.FirstError = e.count, e.first
