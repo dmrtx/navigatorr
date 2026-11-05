@@ -137,6 +137,15 @@ func (s *Server) queueStages(r operationRecord) []map[string]any {
 				}
 				stage["note"] = fmt.Sprintf("%.0f converted · %.0f failed", operationNumber(counts["completed"]), operationNumber(counts["failed"]))
 			}
+			if step.Name == "promote_batch" && status == store.ActionStatusFailed {
+				// The conversions are done and verified; publishing is what
+				// failed, so the stage says that instead of a bare failure.
+				if promotion := operationMap(operationValue(r, "batch_promotion")); promotion != nil {
+					if failed, _ := promotion["failed"].([]any); len(failed) > 0 {
+						stage["note"] = fmt.Sprintf("Encoded and verified · %.0f published · %d failed to publish. Nothing is re-encoded.", operationNumber(promotion["promoted"]), len(failed))
+					}
+				}
+			}
 			if step.Name == "promote_batch" && status == "completed" {
 				promotion := operationMap(operationValue(r, "batch_promotion"))
 				if r.inputs["promote_candidates"] != true && r.state["post_batch_promotion"] != true {

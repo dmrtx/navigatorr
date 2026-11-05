@@ -333,7 +333,11 @@ func (e *Engine) stepTranscodeBatchPromote(ctx context.Context, ec *ExecutionCon
 	}
 	progress := map[string]any{"eligible": len(plan.Members), "promoted": completed, "pending": pending, "failed": failed, "plan_digest": plan.Digest}
 	if len(failed) > 0 {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("%d batch promotion(s) need attention: %s", len(failed), strings.Join(failed, "; ")), Outputs: map[string]any{"batch_promotion": progress}}, nil
+		// The encodes are done and their candidates passed validation (only
+		// those are in the plan); what failed is publishing them. Say so, so the
+		// batch does not read as a failed conversion, and name what Try again
+		// does: it publishes the existing candidates and encodes nothing.
+		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Encoding finished and %d candidates passed validation, but publishing %d of them failed (%d published, %d still pending); nothing is re-encoded and Try again only repeats the publication: %s", len(plan.Members), len(failed), completed, pending, strings.Join(failed, "; ")), Outputs: map[string]any{"batch_promotion": progress}}, nil
 	}
 	if pending > 0 {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "batch_promotion", WaitingReason: fmt.Sprintf("Promoting %d verified candidates; %d completed", len(plan.Members), completed), Outputs: map[string]any{"batch_promotion": progress}}, nil

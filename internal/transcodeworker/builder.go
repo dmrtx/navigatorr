@@ -572,6 +572,13 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 				args = append(args, fmt.Sprintf("-profile:a:%d", out), "2")
 			}
 			args = append(args, fmt.Sprintf("-c:a:%d", out), encoder, fmt.Sprintf("-b:a:%d", out), strconv.Itoa(stream.BitrateKbps)+"k")
+			if encoder == "aac_at" && stream.SampleRate > audioToolboxMaxSampleRate {
+				// aac_at cannot open its encoder on 88.2 kHz and higher input
+				// ("Could not open encoder before EOF", -22). The AAC output
+				// is resampled to 48 kHz, which loses nothing audible at
+				// these bitrates; layout and channel count are unchanged.
+				args = append(args, fmt.Sprintf("-ar:a:%d", out), strconv.Itoa(audioToolboxMaxSampleRate))
+			}
 			// Source muxer bitrate/size tags no longer describe an encoded track.
 			args = append(args, clearStatisticsTags("a", out, stream.StatisticsTags)...)
 			if title, ok := convertedAudioTitle(stream.Title, stream.Layout, stream.Channels); ok {
@@ -617,6 +624,10 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 
 	return args, nil
 }
+
+// audioToolboxMaxSampleRate is the highest input rate AudioToolbox's AAC
+// encoder opens on.
+const audioToolboxMaxSampleRate = 48000
 
 // dispositionFlags is the -disposition value for a set of flags: the names set,
 // joined, or "0" for none (which also stops ffmpeg from marking a stream default

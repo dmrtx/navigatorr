@@ -204,6 +204,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "audio_only_worker_unsupported":
 		e.Outcome = "no_changes"
 		e.Message = "No video encode met this goal. Compacting the lossless audio needs a worker that can prove the copied video unchanged; upgrade the worker and retry. Original preserved."
+	case reason == reasonSourceReplaced:
+		e.Outcome = "no_changes"
+		e.Message = "Nothing to do: another conversion already replaced this file after this job was queued. The replacement is in place and was not touched."
 	case reason == "already_target_codec":
 		e.Outcome = "no_changes"
 		e.Message = "The source already uses the target codec. Original preserved."

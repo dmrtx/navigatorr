@@ -223,10 +223,25 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			if refused != nil {
 				return *refused, nil
 			}
-			if short := origDur - span.Seconds(); short > 3 && short/origDur > 0.02 {
-				return waitDecision(fmt.Sprintf("Audio truncated at stream %d: original runs %.1fs, the track's packets cover %.1fs (%.1fs short)", i, origDur, span.Seconds(), short)), nil
+			if audioDuration != "matches_source_track" {
+				audioDuration = "ok"
 			}
-			audioDuration = "ok"
+			if short := origDur - span.Seconds(); short > 3 && short/origDur > 0.02 {
+				// Short of the container is only truncation when the source
+				// track itself was longer: releases exist whose audio stops
+				// minutes before the video, and a faithful copy or re-encode
+				// of such a track is as short as it. The source track's own
+				// packets decide, read only now that the candidate is short.
+				own, ownErr := e.sourceTrackSpan(ctx, origMap, a.Index)
+				if ownErr == nil && own.Seconds() > 0 && span.Seconds() >= own.Seconds()-sourceTrackTolerance {
+					audioDuration = "matches_source_track"
+					ec.State["audio_shorter_than_container"] = append(stateStrings(ec.State["audio_shorter_than_container"]), fmt.Sprintf("stream %d: the source track covers %.1fs of the container's %.1fs; the candidate's %.1fs matches it", i, own.Seconds(), origDur, span.Seconds()))
+				} else if ownErr == nil && own.Seconds() > 0 {
+					return waitDecision(fmt.Sprintf("Audio truncated at stream %d: original runs %.1fs, the track's packets cover %.1fs (%.1fs short); the source track itself covers %.1fs", i, origDur, span.Seconds(), short, own.Seconds())), nil
+				} else {
+					return waitDecision(fmt.Sprintf("Audio truncated at stream %d: original runs %.1fs, the track's packets cover %.1fs (%.1fs short)", i, origDur, span.Seconds(), short)), nil
+				}
+			}
 		}
 		if !sameLanguage(a.Language, b.Language) {
 			return waitDecision(fmt.Sprintf("Audio language mismatch at stream %d: original=%s output=%s", i, a.Language, b.Language)), nil
@@ -361,4 +376,43 @@ func sameLanguage(source, output string) bool {
 		return true
 	}
 	return normCodec(source) == normCodec(output)
+}
+
+// sourceTrackTolerance is how much shorter than the source track's own packets
+// a candidate track may be: AAC priming and frame rounding, as the worker's
+// pre-publish check allows.
+const sourceTrackTolerance = 0.5
+
+// sourceTrackSpan measures one audio stream of the original from its packets.
+// It reads the whole file, so callers ask only when the candidate looks short.
+func (e *Engine) sourceTrackSpan(ctx context.Context, origMap map[string]any, streamIndex int) (mediainspect.AudioPacketSpan, error) {
+	path := getString(origMap, "path")
+	if path == "" {
+		return mediainspect.AudioPacketSpan{}, fmt.Errorf("original path unknown")
+	}
+	spans, err := mediainspect.MeasureAudioPackets(ctx, e.deps.Ffprobe, path)
+	if err != nil {
+		return mediainspect.AudioPacketSpan{}, err
+	}
+	span, ok := spans[streamIndex]
+	if !ok {
+		return mediainspect.AudioPacketSpan{}, fmt.Errorf("original stream %d has no measurable packets", streamIndex)
+	}
+	return span, nil
+}
+
+func stateStrings(raw any) []string {
+	switch v := raw.(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }

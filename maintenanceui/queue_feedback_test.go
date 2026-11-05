@@ -77,6 +77,32 @@ func TestBatchStagesShowPartialAndUnexecutedWork(t *testing.T) {
 	}
 }
 
+// A batch whose encodes all finished and passed validation but whose
+// publication failed is not a failed conversion: the stage says what finished
+// and what did not.
+func TestBatchWithFailedPublicationShowsEncodingAsFinished(t *testing.T) {
+	s, _ := testUI(t)
+	r := operationRecord{
+		inst:   store.ActionInstance{ActionName: "transcode_batch", Status: "failed", CurrentStep: 2},
+		inputs: map[string]any{"promote_candidates": true},
+		outputs: map[string]any{
+			"counts":          map[string]any{"completed": float64(3)},
+			"batch_promotion": map[string]any{"eligible": float64(3), "promoted": float64(2), "failed": []any{"s01e03: filesystem replacement destination already exists"}},
+		},
+	}
+	stages := s.queueStages(r)
+	if stages[1]["status"] != "completed" {
+		t.Fatalf("finished encodes shown as %v: %v", stages[1]["status"], stages)
+	}
+	if stages[2]["status"] != "failed" {
+		t.Fatalf("publication stage = %v", stages[2]["status"])
+	}
+	note, _ := stages[2]["note"].(string)
+	if !strings.Contains(note, "Encoded and verified") || !strings.Contains(note, "2 published") || !strings.Contains(note, "1 failed to publish") || !strings.Contains(note, "Nothing is re-encoded") {
+		t.Fatalf("publication note = %q", note)
+	}
+}
+
 func TestSkippedBatchAndFailedFileDoNotClaimUnperformedStages(t *testing.T) {
 	s, _ := testUI(t)
 	r := operationRecord{inst: store.ActionInstance{ActionName: "transcode_batch", Status: "completed", CurrentStep: 3}, inputs: map[string]any{"promote_candidates": true}, outputs: map[string]any{"counts": map[string]any{"total": float64(1), "skip": float64(1)}}}

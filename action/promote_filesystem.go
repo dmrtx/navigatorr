@@ -18,8 +18,9 @@ func (e *Engine) localPromotionState(ec *ExecutionContext) (*promotionState, err
 	if err != nil {
 		return nil, err
 	}
-	expected := strings.TrimSuffix(p.OriginalPath, filepath.Ext(p.OriginalPath)) + filepath.Ext(p.CandidatePath)
-	if p.Service != "filesystem" || p.NewPath != expected || p.SeriesPath != filepath.Dir(p.OriginalPath) || temporaryPromotionPath(p.NewPath) {
+	expected := filesystemPromotionNewPath(p.OriginalPath, p.CandidatePath)
+	legacy := strings.TrimSuffix(p.OriginalPath, filepath.Ext(p.OriginalPath)) + filepath.Ext(p.CandidatePath)
+	if p.Service != "filesystem" || p.NewPath != expected && p.NewPath != legacy || p.SeriesPath != filepath.Dir(p.OriginalPath) || temporaryPromotionPath(p.NewPath) {
 		return nil, fmt.Errorf("filesystem replacement identity changed; recovery retained")
 	}
 	if _, err := e.promotionPath(p.NewPath, true); err != nil {
@@ -103,8 +104,8 @@ func (e *Engine) localPromotionPublish(ctx context.Context, ec *ExecutionContext
 		return promoteFailed(err)
 	}
 	if p.NewPath != p.OriginalPath {
-		if _, err := os.Lstat(p.NewPath); !os.IsNotExist(err) {
-			return promoteFailed(fmt.Errorf("replacement destination is occupied; recovery retained"))
+		if err := promotionDestinationFree(p.NewPath); err != nil {
+			return promoteFailed(fmt.Errorf("replacement destination is not available; recovery retained: %w", err))
 		}
 	}
 	ec.State["filesystem_publish_started"] = true
