@@ -30,6 +30,11 @@ var PacketDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?\.?[: ]+\d+|EBM
 // PacketDamagePattern.
 var ReadFaultPattern = regexp.MustCompile(`(?i)\bread error\b`)
 
+// TimestampResetSeconds is how far a packet's timestamp may fall behind the
+// end of what was read before the stream's clock is taken to have restarted (a
+// broadcast recording): the timestamps then no longer measure its length.
+const TimestampResetSeconds = 10.0
+
 // DemuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
 // its context name and text, dropping the context's address.
 func DemuxerTag(line string) (tag, text string, ok bool) {
@@ -52,8 +57,13 @@ type DemuxDamage struct {
 	Packets int
 	// Seconds is the stretch of the stream's timeline the packets covered, from
 	// the earliest packet to the end of the latest. A read that stopped early
-	// covers less than the stream lasts.
+	// covers less than the stream lasts. Packets with no presentation time
+	// (AVI, raw streams) are placed by their decode time.
 	Seconds float64
+	// Discontinuous is set when the timestamps jump back by more than
+	// TimestampResetSeconds: Seconds then says nothing about how much of the
+	// stream was read.
+	Discontinuous bool
 	// Errors counts the damage reports; First is the first of them.
 	Errors int
 	First  string
@@ -64,6 +74,10 @@ type DemuxDamage struct {
 	// ReadFaultPattern, which is also counted here and never as damage).
 	Unrecognised      int
 	FirstUnrecognised string
+	// ReadFaults counts the lines among those that were failed reads. A run
+	// that had one stopped where the read did, so anything it printed before
+	// is not a judgement of the whole file either.
+	ReadFaults int
 }
 
 // ScanDemuxDamage reads every packet of stream streamIndex without decoding
@@ -80,7 +94,7 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 		return damage, &ProbeError{Kind: ProbeUnavailable, Err: errors.New("ffprobe not found")}
 	}
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
-		"-show_entries", "packet=pts_time,duration_time:format=format_name", "-of", "compact", path)
+		"-show_entries", "packet=pts_time,dts_time,duration_time:format=format_name", "-of", "compact", path)
 	cmd.WaitDelay = probeWaitDelay
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -89,12 +103,12 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 	// The format's name is printed last, so every context's lines are kept
 	// until the run ends.
 	type tagLines struct {
-		damaged, other           int
+		damaged, other, faults   int
 		firstDamaged, firstOther string
 	}
 	byTag := map[string]*tagLines{}
 	var tail []string
-	untagged, firstUntagged := 0, ""
+	untagged, untaggedFaults, firstUntagged := 0, 0, ""
 	sink := &lineSink{line: func(line string) {
 		if strings.TrimSpace(line) == "" {
 			return
@@ -108,6 +122,9 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 			if untagged++; untagged == 1 {
 				firstUntagged = line
 			}
+			if ReadFaultPattern.MatchString(line) {
+				untaggedFaults++
+			}
 			return
 		}
 		e := byTag[tag]
@@ -115,7 +132,11 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 			e = &tagLines{}
 			byTag[tag] = e
 		}
-		if !ReadFaultPattern.MatchString(text) && PacketDamagePattern.MatchString(text) {
+		fault := ReadFaultPattern.MatchString(text)
+		if fault {
+			e.faults++
+		}
+		if !fault && PacketDamagePattern.MatchString(text) {
 			if e.damaged++; e.damaged == 1 {
 				e.firstDamaged = "[" + tag + "] " + text
 			}
@@ -139,7 +160,14 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 		case strings.HasPrefix(line, "packet|"):
 			damage.Packets++
 			values := compactValues(line)
-			if pts, ok := values["pts_time"]; ok {
+			pts, ok := values["pts_time"]
+			if !ok {
+				pts, ok = values["dts_time"]
+			}
+			if ok {
+				if timed && pts < end-TimestampResetSeconds {
+					damage.Discontinuous = true
+				}
 				if !timed || pts < first {
 					first = pts
 				}
@@ -177,8 +205,10 @@ func ScanDemuxDamage(ctx context.Context, ffprobePath, path string, streamIndex 
 		damage.Seconds = end - first
 	}
 	damage.Unrecognised, damage.FirstUnrecognised = untagged, firstUntagged
+	damage.ReadFaults = untaggedFaults
 	if e := byTag[formatName]; e != nil {
 		damage.Errors, damage.First = e.damaged, e.firstDamaged
+		damage.ReadFaults += e.faults
 		if e.other > 0 {
 			if damage.Unrecognised == 0 {
 				damage.FirstUnrecognised = e.firstOther

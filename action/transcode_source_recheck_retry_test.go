@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
@@ -57,7 +58,7 @@ func TestRetryReadsAWorkersDamageReportAgain(t *testing.T) {
 	}{
 		{name: "the file reads whole and clean", stdout: cleanScan, verdict: "intact"},
 		{name: "the damage is there", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] EBML header parsing failed\n", refusal: "found the damage too: [matroska,webm] EBML header parsing failed", verdict: "damaged"},
-		{name: "a read that failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", refusal: "could not clear the file: the demuxer printed 1 message(s)", verdict: "unchecked"},
+		{name: "a read that failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", refusal: "could not clear the file: the demuxer's read of the file failed 1 time(s)", verdict: "unchecked"},
 		{name: "a file that ends in the middle of an element", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n", refusal: "found the damage too: [matroska,webm] File ended prematurely", verdict: "damaged"},
 		{name: "the read stopped early", stdout: "packet|pts_time=0.000000|duration_time=0.040000\nformat|format_name=matroska,webm\n", refusal: "could not clear the file: the read covered 0 of the video's 60 seconds", verdict: "unchecked"},
 	} {
@@ -214,18 +215,84 @@ func TestRetryRefusesADamageClaimNoScanCanAnswer(t *testing.T) {
 	}
 }
 
-// A request cut short before the read finished decided nothing.
-func TestRetryCutShortBeforeTheReadKeepsTheJobAsItWas(t *testing.T) {
-	f := newRecheckFixture(t, cleanScan, "", 0, "")
+// A client that gives up on its request while the file is being read (an MCP
+// call times out long before a file of tens of gigabytes is read) does not
+// throw the read away: it runs to its end and its verdict is kept.
+func TestRetryReadsToTheEndWhenTheClientGivesUp(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, `touch $FILE.started; sleep 1`)
 	e := f.failedOnDamage(t, workerDamageReport)
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := e.Retry(ctx, f.ec.InstanceID); err == nil {
-		t.Fatal("a cancelled retry went on")
+	defer cancel()
+	go func() {
+		for i := 0; i < 200; i++ {
+			if _, err := os.Stat(f.path + ".started"); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cancel()
+	}()
+	_, err := e.Retry(ctx, f.ec.InstanceID)
+	if err != nil && strings.Contains(err.Error(), "this file is damaged") {
+		t.Fatalf("a read the client abandoned was refused: %v", err)
 	}
-	inst, state := f.stored(t, e)
-	if inst.Status != StatusFailed || state[sourceRecheckKey] != nil {
-		t.Fatalf("status=%s record=%v", inst.Status, state[sourceRecheckKey])
+	if ctx.Err() == nil {
+		t.Fatal("the client never gave up")
+	}
+	_, state := f.stored(t, e)
+	if state["previous_job_id"] != "job-1" {
+		t.Fatalf("the read did not finish and let the retry go on: %v", state)
+	}
+	history, _ := state["failure_history"].([]any)
+	if len(history) == 0 || history[0].(map[string]any)["phase"] != "recheck" {
+		t.Fatalf("history = %v", history)
+	}
+}
+
+// A read cut short by the lease or a shutdown (not by the client) decided
+// nothing: nothing is stored, and the next Retry reads the file again.
+func TestRecheckOnRetryCutShortKeepsTheJobAsItWas(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, "")
+	e := f.failedOnDamage(t, workerDamageReport)
+	inst, err := e.deps.Store.GetActionInstance(f.ec.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := e.recheckOnRetry(ctx, inst, f.ec); err == nil {
+		t.Fatal("a cut short read let the retry go on")
+	}
+	stored, state := f.stored(t, e)
+	if stored.Status != StatusFailed || state[sourceRecheckKey] != nil {
+		t.Fatalf("status=%s record=%v", stored.Status, state[sourceRecheckKey])
+	}
+}
+
+// A clean read is a statement about the file as the read saw it: a job whose
+// file was only recorded by size cannot have the verdict carried to a file that
+// was touched since.
+func TestAnIntactVerdictIsBoundToTheFileTheReadSaw(t *testing.T) {
+	f := newRecheckFixture(t, cleanScan, "", 0, "")
+	delete(f.ec.State, "original_stat")
+	if _, _, overturned := f.e.recheckDamagedSource(context.Background(), f.ec, workerDamageReport); !overturned || !coordinatorFoundSourceIntact(f.ec.State, "job-1") {
+		t.Fatalf("the file did not read clean: %v", f.ec.State[sourceRecheckKey])
+	}
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(f.path, later, later); err != nil {
+		t.Fatal(err)
+	}
+	if coordinatorFoundSourceIntact(f.ec.State, "job-1") {
+		t.Fatal("a file touched since the read kept its verdict")
+	}
+	// An old record that never stored what it read is not trusted either.
+	delete(f.ec.State[sourceRecheckKey].(map[string]any), "file_mod")
+	if err := os.Chtimes(f.path, time.Now(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if coordinatorFoundSourceIntact(f.ec.State, "job-1") {
+		t.Fatal("a verdict with no file to compare was trusted")
 	}
 }
 

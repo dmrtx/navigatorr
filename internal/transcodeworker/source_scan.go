@@ -56,7 +56,7 @@ var packetDamagePattern = mediainspect.PacketDamagePattern
 // timestampResetSeconds is how far a packet's timestamp may fall behind the
 // latest end seen before the timeline counts as restarted. Reordered
 // B-frames fall back by a fraction of a second.
-const timestampResetSeconds = 10.0
+const timestampResetSeconds = mediainspect.TimestampResetSeconds
 
 // scanSourceVideo reads every packet of stream streamIndex without decoding
 // it. Healthy files of every container the library holds read with no demuxer

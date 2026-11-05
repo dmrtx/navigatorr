@@ -53,6 +53,10 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 			// The worker still says damaged; the coordinator read the file
 			// whole and clean, so what failed was the worker's read.
 			class = string(resilience.WorkerSourceReadFault)
+		} else if class == string(resilience.FFmpegInputCorrupt) && verdictFileChanged(ec.State, jobID) {
+			// Read clean once; the file is not the one that was read. The worker's
+			// class is no longer about this file, and neither is the clean read.
+			class = string(resilience.SourceChanged)
 		}
 		if err := rejectUnchangedPermanentRetry(class); err != nil {
 			return resume, err

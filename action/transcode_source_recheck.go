@@ -109,12 +109,18 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 	if err != nil {
 		return unchecked("the coordinator's read failed: %v", err)
 	}
+	// A file recorded by size alone is told apart from a rewrite of the same
+	// length by what the read itself saw: its size and time, before and after.
 	after, err := os.Stat(target.path)
-	if err != nil || !os.SameFile(before, after) || !target.sameFile(after) {
+	if err != nil || !os.SameFile(before, after) || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || !target.sameFile(after) {
 		return unchecked("the file changed while it was read")
 	}
 	record["packets"], record["demuxer_errors"], record["seconds_read"], record["video_seconds"] = damage.Packets, damage.Errors, damage.Seconds, target.videoSeconds
 	switch {
+	// A run that had a failed read stopped where the read did: what it printed
+	// before, damage included, may be the failure's own aftermath.
+	case damage.ReadFaults > 0:
+		return unchecked("the demuxer's read of the file failed %d time(s), so the read stopped early and judged nothing; the first message this check could not rule out: %s", damage.ReadFaults, damage.FirstUnrecognised)
 	case damage.Errors > 0:
 		record["verdict"], record["detail"] = "damaged", damage.First
 		return "", "", false
@@ -122,10 +128,20 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 		return unchecked("the demuxer printed %d message(s) this check cannot rule out as damage, the first: %s", damage.Unrecognised, damage.FirstUnrecognised)
 	case damage.Packets == 0:
 		return unchecked("the stream has no packets to read")
+	case damage.Discontinuous:
+		return unchecked("the stream's timestamps jump back, so the seconds read cannot be compared with the video's length")
+	case damage.Seconds <= 0:
+		return unchecked("the packets carried no timestamps, so how much of the video was read cannot be measured")
 	case damage.Seconds < target.videoSeconds-recheckCoverageSlack:
 		return unchecked("the read covered %.0f of the video's %.0f seconds", damage.Seconds, target.videoSeconds)
 	}
-	record["verdict"] = "intact"
+	// Cut short after the last packet: the verdict would not be stored, so the
+	// caller must not act on it either.
+	if ctx.Err() != nil {
+		return "", "", false
+	}
+	// The verdict is about this file as the read saw it.
+	record["verdict"], record["file_size"], record["file_mod"] = "intact", before.Size(), before.ModTime().UTC().Format(time.RFC3339Nano)
 	return string(resilience.WorkerSourceReadFault), intactMessage(record), true
 }
 
@@ -153,7 +169,20 @@ func coordinatorFoundSourceIntact(state map[string]any, jobID string) bool {
 		return false
 	}
 	fi, err := os.Stat(target.path)
-	return err == nil && target.sameFile(fi)
+	if err != nil || !target.sameFile(fi) {
+		return false
+	}
+	// The file the read saw, not only the file the job started with.
+	record, _ := state[sourceRecheckKey].(map[string]any)
+	mod, err := time.Parse(time.RFC3339Nano, getString(record, "file_mod"))
+	return err == nil && fi.Size() == getInt64(record, "file_size") && fi.ModTime().Equal(mod)
+}
+
+// verdictFileChanged is whether this job's file was read clean and is no longer
+// the file that was read: the job is blamed on neither the worker nor the file
+// but on a file that has since changed.
+func verdictFileChanged(state map[string]any, jobID string) bool {
+	return recheckVerdict(state, jobID) == "intact" && !coordinatorFoundSourceIntact(state, jobID)
 }
 
 // storedFailureText is the message inside a failed job's stored error.

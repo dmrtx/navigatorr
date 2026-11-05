@@ -446,6 +446,13 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
+	// A retry that reads a file the worker called damaged runs to its end: the
+	// read can outlast the client that asked for it, and a read thrown away on
+	// its timeout would be made again, and thrown away again, by the next ask.
+	// The lease still ends it if it is lost.
+	if peek, err := e.deps.Store.GetActionInstance(instanceID); err == nil && peek != nil && peek.ActionName == "transcode_media" && SourceDamaged(peek.ErrorJSON) && recheckable(storedFailureText(peek.ErrorJSON)) {
+		ctx = context.WithoutCancel(ctx)
+	}
 
 	ctx, release, err := e.claimExecution(ctx, instanceID, true)
 	if err != nil {

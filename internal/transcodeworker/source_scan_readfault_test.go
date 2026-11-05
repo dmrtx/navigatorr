@@ -44,6 +44,25 @@ func TestScanSourceVideoTreatsAFailedReadAsAnIOErrorNotDamage(t *testing.T) {
 	}
 }
 
+// A run whose read failed stopped where the read did, and what it printed
+// before may be that failure's aftermath (a packet cut short by the read, not a
+// bad one). The job is retried as a read problem; if the file is damaged, the
+// next scan that reads it through says so without a failed read.
+func TestScanSourceVideoJudgesNothingWhenAReadFailedAfterDamage(t *testing.T) {
+	scan, err := scanWith(t, "[matroska,webm @ 0x7f] Packet corrupt (stream = 0, dts = 42).\n[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n")
+	if err == nil {
+		t.Fatalf("a scan whose read failed judged the file: %+v", scan)
+	}
+	if class := resilience.Classify("scanning source video packets: " + err.Error()); class != resilience.StorageIOTransient {
+		t.Fatalf("class = %s, want a retryable read problem: %v", class, err)
+	}
+	// The same damage with the read intact is the file's.
+	scan, err = scanWith(t, "[matroska,webm @ 0x7f] Packet corrupt (stream = 0, dts = 42).\n")
+	if err != nil || scan.DemuxErrors != 1 || sourceDamagedClass(scan.damage(10000)) != resilience.FFmpegInputCorrupt {
+		t.Fatalf("scan = %+v err = %v", scan, err)
+	}
+}
+
 // A file that ends in the middle of an element is damaged.
 func TestScanSourceVideoCountsATruncatedFileAsDamage(t *testing.T) {
 	scan, err := scanWith(t, "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n")

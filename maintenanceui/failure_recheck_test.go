@@ -28,28 +28,22 @@ func TestWorkerScanReportLeavesRetryOpenUntilTheFileIsFoundDamaged(t *testing.T)
 		state  func() map[string]any
 		inputs map[string]any
 		open   bool
-		learns string // what an open explanation tells the reader to do
 	}{
-		"never read here": {func() map[string]any { return recordedFile() }, nil, true, "Retry reads the file here first"},
+		"never read here": {func() map[string]any { return recordedFile() }, nil, true},
 		"read, could not judge": {func() map[string]any {
 			s := recordedFile()
 			s["source_recheck"] = map[string]any{"job_id": "job-1", "verdict": "unchecked"}
 			return s
-		}, nil, true, "Retry reads the file here first"},
+		}, nil, true},
 		"read here and damaged": {func() map[string]any {
 			s := recordedFile()
 			s["source_recheck"] = map[string]any{"job_id": "job-1", "verdict": "damaged"}
 			return s
-		}, nil, false, ""},
-		"nothing recorded to read": {func() map[string]any { return map[string]any{"job_id": "job-1"} }, nil, false, ""},
-		// A batch runs a file blamed this way again by skipping it: only the
-		// file's own job reads it.
-		"a file of a batch": {func() map[string]any { return recordedFile() }, map[string]any{"parent_action_id": "batch-x"}, true, "retrying this file's own job reads it here first"},
-		"a file of a batch, read damaged": {func() map[string]any {
-			s := recordedFile()
-			s["source_recheck"] = map[string]any{"job_id": "job-1", "verdict": "damaged"}
-			return s
-		}, map[string]any{"parent_action_id": "batch-x"}, false, ""},
+		}, nil, false},
+		"nothing recorded to read": {func() map[string]any { return map[string]any{"job_id": "job-1"} }, nil, false},
+		// A batch runs a file blamed this way again by skipping it, and its page
+		// has no Retry of the file's own to read it with.
+		"a file of a batch": {func() map[string]any { return recordedFile() }, map[string]any{"parent_action_id": "batch-x"}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := failedRecord(workerScanDamage, tc.state())
@@ -57,8 +51,17 @@ func TestWorkerScanReportLeavesRetryOpenUntilTheFileIsFoundDamaged(t *testing.T)
 				r.inputs[k] = v
 			}
 			e, blocked, steps := explainFailure(r)
+			// The cause is what the page's main button follows: a source to replace
+			// first, or a worker's claim that Retry reads.
+			wantCause := "file_damaged"
 			if tc.open {
-				if blocked != "" || steps != nil || !strings.Contains(e.Happened, "reported the file as damaged") || len(e.Learned) != 1 || !strings.Contains(e.Learned[0], tc.learns) {
+				wantCause = "worker_reported_damage"
+			}
+			if cause := failureCause(r); cause.Kind != wantCause {
+				t.Errorf("cause = %+v, want %s", cause, wantCause)
+			}
+			if tc.open {
+				if blocked != "" || steps != nil || !strings.Contains(e.Happened, "reported the file as damaged") || len(e.Learned) != 1 || !strings.Contains(e.Learned[0], "Retry reads the file here first") {
 					t.Fatalf("blocked %q steps %q explanation %+v", blocked, stepIDs(steps), e)
 				}
 				return
@@ -100,8 +103,13 @@ func TestFailedJobViewOffersRetryForAnUnconfirmedScanReport(t *testing.T) {
 	if operationMap(unconfirmed["explanation"])["happened"] == nil || unconfirmed["retry_blocked"] != nil || unconfirmed["next_steps"] != nil {
 		t.Fatalf("unconfirmed view %v", unconfirmed)
 	}
+	// The page's main button follows the cause: a file to replace first would
+	// disable the very Retry that reads it.
+	if got := operationMap(unconfirmed["cause"])["kind"]; got != "worker_reported_damage" {
+		t.Fatalf("unconfirmed cause = %v", got)
+	}
 	confirmedView := rerunJobView(t, h, "confirmed")
-	if confirmedView["retry_blocked"] == nil || confirmedView["next_steps"] == nil {
+	if confirmedView["retry_blocked"] == nil || confirmedView["next_steps"] == nil || operationMap(confirmedView["cause"])["kind"] != "file_damaged" {
 		t.Fatalf("confirmed view %v", confirmedView)
 	}
 }

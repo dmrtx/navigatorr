@@ -56,6 +56,63 @@ func TestScanDemuxDamageSortsWhatTheDemuxerSaid(t *testing.T) {
 	}
 }
 
+// A failed read is counted apart from the damage a run printed: a run that had
+// one stopped where the read did, so what came before it is not a judgement of
+// the file.
+func TestScanDemuxDamageCountsFailedReadsApart(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stderr string
+		errors int
+		faults int
+	}{
+		"none":                        {"", 0, 0},
+		"damage alone":                {"[matroska,webm @ 0x1] Packet corrupt (stream = 0, dts = 42).\n", 1, 0},
+		"a failed read alone":         {"[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 0, 1},
+		"damage, then a failed read":  {"[matroska,webm @ 0x1] Packet corrupt (stream = 0, dts = 42).\n[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 1, 1},
+		"a failed read of no context": {"Read error\n", 0, 1},
+		"another context's read":      {"[h264 @ 0x2] Read error at pos. 9\n", 0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ffprobe := fakePacketProbe(t, "cat <<'OUT'\n"+scanPackets+"OUT\nprintf '%s' '"+tc.stderr+"' >&2\n")
+			got, err := ScanDemuxDamage(context.Background(), ffprobe, "a.mkv", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Errors != tc.errors || got.ReadFaults != tc.faults {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+// A stream with no presentation times (AVI, raw streams) is placed by its
+// decode times, and one with neither measures nothing; a clock that restarts
+// is reported, a few frames of reordering is not.
+func TestScanDemuxDamagePlacesPacketsByTheTimesTheyCarry(t *testing.T) {
+	for name, tc := range map[string]struct {
+		packets       string
+		seconds       float64
+		discontinuous bool
+	}{
+		"decode times only":         {"packet|dts_time=0.000000|duration_time=0.040000\npacket|dts_time=59.960000|duration_time=0.040000\n", 60, false},
+		"presentation not set":      {"packet|pts_time=N/A|dts_time=1.000000|duration_time=0.500000\npacket|pts_time=N/A|dts_time=3.000000|duration_time=0.500000\n", 2.5, false},
+		"no times at all":           {"packet|size=100\npacket|size=100\n", 0, false},
+		"reordered by a few frames": {"packet|pts_time=0.083000|duration_time=0.041000\npacket|pts_time=0.000000|duration_time=0.041000\npacket|pts_time=0.166000|duration_time=0.041000\n", 0.207, false},
+		"a clock that restarts":     {"packet|pts_time=0.000000|duration_time=1.000000\npacket|pts_time=100.000000|duration_time=1.000000\npacket|pts_time=5.000000|duration_time=1.000000\n", 101, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ffprobe := fakePacketProbe(t, "cat <<'OUT'\n"+tc.packets+"format|format_name=avi\nOUT\n")
+			got, err := ScanDemuxDamage(context.Background(), ffprobe, "a.avi", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := got.Seconds - tc.seconds; d > 0.001 || d < -0.001 || got.Discontinuous != tc.discontinuous {
+				t.Fatalf("got %+v, want %v seconds, discontinuous %v", got, tc.seconds, tc.discontinuous)
+			}
+		})
+	}
+}
+
 // The seconds read run from the earliest packet to the end of the latest, in
 // whatever order the packets are stored.
 func TestScanDemuxDamageMeasuresWhatItRead(t *testing.T) {

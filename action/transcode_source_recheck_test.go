@@ -110,6 +110,14 @@ func TestWorkerDamageReportStandsUnlessTheCoordinatorReadsTheFileCleanAndWhole(t
 		// which says nothing about the bytes.
 		{name: "the read failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "unchecked"},
 		{name: "the file ends in the middle of an element", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] File ended prematurely at pos. 4021 (0xfb5)\n", verdict: "damaged"},
+		// What a run printed before its read failed may be that failure's aftermath.
+		{name: "damage and a failed read in one run", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] EBML header parsing failed\n[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "unchecked"},
+		{name: "a file whose packets carry decode times only", stdout: "packet|dts_time=0.000000|duration_time=0.040000\npacket|dts_time=59.960000|duration_time=0.040000\nformat|format_name=avi\n", verdict: "intact"},
+		{name: "a clock that restarts", stdout: "packet|pts_time=0.000000|duration_time=1.000000\npacket|pts_time=100.000000|duration_time=1.000000\npacket|pts_time=5.000000|duration_time=1.000000\nformat|format_name=matroska,webm\n", verdict: "unchecked"},
+		// Under two seconds the coverage slack alone would pass a read of nothing.
+		{name: "a short video whose packets carry no times", stdout: "packet|size=100\nformat|format_name=matroska,webm\n", mutate: func(f *recheckFixture) { f.original()["video_seconds"] = 1.5 }, verdict: "unchecked"},
+		// With only a size recorded, the read's own before and after tell a rewrite.
+		{name: "rewritten to the same length while it is read", stdout: cleanScan, extra: `touch -t 200101010000 $FILE`, mutate: func(f *recheckFixture) { delete(f.ec.State, "original_stat") }, verdict: "unchecked"},
 		// A line that is not damage by the worker's test is still no proof of a whole read.
 		{name: "a message the check cannot rule out", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Seek failed\n", verdict: "unchecked"},
 		{name: "the read ended early without a word", stdout: "packet|pts_time=0.000000|duration_time=0.040000\npacket|pts_time=29.960000|duration_time=0.040000\nformat|format_name=matroska,webm\n", verdict: "unchecked"},
@@ -300,23 +308,44 @@ func TestWaitStepLeavesAnEncodeThatHitCorruptInputBlamed(t *testing.T) {
 // Running the job again: a worker that still says damaged is overruled only by
 // the coordinator's own whole, clean read of that same job's file.
 func TestManualRetryFollowsTheCoordinatorsRead(t *testing.T) {
+	// readClean is the verdict of a read of the fixture's file, which reads clean.
+	readClean := func(f *recheckFixture) map[string]any {
+		if _, _, overturned := f.e.recheckDamagedSource(context.Background(), f.ec, workerDamageReport); !overturned {
+			t.Fatalf("the fixture's file did not read clean: %v", f.ec.State[sourceRecheckKey])
+		}
+		record, _ := f.ec.State[sourceRecheckKey].(map[string]any)
+		return record
+	}
+	verdictOf := func(job, verdict string) func(*recheckFixture) map[string]any {
+		return func(*recheckFixture) map[string]any { return map[string]any{"job_id": job, "verdict": verdict} }
+	}
+	later := time.Now().Add(time.Hour)
 	for _, tc := range []struct {
-		name      string
-		record    map[string]any
-		changed   bool // the file is no longer the one the verdict read
+		name string
+		// record is the verdict kept for the job.
+		record func(f *recheckFixture) map[string]any
+		// changed is what happens to the file after the verdict.
+		changed   func(path string) error
 		wantRetry bool
+		blocked   string // the class a refusal names
 	}{
-		{"read clean", map[string]any{"job_id": "job-old", "verdict": "intact"}, false, true},
-		{"read clean, then the file changed", map[string]any{"job_id": "job-old", "verdict": "intact"}, true, false},
-		{"read damaged", map[string]any{"job_id": "job-old", "verdict": "damaged"}, false, false},
-		{"read could not judge", map[string]any{"job_id": "job-old", "verdict": "unchecked"}, false, false},
-		{"another job's verdict", map[string]any{"job_id": "job-older", "verdict": "intact"}, false, false},
-		{"never read", nil, false, false},
+		{"read clean", readClean, nil, true, ""},
+		{"read clean, then the file grew", readClean, func(p string) error { return os.WriteFile(p, make([]byte, 65), 0o600) }, false, "source_changed"},
+		{"read clean, then touched at the same length", readClean, func(p string) error { return os.Chtimes(p, later, later) }, false, "source_changed"},
+		{"read damaged", verdictOf("job-old", "damaged"), nil, false, "ffmpeg_input_corrupt"},
+		{"read could not judge", verdictOf("job-old", "unchecked"), nil, false, "ffmpeg_input_corrupt"},
+		{"another job's verdict", verdictOf("job-older", "intact"), nil, false, "ffmpeg_input_corrupt"},
+		{"never read", nil, nil, false, "ffmpeg_input_corrupt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRecheckFixture(t, cleanScan, "", 0, "")
-			if tc.changed {
-				if err := os.WriteFile(f.path, make([]byte, 65), 0o600); err != nil {
+			f.ec.State["job_id"] = "job-old"
+			var record map[string]any
+			if tc.record != nil {
+				record = tc.record(f)
+			}
+			if tc.changed != nil {
+				if err := tc.changed(f.path); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -333,8 +362,8 @@ func TestManualRetryFollowsTheCoordinatorsRead(t *testing.T) {
 				ec.State[key] = f.ec.State[key]
 			}
 			ec.State["job_id"] = "job-old"
-			if tc.record != nil {
-				ec.State[sourceRecheckKey] = tc.record
+			if record != nil {
+				ec.State[sourceRecheckKey] = record
 			}
 			inst := store.ActionInstance{ID: ec.InstanceID, ActionName: "transcode_media", Status: StatusFailed, CurrentStep: 2, StateJSON: toJSON(ec.State)}
 			if err := st.CreateActionInstance(inst); err != nil {
@@ -351,7 +380,7 @@ func TestManualRetryFollowsTheCoordinatorsRead(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "retry blocked") || resume != 2 {
+			if err == nil || !strings.Contains(err.Error(), "retry blocked for "+tc.blocked) || resume != 2 {
 				t.Fatalf("retry allowed for a file nobody cleared: resume=%d err=%v", resume, err)
 			}
 		})

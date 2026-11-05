@@ -95,6 +95,9 @@ func failureCause(r operationRecord) *conversionCause {
 		return c.numbers(predicted, minimum, "percent")
 	case strings.Contains(text, "transcode candidate rejected by user decision"):
 		c.Summary = "The new file was rejected by decision; original kept"
+	case recheckOffered(r):
+		// Not a file to replace yet: Retry reads it here first.
+		c.Kind, c.Summary = "worker_reported_damage", "The worker reported the file as damaged; Navigatorr has not confirmed it"
 	case action.SourceDamaged(text):
 		c.Kind, c.Summary = "file_damaged", "File damaged: ffmpeg found broken data while reading it"
 		if strings.Contains(lower, "moov atom not found") {
