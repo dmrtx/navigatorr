@@ -45,8 +45,8 @@ func (s sourceVideoScan) Seconds() float64 {
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
-// 27835247", "pos: 1234").
-var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?[: ]+(\d+)`)
+// 27835247", "pos: 1234", "Read error at pos. 4021").
+var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?\.?[: ]+(\d+)`)
 
 // packetDamagePattern is what a demuxer error says when the bytes it reads
 // are damaged. It is shared with the coordinator, which reads a file this scan

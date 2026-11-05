@@ -106,7 +106,9 @@ func TestWorkerDamageReportStandsUnlessTheCoordinatorReadsTheFileCleanAndWhole(t
 		{name: "the file changes while it is read", stdout: cleanScan, extra: `printf x >> $FILE`, verdict: "unchecked"},
 		{name: "nothing to read", stdout: "format|format_name=matroska,webm\n", verdict: "unchecked"},
 		// ffprobe takes a read error for the end of the file and exits 0.
-		{name: "the read failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "unchecked"},
+		{name: "the read failed part way", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Read error at pos. 4021 (0xfb5)\n", verdict: "damaged"},
+		// A line that is not damage by the worker's test is still no proof of a whole read.
+		{name: "a message the check cannot rule out", stdout: cleanScan, stderr: "[matroska,webm @ 0x7f] Seek failed\n", verdict: "unchecked"},
 		{name: "the read ended early without a word", stdout: "packet|pts_time=0.000000|duration_time=0.040000\npacket|pts_time=29.960000|duration_time=0.040000\nformat|format_name=matroska,webm\n", verdict: "unchecked"},
 		{name: "the video's length was never measured", stdout: cleanScan, mutate: func(f *recheckFixture) { delete(f.original(), "video_seconds") }, verdict: "unchecked"},
 		{name: "the file is not the one the job started with", stdout: cleanScan, mutate: func(f *recheckFixture) {

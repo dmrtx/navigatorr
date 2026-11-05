@@ -37,9 +37,9 @@ func TestScanDemuxDamageSortsWhatTheDemuxerSaid(t *testing.T) {
 		"another context":            {"[h264 @ 0x2] corrupt decoded frame\n", 0, "", 0, ""},
 		"metadata the demuxer skips": {"[matroska,webm @ 0x1] Unknown-sized element in the chapters\n", 0, "", 1, "[matroska,webm] Unknown-sized element in the chapters"},
 		// ffprobe takes a read error for the end of the file and exits 0.
-		"a read that failed":          {"[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 0, "", 1, "[matroska,webm] Read error at pos. 4021 (0xfb5)"},
+		"a read that failed":          {"[matroska,webm @ 0x1] Read error at pos. 4021 (0xfb5)\n", 1, "[matroska,webm] Read error at pos. 4021 (0xfb5)", 0, ""},
 		"a line of no context":        {"Input/output error\n", 0, "", 1, "Input/output error"},
-		"last line without a newline": {"[matroska,webm @ 0x1] Read error at pos. 99", 0, "", 1, "[matroska,webm] Read error at pos. 99"},
+		"last line without a newline": {"[matroska,webm @ 0x1] Seek failed", 0, "", 1, "[matroska,webm] Seek failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			ffprobe := fakePacketProbe(t, "cat <<'OUT'\n"+scanPackets+"OUT\nprintf '%s' '"+tc.stderr+"' >&2\n")

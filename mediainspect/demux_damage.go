@@ -19,7 +19,7 @@ import (
 // the stream and are not damage. The worker's source scan and the
 // coordinator's re-read of a file the worker called damaged both use it, so
 // the two cannot disagree about what damage is.
-var PacketDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?[: ]+\d+|EBML|corrupt|partial file|truncated`)
+var PacketDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?\.?[: ]+\d+|EBML|corrupt|partial file|truncated`)
 
 // DemuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
 // its context name and text, dropping the context's address.
