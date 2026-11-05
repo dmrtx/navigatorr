@@ -141,8 +141,10 @@ func describeQualityFailure(code string, m QualityNumbers, l *QualityLimits) str
 		return fmt.Sprintf("VMAF p5 %s is below the minimum %s", value(m.VMAFP5), value(l.VMAFP5))
 	case "quality_vmaf_worst_window_below_minimum":
 		return fmt.Sprintf("VMAF worst %.0f-second window %s is below the minimum %s", l.WorstWindowSeconds, value(m.VMAFWorstWindow), value(l.VMAFWorstWindow))
-	case "sample_below_minimum_quality", "below_minimum_quality":
+	case "quality_vmaf_mean_below_minimum", "sample_below_minimum_quality", "below_minimum_quality":
 		return fmt.Sprintf("VMAF mean %s is below the minimum %s", value(m.VMAFMean), value(l.VMAFMean))
+	case "quality_vmaf_sample_below_minimum":
+		return fmt.Sprintf("a scored window's VMAF mean is below the minimum %s", value(l.VMAFMean))
 	case "quality_ssim_mean_below_minimum":
 		return fmt.Sprintf("SSIM mean %s is below the minimum", value(m.SSIMMean))
 	case "quality_vmaf_frames_below_limit_exceeded":
