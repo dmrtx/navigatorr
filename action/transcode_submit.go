@@ -98,12 +98,18 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if (plan.X265 != nil || plan.AudioMode == "he_aac") && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil || (plan.X265 != nil && !caps.X265TwoPass) || (plan.AudioMode == "he_aac" && !caps.HEAACAudio) {
 			return StepResult{Status: StepFailed, Error: "worker does not support the explicit x265/HE-AAC experiment; upgrade before encoding"}, nil
 		}
 	}
 	if plan.AudioMode == transcode.AudioModeCompactLossless && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking lossless audio capability: %v", err)}, nil
 		}
@@ -113,6 +119,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if transcode.IsAudioLevelMode(plan.AudioMode) && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking audio level capability: %v", err)}, nil
 		}
@@ -128,6 +137,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if plan.Tracks != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking track selection capability: %v", err)}, nil
 		}
@@ -137,6 +149,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if transcode.IsSizeAudioOnlyPlan(plan) && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking audio-only capability: %v", err)}, nil
 		}
@@ -149,6 +164,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if plan.AudioMode == "compact" && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact audio capability: %v", err)}, nil
 		}
@@ -161,6 +179,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 	if plan.Compact != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
 		if err != nil {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking compact capability: %v", err)}, nil
 		}
@@ -780,6 +801,21 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if class == "" {
 			class = string(resilience.Classify(msg))
 		}
+		if recheckable(msg) {
+			// The worker's read of the file is not the file: read it here
+			// before leaving the job blamed on bytes that may be fine.
+			c, m, overturned := e.recheckDamagedSource(ctx, ec, msg)
+			if err := ctx.Err(); err != nil && !overturned {
+				// A read cut short judged nothing; the failure is recorded
+				// when the step runs again.
+				return StepResult{}, err
+			}
+			if overturned {
+				// What the worker said stays in the history, whole.
+				appendFailureHistory(ec, "worker", class, msg)
+				class, msg = c, m
+			}
+		}
 		ec.State["failure_classification"] = class
 		appendFailureHistory(ec, "worker", class, msg)
 		// Worker StatusFailed is always terminal: never coordinator retry/wait.
@@ -838,4 +874,21 @@ func adoptShortenedCandidate(ec *ExecutionContext, jobID, reported string) {
 	}
 	ec.State["candidate_path"] = reported
 	ec.State["output_path"] = reported
+}
+
+// capabilityReadDeferred turns a capability read that could not reach the
+// worker into a wait. The read changes nothing on the worker and nothing has
+// been submitted yet, so a daemon that is restarting (connection refused for a
+// few seconds) is not a reason to fail the action: the same step runs again
+// when the reconciler next polls. A definitive answer (an HTTP error, an
+// unsupported protocol, a failed fingerprint) is not deferred and still fails.
+func capabilityReadDeferred(err error) (StepResult, bool) {
+	if err == nil || !httpclient.IsTransportUncertain(err) {
+		return StepResult{}, false
+	}
+	return StepResult{
+		Status:           StepWaitingExternal,
+		WaitingCondition: "worker_unreachable",
+		WaitingReason:    fmt.Sprintf("Worker capabilities could not be read (%v); nothing was submitted, retrying when the worker answers", err),
+	}, true
 }

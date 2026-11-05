@@ -88,8 +88,13 @@ type promotionState struct {
 	NewPath                           string                       `json:"new_path,omitempty"`
 	Commands                          map[string]*promotionCommand `json:"commands,omitempty"`
 	DeleteSentAt                      string                       `json:"delete_sent_at,omitempty"`
-	OldRemoved                        bool                         `json:"old_removed"`
-	RecoveryCleanupStarted            bool                         `json:"recovery_cleanup_started,omitempty"`
+	// PublishedAt is stamped once, when the replacement is final. Unlike the
+	// row's updated_at it does not move when the completed promotion is saved
+	// again (discarding its recovery copy, say); promotions from before it
+	// existed have none.
+	PublishedAt            string `json:"published_at,omitempty"`
+	OldRemoved             bool   `json:"old_removed"`
+	RecoveryCleanupStarted bool   `json:"recovery_cleanup_started,omitempty"`
 	// Persisted with RecoveryCleanupStarted, before cleanup.truncate_before_delete
 	// empties the verified recovery copy: a resumed cleanup that finds the
 	// copy empty finishes the unlink instead of verifying it again.

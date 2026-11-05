@@ -50,6 +50,9 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
+	// lifecycle is the service's context, known once StartReconciler runs: work
+	// that outlives the request that asked for it still ends with the service.
+	lifecycle atomic.Pointer[context.Context]
 	// hashSlots bounds whole-file hashes of NAS media across every caller, so
 	// parallel continuations never saturate the share the worker reads from.
 	hashSlots chan struct{}
@@ -446,8 +449,22 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required for action engine")
 	}
-
-	ctx, release, err := e.claimExecution(ctx, instanceID, true)
+	// A retry that reads a file the worker called damaged runs to its end: the
+	// read can outlast the client that asked for it, and a read thrown away on
+	// its timeout would be made again, and thrown away again, by the next ask.
+	// The service's shutdown and the loss of the lease still end it, and a retry
+	// that waits for a busy lease waits only as long as its client does.
+	var (
+		release func()
+		err     error
+	)
+	if peek, perr := e.deps.Store.GetActionInstance(instanceID); perr == nil && peek != nil && peek.ActionName == "transcode_media" && SourceDamaged(peek.ErrorJSON) && recheckable(storedFailureText(peek.ErrorJSON)) {
+		run, stop := e.outlivingRequest(ctx)
+		defer stop()
+		ctx, release, err = e.claimWhileAsked(run, ctx, instanceID)
+	} else {
+		ctx, release, err = e.claimExecution(ctx, instanceID, true)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -473,11 +490,6 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if removedSearchAction(inst, parseExecutionContext(inst, e)) {
 		return nil, errors.New(removedSearchMessage)
 	}
-	// A damaged file fails the same way every time; it is replaced first.
-	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
-		return nil, errors.New("this file is damaged, so running it again fails the same way; replace the file, then choose a goal for it")
-	}
-
 	tmpl, ok := e.GetTemplate(inst.ActionName)
 	if !ok {
 		return nil, fmt.Errorf("unknown action template: %s", inst.ActionName)
@@ -493,6 +505,15 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if inst.ActionName == "transcode_media" && getBool(ec.State, candidateRemovedKey) {
 		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
+	}
+	// A damaged file fails the same way every time; it is replaced first. A
+	// worker's report of it is read again here, after the checks that would
+	// refuse the retry anyway (the read can take minutes), because the same
+	// bytes can read cleanly from the NAS.
+	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
+		if err := e.recheckOnRetry(ctx, inst, ec); err != nil {
+			return nil, err
+		}
 	}
 	if err := e.batchPromotionRetryOwner(inst, ec, tmpl); err != nil {
 		return nil, err

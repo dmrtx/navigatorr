@@ -131,10 +131,15 @@ func TestPacketDamagePatternIgnoresHeaderNoise(t *testing.T) {
 		"Length 9 indicated by an EBML number's first byte 0x01 at pos 1 exceeds max length 8.",
 		"Packet corrupt (stream = 0, dts = 1234)",
 		"stream 0, offset 0x1a8bb6f: partial file",
+		// A file that ends in the middle of an element.
+		"File ended prematurely at pos. 4021 (0xfb5)",
 	} {
 		if !packetDamagePattern.MatchString(text) {
 			t.Errorf("damage not recognised: %q", text)
 		}
+	}
+	if m := errorBytePattern.FindStringSubmatch("File ended prematurely at pos. 4021 (0xfb5)"); m == nil || m[1] != "4021" {
+		t.Errorf("byte offset of a truncated file not found: %v", m)
 	}
 	for _, text := range []string{
 		"Referenced QT chapter track not found",

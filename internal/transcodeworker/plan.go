@@ -25,6 +25,9 @@ type SourceStream struct {
 	Layout      string         `json:"channel_layout,omitempty"`
 	Disposition map[string]int `json:"disposition,omitempty"`
 	StartTime   *float64       `json:"start_time,omitempty"`
+	// SampleRate is an audio track's rate in Hz (zero when the probe states
+	// none). AudioToolbox's AAC encoder cannot open above 48 kHz.
+	SampleRate int `json:"sample_rate,omitempty"`
 	// BitrateKbps is an audio track's source bitrate (zero when the probe
 	// states none), which the size goal's audio levels read.
 	BitrateKbps int `json:"bitrate_kbps,omitempty"`
@@ -103,6 +106,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			BitsPerSample    any               `json:"bits_per_sample"`
 			Channels         int               `json:"channels"`
 			ChannelLayout    string            `json:"channel_layout"`
+			SampleRate       string            `json:"sample_rate"`
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
 			StartTime        string            `json:"start_time"`
@@ -151,8 +155,10 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if kind == "audio" {
 			bitrateKbps = transcode.SourceAudioKbps(mediainspect.ParseBitRate(st.BitRate, st.Tags), st.Tags, duration)
 		}
+		sampleRate, _ := strconv.Atoi(strings.TrimSpace(st.SampleRate))
 		out = append(out, SourceStream{
-			Index: st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
+			SampleRate: sampleRate,
+			Index:      st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
@@ -228,6 +234,8 @@ type StreamAction struct {
 	Handler  string `json:"handler,omitempty"`
 	Channels int    `json:"channels,omitempty"`
 	Layout   string `json:"channel_layout,omitempty"`
+	// SampleRate is the source track's rate in Hz when the probe stated it.
+	SampleRate int `json:"sample_rate,omitempty"`
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
@@ -373,7 +381,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 			if plan.Tracks != nil {
 				disposition, seenKept[s.Index] = kept[s.Index], true
 			}
-			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, StatisticsTags: s.StatisticsTags})
+			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, SampleRate: s.SampleRate, StatisticsTags: s.StatisticsTags})
 			outAudio++
 			if target != "copy" {
 				reason := fmt.Sprintf("%s audio requested; AAC at %d kbps, preserving channels and language (lossy)", plan.AudioMode, bitrate)

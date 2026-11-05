@@ -49,6 +49,15 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		if class == "" {
 			class = string(resilience.Classify(st.Error))
 		}
+		if class == string(resilience.FFmpegInputCorrupt) && coordinatorFoundSourceIntact(ec.State, jobID) {
+			// The worker still says damaged; the coordinator read the file
+			// whole and clean, so what failed was the worker's read.
+			class = string(resilience.WorkerSourceReadFault)
+		} else if class == string(resilience.FFmpegInputCorrupt) && verdictFileChanged(ec.State, jobID) {
+			// Read clean once; the file is not the one that was read. The worker's
+			// class is no longer about this file, and neither is the clean read.
+			class = string(resilience.SourceChanged)
+		}
 		if err := rejectUnchangedPermanentRetry(class); err != nil {
 			return resume, err
 		}
@@ -62,7 +71,7 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		}
 		retry := getInt(ec.State, "manual_retry_count") + 1
 		appendFailureHistory(ec, "manual_retry", class, fmt.Sprintf("confirmed terminal worker job %s; allocating attempt %d", jobID, retry))
-		for _, key := range []string{"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status", "transcode_phase", "candidate_path", "output_path", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms", "next_poll_at", "retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, transcodeRejectedKey, "validation", "result", "original_intact", "original_integrity", "original_integrity_check", originalDigestConflictKey, "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at", "failure_classification", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms", "worker_wall_duration_ms", candidateLocationKey, publishPolicyKey, publishPolicyFallbackKey, publishRetentionWaitKey, candidateRetainedAtKey, candidateRetainedUntilKey} {
+		for _, key := range []string{"recovery_required", "worker_error", "finalization_retry_count", "next_finalization_at", "transcode_submitted", "transcode_reconcile", "transcode_done", "transcode_status", "transcode_phase", "candidate_path", "output_path", "idempotency_key", "worker_completed_at", "reconciled_at", "reconcile_lag_ms", "next_poll_at", "retry_not_before", workerBusyNotBeforeKey, "worker_busy", slotWaitLogKey, workerSlotWaitSinceKey, workerSlotPositionKey, workerSlotPolledAtKey, transcodeRejectedKey, "validation", "result", "original_intact", "original_integrity", "original_integrity_check", originalDigestConflictKey, "progress", "speed", "fps", "last_known_progress", "last_progress_at", "worker_heartbeat_at", "failure_classification", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms", "worker_wall_duration_ms", sourceRecheckKey, candidateLocationKey, publishPolicyKey, publishPolicyFallbackKey, publishRetentionWaitKey, candidateRetainedAtKey, candidateRetainedUntilKey} {
 			delete(ec.State, key)
 			delete(ec.Outputs, key)
 		}

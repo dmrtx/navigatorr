@@ -19,6 +19,14 @@ func failedFileJob(r operationRecord) bool {
 		!strings.Contains(r.inst.ErrorJSON, "transcode candidate rejected by user decision") && !savingsFailurePattern.MatchString(r.inst.ErrorJSON)
 }
 
+// recheckOffered is whether the worker's report of a damaged file is still
+// open to Retry's read. A file of a batch is not: the batch runs it again by
+// skipping a file blamed this way, and a batch file has no Retry of its own on
+// the page.
+func recheckOffered(r operationRecord) bool {
+	return action.CanRecheckSource(r.inst.ErrorJSON, r.state) && operationString(r.inputs["parent_action_id"]) == ""
+}
+
 // failureText is the job's stored error message.
 func failureText(r operationRecord) string {
 	text := strings.TrimSpace(r.inst.ErrorJSON)
@@ -80,6 +88,12 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 	class := failureClass(r, text)
 	chooseGoal := nextStep{ID: "tracks", Label: "Choose a goal", Detail: "Start a goal for the file as it is now."}
 	switch {
+	// The worker's scan blamed the file and Navigatorr has not found it damaged
+	// itself: Retry reads the file here first.
+	case recheckOffered(r):
+		e.Happened = "The worker reported the file as damaged: its own scan of the video found errors in the container. Navigatorr has not confirmed it."
+		e.Learned = []string{"The worker reads the file through its own copy or network path, which can fail where a read here does not. Retry reads the file here first: if it reads whole and clean, the job runs again; if it is damaged here too, nothing runs and Retry says what the read found."}
+		return e, "", nil
 	case action.SourceDamaged(text):
 		why := "ffmpeg found broken data while reading it"
 		if strings.Contains(lower, "moov atom not found") {
@@ -88,6 +102,10 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 		e.Happened = fmt.Sprintf("The file itself is damaged: %s.", why)
 		e.Learned = []string{"Every run of this file fails the same way. Replace it, for example by downloading it again, then choose a goal for the new file."}
 		return e, "This file is damaged; running it again fails the same way.", []nextStep{{ID: "tracks", Label: "Choose a goal", Detail: "Once the file is replaced, start a goal for the new one."}}
+	case class == string(resilience.WorkerSourceReadFault):
+		e.Happened = "The worker reported the file as damaged, but Navigatorr read the same file end to end and found nothing wrong: the worker's own read of it failed."
+		e.Learned = []string{"The file is fine. Running it again is safe, and can pass if the worker reads it correctly this time; if it keeps failing on one worker, that worker's copy or network path needs a look."}
+		return e, "", nil
 	case strings.Contains(text, "choosing the tracks to keep"):
 		_, detail, _ := strings.Cut(text, "choosing the tracks to keep: ")
 		e.Happened = shortTrackMismatch(detail)

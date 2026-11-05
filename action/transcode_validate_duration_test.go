@@ -62,8 +62,8 @@ func TestPromotionValidationRefusesTruncatedAudio(t *testing.T) {
 	}{
 		{"every track full length", packetLine(1, 0, duration) + packetLine(2, 0, duration), StepCompleted, ""},
 		{"within the container tolerance", packetLine(1, 0, duration) + packetLine(2, 0, duration-20), StepCompleted, ""},
-		{"second track stops early", packetLine(1, 0, duration) + packetLine(2, 0, 600), StepWaitingDecision, "Audio truncated at stream 1: original runs 1420.0s, the track's packets cover 600.0s (820.0s short)"},
-		{"first track stops early", packetLine(1, 0, 900) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short)"},
+		{"second track stops early", packetLine(1, 0, duration) + packetLine(2, 0, 600), StepWaitingDecision, "Audio truncated at stream 1: original runs 1420.0s, the track's packets cover 600.0s (820.0s short); the source track itself covers 1420.0s"},
+		{"first track stops early", packetLine(1, 0, 900) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short); the source track itself covers 1420.0s"},
 		{"a track with no packets", packetLine(1, 0, duration), StepWaitingDecision, "Audio stream 1 has no measurable packets"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,6 +116,16 @@ func packetLine(stream int, start, length float64) string {
 // ffprobe prints packets, or runs packetScript in place of the scan.
 func validateWithPackets(t *testing.T, packets, packetScript string) (StepResult, *ExecutionContext) {
 	t.Helper()
+	return validateWithSourcePackets(t, packets, packetScript, packetLine(1, 0, 1420)+packetLine(2, 0, 1420))
+}
+
+// sourceScanFails makes the fake ffprobe fail when it is asked about the original.
+const sourceScanFails = "<scan fails>"
+
+// validateWithSourcePackets is validateWithPackets with the packets the fake
+// ffprobe prints when asked about the original file instead of the candidate.
+func validateWithSourcePackets(t *testing.T, packets, packetScript, sourcePackets string) (StepResult, *ExecutionContext) {
+	t.Helper()
 	const duration = 1420
 	dir := t.TempDir()
 	candidate := filepath.Join(dir, "candidate.mkv")
@@ -131,7 +141,12 @@ func validateWithPackets(t *testing.T, packets, packetScript string) (StepResult
 		body = packetScript
 	}
 	ffprobe := filepath.Join(dir, "ffprobe")
-	script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) " + body + ";; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
+	original := filepath.Join(dir, "original.mkv")
+	sourceBody := "cat <<'SOURCE'\n" + sourcePackets + "SOURCE\nexit 0"
+	if sourcePackets == sourceScanFails {
+		sourceBody = "echo 'read error' >&2\nexit 1"
+	}
+	script := "#!/bin/sh\ncase \"$*\" in *-show_packets*) case \"$*\" in *original.mkv*) " + sourceBody + ";; esac\n" + body + ";; esac\ncat <<'JSON'\n" + probe + "\nJSON\n"
 	if err := os.WriteFile(ffprobe, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +154,7 @@ func validateWithPackets(t *testing.T, packets, packetScript string) (StepResult
 	ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
 		"candidate_path": candidate,
 		"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy"},
-		"original": map[string]any{"size_bytes": int64(1 << 30), "duration_sec": float64(duration),
+		"original": map[string]any{"path": original, "size_bytes": int64(1 << 30), "duration_sec": float64(duration),
 			"video": []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8}},
 			"audio": []mediainspect.DetailedStream{
 				{Index: 1, Kind: "audio", Codec: "eac3", Channels: 6, ChannelLayout: "5.1(side)", Language: "eng"},
@@ -195,7 +210,7 @@ func TestPromotionValidationRefusesRealTruncatedAudio(t *testing.T) {
 		ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
 			"candidate_path": candidate,
 			"plan":           &transcode.Plan{VideoCodec: "h264_videotoolbox", AudioMode: "copy"},
-			"original":       map[string]any{"size_bytes": srcRep.SizeBytes * 2, "duration_sec": srcRep.DurationSec, "video": srcRep.Video, "audio": srcRep.Audio},
+			"original":       map[string]any{"path": source, "size_bytes": srcRep.SizeBytes * 2, "duration_sec": srcRep.DurationSec, "video": srcRep.Video, "audio": srcRep.Audio},
 		}}
 		result, err := e.validateCandidateDetailed(ctx, ec)
 		if err != nil {
@@ -209,5 +224,45 @@ func TestPromotionValidationRefusesRealTruncatedAudio(t *testing.T) {
 	r := validate(short)
 	if r.Status != StepWaitingDecision || !strings.HasPrefix(r.WaitingReason, "Audio truncated at stream 0: ") {
 		t.Fatalf("truncated candidate: %s (%s%s)", r.Status, r.Error, r.WaitingReason)
+	}
+}
+
+// Some releases carry audio that stops minutes before the video. A faithful
+// candidate of such a track is as short as its source, and the container's
+// duration cannot say it is truncated; the source track's own packets can.
+func TestPromotionValidationComparesShortAudioWithTheSourceTrack(t *testing.T) {
+	restore := mediainspect.SetAudioPacketStallTimeoutForTest(300 * time.Millisecond)
+	defer restore()
+	const duration = 1420
+	for _, tc := range []struct {
+		name, candidate, source string
+		want                    StepStatus
+		reason                  string
+	}{
+		{"source track is as short as the candidate", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
+		{"candidate lost more than the source track lacked", packetLine(1, 0, 900) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short); the source track itself covers 1226.0s"},
+		{"source track full length, candidate short", packetLine(1, 0, 1000) + packetLine(2, 0, duration), packetLine(1, 0, duration) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1000.0s (420.0s short); the source track itself covers 1420.0s"},
+		{"candidate track shifted later by as much as it is long", packetLine(1, 100, 1200) + packetLine(2, 0, duration), packetLine(1, 0, 1200) + packetLine(2, 0, duration), StepWaitingDecision, "Audio out of place at stream 0: the source track runs 0.0s-1200.0s but the candidate's runs 100.0s-1300.0s"},
+		{"candidate lost the start of a short source track", packetLine(1, 100, 1126) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1126.0s (294.0s short); the source track itself covers 1226.0s"},
+		{"start within tolerance still matches", packetLine(1, 0.3, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
+		{"source that starts late in its own timeline", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 1.4, 1226) + packetLine(2, 1.4, duration), StepCompleted, ""},
+		{"source read fails: the candidate is not measured, not truncated", packetLine(1, 0, 1226) + packetLine(2, 0, duration), sourceScanFails, StepWaitingDecision, "Audio source track not measured at stream 0 ("},
+		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio source track not measured at stream 0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, ec := validateWithSourcePackets(t, tc.candidate, "", tc.source)
+			if result.Status != tc.want || (tc.reason != "" && !strings.HasPrefix(result.WaitingReason, tc.reason)) {
+				t.Fatalf("status %s reason %q (%s), want %s %q", result.Status, result.WaitingReason, result.Error, tc.want, tc.reason)
+			}
+			if tc.want != StepCompleted {
+				return
+			}
+			if v, _ := ec.State["validation"].(map[string]any); v["audio_duration"] != "matches_source_track" {
+				t.Fatalf("validation %v", v)
+			}
+			if got := stateStrings(ec.State["audio_shorter_than_container"]); len(got) != 1 {
+				t.Fatalf("the shortfall must be recorded: %v", ec.State["audio_shorter_than_container"])
+			}
+		})
 	}
 }

@@ -267,6 +267,12 @@ type HTTPConfig struct {
 	// SubmitTimeout bounds Submit POSTs. Zero selects
 	// DefaultHTTPSubmitTimeout.
 	SubmitTimeout time.Duration
+	// ReadRetryDelays are the pauses before each retry of a read-only request
+	// (Capabilities) that failed at the transport: connection refused while the
+	// daemon restarts, a reset, a timeout. Nil selects DefaultReadRetryDelays;
+	// an empty non-nil slice disables retries. Only reads are retried: a
+	// mutation whose acknowledgement was lost is reconciled by job identity.
+	ReadRetryDelays []time.Duration
 	// PathMappings translates local<->remote paths with longest-prefix
 	// matching; translation fails closed when no mapping matches.
 	PathMappings []transcode.PathMapping
@@ -277,6 +283,11 @@ type HTTPConfig struct {
 	// construction always disables redirects.
 	HTTPClient *http.Client
 }
+
+// DefaultReadRetryDelays bounds the in-call retries of a read-only request:
+// two more attempts within about a second. A longer outage is the caller's to
+// wait out; an unreachable worker must not hold a request open for minutes.
+var DefaultReadRetryDelays = []time.Duration{250 * time.Millisecond, 750 * time.Millisecond}
 
 // HTTPExecutorOption customizes an HTTPExecutor (tests).
 type HTTPExecutorOption func(*HTTPExecutor)
@@ -726,18 +737,44 @@ func (e *HTTPExecutor) Doctor(ctx context.Context) error {
 // fail-closed checks: protocol version match + fingerprint
 // verification. Capabilities are NEVER derived from /health.
 func (e *HTTPExecutor) Capabilities(ctx context.Context) (transcode.WorkerCapabilities, error) {
-	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
-	defer cancel()
-	req, err := e.newRequest(ctx, http.MethodGet, "/v1/capabilities", nil)
-	if err != nil {
-		return transcode.WorkerCapabilities{}, fmt.Errorf("building capabilities request: %w", err)
+	var req *http.Request
+	var data []byte
+	var code int
+	var hdr http.Header
+	delays := e.cfg.ReadRetryDelays
+	if delays == nil {
+		delays = DefaultReadRetryDelays
 	}
-	data, code, hdr, err := e.do(req, "capabilities", "", false)
-	if err != nil {
-		if isTransportFailure(err) {
+	for attempt := 0; ; attempt++ {
+		reqCtx, cancel := context.WithTimeout(ctx, e.reqTO)
+		var err error
+		req, err = e.newRequest(reqCtx, http.MethodGet, "/v1/capabilities", nil)
+		if err != nil {
+			cancel()
+			return transcode.WorkerCapabilities{}, fmt.Errorf("building capabilities request: %w", err)
+		}
+		data, code, hdr, err = e.do(req, "capabilities", "", false)
+		cancel()
+		if err == nil {
+			break
+		}
+		if !isTransportFailure(err) {
+			return transcode.WorkerCapabilities{}, fmt.Errorf("transcode http capabilities: %w", err)
+		}
+		// The read changes nothing on the worker, so repeating it is safe. The
+		// caller's own cancellation is never retried through.
+		// A worker that accepts the connection and then stays silent would turn
+		// every attempt into a full request timeout, so only a refused or reset
+		// connection is repeated.
+		var ne net.Error
+		if (errors.As(err, &ne) && ne.Timeout()) || errors.Is(err, context.DeadlineExceeded) || attempt >= len(delays) || ctx.Err() != nil {
 			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
 		}
-		return transcode.WorkerCapabilities{}, fmt.Errorf("transcode http capabilities: %w", err)
+		select {
+		case <-ctx.Done():
+			return transcode.WorkerCapabilities{}, e.failUncertain("capabilities", "", err)
+		case <-time.After(delays[attempt]):
+		}
 	}
 	if code != http.StatusOK {
 		return transcode.WorkerCapabilities{}, newHTTPError(req, code, data, hdr)

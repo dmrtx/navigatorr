@@ -95,11 +95,16 @@ func failureCause(r operationRecord) *conversionCause {
 		return c.numbers(predicted, minimum, "percent")
 	case strings.Contains(text, "transcode candidate rejected by user decision"):
 		c.Summary = "The new file was rejected by decision; original kept"
+	case recheckOffered(r):
+		// Not a file to replace yet: Retry reads it here first.
+		c.Kind, c.Summary = "worker_reported_damage", "The worker reported the file as damaged; Navigatorr has not confirmed it"
 	case action.SourceDamaged(text):
 		c.Kind, c.Summary = "file_damaged", "File damaged: ffmpeg found broken data while reading it"
 		if strings.Contains(lower, "moov atom not found") {
 			c.Summary = "File damaged: its MP4 index (moov atom) is missing"
 		}
+	case class == string(resilience.WorkerSourceReadFault):
+		c.Kind, c.Summary = "worker_read_fault", "The worker reported the file as damaged, but Navigatorr read it whole and it is intact"
 	case strings.Contains(text, "choosing the tracks to keep"):
 		c.Kind, c.Summary = "tracks_mismatch", "The tracks picked for this job are not in the file"
 	case class == string(resilience.Cancelled):

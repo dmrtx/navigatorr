@@ -67,7 +67,10 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	}
 	fi, err := os.Stat(cleanPath)
 	if err != nil {
-		return StepResult{Status: StepFailed, Error: fmt.Sprintf("file %q not accessible: %v", cleanPath, err)}, nil
+		return e.missingSourceResult(ec, cleanPath, err), nil
+	}
+	if res, replaced := e.replacedSince(ctx, ec, cleanPath, fi); replaced {
+		return res, nil
 	}
 	if fi.IsDir() {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("path %q is a directory, not a media file", cleanPath)}, nil
@@ -112,7 +115,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if modeSnapshot != nil {
 		sel, err := resolveTrackSelection(modeSnapshot, &rep)
 		if err != nil {
-			return StepResult{Status: StepFailed, Error: fmt.Sprintf("choosing the tracks to keep: %v", err)}, nil
+			return e.staleTrackPicksResult(ec, cleanPath, err), nil
 		}
 		if sel != nil {
 			trackSel, trackReport = sel, trackSelectionReport(modeSnapshot.Tracks, sel, &rep, fi.Size())

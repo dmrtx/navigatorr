@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
@@ -44,20 +45,18 @@ func (s sourceVideoScan) Seconds() float64 {
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
-// 27835247", "pos: 1234").
-var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?[: ]+(\d+)`)
+// 27835247", "pos: 1234", "File ended prematurely at pos. 4021").
+var errorBytePattern = regexp.MustCompile(`\bpos(?:ition)?\.?[: ]+(\d+)`)
 
 // packetDamagePattern is what a demuxer error says when the bytes it reads
-// are damaged. A demuxer also reports, at error level, header or metadata it
-// does not understand in files that play fine (a chapter track it cannot
-// find, a master element longer than its parent); those name no position in
-// the stream and are not damage.
-var packetDamagePattern = regexp.MustCompile(`(?i)\bpos(?:ition)?[: ]+\d+|EBML|corrupt|partial file|truncated`)
+// are damaged. It is shared with the coordinator, which reads a file this scan
+// called damaged again before the job is left blaming the file.
+var packetDamagePattern = mediainspect.PacketDamagePattern
 
 // timestampResetSeconds is how far a packet's timestamp may fall behind the
 // latest end seen before the timeline counts as restarted. Reordered
 // B-frames fall back by a fraction of a second.
-const timestampResetSeconds = 10.0
+const timestampResetSeconds = mediainspect.TimestampResetSeconds
 
 // scanSourceVideo reads every packet of stream streamIndex without decoding
 // it. Healthy files of every container the library holds read with no demuxer
@@ -127,23 +126,36 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		first string
 	}
 	byTag := map[string]*tagErrors{}
+	// readFaults are the demuxer's failed reads: the scan stopped where the
+	// read did, so it judged nothing about the file.
+	readFaults := map[string]*tagErrors{}
+	// A failed read is the file's no matter which context logged it, or none.
+	var untaggedFaults tagErrors
 	var stderrTail []string
 	stderr := &lineWriter{line: func(line string) {
 		tag, text, ok := demuxerTag(line)
 		if !ok {
+			if mediainspect.ReadFaultPattern.MatchString(line) {
+				if untaggedFaults.count++; untaggedFaults.count == 1 {
+					untaggedFaults.first = line
+				}
+			}
 			// The last lines: ffprobe ends with the reason it stopped.
 			if stderrTail = append(stderrTail, line); len(stderrTail) > 5 {
 				stderrTail = stderrTail[1:]
 			}
 			return
 		}
-		if !packetDamagePattern.MatchString(text) {
+		target := byTag
+		if mediainspect.ReadFaultPattern.MatchString(text) {
+			target = readFaults
+		} else if !packetDamagePattern.MatchString(text) {
 			return
 		}
-		e := byTag[tag]
+		e := target[tag]
 		if e == nil {
 			e = &tagErrors{first: "[" + tag + "] " + text}
-			byTag[tag] = e
+			target[tag] = e
 		}
 		e.count++
 	}}
@@ -162,6 +174,18 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	if formatName == "" {
 		return scan, errors.New("ffprobe video packet scan printed no format name")
 	}
+	faults := untaggedFaults
+	if e := readFaults[formatName]; e != nil {
+		if faults.count == 0 {
+			faults.first = e.first
+		}
+		faults.count += e.count
+	}
+	if faults.count > 0 {
+		// Not the file's damage, so not the permanent class: the read of it
+		// failed, and a retry reads it again.
+		return scan, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its video was fully scanned (%s); the scan judged nothing about the file", faults.count, truncateForLog(faults.first, 200))
+	}
 	if e := byTag[formatName]; e != nil {
 		scan.DemuxErrors, scan.FirstError = e.count, e.first
 		if m := errorBytePattern.FindStringSubmatch(e.first); m != nil {
@@ -174,16 +198,7 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 // demuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
 // its context name and text, dropping the context's address.
 func demuxerTag(line string) (tag, text string, ok bool) {
-	rest, found := strings.CutPrefix(line, "[")
-	if !found {
-		return "", "", false
-	}
-	inside, text, found := strings.Cut(rest, "]")
-	if !found {
-		return "", "", false
-	}
-	tag, _, _ = strings.Cut(inside, " @ ")
-	return tag, strings.TrimSpace(text), tag != ""
+	return mediainspect.DemuxerTag(line)
 }
 
 // damage is the job's failure when the demuxer reported errors in the video.

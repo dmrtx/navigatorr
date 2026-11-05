@@ -55,6 +55,12 @@ const (
 	// comes from the typed probe error and never from the probe's stderr, which
 	// names paths and may say anything.
 	MediaProbeFailed FailureClass = "media_probe_failed"
+	// WorkerSourceReadFault is a worker reporting the source as damaged while
+	// the coordinator reads the same, unchanged file end to end without one
+	// demuxer error: the fault is in the worker's copy or network read, not in
+	// the file. The coordinator assigns it; a worker never reports it, so
+	// Classify never returns it from a message.
+	WorkerSourceReadFault FailureClass = "worker_source_read_fault"
 	// CandidateInvalid is the worker-local candidate failing its integrity or
 	// preservation checks (a changed digest, a lost stream, a diverging
 	// duration). The class is typed at the point of detection; the message is

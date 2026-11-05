@@ -401,13 +401,13 @@ func (e *Engine) stepPromotePlan(ctx context.Context, ec *ExecutionContext) (Ste
 			return promoteFailed(fmt.Errorf("filesystem promotion cannot include library IDs"))
 		}
 		p.SeriesPath = filepath.Dir(p.OriginalPath)
-		p.NewPath = strings.TrimSuffix(p.OriginalPath, filepath.Ext(p.OriginalPath)) + filepath.Ext(p.CandidatePath)
+		p.NewPath = filesystemPromotionNewPath(p.OriginalPath, p.CandidatePath)
 		if _, err := e.promotionPath(p.NewPath, true); err != nil {
 			return promoteFailed(err)
 		}
 		if p.NewPath != p.OriginalPath {
-			if _, err := os.Lstat(p.NewPath); !os.IsNotExist(err) {
-				return promoteFailed(fmt.Errorf("filesystem replacement destination already exists or cannot be inspected"))
+			if err := promotionDestinationFree(p.NewPath); err != nil {
+				return promoteFailed(err)
 			}
 		}
 		return StepResult{Status: StepCompleted, Outputs: map[string]any{"promotion": p, "candidate_path": p.CandidatePath, "original_path": p.OriginalPath, "final_path": p.NewPath, "estimated_bytes_saved": p.OriginalBytes - p.CandidateBytes}}, nil
@@ -1114,4 +1114,34 @@ func (e *Engine) promotionExpectedCodec(p *promotionState) string {
 		}
 	}
 	return "hevc"
+}
+
+// filesystemPromotionNewPath is where a filesystem promotion publishes the
+// candidate: the original's name with the candidate's extension. An extension
+// that differs from the original's only in letter case ("T8CLRZ~D.MKV" and a
+// ".mkv" candidate) keeps the original's spelling. SMB shares and the NAS
+// filesystem are case-insensitive, so the ".mkv" spelling would name the
+// original itself: the destination check would refuse every such replacement,
+// and removing the original afterwards would delete the published file.
+func filesystemPromotionNewPath(originalPath, candidatePath string) string {
+	originalExt, candidateExt := filepath.Ext(originalPath), filepath.Ext(candidatePath)
+	if strings.EqualFold(originalExt, candidateExt) {
+		candidateExt = originalExt
+	}
+	return strings.TrimSuffix(originalPath, originalExt) + candidateExt
+}
+
+// promotionDestinationFree reports why a replacement destination cannot be
+// used, naming whether a file already occupies it or the check itself failed:
+// the first is a conflict with another file, the second a storage problem.
+func promotionDestinationFree(path string) error {
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return fmt.Errorf("filesystem replacement destination already exists: %s", path)
+	case os.IsNotExist(err):
+		return nil
+	default:
+		return fmt.Errorf("filesystem replacement destination cannot be inspected: %w", err)
+	}
 }
