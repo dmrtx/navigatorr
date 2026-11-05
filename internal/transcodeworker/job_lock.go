@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,23 @@ func acquireJobLock(jobDir string) (*jobFileLock, error) {
 // meantime) gets fs.ErrNotExist instead of an empty shell directory that would
 // shadow the real one.
 func acquireExistingJobLock(jobDir string) (*jobFileLock, error) {
+	return lockExistingJobDir(jobDir, syscall.LOCK_EX)
+}
+
+// errJobLockBusy is what tryAcquireExistingJobLock returns while another holder
+// has the lock.
+var errJobLockBusy = errors.New("job lock is held")
+
+// tryAcquireExistingJobLock is acquireExistingJobLock without the wait: a lock
+// someone else holds is errJobLockBusy at once. For maintenance that revisits
+// the job on its next pass and must not queue behind a long operation (a
+// publication verifying a large candidate holds the lock for as long as the
+// hash takes).
+func tryAcquireExistingJobLock(jobDir string) (*jobFileLock, error) {
+	return lockExistingJobDir(jobDir, syscall.LOCK_EX|syscall.LOCK_NB)
+}
+
+func lockExistingJobDir(jobDir string, how int) (*jobFileLock, error) {
 	if fi, err := os.Stat(jobDir); err != nil {
 		return nil, fmt.Errorf("job dir for lock: %w", err)
 	} else if !fi.IsDir() {
@@ -45,8 +63,11 @@ func acquireExistingJobLock(jobDir string) (*jobFileLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file %s: %w", lockFile, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
 		_ = f.Close()
+		if how&syscall.LOCK_NB != 0 && errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errJobLockBusy
+		}
 		return nil, fmt.Errorf("locking %s: %w", lockFile, err)
 	}
 	return &jobFileLock{file: f}, nil

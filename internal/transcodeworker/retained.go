@@ -539,9 +539,13 @@ func (w *Worker) sweepHiddenDir(ctx context.Context, name string) error {
 	if !ok {
 		return w.collectShellDir(dir)
 	}
-	lock, err := acquireExistingJobLock(dir)
+	// A job someone holds is being worked on (a publication verifying its
+	// candidate, a release, a runner): the next pass looks again. Waiting would
+	// stall every sweep behind it, the queue's included, for as long as a
+	// large candidate takes to hash.
+	lock, err := tryAcquireExistingJobLock(dir)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errJobLockBusy) {
 			return nil
 		}
 		return err

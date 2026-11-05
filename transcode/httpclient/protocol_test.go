@@ -285,6 +285,45 @@ func TestHTTPExecutor_PublishRetainedAnswers(t *testing.T) {
 	}
 }
 
+// The worker answers a publish request only after it has read the whole
+// candidate, so the request has a deadline of its own. Neither the executor's
+// request timeout nor the client's overall Timeout may end it first, while the
+// other calls keep theirs.
+func TestHTTPExecutor_PublishRetainedOutlastsTheRequestTimeout(t *testing.T) {
+	const verify = 400 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(verify)
+		_, _ = w.Write([]byte(`{"id":"job-1","status":"running","finalization_state":"finalizing"}`))
+	}))
+	defer srv.Close()
+	exec, err := NewHTTPExecutor(HTTPConfig{
+		BaseURL:        srv.URL,
+		RequestTimeout: verify / 4,
+		SubmitTimeout:  verify / 4,
+		PublishTimeout: 10 * time.Second,
+		PathMappings:   testHTTPMappings(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := exec.PublishRetained(context.Background(), "job-1")
+	if err != nil || st.Status != "running" {
+		t.Fatalf("a publish that waits for the worker's verification: %+v, %v", st, err)
+	}
+	if err := exec.RetryPublication(context.Background(), "job-1"); err == nil {
+		t.Fatal("the other calls must keep the request timeout")
+	}
+
+	// Left at its default the deadline covers a verification of minutes.
+	def, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, PathMappings: testHTTPMappings()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.pubTO != DefaultHTTPPublishTimeout || def.pubTO <= def.reqTO || def.pubTO <= def.subTO {
+		t.Fatalf("publish timeout = %v, want %v above the request (%v) and submit (%v) timeouts", def.pubTO, DefaultHTTPPublishTimeout, def.reqTO, def.subTO)
+	}
+}
+
 func TestHTTPExecutor_ReleaseRetainedAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

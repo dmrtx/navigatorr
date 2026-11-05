@@ -61,6 +61,14 @@ const DefaultHTTPRequestTimeout = 15 * time.Second
 // encode itself.
 const DefaultHTTPSubmitTimeout = 60 * time.Second
 
+// DefaultHTTPPublishTimeout is the default deadline for a publish request. The
+// worker verifies the whole retained candidate (a SHA-256 over tens of
+// gigabytes) before it answers, so the request outlasts every other call; at
+// the 15 s a read gets, a large candidate could never be published. It stays
+// under the worker's own window for the route, so the client is the one to
+// give up.
+const DefaultHTTPPublishTimeout = 20 * time.Minute
+
 // HTTPError is a typed non-2xx daemon response. It preserves method, URL
 // (without secrets), status code, and a bounded server message so callers
 // (and phase-4 reconciliation) can classify without string-sniffing raw
@@ -267,6 +275,10 @@ type HTTPConfig struct {
 	// SubmitTimeout bounds Submit POSTs. Zero selects
 	// DefaultHTTPSubmitTimeout.
 	SubmitTimeout time.Duration
+	// PublishTimeout bounds the publish POST of a retained candidate, which
+	// does not answer until the worker has verified the whole file. Zero
+	// selects DefaultHTTPPublishTimeout.
+	PublishTimeout time.Duration
 	// ReadRetryDelays are the pauses before each retry of a read-only request
 	// (Capabilities) that failed at the transport: connection refused while the
 	// daemon restarts, a reset, a timeout. Nil selects DefaultReadRetryDelays;
@@ -312,6 +324,7 @@ type HTTPExecutor struct {
 	client *http.Client
 	reqTO  time.Duration
 	subTO  time.Duration
+	pubTO  time.Duration
 }
 
 // NewHTTPExecutor builds an HTTPExecutor. BaseURL must be an http/https URL;
@@ -345,7 +358,12 @@ func NewHTTPExecutor(cfg HTTPConfig, opts ...HTTPExecutorOption) (*HTTPExecutor,
 		subTO = DefaultHTTPSubmitTimeout
 	}
 
-	e := &HTTPExecutor{cfg: cfg, base: base, token: token, reqTO: reqTO, subTO: subTO}
+	pubTO := cfg.PublishTimeout
+	if pubTO <= 0 {
+		pubTO = DefaultHTTPPublishTimeout
+	}
+
+	e := &HTTPExecutor{cfg: cfg, base: base, token: token, reqTO: reqTO, subTO: subTO, pubTO: pubTO}
 	if cfg.HTTPClient != nil {
 		// Shallow-copy so forcing the no-redirect policy below never
 		// mutates a caller-shared client.
@@ -510,11 +528,17 @@ func (e *HTTPExecutor) newRequest(ctx context.Context, method, path string, body
 // an ordinary error. A complete non-2xx response is definitive either way
 // and is returned as a typed *HTTPError (never UncertainError).
 func (e *HTTPExecutor) do(req *http.Request, op, jobID string, mutating bool) ([]byte, int, http.Header, error) {
+	return e.doOn(e.client, req, op, jobID, mutating)
+}
+
+// doOn is do over the given client, for a call whose deadline is not the
+// executor's (the client's own Timeout would cut it off at the default).
+func (e *HTTPExecutor) doOn(client *http.Client, req *http.Request, op, jobID string, mutating bool) ([]byte, int, http.Header, error) {
 	reqOp := req.Method + " " + req.URL.Path
 	if jobID != "" {
 		req.Header.Set(transcode.JobIDHeader, jobID)
 	}
-	resp, err := e.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		// %w keeps url.Error/net.Error/context chains intact for errors.As
 		// and errors.Is; the ID lets an operator find the attempt in the
@@ -1044,8 +1068,10 @@ func (e *HTTPExecutor) RetryPublication(ctx context.Context, jobID string) error
 	return he
 }
 
-// PublishRetained POSTs /v1/jobs/{id}/publish. The request only starts the
-// worker's publication of a retained candidate and repeating it is harmless, so
+// PublishRetained POSTs /v1/jobs/{id}/publish. The worker answers once it has
+// verified the retained candidate and started its publication, which for a
+// large file takes far longer than a read (see DefaultHTTPPublishTimeout).
+// The request only starts the publication and repeating it is harmless, so
 // a transport failure is an ordinary error the caller retries. A worker that
 // predates deferred publication answers 404 "not found" for the route (the same
 // code a missing job carries, so only the message tells them apart), which is
@@ -1060,13 +1086,18 @@ func (e *HTTPExecutor) PublishRetained(ctx context.Context, jobID string) (trans
 		return transcode.JobStatus{}, fmt.Errorf("invalid jobID %q", jobID)
 	}
 	path := "/v1/jobs/" + url.PathEscape(jobID) + "/publish"
-	ctx, cancel := context.WithTimeout(ctx, e.reqTO)
+	// The worker answers only after it has verified the whole candidate, which
+	// takes longer than any other call: the request gets its own deadline, on
+	// a client whose overall Timeout does not undo it.
+	ctx, cancel := context.WithTimeout(ctx, e.pubTO)
 	defer cancel()
 	hreq, err := e.newRequest(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return transcode.JobStatus{}, fmt.Errorf("building publish request: %w", err)
 	}
-	data, code, hdr, err := e.do(hreq, "publish_retained", jobID, false)
+	patient := *e.client
+	patient.Timeout = e.pubTO
+	data, code, hdr, err := e.doOn(&patient, hreq, "publish_retained", jobID, false)
 	if err != nil {
 		return transcode.JobStatus{}, err
 	}
