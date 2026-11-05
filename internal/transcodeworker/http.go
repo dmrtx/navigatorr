@@ -220,6 +220,29 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	return r.ResponseWriter.Write(b)
 }
 
+// Unwrap lets http.ResponseController reach the connection, so a route can
+// move its own deadlines.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
+// retainedPublishWindow is how long a publish request may run. The request
+// verifies the whole retained candidate against its checkpoint before it
+// answers, a read of tens of gigabytes that takes longer than the 15 s the
+// server allows every other route. With the server's deadlines a large
+// candidate could never be published: each attempt was cut off mid-hash and
+// the next started over. It stays above the client's own limit so the client
+// is the one to give up.
+const retainedPublishWindow = 25 * time.Minute
+
+// extendRequestDeadlines moves the connection's read and write deadlines out
+// to window from now. A writer that cannot (a test recorder) keeps the
+// server's.
+func extendRequestDeadlines(w http.ResponseWriter, window time.Duration) {
+	rc := http.NewResponseController(w)
+	deadline := time.Now().Add(window)
+	_ = rc.SetReadDeadline(deadline)
+	_ = rc.SetWriteDeadline(deadline)
+}
+
 // withRequestLog logs method, path, status, duration, request ID and job ID
 // for each request, and echoes the request ID in the response. A missing or
 // malformed X-Request-ID is replaced by a worker-generated one. Headers and
@@ -596,6 +619,7 @@ func (s *Server) handleJobByID(w http.ResponseWriter, r *http.Request) {
 			writeHTTPCodedJSON(w, http.StatusInternalServerError, transcode.WorkerErrorInternal, res)
 		}
 	case r.Method == http.MethodPost && isPublish:
+		extendRequestDeadlines(w, retainedPublishWindow)
 		res, err := s.worker.PublishRetained(r.Context(), id)
 		switch {
 		case err == nil:
