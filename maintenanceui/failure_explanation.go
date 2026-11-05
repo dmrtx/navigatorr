@@ -80,6 +80,13 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 	class := failureClass(r, text)
 	chooseGoal := nextStep{ID: "tracks", Label: "Choose a goal", Detail: "Start a goal for the file as it is now."}
 	switch {
+	// The worker's scan blamed the file and Navigatorr has not found it damaged
+	// itself: Retry reads the file here first. A file of a batch runs again from
+	// its batch row, which skips a file blamed this way.
+	case action.CanRecheckSource(r.inst.ErrorJSON, r.state) && operationString(r.inputs["parent_action_id"]) == "":
+		e.Happened = "The worker reported the file as damaged: its own scan of the video found errors in the container. Navigatorr has not confirmed it."
+		e.Learned = []string{"The worker reads the file through its own copy or network path, which can fail where a read here does not. Retry reads the file here first: if it reads whole and clean, the job runs again; if it is damaged here too, nothing runs and Retry says what the read found."}
+		return e, "", nil
 	case action.SourceDamaged(text):
 		why := "ffmpeg found broken data while reading it"
 		if strings.Contains(lower, "moov atom not found") {

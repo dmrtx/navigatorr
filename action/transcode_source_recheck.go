@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
 )
 
@@ -128,12 +130,84 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 	return string(resilience.WorkerSourceReadFault), intactMessage(record), true
 }
 
+// recheckVerdict is the verdict of the coordinator's re-read of this job's
+// source, "" when it has none (a record of another attempt does not count).
+func recheckVerdict(state map[string]any, jobID string) string {
+	record, _ := state[sourceRecheckKey].(map[string]any)
+	if jobID == "" || getString(record, "job_id") != jobID {
+		return ""
+	}
+	return getString(record, "verdict")
+}
+
 // coordinatorFoundSourceIntact is whether the coordinator read this job's
 // source whole and clean after the worker called it damaged, so the worker's
 // class is not the file's.
 func coordinatorFoundSourceIntact(state map[string]any, jobID string) bool {
-	record, _ := state[sourceRecheckKey].(map[string]any)
-	return jobID != "" && getString(record, "job_id") == jobID && getString(record, "verdict") == "intact"
+	return recheckVerdict(state, jobID) == "intact"
+}
+
+// storedFailureText is the message inside a failed job's stored error.
+func storedFailureText(errorJSON string) string {
+	text := strings.TrimSpace(errorJSON)
+	var stored struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(text), &stored) == nil && stored.Error != "" {
+		return stored.Error
+	}
+	return text
+}
+
+// CanRecheckSource is whether a failed job that blames its file is still worth
+// a Retry: the blame is the worker's scan of the video, which the coordinator
+// has not found damaged itself, and Retry reads the file again before it
+// decides. A job the coordinator already read as damaged is not, nor is one
+// that recorded nothing to tell its file by (a preflight that never read it).
+func CanRecheckSource(errorJSON string, state map[string]any) bool {
+	if !recheckable(storedFailureText(errorJSON)) || recheckVerdict(state, getString(state, "job_id")) == "damaged" {
+		return false
+	}
+	_, why := recheckTargetOf(&ExecutionContext{State: state})
+	return why == ""
+}
+
+// damagedFileRefusal is why Retry will not run a file that is damaged.
+const damagedFileRefusal = "this file is damaged, so running it again fails the same way; replace the file, then choose a goal for it"
+
+// recheckOnRetry decides a Retry of a job blamed on its file. A worker's scan
+// report is checked by reading the file here, now: only a whole, clean read
+// lets the retry go on, with the record kept for the retry to follow. Any other
+// outcome refuses it, with what the read found. inst carries the record on
+// return so the retry continues from it.
+func (e *Engine) recheckOnRetry(ctx context.Context, inst *store.ActionInstance) error {
+	message := storedFailureText(inst.ErrorJSON)
+	if !recheckable(message) {
+		return errors.New(damagedFileRefusal)
+	}
+	ec := parseExecutionContext(inst, e)
+	before := recheckVerdict(ec.State, getString(ec.State, "job_id"))
+	class, text, overturned := e.recheckDamagedSource(ctx, ec, message)
+	if err := ctx.Err(); err != nil && !overturned {
+		return err
+	}
+	if before == "" || before == "unchecked" {
+		if overturned {
+			appendFailureHistory(ec, "recheck", class, text)
+		}
+		inst.StateJSON = toJSON(ec.State)
+		if err := e.updateInstance(ctx, inst); err != nil {
+			return err
+		}
+	}
+	if overturned {
+		return nil
+	}
+	record, _ := ec.State[sourceRecheckKey].(map[string]any)
+	if getString(record, "verdict") == "damaged" {
+		return fmt.Errorf("%s (Navigatorr read it again and found the damage too: %s)", damagedFileRefusal, getString(record, "detail"))
+	}
+	return fmt.Errorf("%s (Navigatorr read it again to check the worker's report but could not clear the file: %s)", damagedFileRefusal, getString(record, "detail"))
 }
 
 // intactMessage is the failure of a job whose file the coordinator read

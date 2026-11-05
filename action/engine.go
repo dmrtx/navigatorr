@@ -473,9 +473,13 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 	if removedSearchAction(inst, parseExecutionContext(inst, e)) {
 		return nil, errors.New(removedSearchMessage)
 	}
-	// A damaged file fails the same way every time; it is replaced first.
+	// A damaged file fails the same way every time; it is replaced first. A
+	// worker's report of it is read again here, because the same bytes can read
+	// cleanly from the NAS.
 	if inst.ActionName == "transcode_media" && SourceDamaged(inst.ErrorJSON) {
-		return nil, errors.New("this file is damaged, so running it again fails the same way; replace the file, then choose a goal for it")
+		if err := e.recheckOnRetry(ctx, inst); err != nil {
+			return nil, err
+		}
 	}
 
 	tmpl, ok := e.GetTemplate(inst.ActionName)
