@@ -49,6 +49,11 @@ func (e *Engine) prepareRemoteRetry(ctx context.Context, inst *store.ActionInsta
 		if class == "" {
 			class = string(resilience.Classify(st.Error))
 		}
+		if class == string(resilience.FFmpegInputCorrupt) && coordinatorFoundSourceIntact(ec.State, jobID) {
+			// The worker still says damaged; the coordinator read the file
+			// whole and clean, so what failed was the worker's read.
+			class = string(resilience.WorkerSourceReadFault)
+		}
 		if err := rejectUnchangedPermanentRetry(class); err != nil {
 			return resume, err
 		}

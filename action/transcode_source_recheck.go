@@ -18,9 +18,11 @@ import (
 // file: the same bytes can read cleanly from the NAS. A job blamed on the file
 // is never offered a retry, so before it is left that way the coordinator reads
 // the file itself, packet by packet, with the demuxer and the damage test the
-// worker used. Only a clean read of an unchanged file overturns the worker; any
-// other outcome (damage found again, the read failing, the file changing under
-// the scan) leaves the worker's verdict standing.
+// worker used. Only a clean, complete read of the file the job started with
+// overturns the worker; any other outcome (damage found again, a message the
+// check cannot rule out, a read that stopped early or failed, a file that is
+// not the one the job began with or changed under the scan) leaves the
+// worker's verdict standing.
 
 const (
 	// sourceRecheckKey holds the record of the coordinator's re-read.
@@ -28,62 +30,110 @@ const (
 	// recheckTimeout bounds the re-read: it reads the whole video stream of
 	// a file that can be tens of gigabytes over the network.
 	recheckTimeout = 20 * time.Minute
+	// recheckCoverageSlack is how many seconds short of the video's measured
+	// length a complete read may end: the last picture's end is measured, not
+	// stated.
+	recheckCoverageSlack = 2.0
+	// workerScanReport is what the worker's pre-encode scan of the video says.
+	// An encode that stops on corrupt input (ffmpeg's own "invalid data")
+	// carries the same class without it: a packet scan does not decode, so it
+	// cannot clear that.
+	workerScanReport = "reading its video the demuxer reported"
 )
 
 // workerDamageWords are the phrases that make a failure read as the file's
 // own damage (SourceDamaged); a verdict that overturns it must not carry them.
 var workerDamageWords = regexp.MustCompile(`(?i)ffmpeg_input_corrupt:?|moov atom not found`)
 
+// recheckable is whether a worker's failure is a claim about the file that a
+// packet scan can answer: the worker's own scan of the video, or an index the
+// worker could not find in its copy of an MP4.
+func recheckable(workerMessage string) bool {
+	return strings.Contains(workerMessage, workerScanReport) ||
+		SourceDamaged(workerMessage) && strings.Contains(workerMessage, "moov atom not found")
+}
+
 // recheckDamagedSource re-reads the source of a job the worker failed as
 // damaged. It returns the class and message the job should fail with, and
-// whether they replace the worker's.
+// whether they replace the worker's. A read cut short by the caller's context
+// records nothing: the caller sees the context's error and tries again.
 func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext, workerMessage string) (class, message string, overturned bool) {
-	if !SourceDamaged(workerMessage) {
+	if !recheckable(workerMessage) {
 		return "", "", false
 	}
-	record := stateObject(ec.State, sourceRecheckKey)
-	if verdict := getString(record, "verdict"); verdict != "" {
-		// Already read for this failure.
-		if verdict == "intact" {
+	jobID := getString(ec.State, "job_id")
+	record, _ := ec.State[sourceRecheckKey].(map[string]any)
+	if getString(record, "job_id") == jobID {
+		// Already read for this failure; a read that could not judge is made again.
+		switch getString(record, "verdict") {
+		case "intact":
 			return string(resilience.WorkerSourceReadFault), intactMessage(record), true
+		case "damaged":
+			return "", "", false
 		}
+	}
+	record = map[string]any{"job_id": jobID, "worker_report": truncateText(workerMessage, 600), "checked_at": time.Now().UTC().Format(time.RFC3339)}
+	defer func() {
+		if ctx.Err() == nil {
+			ec.State[sourceRecheckKey] = record
+		}
+	}()
+	unchecked := func(format string, args ...any) (string, string, bool) {
+		record["verdict"], record["detail"] = "unchecked", fmt.Sprintf(format, args...)
 		return "", "", false
 	}
-	path, videoIndex := recheckTarget(ec)
-	if path == "" {
-		return "", "", false
-	}
-	record = map[string]any{"path": path, "worker_report": truncateText(workerMessage, 600), "checked_at": time.Now().UTC().Format(time.RFC3339)}
-	defer func() { ec.State[sourceRecheckKey] = record }()
 
-	before, err := os.Stat(path)
-	if err != nil {
-		record["verdict"], record["detail"] = "unchecked", fmt.Sprintf("the file could not be inspected: %v", err)
-		return "", "", false
+	target, why := recheckTargetOf(ec)
+	if why != "" {
+		return unchecked("%s", why)
 	}
+	record["path"] = target.path
+	before, err := os.Stat(target.path)
+	if err != nil {
+		return unchecked("the file could not be inspected: %v", err)
+	}
+	if !target.sameFile(before) {
+		return unchecked("the file is not the one the job started with (it is %d bytes, modified %s)", before.Size(), before.ModTime().UTC().Format(time.RFC3339))
+	}
+	release, err := e.acquireHashSlot(ctx)
+	if err != nil {
+		return unchecked("no read slot was free: %v", err)
+	}
+	defer release()
 	scanCtx, cancel := context.WithTimeout(ctx, recheckTimeout)
 	defer cancel()
-	damage, err := mediainspect.ScanDemuxDamage(scanCtx, e.deps.Ffprobe, path, videoIndex)
+	damage, err := mediainspect.ScanDemuxDamage(scanCtx, e.deps.Ffprobe, target.path, target.videoIndex)
 	if err != nil {
-		record["verdict"], record["detail"] = "unchecked", fmt.Sprintf("the coordinator's read failed: %v", err)
-		return "", "", false
+		return unchecked("the coordinator's read failed: %v", err)
 	}
-	after, err := os.Stat(path)
-	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
-		record["verdict"], record["detail"] = "unchecked", "the file changed while it was read"
-		return "", "", false
+	after, err := os.Stat(target.path)
+	if err != nil || !os.SameFile(before, after) || !target.sameFile(after) {
+		return unchecked("the file changed while it was read")
 	}
-	record["packets"], record["demuxer_errors"] = damage.Packets, damage.Errors
+	record["packets"], record["demuxer_errors"], record["seconds_read"], record["video_seconds"] = damage.Packets, damage.Errors, damage.Seconds, target.videoSeconds
 	switch {
 	case damage.Errors > 0:
 		record["verdict"], record["detail"] = "damaged", damage.First
 		return "", "", false
+	case damage.Unrecognised > 0:
+		return unchecked("the demuxer printed %d message(s) this check cannot rule out as damage, the first: %s", damage.Unrecognised, damage.FirstUnrecognised)
 	case damage.Packets == 0:
-		record["verdict"], record["detail"] = "unchecked", "the stream has no packets to read"
-		return "", "", false
+		return unchecked("the stream has no packets to read")
+	case target.videoSeconds <= 0:
+		return unchecked("the original's video length was not measured, so a read that stopped early cannot be told from a whole one")
+	case damage.Seconds < target.videoSeconds-recheckCoverageSlack:
+		return unchecked("the read covered %.0f of the video's %.0f seconds", damage.Seconds, target.videoSeconds)
 	}
 	record["verdict"] = "intact"
 	return string(resilience.WorkerSourceReadFault), intactMessage(record), true
+}
+
+// coordinatorFoundSourceIntact is whether the coordinator read this job's
+// source whole and clean after the worker called it damaged, so the worker's
+// class is not the file's.
+func coordinatorFoundSourceIntact(state map[string]any, jobID string) bool {
+	record, _ := state[sourceRecheckKey].(map[string]any)
+	return jobID != "" && getString(record, "job_id") == jobID && getString(record, "verdict") == "intact"
 }
 
 // intactMessage is the failure of a job whose file the coordinator read
@@ -91,30 +141,55 @@ func (e *Engine) recheckDamagedSource(ctx context.Context, ec *ExecutionContext,
 // job read as a damaged file again.
 func intactMessage(record map[string]any) string {
 	report := workerDamageWords.ReplaceAllString(getString(record, "worker_report"), "[worker read error]")
-	return fmt.Sprintf("the worker reported the source file as damaged, but the coordinator read the same file end to end (%d video packets) without a single demuxer error and the file did not change, so the file is intact and the worker's own read of it was at fault. Running it again is safe. The worker said: %s",
-		getInt(record, "packets"), report)
+	return fmt.Sprintf("the worker reported the source file as damaged, but the coordinator read the same file end to end (%d video packets, %.0f of %.0f seconds) without a single demuxer error and the file did not change, so the file is intact and the worker's own read of it was at fault. Running it again is safe. The worker said: %s",
+		getInt(record, "packets"), getFloat(record, "seconds_read"), getFloat(record, "video_seconds"), report)
 }
 
-// recheckTarget is the original's path as the coordinator sees it and the
-// index of the video the worker scanned.
-func recheckTarget(ec *ExecutionContext) (path string, videoIndex int) {
-	path = getString(ec.State, "resolved_path")
-	var original struct {
-		Path  string `json:"path"`
-		Video []struct {
-			Index int `json:"index"`
-		} `json:"video"`
-	}
+// recheckTarget is the file the job started with, as the coordinator can tell
+// it from another, and the video the worker scanned.
+type recheckTarget struct {
+	path         string
+	videoIndex   int
+	videoSeconds float64
+	size         int64
+	// mod is the modification time the job recorded; zero when only the size
+	// was recorded.
+	mod time.Time
+}
+
+// sameFile is whether fi is the file the job recorded.
+func (t recheckTarget) sameFile(fi os.FileInfo) bool {
+	return fi.Size() == t.size && (t.mod.IsZero() || fi.ModTime().Equal(t.mod))
+}
+
+// recheckTargetOf reads the job's record of its original. why says what is
+// missing when the file cannot be told from another one.
+func recheckTargetOf(ec *ExecutionContext) (t recheckTarget, why string) {
+	var rep mediainspect.DetailedReport
 	if b, err := json.Marshal(ec.State["original"]); err == nil {
-		_ = json.Unmarshal(b, &original)
+		_ = json.Unmarshal(b, &rep)
 	}
-	if path == "" {
-		path = original.Path
+	t.path = getString(ec.State, "resolved_path")
+	if t.path == "" {
+		t.path = rep.Path
 	}
-	if len(original.Video) > 0 {
-		videoIndex = original.Video[0].Index
+	if t.path == "" {
+		return t, "the job recorded no path for the file"
 	}
-	return path, videoIndex
+	// The programme video, not a cover picture before it.
+	video := rep.MainVideo()
+	if len(video) == 0 {
+		return t, "the job recorded no programme video to read"
+	}
+	t.videoIndex, t.videoSeconds = video[0].Index, rep.VideoSeconds
+	var ok bool
+	if t.size, t.mod, ok = recordedOriginalStat(ec.State); !ok {
+		t.size = rep.SizeBytes
+	}
+	if t.size <= 0 {
+		return t, "the job recorded no size for the file, so it cannot be told from another"
+	}
+	return t, ""
 }
 
 func truncateText(s string, n int) string {

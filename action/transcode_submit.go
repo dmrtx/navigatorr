@@ -801,10 +801,18 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if class == "" {
 			class = string(resilience.Classify(msg))
 		}
-		if class == string(resilience.FFmpegInputCorrupt) || SourceDamaged(msg) {
+		if recheckable(msg) {
 			// The worker's read of the file is not the file: read it here
 			// before leaving the job blamed on bytes that may be fine.
-			if c, m, overturned := e.recheckDamagedSource(ctx, ec, msg); overturned {
+			c, m, overturned := e.recheckDamagedSource(ctx, ec, msg)
+			if err := ctx.Err(); err != nil && !overturned {
+				// A read cut short judged nothing; the failure is recorded
+				// when the step runs again.
+				return StepResult{}, err
+			}
+			if overturned {
+				// What the worker said stays in the history, whole.
+				appendFailureHistory(ec, "worker", class, msg)
 				class, msg = c, m
 			}
 		}
