@@ -42,21 +42,8 @@ type replacementRecord struct {
 	SourceActionID string
 	OriginalPath   string
 	NewPath        string
+	NewBytes       int64
 	CompletedAt    time.Time
-}
-
-// sameLibraryFile reports whether two paths are the same file apart from the
-// extension (a replacement may change it) and its letter case (the shares are
-// case-insensitive).
-func sameLibraryFile(a, b string) bool {
-	if filepath.Dir(a) != filepath.Dir(b) && !strings.EqualFold(filepath.Dir(a), filepath.Dir(b)) {
-		return false
-	}
-	stem := func(p string) string {
-		base := filepath.Base(p)
-		return strings.TrimSuffix(base, filepath.Ext(base))
-	}
-	return strings.EqualFold(stem(a), stem(b))
 }
 
 // replacementSince finds the completed promotion that replaced path after the
@@ -82,7 +69,7 @@ func (e *Engine) replacementSince(path, instanceID string) (*replacementRecord, 
 	}
 	// The stem as it appears inside the stored JSON string.
 	needle := string(encoded[1 : len(encoded)-1])
-	rows, err := e.deps.Store.ListActionInstancesMentioning("promote_transcode_candidate", needle, []string{store.ActionStatusCompleted}, nil)
+	rows, err := e.deps.Store.ListActionInstancesMentioningFold("promote_transcode_candidate", needle, []string{store.ActionStatusCompleted}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,16 +82,22 @@ func (e *Engine) replacementSince(path, instanceID string) (*replacementRecord, 
 			continue
 		}
 		p := state.Promotion
-		if p.NewPath == "" || !sameLibraryFile(p.OriginalPath, path) {
+		// The promotion's original must be this very file (letter case aside:
+		// the shares ignore it). A sibling with the same name and another
+		// extension is a different file, whatever replaced it.
+		if p.NewPath == "" || !strings.EqualFold(p.OriginalPath, path) {
 			continue
 		}
 		done := parseStoreTime(row.UpdatedAt)
-		if !done.After(admitted) {
+		// Updates are stored to the second while admission is stored to the
+		// nanosecond: a promotion that finished in the second of admission
+		// may be on either side, so it counts as after.
+		if !done.Add(time.Second).After(admitted) {
 			// Finished before this job existed: the job was admitted against
 			// the file as the promotion left it.
 			continue
 		}
-		rec := &replacementRecord{PromotionID: row.ID, SourceActionID: p.SourceActionID, OriginalPath: p.OriginalPath, NewPath: p.NewPath, CompletedAt: done}
+		rec := &replacementRecord{PromotionID: row.ID, SourceActionID: p.SourceActionID, OriginalPath: p.OriginalPath, NewPath: p.NewPath, NewBytes: p.CandidateBytes, CompletedAt: done}
 		if best == nil || rec.CompletedAt.After(best.CompletedAt) {
 			best = rec
 		}
@@ -119,9 +112,12 @@ func (e *Engine) skipReplacedSource(ec *ExecutionContext, rec *replacementRecord
 	if rec == nil {
 		return StepResult{}, false
 	}
-	if _, err := os.Stat(rec.NewPath); err != nil {
-		// The replacement the history names is not there either: nothing
-		// proves the work is done, so the caller reports the plain failure.
+	fi, err := os.Stat(rec.NewPath)
+	if err != nil || fi.IsDir() || (rec.NewBytes > 0 && fi.Size() != rec.NewBytes) {
+		// The replacement the history names is not there, or is not the file
+		// the promotion published (it was changed or substituted since):
+		// nothing proves the work is done, so the caller reports the plain
+		// outcome.
 		return StepResult{}, false
 	}
 	ec.State["skip_transcode"] = true
@@ -169,16 +165,35 @@ func (e *Engine) staleTrackPicksResult(ec *ExecutionContext, path string, picksE
 	return StepResult{Status: StepFailed, Error: fmt.Sprintf("choosing the tracks to keep: %v; the streams were picked for the file as it was when this job was queued and the file has changed since. They were not applied to the new file: choose the tracks again", picksErr)}
 }
 
-// replacedSincePicked reports a promotion that replaced path after the job was
-// queued, for a job that carries explicit stream picks: indexes that still
-// exist can silently point at other tracks in a replaced file.
-func (e *Engine) replacedSincePicked(ctx context.Context, ec *ExecutionContext, path string) (StepResult, bool) {
+// replacedSince reports a job whose file a completed promotion replaced after
+// the job was queued, even when the file is still there under the same name:
+// converting it again would re-encode a file that is already the result. A job
+// with explicit stream picks is also stopped when the file was modified after
+// it was queued without any promotion explaining it: indexes that still exist
+// can point at other tracks of a different file.
+func (e *Engine) replacedSince(ctx context.Context, ec *ExecutionContext, path string, fi os.FileInfo) (StepResult, bool) {
 	if ctx.Err() != nil {
 		return StepResult{}, false
+	}
+	rec, _ := e.replacementSince(path, ec.InstanceID)
+	if res, ok := e.skipReplacedSource(ec, rec, "another conversion replaced this file after this job was queued"); ok {
+		return res, true
 	}
 	if ec.Inputs[inputKeepAudioStreams] == nil && ec.Inputs[inputKeepSubtitleStreams] == nil {
 		return StepResult{}, false
 	}
-	rec, _ := e.replacementSince(path, ec.InstanceID)
-	return e.skipReplacedSource(ec, rec, "the audio/subtitle streams chosen for this job belong to the file before it was replaced")
+	if e.deps.Store == nil {
+		return StepResult{}, false
+	}
+	if self, err := e.deps.Store.GetActionInstanceIfExists(ec.InstanceID); err == nil && self != nil {
+		if admitted := parseStoreTime(self.CreatedAt); !admitted.IsZero() && fi.ModTime().After(admitted.Add(picksModifiedSlack)) {
+			ec.State["failure_classification"] = string(resilience.SourceChanged)
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("choosing the tracks to keep: the file was modified at %s, after this job was queued at %s, and the streams were picked for the file as it was then. They were not applied to the new file: choose the tracks again", fi.ModTime().UTC().Format(time.RFC3339), admitted.UTC().Format(time.RFC3339))}, true
+		}
+	}
+	return StepResult{}, false
 }
+
+// picksModifiedSlack absorbs the clock difference between the NAS and the
+// coordinator; a change that only shows after it is a real one.
+const picksModifiedSlack = 5 * time.Minute

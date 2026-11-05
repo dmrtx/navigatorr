@@ -233,7 +233,14 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 				// of such a track is as short as it. The source track's own
 				// packets decide, read only now that the candidate is short.
 				own, ownErr := e.sourceTrackSpan(ctx, origMap, a.Index)
-				if ownErr == nil && own.Seconds() > 0 && span.Seconds() >= own.Seconds()-sourceTrackTolerance {
+				// The candidate must cover the same stretch of the timeline, not
+				// just as many seconds: a track that lost its first minutes and
+				// starts later is as long as the source and still wrong.
+				aligned := ownErr == nil && math.Abs(span.Start-own.Start) <= sourceTrackTolerance && span.End >= own.End-sourceTrackTolerance
+				if ownErr == nil && own.Seconds() > 0 && span.Seconds() >= own.Seconds()-sourceTrackTolerance && !aligned {
+					return waitDecision(fmt.Sprintf("Audio out of place at stream %d: the source track runs %.1fs-%.1fs but the candidate's runs %.1fs-%.1fs", i, own.Start, own.End, span.Start, span.End)), nil
+				}
+				if aligned && own.Seconds() > 0 {
 					audioDuration = "matches_source_track"
 					ec.State["audio_shorter_than_container"] = append(stateStrings(ec.State["audio_shorter_than_container"]), fmt.Sprintf("stream %d: the source track covers %.1fs of the container's %.1fs; the candidate's %.1fs matches it", i, own.Seconds(), origDur, span.Seconds()))
 				} else if ownErr == nil && own.Seconds() > 0 {

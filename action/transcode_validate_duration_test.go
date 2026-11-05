@@ -235,6 +235,9 @@ func TestPromotionValidationComparesShortAudioWithTheSourceTrack(t *testing.T) {
 		{"source track is as short as the candidate", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
 		{"candidate lost more than the source track lacked", packetLine(1, 0, 900) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short); the source track itself covers 1226.0s"},
 		{"source track full length, candidate short", packetLine(1, 0, 1000) + packetLine(2, 0, duration), packetLine(1, 0, duration) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1000.0s (420.0s short); the source track itself covers 1420.0s"},
+		{"candidate track shifted later by as much as it is long", packetLine(1, 100, 1200) + packetLine(2, 0, duration), packetLine(1, 0, 1200) + packetLine(2, 0, duration), StepWaitingDecision, "Audio out of place at stream 0: the source track runs 0.0s-1200.0s but the candidate's runs 100.0s-1300.0s"},
+		{"candidate lost the start of a short source track", packetLine(1, 100, 1126) + packetLine(2, 0, duration), packetLine(1, 0, 1226) + packetLine(2, 0, duration), StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 1126.0s (294.0s short); the source track itself covers 1226.0s"},
+		{"start within tolerance still matches", packetLine(1, 0.3, 1226) + packetLine(2, 0, duration), packetLine(1, 0, 1226.2) + packetLine(2, 0, duration), StepCompleted, ""},
 		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio truncated at stream 0: original runs 1420.0s, the track's packets cover 900.0s (520.0s short)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

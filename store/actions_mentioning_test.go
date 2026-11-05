@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestListActionInstancesMentioningFoldIgnoresLetterCase(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateActionInstance(ActionInstance{ID: "p", ActionName: "promote_transcode_candidate", Status: ActionStatusCompleted, StateJSON: `{"original_path":"/m/Show S01E01.mp4"}`}); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := s.ListActionInstancesMentioning("promote_transcode_candidate", "show s01e01", nil, nil)
+	if err != nil || len(exact) != 0 {
+		t.Fatalf("the exact search must stay case-sensitive: %v, %v", exact, err)
+	}
+	folded, err := s.ListActionInstancesMentioningFold("promote_transcode_candidate", "show s01e01", nil, nil)
+	if err != nil || len(folded) != 1 {
+		t.Fatalf("the folded search must find it: %v, %v", folded, err)
+	}
+}
+
 func TestListActionInstancesMentioningFiltersInSQL(t *testing.T) {
 	s := openTest(t)
 	rows := []ActionInstance{

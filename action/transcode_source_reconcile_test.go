@@ -59,8 +59,14 @@ func (q *queuedFile) queue(t *testing.T, id, path string, extra map[string]any) 
 // promoted records a completed promotion that replaced original with newPath.
 func (q *queuedFile) promoted(t *testing.T, id, original, newPath string) {
 	t.Helper()
+	q.promotedWithBytes(t, id, original, newPath, 0)
+}
+
+// promotedWithBytes records the size the promotion published, as a real one does.
+func (q *queuedFile) promotedWithBytes(t *testing.T, id, original, newPath string, bytes int64) {
+	t.Helper()
 	seedActionInstance(t, q.st, id, "promote_transcode_candidate", StatusCompleted, 0, "", map[string]any{}, map[string]any{
-		"promotion": map[string]any{"transcode_action_id": "earlier-conversion", "original_path": original, "new_path": newPath},
+		"promotion": map[string]any{"transcode_action_id": "earlier-conversion", "original_path": original, "new_path": newPath, "candidate_bytes": bytes},
 	})
 }
 
@@ -110,7 +116,8 @@ func TestPromotionOlderThanTheJobDoesNotSupersedeIt(t *testing.T) {
 	original := filepath.Join(q.dir, "Older.mp4")
 	replacement := q.write(t, "Older.mkv")
 	q.promoted(t, "promotion-old", original, replacement)
-	time.Sleep(3 * time.Millisecond)
+	// Updates are stored to the second, so "older" means more than a second.
+	time.Sleep(1100 * time.Millisecond)
 	ec := q.queue(t, "queued-3", original, nil)
 	if res := q.preflight(t, ec); res.Status != StepFailed {
 		t.Fatalf("an older promotion superseded a newer job: %+v", res)
@@ -158,18 +165,73 @@ func TestStalePicksOfAReplacedFileEndTheJobAsDone(t *testing.T) {
 	}
 }
 
-func TestSameLibraryFile(t *testing.T) {
-	for _, c := range []struct {
-		a, b string
-		want bool
-	}{
-		{"/m/s/E1.mp4", "/m/s/E1.mkv", true},
-		{"/m/s/E1.MKV", "/m/s/E1.mkv", true},
-		{"/m/s/E1.mkv", "/m/s/E2.mkv", false},
-		{"/m/s/E1.mkv", "/m/t/E1.mkv", false},
-	} {
-		if got := sameLibraryFile(c.a, c.b); got != c.want {
-			t.Errorf("sameLibraryFile(%q, %q) = %v", c.a, c.b, got)
-		}
+// Another file with the same name and another extension is not the file that
+// was replaced: E01.mp4 being gone says nothing about E01.mkv's promotion.
+func TestPromotionOfASiblingExtensionDoesNotExplainAMissingFile(t *testing.T) {
+	q := newQueuedFile(t)
+	ec := q.queue(t, "queued-7", filepath.Join(q.dir, "Sibling.mp4"), nil)
+	kept := q.write(t, "Sibling.mkv")
+	q.promoted(t, "promotion-7", kept, kept)
+	if res := q.preflight(t, ec); res.Status != StepFailed {
+		t.Fatalf("a sibling's promotion explained a deleted file: %+v", res)
+	}
+}
+
+// The file is still there under its name, but a promotion replaced it after the
+// job was queued and the job has no manual picks: converting it again would
+// re-encode the result.
+func TestQueuedJobWhoseFileWasReplacedInPlaceIsSkipped(t *testing.T) {
+	q := newQueuedFile(t)
+	file := q.write(t, "InPlace.mkv")
+	ec := q.queue(t, "queued-8", file, nil)
+	q.promoted(t, "promotion-8", file, file)
+	res := q.preflight(t, ec)
+	if res.Status != StepCompleted || res.Outputs["reason_code"] != reasonSourceReplaced {
+		t.Fatalf("a file replaced in place must end the job as done: %+v", res)
+	}
+}
+
+// The published file is not the one the promotion recorded: it was changed or
+// substituted afterwards, so nothing proves the work is what is in place.
+func TestReplacementWithAnotherSizeDoesNotSkip(t *testing.T) {
+	q := newQueuedFile(t)
+	original := filepath.Join(q.dir, "Swapped.mp4")
+	ec := q.queue(t, "queued-9", original, nil)
+	replacement := q.write(t, "Swapped.mkv")
+	q.promotedWithBytes(t, "promotion-9", original, replacement, 4242)
+	if res := q.preflight(t, ec); res.Status != StepFailed {
+		t.Fatalf("skipped on a file that is not what was published: %+v", res)
+	}
+}
+
+// The shares ignore letter case, so a promotion recorded as "Show S01E01.mp4"
+// explains a job queued for "show s01e01.MP4".
+func TestReplacementIsFoundWhateverTheLetterCase(t *testing.T) {
+	q := newQueuedFile(t)
+	ec := q.queue(t, "queued-10", filepath.Join(q.dir, "show s01e01.MP4"), nil)
+	replacement := q.write(t, "Show S01E01.mkv")
+	q.promoted(t, "promotion-10", filepath.Join(q.dir, "Show S01E01.mp4"), replacement)
+	res := q.preflight(t, ec)
+	if res.Status != StepCompleted || res.Outputs["reason_code"] != reasonSourceReplaced {
+		t.Fatalf("case difference hid the replacement: %+v", res)
+	}
+}
+
+// A job with manual picks whose file was modified after it was queued, with no
+// promotion to explain it, must not apply the picks to what may be other tracks.
+func TestPicksAreRefusedForAFileModifiedAfterQueueing(t *testing.T) {
+	q := newQueuedFile(t)
+	file := q.write(t, "Touched.mkv")
+	ec := q.queue(t, "queued-11", file, map[string]any{"keep_audio_streams": []any{float64(1)}})
+	later := time.Now().Add(time.Hour)
+	if err := os.Chtimes(file, later, later); err != nil {
+		t.Fatal(err)
+	}
+	res := q.preflight(t, ec)
+	if res.Status != StepFailed || !strings.Contains(res.Error, "not applied to the new file") {
+		t.Fatalf("picks applied to a modified file: %+v", res)
+	}
+	if getString(ec.State, "failure_classification") != string(resilience.SourceChanged) {
+		t.Fatalf("classification = %v", ec.State["failure_classification"])
 	}
 }

@@ -205,16 +205,31 @@ func (s *Store) ListActionInstancesByName(name string, limit, offset int) ([]Act
 // through listActionInstances copies every row's JSON and takes the lock once
 // per page, which holds up every other store call for as long as the scan runs.
 func (s *Store) ListActionInstancesMentioning(name, needle string, in, notIn []string) ([]ActionInstance, error) {
+	return s.listActionInstancesMentioning(false, name, needle, in, notIn)
+}
+
+// ListActionInstancesMentioningFold is ListActionInstancesMentioning with the
+// match ignoring the letter case of ASCII letters, for paths that live on a
+// case-insensitive share and are spelled differently by different writers.
+func (s *Store) ListActionInstancesMentioningFold(name, needle string, in, notIn []string) ([]ActionInstance, error) {
+	return s.listActionInstancesMentioning(true, name, needle, in, notIn)
+}
+
+func (s *Store) listActionInstancesMentioning(fold bool, name, needle string, in, notIn []string) ([]ActionInstance, error) {
 	if needle == "" {
 		return nil, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	match := `instr(state_json, ?)`
+	if fold {
+		match = `instr(lower(state_json), lower(?))`
+	}
 	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
 		state_json, waiting_reason, waiting_condition, waiting_options_json,
 		error_json, idempotency_key, created_at, updated_at
-		FROM action_instances WHERE action_name=? AND instr(state_json, ?) > 0`
+		FROM action_instances WHERE action_name=? AND ` + match + ` > 0`
 	args := []any{name, needle}
 	for _, f := range []struct {
 		op       string

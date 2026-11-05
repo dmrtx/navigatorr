@@ -69,7 +69,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	if err != nil {
 		return e.missingSourceResult(ec, cleanPath, err), nil
 	}
-	if res, replaced := e.replacedSincePicked(ctx, ec, cleanPath); replaced {
+	if res, replaced := e.replacedSince(ctx, ec, cleanPath, fi); replaced {
 		return res, nil
 	}
 	if fi.IsDir() {
