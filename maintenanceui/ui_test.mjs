@@ -5815,6 +5815,33 @@ test("Save as default keeps the choices on the server and starts the next form f
   assert.equal(other.h.run('radioValue("keep-commentary")'), "drop");
 });
 
+test("Run next asks for one file to go first, once", async () => {
+  const { h, sent } = submissionHarnessGoal();
+  const submit = () => h.run('$("path").value = "/media/one.mkv"; buildAndSubmitJob()');
+  h.run('$("queue-priority").checked = true');
+  await submit();
+  assert.equal(sent.at(-1).queue_priority, true);
+  assert.equal(h.run('$("queue-priority").checked'), false, "the next file does not inherit it");
+  await submit();
+  assert.equal("queue_priority" in sent.at(-1), false);
+  // A file opened from elsewhere starts without it.
+  h.run('$("queue-priority").checked = true; openGoalForm("/media/other.mkv")');
+  assert.equal(h.run('$("queue-priority").checked'), false);
+});
+
+test("Run next is greyed for a batch, with the reason", () => {
+  const h = harness();
+  const el = (id) => h.elements.get(id);
+  h.run('$("queue-priority").checked = true; $("scope").value = "batch"; renderConversionOptions();');
+  assert.equal(el("queue-priority").disabled, true);
+  assert.equal(el("queue-priority").checked, false);
+  assert.equal(el("queue-priority-reason").hidden, false);
+  assert.equal(el("queue-priority-reason").textContent, "Only a single file can run next.");
+  h.run('$("scope").value = "file"; renderConversionOptions();');
+  assert.equal(el("queue-priority").disabled, false);
+  assert.equal(el("queue-priority-reason").hidden, true);
+});
+
 test("reopening a job restores its track rules over the saved ones", () => {
   const { h } = goalHarness();
   h.run('conversionDefaults.drop_commentary = true; conversionDefaults.prefer_stereo = false; applyConversionDefaults()');
@@ -6097,12 +6124,13 @@ test("goal names are the same in the form, the reconfigure dialog and job rows",
   const more = form.slice(form.indexOf('<details id="more-goals"'));
   // Options, not goals to pick from: the goals are named only under More options.
   assert.doesNotMatch(form, /goal-card|goal-title/);
-  for (const name of ["Video", "HDR and Dolby Vision", "Resolution", "Size limit"]) assert.ok(visible.includes(`class="goal-option-label">${name}<`), name);
+  for (const name of ["Video", "HDR and Dolby Vision", "Resolution", "Size limit", "Encoder"]) assert.ok(visible.includes(`class="goal-option-label">${name}<`), name);
   assert.match(visible, /Convert to SDR[\s\S]*Keep HDR/);
   assert.doesNotMatch(visible, /Keep Dolby Vision/);
   assert.match(more, /<summary>More options<\/summary>/);
   assert.match(more, /name="conversion-goal" value="" checked[\s\S]*Keep quality, convert to x265[\s\S]*Strict quality/);
-  assert.match(more, /id="hardware-option"/);
+  assert.match(visible, /id="hardware-option"/);
+  assert.doesNotMatch(more, /id="hardware-option"/);
   // The reconfigure dialog shows the same goal cards; its hidden select carries the choice.
   const dialog = markup.match(/<fieldset id="reconfigure-mode-label"[\s\S]*?<\/fieldset>/)[0];
   for (const name of ["Save space", "Shrink to 1080p SDR", "Audio only", "Strict quality", "Keep quality, convert to x265"]) assert.ok(dialog.includes(`<strong class="goal-title">${name}</strong>`), name);

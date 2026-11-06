@@ -379,6 +379,15 @@
                   <p id="size-budget-readout" class="goal-readout" role="status" hidden></p>
                   <p id="size-budget-reason" class="muted size-budget-help" hidden></p>
                 </div>
+                  <div id="hardware-option" class="goal-option">
+                    <span id="size-engine-label" class="goal-option-label">Encoder</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="size-engine-label">
+                      <label><input type="radio" name="size-engine" value="fast" checked /><span>Fast · media engine</span></label>
+                      <label><input type="radio" name="size-engine" value="small" /><span>Smallest · x265</span></label>
+                    </div>
+                    <input id="allow-hardware" type="checkbox" checked hidden />
+                    <p id="size-engine-reason" class="muted size-budget-help" hidden></p>
+                  </div>
                 <details id="more-goals" class="more-goals">
                   <summary>More options</summary>
                   <div class="goal-option">
@@ -388,15 +397,6 @@
                       <label><input type="radio" name="conversion-goal" value="x265_preserve" /><span>Keep quality, convert to x265</span></label>
                       <label><input type="radio" name="conversion-goal" value="quality" /><span>Strict quality</span></label>
                     </div>
-                  </div>
-                  <div id="hardware-option" class="goal-option">
-                    <span id="size-engine-label" class="goal-option-label">Encoder</span>
-                    <div class="segmented" role="radiogroup" aria-labelledby="size-engine-label">
-                      <label><input type="radio" name="size-engine" value="fast" checked /><span>Fast · media engine</span></label>
-                      <label><input type="radio" name="size-engine" value="small" /><span>Smallest · x265</span></label>
-                    </div>
-                    <input id="allow-hardware" type="checkbox" checked hidden />
-                    <p id="size-engine-reason" class="muted size-budget-help" hidden></p>
                   </div>
                 </details>
               </fieldset>
@@ -453,6 +453,8 @@
               </details>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
               <label id="replace-auto-label" class="check replace-auto" hidden><input id="replace-auto" type="checkbox" />Replace automatically when done</label>
+              <label id="queue-priority-label" class="check replace-auto"><input id="queue-priority" type="checkbox" />Run next, ahead of the queue</label>
+              <p id="queue-priority-reason" class="muted size-budget-help" hidden></p>
               <div class="conversion-defaults"><button id="save-conversion-defaults" type="button" class="quiet">Save as default</button><span id="conversion-defaults-status" class="metadata" role="status"></span></div>
               <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <details id="advanced-profiles" class="advanced-profiles">
