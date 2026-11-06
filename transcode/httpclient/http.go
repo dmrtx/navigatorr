@@ -1072,7 +1072,10 @@ func (e *HTTPExecutor) RetryPublication(ctx context.Context, jobID string) error
 // verified the retained candidate and started its publication, which for a
 // large file takes far longer than a read (see DefaultHTTPPublishTimeout).
 // The request only starts the publication and repeating it is harmless, so
-// a transport failure is an ordinary error the caller retries. A worker that
+// a call that gets no answer (a refused or reset connection, a close before or
+// in the middle of the response, a deadline) is *UncertainError: the caller
+// waits and asks again, and never takes it for the worker refusing the
+// upload. Only an answer from the worker is a definitive *HTTPError. A worker that
 // predates deferred publication answers 404 "not found" for the route (the same
 // code a missing job carries, so only the message tells them apart), which is
 // reported as transcode.ErrDeferredPublicationUnsupported and is
@@ -1099,7 +1102,15 @@ func (e *HTTPExecutor) PublishRetained(ctx context.Context, jobID string) (trans
 	patient.Timeout = e.pubTO
 	data, code, hdr, err := e.doOn(&patient, hreq, "publish_retained", jobID, false)
 	if err != nil {
-		return transcode.JobStatus{}, err
+		// doOn returns an *HTTPError only for a complete answer it refuses to
+		// use (a redirect, an oversized body); every other failure is the
+		// connection or the body giving out, which says nothing about the
+		// candidate or the worker's decision.
+		var he *HTTPError
+		if errors.As(err, &he) {
+			return transcode.JobStatus{}, err
+		}
+		return transcode.JobStatus{}, e.failUncertain("publish_retained", jobID, err)
 	}
 	if code == http.StatusOK {
 		var st transcode.JobStatus

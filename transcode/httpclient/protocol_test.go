@@ -3,6 +3,7 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -250,6 +251,9 @@ func TestHTTPExecutor_PublishRetainedAnswers(t *testing.T) {
 				if !errors.As(err, &he) || he.StatusCode != tc.status || errors.Is(err, transcode.ErrDeferredPublicationUnsupported) {
 					t.Fatalf("want the worker's own error, got %v", err)
 				}
+				if IsTransportUncertain(err) {
+					t.Fatalf("an answer from the worker is definitive, not a transport failure: %v", err)
+				}
 			case tc.want != nil:
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("got %v want %v", err, tc.want)
@@ -270,18 +274,82 @@ func TestHTTPExecutor_PublishRetainedAnswers(t *testing.T) {
 	if _, err := newTestHTTPExecutor(t, srv).PublishRetained(context.Background(), "job-1"); err == nil {
 		t.Fatal("a response for another job was accepted")
 	}
-	// A transport failure is an ordinary error: the request is idempotent and
-	// the caller repeats it.
-	dead := httptest.NewServer(http.NotFoundHandler())
-	exec := newTestHTTPExecutor(t, dead)
-	dead.Close()
-	if _, err := exec.PublishRetained(context.Background(), "job-1"); err == nil {
-		t.Fatal("a closed worker answered")
-	}
 	unused := httptest.NewServer(http.NotFoundHandler())
 	defer unused.Close()
 	if _, err := newTestHTTPExecutor(t, unused).PublishRetained(context.Background(), "../evil"); err == nil {
 		t.Fatal("an unsafe job id must be refused before any request")
+	}
+}
+
+// A publish request that gets no answer is not a refusal: the worker may well
+// be busy copying the candidate, and asking again is harmless. Whatever way the
+// connection fails, the caller must be told the outcome is unknown so it waits
+// and asks again, instead of reporting that the worker refused the upload.
+func TestHTTPExecutor_PublishRetainedTransportFailuresAreUncertain(t *testing.T) {
+	// hangUp reads the request and drops the connection the way a worker does
+	// when it closes an idle or overloaded connection: with whatever bytes the
+	// test wrote first, then a close or a reset.
+	hangUp := func(reply string, reset bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			if reply != "" {
+				_, _ = conn.Write([]byte(reply))
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok && reset {
+				_ = tcp.SetLinger(0)
+			}
+			_ = conn.Close()
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+	}{
+		{"closed without an answer", hangUp("", false)},
+		{"connection reset", hangUp("", true)},
+		{"answer cut short", hangUp("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{\"id\":\"job-1\"", false)},
+		{"error answer cut short", hangUp("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 400\r\n\r\n{\"error\"", false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				tc.handler(w, r)
+			}))
+			defer srv.Close()
+			_, err := newTestHTTPExecutor(t, srv).PublishRetained(context.Background(), "job-1")
+			if !IsTransportUncertain(err) {
+				t.Fatalf("a publish that got no answer must be uncertain, got %T: %v", err, err)
+			}
+			var he *HTTPError
+			if errors.As(err, &he) {
+				t.Fatalf("no answer arrived, so there is no worker error to report: %v", err)
+			}
+			if attempts.Load() != 1 {
+				t.Fatalf("the executor must not repeat the request itself: %d attempts", attempts.Load())
+			}
+		})
+	}
+
+	// Nothing listens.
+	dead := httptest.NewServer(http.NotFoundHandler())
+	exec := newTestHTTPExecutor(t, dead)
+	dead.Close()
+	if _, err := exec.PublishRetained(context.Background(), "job-1"); !IsTransportUncertain(err) {
+		t.Fatalf("a worker that refuses the connection must be uncertain, got %T: %v", err, err)
+	}
+
+	// The caller giving up is not a refusal either, and stays recognisable.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	if _, err := newTestHTTPExecutor(t, srv).PublishRetained(ctx, "job-1"); !IsTransportUncertain(err) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled publish: %T: %v", err, err)
 	}
 }
 
