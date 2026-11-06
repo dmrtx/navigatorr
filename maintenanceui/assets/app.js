@@ -5960,6 +5960,16 @@ function workerHeartbeatState(value, now = Date.now()) {
 function heartbeatAlive(state) {
   return state === "fresh" || state === "delayed";
 }
+// A job the worker holds in its queue because it has no room to keep the
+// candidate. The slot may be free: only room lets it start.
+function workerRoomWait(job) {
+  const w = job.worker || {};
+  if ((w.transcode_phase || w.phase) !== "queued") return null;
+  const reason = String(job.waiting_reason || "");
+  if (reason.includes("(free_disk)")) return {status: "Waiting for disk space", message: "The worker needs more free disk before it can keep this file's converted copy. The job stays in line and starts by itself when there is room."};
+  if (reason.includes("(retention_budget)")) return {status: "Waiting for candidate space", message: "The worker's space for converted copies waiting for your decision is full. The job starts by itself when one is approved or rejected."};
+  return null;
+}
 function workerProgressObservation(job) {
   const w = job.worker || {};
   const phase = w.transcode_phase || w.phase;
@@ -5968,12 +5978,15 @@ function workerProgressObservation(job) {
   if (!["running", "waiting_external"].includes(job.status)) return result;
   if (workerUnavailable(job)) return {...result, warning: true, status: "Worker offline", message: "Worker unreachable. Retrying connection automatically."};
   if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
+  const room = workerRoomWait(job);
+  if (room) return {...result, ...room};
   const waiting = job.activity_waiting_condition || job.waiting_condition;
   // A batch reports its own slot counts; a single job just waits its turn.
   if (waiting === "worker_busy" && !job.batch) {
     const position = job.work?.phase === "waiting_for_worker" ? Number(job.work.queue_position) : 0;
     const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
-    return {...result, status: "Waiting for a free worker slot", message: `The worker is running as many jobs as it allows. This job continues automatically when a slot is free.${line}`};
+    const turn = job.queue_priority ? "All slots are busy. This job goes ahead of the queue and takes the first free slot." : "The worker is running as many jobs as it allows. This job continues automatically when a slot is free.";
+    return {...result, status: job.queue_priority ? "Run next · Waiting for a slot" : "Waiting for a free worker slot", message: `${turn}${line}`};
   }
   if (waiting === "worker_drain") return {...result, status: "Held for worker deploy", message: "Worker drain is on, so this job has not started. It continues when the drain is resumed."};
   if (["worker_busy", "parent_busy", "queued", "transcode_retry", "worker_reconciling"].includes(waiting))
@@ -8474,6 +8487,7 @@ function isConversionPage(job) {
 function conversionStatusOf(job) {
   if (conversionLabels[job.conversion_status]) return job.conversion_status;
   if (job.status === "pending") return "queued";
+  if (["worker_busy", "worker_drain"].includes(job.waiting_condition) || (job.worker?.transcode_phase || job.worker?.phase) === "queued") return "queued";
   if (["running", "waiting_external"].includes(job.status)) return "encoding";
   if (job.status === "waiting_decision") return "needs_decision";
   if (job.status === "failed") return "failed";
@@ -8486,7 +8500,7 @@ function conversionStatusOf(job) {
 function conversionChip(job) {
   const status = conversionStatusOf(job);
   if (job.resolved_by && status === "failed") return statusBadge("Resolved", "neutral");
-  return statusBadge(conversionLabels[status], conversionTones[status]);
+  return statusBadge(job.queue_priority ? `${conversionLabels[status]} · Run next` : conversionLabels[status], conversionTones[status]);
 }
 const percentOf = (part, whole) => whole > 0 ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
 function conversionSizes(job) {
@@ -8812,7 +8826,8 @@ function conversionNodes(job, fix = null) {
   // While it works, one line says what is happening now, and the facts of the
   // try in progress stand in for the settings line it does not have yet.
   if (["queued", "encoding"].includes(status)) {
-    const step = stepText(job);
+    // A job waiting its turn has not begun any step.
+    const step = status === "encoding" ? stepText(job) : "";
     if (step) out.push(oneLine(step, "jd-line jd-step cv-now"));
     const facts = job.outcome ? [] : detailFacts(job);
     if (facts.length) {
@@ -9719,7 +9734,7 @@ function batchFileActivity(item, job) {
   if (phase) {
     const observation = workerProgressObservation({...activity, status: item.status});
     const eta = observation.message ? "" : encodeEta(activity.id, worker, activity.eta_seconds);
-    return workerPhaseLabel(phase) + (observation.message ? ` · ${observation.message}` : eta ? ` · ${eta}` : "");
+    return (workerRoomWait(activity)?.status || workerPhaseLabel(phase)) + (observation.message ? ` · ${observation.message}` : eta ? ` · ${eta}` : "");
   }
   if (activity?.work?.phase === "waiting_for_hash_slot") return "Waiting to verify source";
   if (activity?.work?.phase === "hashing_source") return `Verifying source${activity.work.total_bytes > 0 ? ` · ${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)}` : ""}`;
