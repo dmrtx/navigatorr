@@ -67,18 +67,36 @@ func TestSaveSpacePreflightRunsAnHDRSourceAsShrinkKeepingHDR(t *testing.T) {
 	if ec.Inputs["allow_hardware"] != nil {
 		t.Fatalf("hardware kept on a goal without it: %+v", ec.Inputs)
 	}
-	request, _ := ec.Inputs[saveSpaceRequestKey].(map[string]any)
+	request, _ := ec.Inputs[SaveSpaceRequestKey].(map[string]any)
 	if request["mode"] != "size" || request["allow_hardware"] != true {
 		t.Fatalf("request lost: %+v", request)
 	}
 	digest := policy.Digest
-	saveSpaceHDRPreflight(t, e, ec)
-	if again := assertRoutedToShrinkKeepingHDR(t, ec); again.Digest != digest {
-		t.Fatalf("a repeated preflight froze %s, then %s", digest, again.Digest)
+	again := requeuedSaveSpaceHDR(t, e, ec)
+	if policy := assertRoutedToShrinkKeepingHDR(t, again); policy.Digest != digest {
+		t.Fatalf("a repeated preflight froze %s, then %s", digest, policy.Digest)
 	}
-	if request, _ := ec.Inputs[saveSpaceRequestKey].(map[string]any); request["mode"] != "size" {
+	if request, _ := again.Inputs[SaveSpaceRequestKey].(map[string]any); request["mode"] != "size" {
 		t.Fatalf("a repeated preflight replaced the request: %+v", request)
 	}
+	if _, err := validateTranscodeMedia(context.Background(), e, map[string]any{"path": file, "mode": "size", SaveSpaceRequestKey: map[string]any{}}); err == nil {
+		t.Fatal("a client sent the routing record")
+	}
+}
+
+// requeuedSaveSpaceHDR runs a routed action's preflight again from what a node
+// pause leaves stored: its inputs, and of its state only the frozen policy.
+func requeuedSaveSpaceHDR(t *testing.T, e *Engine, ec *ExecutionContext) *ExecutionContext {
+	t.Helper()
+	var inputs, state map[string]any
+	if json.Unmarshal([]byte(toJSON(ec.Inputs)), &inputs) != nil || json.Unmarshal([]byte(toJSON(ec.State)), &state) != nil {
+		t.Fatal("stored round trip")
+	}
+	again := &ExecutionContext{InstanceID: ec.InstanceID, ActionName: ec.ActionName, Inputs: inputs, State: map[string]any{"mode_policy": state["mode_policy"]}}
+	if result := saveSpaceHDRPreflight(t, e, again); result.Status == StepFailed {
+		t.Fatalf("preflight again: %+v", result)
+	}
+	return again
 }
 
 // A retry of a lost response finds the action without reading the file, which
@@ -132,7 +150,7 @@ func TestSaveSpaceRouteLeavesEveryOtherRequestAlone(t *testing.T) {
 		extra["path"] = file
 		ec := &ExecutionContext{InstanceID: "left-" + name, ActionName: "transcode_media", Inputs: extra, State: map[string]any{}}
 		seedActionInstance(t, st, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
-		if result := saveSpaceHDRPreflight(t, e, ec); getString(result.Outputs, "reason_code") != "hdr_requires_compact" || ec.Inputs["keep_hdr"] != nil || ec.Inputs[saveSpaceRequestKey] != nil {
+		if result := saveSpaceHDRPreflight(t, e, ec); getString(result.Outputs, "reason_code") != "hdr_requires_compact" || ec.Inputs["keep_hdr"] != nil || ec.Inputs[SaveSpaceRequestKey] != nil {
 			t.Errorf("%s: %+v inputs %+v", name, result, ec.Inputs)
 		}
 	}
@@ -144,7 +162,7 @@ func TestSaveSpaceRouteLeavesEveryOtherRequestAlone(t *testing.T) {
 	ec := &ExecutionContext{InstanceID: "sdr", ActionName: "transcode_media", Inputs: map[string]any{"path": sdrFile, "mode": "size"}, State: map[string]any{}}
 	seedActionInstance(t, sdrStore, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
 	saveSpaceHDRPreflight(t, sdr, ec)
-	if ec.Inputs["mode"] != "size" || ec.Inputs[saveSpaceRequestKey] != nil {
+	if ec.Inputs["mode"] != "size" || ec.Inputs[SaveSpaceRequestKey] != nil {
 		t.Errorf("SDR source routed: %+v", ec.Inputs)
 	}
 }
@@ -181,9 +199,16 @@ func TestSaveSpaceBatchChildRoutesItself(t *testing.T) {
 	if policy.Tracks == nil || len(policy.Tracks.Languages) != 1 || policy.Tracks.Languages[0] != "jpn" {
 		t.Fatalf("languages lost: %+v", policy.Tracks)
 	}
-	// A retried child preflight must not fight the parent's goal.
-	saveSpaceHDRPreflight(t, e, child)
-	assertRoutedToShrinkKeepingHDR(t, child)
+	// A requeued child must not fight the parent's goal.
+	assertRoutedToShrinkKeepingHDR(t, requeuedSaveSpaceHDR(t, e, child))
+	// It still answers to the parent: a file taken out of the batch stops.
+	items[0].Decision = "skip"
+	if err := st.UpdateTranscodeBatchItem(items[0]); err != nil {
+		t.Fatal(err)
+	}
+	if result := saveSpaceHDRPreflight(t, e, child); result.Status != StepFailed || result.Error != "mode source is not a member of parent inventory" {
+		t.Fatalf("a removed file ran again: %+v", result)
+	}
 }
 
 func TestSaveSpaceBatchKeepsSkippingWhatTheRouteDoesNotTake(t *testing.T) {
@@ -243,7 +268,7 @@ func TestSaveSpaceGoalChangeRoutesAnHDRChild(t *testing.T) {
 }
 
 func TestRoutedRequestSurvivesTheStoredRoundTrip(t *testing.T) {
-	stored := map[string]any{"path": "x", "mode": "compact", "keep_hdr": true, "replace_when_done": true, saveSpaceRequestKey: map[string]any{"path": "x", "mode": "size", "replace_when_done": true, "idempotency_key": "k"}}
+	stored := map[string]any{"path": "x", "mode": "compact", "keep_hdr": true, "replace_when_done": true, SaveSpaceRequestKey: map[string]any{"path": "x", "mode": "size", "replace_when_done": true, "idempotency_key": "k"}}
 	raw, err := json.Marshal(stored)
 	if err != nil {
 		t.Fatal(err)

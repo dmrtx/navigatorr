@@ -894,10 +894,25 @@ func saveSpaceHDRPolicy(anime bool, tracks *transcode.TrackPolicy) (ModePolicySn
 	return modePolicyGoal("compact", anime, saveSpaceHDRMaxHeight, nil, false, nil, tracks, false, false, true)
 }
 
-// saveSpaceRequestKey holds, in the inputs of a routed action, the request as
+// SaveSpaceRequestKey holds, in the inputs of a routed action, the request as
 // it was sent. A replay of that request still finds the action, without reading
-// the file again, and a different request does not.
-const saveSpaceRequestKey = "save_space_request"
+// the file again, and a different request does not. No client may send it.
+const SaveSpaceRequestKey = "save_space_request"
+
+// withoutSaveSpaceRequest is what a preflight running again judges: the routed
+// inputs, not the record routing left beside them.
+func withoutSaveSpaceRequest(inputs map[string]any) map[string]any {
+	if inputs[SaveSpaceRequestKey] == nil {
+		return inputs
+	}
+	judged := make(map[string]any, len(inputs))
+	for key, value := range inputs {
+		if key != SaveSpaceRequestKey {
+			judged[key] = value
+		}
+	}
+	return judged
+}
 
 // routeSaveSpaceHDR turns a Save space action whose preflight found an HDR or
 // Dolby Vision source into the Shrink goal that keeps HDR, so every later step,
@@ -916,7 +931,7 @@ func routeSaveSpaceHDR(ec *ExecutionContext, frozen *ModePolicySnapshot) (*ModeP
 	for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset"} {
 		delete(ec.Inputs, key)
 	}
-	ec.Inputs[saveSpaceRequestKey] = request
+	ec.Inputs[SaveSpaceRequestKey] = request
 	ec.Inputs["mode"] = "compact"
 	ec.Inputs["keep_hdr"] = true
 	ec.Inputs["max_height"] = float64(saveSpaceHDRMaxHeight)
@@ -1043,10 +1058,6 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 	if getString(ec.Inputs, "mode") == "" || getString(ec.Inputs, "parent_action_id") == "" {
 		return nil
 	}
-	// A routed child already froze its own goal (routeSaveSpaceHDR).
-	if ec.Inputs[saveSpaceRequestKey] != nil && ec.State["mode_policy"] != nil {
-		return nil
-	}
 	if e.deps.Store == nil {
 		return fmt.Errorf("mode parent store is unavailable")
 	}
@@ -1068,8 +1079,18 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 		mode = getString(row, "mode")
 		policy = row["mode_policy"]
 	}
-	if mode != getString(ec.Inputs, "mode") {
+	// A routed child was sent the parent's goal and froze its own
+	// (routeSaveSpaceHDR); it still answers to the parent.
+	sent := getString(ec.Inputs, "mode")
+	request, routed := ec.Inputs[SaveSpaceRequestKey].(map[string]any)
+	if routed {
+		sent = getString(request, "mode")
+	}
+	if mode != sent {
 		return fmt.Errorf("mode does not match frozen parent attempt")
+	}
+	if routed && ec.State["mode_policy"] != nil {
+		return nil
 	}
 	ec.State["mode_policy"] = policy
 	ec.State["policy_digest"] = getString(states, "policy_digest")

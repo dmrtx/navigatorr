@@ -122,7 +122,7 @@ func rerunInputs(r operationRecord) map[string]any {
 	inputs := map[string]any{}
 	for k, v := range r.inputs {
 		// A routed Save space job runs again as the goal it became.
-		if k != "idempotency_key" && k != "save_space_request" {
+		if k != "idempotency_key" && k != action.SaveSpaceRequestKey {
 			inputs[k] = v
 		}
 	}

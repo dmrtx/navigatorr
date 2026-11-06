@@ -43,7 +43,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	// profile_config and its x265 settings, is judged before the hash and the
 	// probe. Admission ran the same checks; this repeats them for requests
 	// stored before they existed.
-	req, err := e.validateTranscodeRequest(ec.ActionName, ec.Inputs)
+	req, err := e.validateTranscodeRequest(ec.ActionName, withoutSaveSpaceRequest(ec.Inputs))
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
