@@ -1221,23 +1221,41 @@ func TestRetained_FreeDiskFloorTakesRoomFromTheSourceCache(t *testing.T) {
 		return err == nil
 	}
 
-	t.Run("oldest first, pinned last, no more than it needs", func(t *testing.T) {
-		f, cacheDir := setup(t, entrySize)
-		pinnedOld := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 5*time.Hour)
-		old := writeCacheEntry(t, cacheDir, "bbbb", entrySize, 4*time.Hour)
-		newer := writeCacheEntry(t, cacheDir, "cccc", entrySize, 3*time.Hour)
+	pin := func(t *testing.T, cacheDir, key string) {
+		t.Helper()
 		if err := os.MkdirAll(sourceCachePinDir(cacheDir), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "aaaa."+pinOwnerTag("job-held")), nil, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), key+"."+pinOwnerTag("job-held")), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	t.Run("oldest first, pinned last, no more than it needs", func(t *testing.T) {
+		f, cacheDir := setup(t, 2*entrySize)
+		pinnedOld := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 5*time.Hour)
+		old := writeCacheEntry(t, cacheDir, "bbbb", entrySize, 4*time.Hour)
+		newer := writeCacheEntry(t, cacheDir, "cccc", entrySize, 3*time.Hour)
+		pin(t, cacheDir, "aaaa")
 		f.submit("job-room", "on_approval")
 		if job := f.loadQueued("job-room"); job.PID == 0 || job.RetentionBlocked != "" {
 			t.Fatalf("job-room = pid %d blocked %q: the cache had room to give", job.PID, job.RetentionBlocked)
 		}
-		if exists(old) || exists(newer) || !exists(pinnedOld) {
-			t.Fatalf("old %v newer %v pinned %v: unpinned entries go first, and the pinned one was not needed", exists(old), exists(newer), exists(pinnedOld))
+		if exists(old) || !exists(newer) || !exists(pinnedOld) {
+			t.Fatalf("old %v newer %v pinned %v: only the oldest unpinned entry had to go", exists(old), exists(newer), exists(pinnedOld))
+		}
+	})
+
+	t.Run("a pin gives way when nothing else can", func(t *testing.T) {
+		f, cacheDir := setup(t, 0)
+		pinned := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 3*time.Hour)
+		pin(t, cacheDir, "aaaa")
+		f.submit("job-pin", "on_approval")
+		if job := f.loadQueued("job-pin"); job.PID == 0 || job.RetentionBlocked != "" {
+			t.Fatalf("job-pin = pid %d blocked %q", job.PID, job.RetentionBlocked)
+		}
+		if exists(pinned) {
+			t.Fatal("the pinned entry should have made room")
 		}
 	})
 
