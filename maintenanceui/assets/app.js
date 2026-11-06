@@ -2400,6 +2400,7 @@ async function loadGoalProfile(key) {
 function sourceProfileText(profile) {
   return [profile.resolution, profile.dynamic_range, profile.video_codec, profile.bit_depth ? `${profile.bit_depth}-bit` : "", profile.size_bytes ? bytes(profile.size_bytes) : ""].filter(Boolean).join(" · ");
 }
+const keepsHDRNote = "Keeps HDR, up to 4K, at least 30% smaller; Dolby Vision becomes HDR10";
 function renderGoalProfile() {
   const p = state.goalProfile, ready = p?.status === "ready" ? p.data : null;
   const line = $("source-profile");
@@ -2407,10 +2408,11 @@ function renderGoalProfile() {
   line.textContent = ready ? `${sourceProfileText(ready.profile)}${p.batch ? " · based on the first file" : ""}` : p?.status === "error" ? "Could not read this file" : "";
   for (const mode of Object.keys(goalNames)) {
     const note = $(`goal-note-${mode}`), verdict = ready?.goals?.[mode];
-    const text = ready?.recommended === mode ? "Recommended for this file" : verdict?.status === "skip" ? `Skips ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}` : "";
+    const keepsHDR = verdict?.keeps_hdr && verdict.status !== "skip";
+    const text = ready?.recommended === mode ? "Recommended for this file" : verdict?.status === "skip" ? `Skips ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}` : keepsHDR ? keepsHDRNote : "";
     note.hidden = !text;
     note.textContent = text;
-    note.dataset.kind = ready?.recommended === mode ? "recommended" : "skip";
+    note.dataset.kind = ready?.recommended === mode ? "recommended" : keepsHDR ? "keeps" : "skip";
   }
 }
 // More goals opens for a selected or recommended goal inside it. A goal
@@ -2425,6 +2427,7 @@ function syncMoreGoals() {
 function goalSkipWarning() {
   const p = state.goalProfile, mode = processingMode();
   const verdict = p?.status === "ready" ? p.data.goals?.[mode] : null;
+  if (mode === "size" && verdict?.keeps_hdr && $("size-budget-kind").value) return `Save space will skip ${p.batch ? "the first file" : "this file"}: a size limit cannot be applied to HDR or Dolby Vision. Remove the limit to convert it keeping HDR.`;
   if (verdict?.status !== "skip") return "";
   return `${goalNames[mode]} will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
 }
@@ -2999,7 +3002,8 @@ function syncTrackBoxes() {
   streamPreview($("keep-tracks-preview"), loading ? null : keepTracks.data, mode, trackKept);
   const profile = state.goalProfile?.status === "ready" ? state.goalProfile.data.profile : null;
   const data = loading ? null : keepTracks.data;
-  goalEstimate($("goal-estimate"), data, mode, trackKept, {budget: sizeBudgetBytes("size-budget", data?.size_bytes), codec: data?.video_codec || profile?.video_codec,
+  // A goal that skips the file has nothing to estimate.
+  goalEstimate($("goal-estimate"), goalSkipWarning() ? null : data, mode, trackKept, {budget: sizeBudgetBytes("size-budget", data?.size_bytes), codec: data?.video_codec || profile?.video_codec,
     query: data ? goalEstimateQuery(keepTracks.path, mode, trackKept, data, {height: shrinkHeight("compact-height"), budgetPrefix: "size-budget"}) : "",
     rerender: () => syncTrackBoxes()});
 }
@@ -5796,7 +5800,7 @@ function shortJobReason(reason) {
     audio_only_nothing_to_convert: "Every audio track is already at or below this goal's level and no track is removed; original kept",
     audio_only_worker_unsupported: "No video setting met this goal; compacting only the audio needs an updated worker. Original kept",
     unsupported_source: "Automatic testing does not support this source format yet; original kept",
-    hdr_requires_compact: "HDR or Dolby Vision source; only the Shrink to 1080p SDR goal converts it. Original kept",
+    hdr_requires_compact: "HDR or Dolby Vision source; this goal does not encode it. Save space without a size limit and Shrink do. Original kept",
     compact_not_needed: "Already SDR at or below the Shrink to 1080p SDR target; the Save space goal can shrink it. Original kept",
     hfr_quality_unavailable: "The worker cannot measure quality at this frame rate yet; original kept",
     compact_frame_evidence_unavailable: "Could not read this video's frames to plan the conversion (it may have timed out); original kept. Use Change goal to try again",

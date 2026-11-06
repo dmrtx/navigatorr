@@ -225,7 +225,7 @@ func resultCause(r operationRecord, streams *action.ConversionStreams) *conversi
 	case "compact_not_needed":
 		c.Kind, c.Summary = "nothing_to_do", "The file is already 1080p SDR or smaller: nothing to shrink"
 	case "hdr_requires_compact":
-		c.Summary = "HDR or Dolby Vision source: Save space keeps the picture as it is and cannot encode it"
+		c.Summary = "HDR or Dolby Vision source: this goal does not encode it. Save space without a size limit and Shrink do"
 	default:
 		if operationValue(r, "skip_transcode") == true {
 			c.Kind, c.Summary = "nothing_to_do", "The job skipped encoding"

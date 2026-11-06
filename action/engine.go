@@ -415,6 +415,13 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 	// dedicated Run argument or inside inputs. It does not change workflow
 	// semantics and therefore is excluded from the immutable payload check.
 	delete(existing, "idempotency_key")
+	// A Save space action routed to keep HDR answers to the request it was.
+	if original, ok := existing[saveSpaceRequestKey].(map[string]any); ok {
+		if _, resent := requested[saveSpaceRequestKey]; !resent {
+			existing = original
+			delete(existing, "idempotency_key")
+		}
+	}
 	// A submission without replace_when_done takes the server default, which
 	// is frozen into the stored inputs; replaying it without the field is the
 	// same request even after the default changed. Sent explicitly, it must

@@ -44,7 +44,7 @@ func TestTranscodeAcceptance(t *testing.T) {
 		{"3_compact_hdr", caseCompact},
 		{"4_quality", caseQuality},
 		{"5_x265_preserve", caseX265Preserve},
-		{"6a_skip_hdr_size", caseSkipHDRSize},
+		{"6a_skip_hdr_quality", caseSkipHDRQuality},
 		{"6b_skip_sdr_compact", caseSkipSDRCompact},
 		{"6c_skip_hevc_preserve", caseSkipHEVCPreserve},
 		{"7_timestamp_glitch", caseTimestampGlitch},
@@ -220,8 +220,8 @@ func (k *kase) expectSkip(spec srcSpec, goal, reason string) {
 
 // A skip is decided from the probe alone, so the skip cases need no encoder or
 // metric.
-func caseSkipHDRSize(k *kase) {
-	k.expectSkip(hdrSource, "size", "hdr_requires_compact")
+func caseSkipHDRQuality(k *kase) {
+	k.expectSkip(hdrSource, "quality", "hdr_requires_compact")
 }
 
 func caseSkipSDRCompact(k *kase) {

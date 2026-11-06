@@ -446,6 +446,20 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 			if reason == "" && mode == "compact" {
 				reason = compactInventoryReason(ec, gateRep)
 			}
+			if reason == "hdr_requires_compact" && saveSpaceTakesHDR(ec.Inputs) {
+				// The child routes itself in its preflight (routeSaveSpaceHDR).
+				parent, err := freezeModePolicy(ec)
+				if err != nil {
+					return StepResult{Status: StepFailed, Error: err.Error()}, nil
+				}
+				policy, err := saveSpaceHDRPolicy(isAnime, parent.Tracks)
+				if err != nil {
+					return StepResult{Status: StepFailed, Error: err.Error()}, nil
+				}
+				if reason = modeSourceReason("compact", gateRep, hfrSupported); reason == "" {
+					reason = compactPolicyInventoryReason(&policy, gateRep)
+				}
+			}
 			if reason != "" {
 				itemDecision, itemStatus = "skip", "skip"
 				itemReasons = []string{reason}

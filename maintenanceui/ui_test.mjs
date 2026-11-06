@@ -3652,7 +3652,7 @@ test("an HDR file skipped by a size goal can change to the compact goal", async 
   const rows=h.elements.get("batch-items-list").children;
   const all = row=>[row,...row.children.flatMap(all)];
   const text = row=>all(row).map(el=>el.textContent).filter(Boolean).join(" ");
-  assert.match(text(rows[0]),/only the Shrink to 1080p SDR goal converts it/);
+  assert.match(text(rows[0]),/Save space without a size limit and Shrink do/);
   assert.ok(enabledLabels(rows[0]).includes("Change goal"));
   assert.ok(nodesWithClass(rows[1], "jd-chip").some(c => c.textContent === "Shrink to 720p SDR"));
 });
@@ -4624,7 +4624,7 @@ test("size goal discloses which audio becomes AAC", () => {
 test("compact goal says in plain language what it drops and still needs approval", () => {
   const radio = markup.match(/<label class="goal-head"><input type="radio" name="processing-mode" value="compact" \/>[\s\S]*?<\/label>/)?.[0] || "";
   assert.match(radio, /<strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR<\/strong>/);
-  assert.match(radio, /Use it for HDR and Dolby Vision, or 4K you don't need\. Converted to SDR, at least 30% smaller; lossless audio becomes AAC\./);
+  assert.match(radio, /Use it for 4K you don't need\. Converted to SDR unless you keep HDR, at least 30% smaller; lossless audio becomes AAC\./);
   assert.match(markup, /<option value="compact">Shrink to SDR · At least 30% smaller, HDR removed/);
   assert.match(source, /item\.mode === "compact" \? shrinkLabel\(item\.max_height, item\.keep_hdr\)/);
 });
@@ -5893,6 +5893,33 @@ test("a folder or batch reads the first video and says so", async () => {
   await h.run('loadGoalProfile("/media/Show/first.mkv")');
   assert.equal(line().textContent, "4K · HDR10 · HEVC · 10-bit · 63.00 GB · based on the first file");
   assert.equal(note("size").textContent, "Skips the first file: HDR source");
+});
+
+test("Save space says it keeps HDR, and only a size limit makes it skip the file", async () => {
+  const { h, note } = goalHarness();
+  h.context.profile = goalProfileFixture({ goals: { size: { status: "ok", keeps_hdr: true }, compact: { status: "ok" }, quality: { status: "skip", reason_code: "hdr_requires_compact" }, x265_preserve: { status: "skip", reason_code: "hdr_requires_compact" } } });
+  h.run("api = async () => profile;");
+  h.run('controls()');
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(note("size").textContent, "Keeps HDR, up to 4K, at least 30% smaller; Dolby Vision becomes HDR10");
+  assert.equal(note("size").dataset.kind, "keeps");
+  h.run('setProcessingMode("size")');
+  assert.equal(h.run("goalSkipWarning()"), "");
+  h.run('$("size-budget-kind").value = "percent"');
+  assert.match(h.run("goalSkipWarning()"), /a size limit cannot be applied to HDR or Dolby Vision/);
+  h.run('$("size-budget-kind").value = ""');
+  h.run('setProcessingMode("quality")');
+  assert.match(h.run("goalSkipWarning()"), /will skip this file/);
+});
+
+test("a goal that skips the file shows no estimate", () => {
+  const { h } = goalHarness();
+  h.context.profile = goalProfileFixture();
+  h.run('state.goalProfile = {status: "ready", data: profile}; setProcessingMode("quality")');
+  assert.notEqual(h.run("goalSkipWarning()"), "");
+  assert.match(source, /goalEstimate\(\$\("goal-estimate"\), goalSkipWarning\(\) \? null : data,/);
+  h.run('$("goal-estimate").hidden = false; goalEstimate($("goal-estimate"), null, "quality", () => true)');
+  assert.equal(h.elements.get("goal-estimate").hidden, true);
 });
 
 test("submitting a goal the server says will skip asks first, and says so plainly", async () => {

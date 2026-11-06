@@ -67,6 +67,15 @@ func CompressionPolicyToday() (CompressionToday, error) {
 	return out, nil
 }
 
+// sameResolutionPicture says what a goal that keeps the resolution does with
+// HDR, which only Save space takes.
+func sameResolutionPicture(goal string) string {
+	if goal == "size" {
+		return "Same resolution. HDR and Dolby Vision files run as Shrink keeping HDR, up to 4K and with its quality settings: Dolby Vision 7/8 and HDR10+ come out as HDR10. With a size limit they are skipped."
+	}
+	return "Same resolution. HDR and Dolby Vision files are skipped: Save space, Shrink or Audio only handles them."
+}
+
 func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 	d := CompressionGoal{Goal: goal, Version: p.Version, Digest: strings.TrimPrefix(p.Digest, "sha256:")}
 	if len(d.Digest) > 12 {
@@ -79,7 +88,7 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 	case p.Size != nil && p.Size.AudioOnly:
 		d.Picture = "The video is copied and proven unchanged: 4K, HDR and Dolby Vision included."
 	default:
-		d.Picture = "Same resolution. HDR and Dolby Vision files are skipped: Shrink or Audio only handles them."
+		d.Picture = sameResolutionPicture(goal)
 	}
 	d.Video = describeRecipe(p.Recipe)
 	if p.Mode == "size" && p.Recipe != nil && p.Recipe.Kind == RecipeQualityLadder {

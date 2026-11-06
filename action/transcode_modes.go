@@ -847,8 +847,9 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 	if len(video) != 1 || video[0].BitDepth != 8 && video[0].BitDepth != 10 {
 		return "unsupported_source"
 	}
-	// Only the compact goal converts HDR and Dolby Vision; a goal change can
-	// pick these files up, unlike unsupported_source.
+	// Only the compact goal encodes HDR and Dolby Vision; Save space reaches it
+	// through saveSpaceTakesHDR, and a goal change can pick the rest up, unlike
+	// unsupported_source.
 	if mode != "compact" && isSourceHDRorDV(rep) {
 		return "hdr_requires_compact"
 	}
@@ -863,6 +864,64 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 		return "already_target_codec"
 	}
 	return ""
+}
+
+// saveSpaceHDRMaxHeight is the limit Save space gives an HDR or Dolby Vision
+// source: 4K stays 4K, a smaller file is not upscaled, and anything wider or
+// taller than 3840x2160 is scaled to fit.
+const saveSpaceHDRMaxHeight = 2160
+
+// saveSpaceTakesHDR reports a size goal that hands HDR and Dolby Vision sources
+// to Shrink's keep-HDR chain, the only encode proven to keep HDR. That chain
+// plans no size limit and has its own minimum saving, so a goal that names
+// either one keeps its rule and skips the file (hdr_requires_compact), and the
+// audio-only goal copies the picture and needs none of this.
+func saveSpaceTakesHDR(inputs map[string]any) bool {
+	if getString(inputs, "mode") != "size" || getBool(inputs, "audio_only") || getBool(inputs, "accept_smaller_saving") {
+		return false
+	}
+	for _, key := range []string{"size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier"} {
+		if inputs[key] != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// saveSpaceHDRPolicy freezes the goal an HDR source of a Save space request
+// runs under. The request's track selection carries over.
+func saveSpaceHDRPolicy(anime bool, tracks *transcode.TrackPolicy) (ModePolicySnapshot, error) {
+	return modePolicyGoal("compact", anime, saveSpaceHDRMaxHeight, nil, false, nil, tracks, false, false, true)
+}
+
+// saveSpaceRequestKey holds, in the inputs of a routed action, the request as
+// it was sent. A replay of that request still finds the action, without reading
+// the file again, and a different request does not.
+const saveSpaceRequestKey = "save_space_request"
+
+// routeSaveSpaceHDR turns a Save space action whose preflight found an HDR or
+// Dolby Vision source into the Shrink goal that keeps HDR, so every later step,
+// the worker and the history see the goal that really runs. A batch child is
+// routed the same way, whatever goal row it came from.
+func routeSaveSpaceHDR(ec *ExecutionContext, frozen *ModePolicySnapshot) (*ModePolicySnapshot, error) {
+	anime := getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime"
+	policy, err := saveSpaceHDRPolicy(anime, frozen.Tracks)
+	if err != nil {
+		return nil, err
+	}
+	request := make(map[string]any, len(ec.Inputs))
+	for key, value := range ec.Inputs {
+		request[key] = value
+	}
+	for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset"} {
+		delete(ec.Inputs, key)
+	}
+	ec.Inputs[saveSpaceRequestKey] = request
+	ec.Inputs["mode"] = "compact"
+	ec.Inputs["keep_hdr"] = true
+	ec.Inputs["max_height"] = float64(saveSpaceHDRMaxHeight)
+	ec.State["mode_policy"] = policy
+	return freezeModePolicy(ec)
 }
 
 // audioOnlySourceReason classifies a source for the audio-only size goal. The
@@ -984,6 +1043,10 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 	if getString(ec.Inputs, "mode") == "" || getString(ec.Inputs, "parent_action_id") == "" {
 		return nil
 	}
+	// A routed child already froze its own goal (routeSaveSpaceHDR).
+	if ec.Inputs[saveSpaceRequestKey] != nil && ec.State["mode_policy"] != nil {
+		return nil
+	}
 	if e.deps.Store == nil {
 		return fmt.Errorf("mode parent store is unavailable")
 	}
@@ -1058,7 +1121,15 @@ func compactSourcePlanWith(ctx context.Context, rep *mediainspect.DetailedReport
 // Vision need decoded-frame evidence, which each child preflight collects.
 func compactInventoryReason(ec *ExecutionContext, rep *mediainspect.DetailedReport) string {
 	p, err := freezeModePolicy(ec)
-	if err != nil || p == nil || p.Compact == nil {
+	if err != nil {
+		return "compact_policy_unavailable"
+	}
+	return compactPolicyInventoryReason(p, rep)
+}
+
+// compactPolicyInventoryReason is compactInventoryReason for a given policy.
+func compactPolicyInventoryReason(p *ModePolicySnapshot, rep *mediainspect.DetailedReport) string {
+	if p == nil || p.Compact == nil {
 		return "compact_policy_unavailable"
 	}
 	video := rep.MainVideo()

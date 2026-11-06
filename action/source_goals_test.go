@@ -14,7 +14,9 @@ func sdrClassifier(_ context.Context, rep *mediainspect.DetailedReport) (mediain
 }
 
 // A preview must never disagree with the job: every non-compact verdict is
-// exactly what modeSourceReason returns for the same report.
+// exactly what modeSourceReason returns for the same report, except that
+// admission hands Save space's HDR sources to the keep-HDR goal, which has the
+// verdict of that goal's own gate.
 func TestSourceGoalsMatchTheJobGates(t *testing.T) {
 	e := NewEngine(EngineDeps{})
 	for name, stream := range map[string]mediainspect.DetailedStream{
@@ -31,6 +33,13 @@ func TestSourceGoalsMatchTheJobGates(t *testing.T) {
 		for _, mode := range []string{"size", "quality", "x265_preserve"} {
 			want := modeSourceReason(mode, rep, false)
 			v := got.Goals[mode]
+			if mode == "size" && want == "hdr_requires_compact" {
+				policy, err := saveSpaceHDRPolicy(false, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, want = compactSourcePlanWith(context.Background(), rep, &policy, sdrClassifier)
+			}
 			if (want == "") != (v.Status == GoalOK) || v.ReasonCode != want {
 				t.Fatalf("%s/%s: job says %q, preview %+v", name, mode, want, v)
 			}
@@ -55,7 +64,7 @@ func TestSourceGoalsRecommendation(t *testing.T) {
 		return mediainspect.DynamicRange{}, errors.New("no frames")
 	}
 	g := e.SourceGoals(context.Background(), "/media/movie.mkv", hdr, failing)
-	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].ReasonCode != "hdr_requires_compact" || g.Recommended != "compact" || g.Dynamic != nil {
+	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].Status != GoalUnknown || !g.Goals["size"].KeepsHDR || g.Goals["quality"].ReasonCode != "hdr_requires_compact" || g.Recommended != "compact" || g.Dynamic != nil {
 		t.Fatalf("%+v", g)
 	}
 }

@@ -18,7 +18,8 @@ var noWinnerReasons = map[string]bool{"no_suitable_candidate": true, "quality_no
 
 // A standalone file the goal could not handle ends with a reason that names the
 // goal that can. The server decides the remedy; the client only asks for it.
-// hdr_requires_compact: only Shrink to 1080p SDR converts HDR and Dolby Vision.
+// hdr_requires_compact: Shrink converts HDR and Dolby Vision whatever else the
+// job asked for.
 // compact_not_needed: an SDR source already at the compact target needs the
 // size goal to shrink further. Other skip reasons (unsupported_source,
 // hfr_quality_unavailable, already_target_codec, insufficient_savings) are not
@@ -120,7 +121,8 @@ func noWinnerRounds(records []operationRecord) map[string]int {
 func rerunInputs(r operationRecord) map[string]any {
 	inputs := map[string]any{}
 	for k, v := range r.inputs {
-		if k != "idempotency_key" {
+		// A routed Save space job runs again as the goal it became.
+		if k != "idempotency_key" && k != "save_space_request" {
 			inputs[k] = v
 		}
 	}

@@ -255,6 +255,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	gateRep := coverArtGateReport(&rep, func() bool { return workerSupportsCoverArt(ctx, e.actionWorker(ec)) })
 	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
+		if saveSpaceTakesHDR(ec.Inputs) && isSourceHDRorDV(gateRep) {
+			if modeSnapshot, err = routeSaveSpaceHDR(ec, modeSnapshot); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
+		}
 		var reason string
 		if modeSnapshot.Size != nil && modeSnapshot.Size.AudioOnly {
 			reason = audioOnlySourceReason(gateRep)

@@ -2756,7 +2756,7 @@ pre {
 }
 .source-profile { margin: 0 0 .5rem; overflow-wrap: anywhere; }
 .goal-note { display: block; margin-top: .3rem; font-size: .8rem; font-style: normal; font-weight: 600; }
-.goal-note[data-kind="recommended"] { color: var(--forest); }
+.goal-note[data-kind="recommended"], .goal-note[data-kind="keeps"] { color: var(--forest); }
 .goal-note[data-kind="skip"] { color: var(--warning); }
 /* More goals is a quiet disclosure, not a second card around the goal cards. */
 .more-goals { margin: .45rem 0 0; }
