@@ -406,6 +406,36 @@ func TestQueueBatchTelemetryIdentifiesTheActualActiveFile(t *testing.T) {
 	}
 }
 
+func TestQueuedBatchFileKeepsWhyTheWorkerHoldsIt(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "waiting_external", nil, nil, nil)
+	reason := "Transcoding media (queued); phase: queued; waiting for room on the worker to keep the candidate (free_disk)"
+	for id, state := range map[string]string{"held": `{"transcode_phase":"queued"}`, "encoding": `{"transcode_phase":"encoding"}`} {
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, InputsJSON: `{"parent_action_id":"batch","path":"/media/` + id + `.mkv"}`, OutputsJSON: "{}", StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/operations?group=workflow&status=active", "", true)
+	var page operationsPage
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Jobs) != 1 {
+		t.Fatal(w.Body.String())
+	}
+	for _, raw := range page.Jobs[0]["activities"].([]any) {
+		activity := raw.(map[string]any)
+		switch activity["id"] {
+		case "held":
+			if activity["waiting_reason"] != reason {
+				t.Fatal("a file held in the worker's line lost its reason", activity)
+			}
+		case "encoding":
+			if _, ok := activity["waiting_reason"]; ok {
+				t.Fatal("a working file carries a waiting reason", activity)
+			}
+		}
+	}
+}
+
 func TestQueueBatchIncludesEveryActiveFile(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store

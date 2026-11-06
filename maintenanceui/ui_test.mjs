@@ -5226,6 +5226,10 @@ test("a job asked to run next says so while it waits, and a waiting job is not e
   assert.doesNotMatch(noRoom, /worker slot/);
   h.context.job = {...h.context.job, waiting_reason:"Transcoding media (queued); waiting for room on the worker to keep the candidate (retention_budget)"};
   assert.equal(h.run("queuePresentation(job).status"), "Waiting for candidate space");
+  // A batch file in the worker's line names it too.
+  h.context.job = {batch:{},status:"waiting_external",activities:[{id:"child",status:"waiting_external",waiting_condition:"transcode_complete",waiting_reason:"phase: queued; waiting for room on the worker to keep the candidate (free_disk)",worker:{transcode_phase:"queued"}}]};
+  assert.match(h.run('batchFileActivity({status:"running",child_action_id:"child"},job)'), /^Waiting for disk space · /);
+  h.context.job = {action_name:"transcode_media",status:"waiting_external",waiting_condition:"transcode_complete",waiting_reason:"",worker:{transcode_phase:"queued",transcode_status:"queued",queue_position:1}};
   // In the worker's line for an ordinary slot, the wording does not change.
   h.context.job = {...h.context.job, waiting_reason:"Transcoding media (queued, progress: 0.0%); phase: queued"};
   assert.equal(h.run("workerRoomWait(job)"), null);

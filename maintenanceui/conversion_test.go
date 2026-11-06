@@ -2,6 +2,7 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -118,7 +119,7 @@ func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
 	seed("started", "transcode_complete", priority)
 	seed("plain", "worker_busy", `{"path":"/media/b.mkv"}`)
 	seed("held", "worker_drain", `{"path":"/media/c.mkv"}`)
-	if err := st.CreateActionInstance(store.ActionInstance{ID: "no-room", ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", InputsJSON: priority, StateJSON: `{"transcode_phase":"queued"}`}); err != nil {
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "no-room", ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: "Transcoding media (queued); waiting for room on the worker to keep the candidate (free_disk)", InputsJSON: priority, OutputsJSON: "{}", StateJSON: `{"transcode_phase":"queued"}`}); err != nil {
 		t.Fatal(err)
 	}
 	for id, want := range map[string]struct {
@@ -145,8 +146,21 @@ func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
 			t.Fatalf("%s: status %v priority %v", id, job["conversion_status"], job["queue_priority"])
 		}
 	}
+	// The page reads why it waits from these two.
+	w := request(h, "GET", "/api/maintenance/operations?id=no-room", "", true)
+	var held struct {
+		Jobs []struct {
+			WaitingReason string `json:"waiting_reason"`
+			Worker        struct {
+				Phase string `json:"transcode_phase"`
+			} `json:"worker"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &held); err != nil || len(held.Jobs) != 1 || held.Jobs[0].Worker.Phase != "queued" || !strings.Contains(held.Jobs[0].WaitingReason, "(free_disk)") {
+		t.Fatalf("%v %s", err, w.Body)
+	}
 	// The list reads the trimmed snapshot, not the full record.
-	w := request(h, "GET", "/api/maintenance/operations", "", true)
+	w = request(h, "GET", "/api/maintenance/operations", "", true)
 	var list struct {
 		Jobs []map[string]any `json:"jobs"`
 	}
