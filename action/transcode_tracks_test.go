@@ -124,6 +124,23 @@ func TestTrackPolicyFreezesWithTheGoal(t *testing.T) {
 		t.Fatalf("manual policy %+v", manual.Tracks)
 	}
 
+	// Commentary and Prefer 2.0 are frozen, change the digest, and hold without a language list.
+	plain := freeze(map[string]any{"mode": "size"}, map[string]any{})
+	trimmed := freeze(map[string]any{"mode": "size", "drop_commentary": true, "prefer_stereo": true}, map[string]any{})
+	if !trimmed.Tracks.DropCommentary || !trimmed.Tracks.PreferStereo || trimmed.Digest == plain.Digest {
+		t.Fatalf("trimmed policy %+v digest %s", trimmed.Tracks, trimmed.Digest)
+	}
+	if plain.Tracks.DropCommentary || plain.Tracks.PreferStereo {
+		t.Fatalf("unasked flags %+v", plain.Tracks)
+	}
+	if same := freeze(map[string]any{"mode": "size", "drop_commentary": false, "prefer_stereo": false}, map[string]any{}); same.Digest != plain.Digest {
+		t.Fatalf("false flags changed the digest: %s vs %s", same.Digest, plain.Digest)
+	}
+	every := freeze(map[string]any{"mode": "size", "keep_languages": []any{}, "drop_commentary": true}, map[string]any{})
+	if every.Tracks == nil || !every.Tracks.DropCommentary || len(every.Tracks.Languages) != 0 {
+		t.Fatalf("every language without commentary %+v", every.Tracks)
+	}
+
 	// An empty saved global list is a choice: no selection.
 	if _, err := st.SetKeepLanguages([]string{}); err != nil {
 		t.Fatal(err)

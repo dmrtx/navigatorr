@@ -4,7 +4,7 @@ const goalNames = {size: "Save space", compact: "Shrink to 1080p SDR", audio_onl
 // mode=size with audio_only, and shown under its own name.
 const goalMode = goal => goal === "audio_only" ? "size" : goal;
 const goalKeyOf = (mode, audioOnly) => mode === "size" && audioOnly ? "audio_only" : mode;
-const moreGoals = ["quality"];
+const moreGoals = ["quality", "x265_preserve"];
 const state = {
   batchOutstandingOnly: false,
   tab: "library",
@@ -769,6 +769,7 @@ async function applyNavigation(route) {
     $("technical").checked = Boolean(route.technical);
     setProcessingMode(route.mode || "size");
     if (route.modeExplicit) state.goalExplicit = true;
+    else if (!state.goalExplicit && !state.goalCarry) applyConversionDefaults();
     const sources = [...state.info.roots.map(r=>`folder:${r}`), ...state.info.services.map(s=>s.name)];
     $("service").value = sources.includes(route.source) ? route.source : sources[0] || "";
     resetLibrary();
@@ -1173,6 +1174,7 @@ async function initialize() {
   // The picker in the goal form names the saved languages.
   void loadKeepLanguages();
   void loadReplaceAuto();
+  void loadConversionDefaults();
   $("logout").hidden = !state.localSession;
   $("access-expired").hidden = true;
   $("service").replaceChildren();
@@ -2312,9 +2314,115 @@ function processingMode() {
 }
 function setProcessingMode(mode) {
   document.querySelectorAll('input[name="processing-mode"]').forEach(input => { input.checked = input.value === mode; });
+  // A goal set from outside the options (a link, an earlier job) shows on them.
+  const height = shrinkRadios("compact-height").find(r => r.checked)?.value;
+  if (mode === "compact" && height === "2160") setShrinkHeight("compact-height", 1080);
+  if (mode === "size" && height !== "2160") setShrinkHeight("compact-height", 2160);
+}
+const radioValue = name => [...document.querySelectorAll(`input[name="${name}"]`)].find(r => r.checked)?.value ?? "";
+const setRadioValue = (name, value) => document.querySelectorAll(`input[name="${name}"]`).forEach(r => { r.checked = r.value === value; });
+// The options on screen name one of the goals the server runs: the video copied
+// is Audio only, 1080p is Shrink, and the rest is Save space, which sends an HDR
+// file through Shrink at its resolution. A height kept from an earlier job
+// (none of the radios) stays Shrink.
+function conversionGoal() {
+  const other = radioValue("conversion-goal");
+  if (other) return other;
+  if (radioValue("conversion-video") === "copy") return "audio_only";
+  return radioValue("compact-height") === "2160" ? "size" : "compact";
+}
+function applyConversionGoal() {
+  setProcessingMode(conversionGoal());
 }
 // Only a click counts as the user's choice; the form never overrides it.
-document.querySelectorAll('input[name="processing-mode"]').forEach(input => input.addEventListener("change", () => { state.goalExplicit = true; controls(); }));
+for (const name of ["conversion-video", "conversion-goal", "compact-hdr", "compact-height", "keep-commentary", "keep-channels"])
+  document.querySelectorAll(`input[name="${name}"]`).forEach(input => input.addEventListener("change", () => {
+    state.goalExplicit = true;
+    if (name === "compact-height" && state.goalCarry?.inputs) delete state.goalCarry.inputs.max_height;
+    applyConversionGoal();
+    controls();
+  }));
+// The form starts from the saved defaults until the user chooses.
+const conversionDefaults = {hdr: "sdr", max_height: 2160, encoder: "fast", drop_commentary: true, prefer_stereo: false};
+function applyConversionDefaults() {
+  const d = conversionDefaults;
+  setRadioValue("conversion-goal", "");
+  setRadioValue("conversion-video", "compress");
+  setKeepHDR("compact-hdr", d.hdr === "keep");
+  setShrinkHeight("compact-height", d.max_height);
+  setRadioValue("keep-commentary", d.drop_commentary ? "drop" : "keep");
+  setRadioValue("keep-channels", d.prefer_stereo ? "stereo" : "all");
+  $("allow-hardware").checked = d.encoder === "fast";
+  applyConversionGoal();
+}
+async function loadConversionDefaults() {
+  try {
+    const data = await api("preferences");
+    if (data?.conversion_defaults) Object.assign(conversionDefaults, data.conversion_defaults);
+  } catch {}
+  if (!state.goalExplicit && !state.goalCarry) applyConversionDefaults();
+  controls();
+}
+async function saveConversionDefaults() {
+  const status = $("conversion-defaults-status");
+  const defaults = {hdr: radioValue("compact-hdr") === "keep" ? "keep" : "sdr", max_height: radioValue("compact-height") === "1080" ? 1080 : 2160, encoder: $("allow-hardware").checked ? "fast" : "small", drop_commentary: radioValue("keep-commentary") === "drop", prefer_stereo: radioValue("keep-channels") === "stereo"};
+  try {
+    const data = await api("preferences", {conversion_defaults: defaults}, {method: "PUT"});
+    Object.assign(conversionDefaults, data?.conversion_defaults || defaults);
+    status.textContent = "Saved as your default";
+  } catch (err) {
+    status.textContent = err?.message || "Could not save";
+  }
+}
+$("save-conversion-defaults").addEventListener("click", () => saveConversionDefaults());
+// A row that does not apply stays in place, greyed, and says why.
+// A height from an earlier job that the options do not offer, for its file and goal.
+function carriedHeight() {
+  const carry = state.goalCarry;
+  return carry?.path === $("path").value && carry.mode === processingMode() ? carry.inputs?.max_height || 0 : 0;
+}
+// Save space runs an HDR file through Shrink at its resolution.
+function viaShrink() {
+  const p = state.goalProfile;
+  return processingMode() === "size" && !$("size-budget-kind").value && p?.status === "ready" && p.data.goals?.size?.via_shrink === true;
+}
+function savingFloor() {
+  const mode = processingMode();
+  if (mode === "audio_only" || $("size-budget-kind").value || !["size", "compact"].includes(mode)) return "";
+  return ` The result is kept only if it is at least ${mode === "compact" || viaShrink() ? 30 : 15}% smaller.`;
+}
+function setOptionRow(name, reasonId, reason) {
+  document.querySelectorAll(`input[name="${name}"]`).forEach(r => { r.disabled = Boolean(reason); });
+  const note = $(reasonId);
+  note.hidden = !reason;
+  note.textContent = reason || "";
+}
+// The options as the form's goal and the chosen file leave them. A batch is
+// decided file by file, so only one file greys what its own picture rules out.
+function renderConversionOptions() {
+  const p = state.goalProfile, ready = p?.status === "ready" && !p.batch ? p.data : null;
+  const dynamic = ready?.profile?.dynamic_range_class || "";
+  const sdrFile = dynamic === "sdr", hdrFile = Boolean(ready?.goals?.size?.via_shrink) || ready?.goals?.size?.reason_code === "hdr_requires_compact";
+  const height = ready?.profile?.height || 0, smallFile = height > 0 && height <= 1080;
+  // A saved 1080p does not apply to a file that is no taller.
+  if (smallFile && processingMode() === "compact" && radioValue("compact-height") === "1080") {
+    setShrinkHeight("compact-height", 2160);
+    applyConversionGoal();
+  }
+  const mode = processingMode();
+  setRadioValue("conversion-goal", mode === "x265_preserve" || mode === "quality" ? mode : "");
+  setRadioValue("conversion-video", mode === "audio_only" ? "copy" : "compress");
+  const other = mode === "x265_preserve" || mode === "quality" ? "Not used by the goal under More options." : "";
+  const copied = mode === "audio_only" ? "The video is copied as it is." : "";
+  setOptionRow("compact-hdr", "compact-hdr-reason", other || copied || (sdrFile ? "This file is already SDR." : ""));
+  setOptionRow("compact-height", "compact-height-reason", other || copied || (smallFile ? "This file is already 1080p or smaller." : carriedHeight() ? `${carriedHeight()}p, as in the earlier job, until you choose.` : ""));
+  if (!other && !copied && !smallFile && carriedHeight()) document.querySelectorAll('input[name="compact-height"]').forEach(r => { r.disabled = false; });
+  const noLimit = other || copied || (mode === "compact" ? "A size limit needs Resolution on Keep." : hdrFile ? "A size limit cannot be applied to HDR or Dolby Vision." : "");
+  if (noLimit) $("size-budget-kind").value = "";
+  setOptionRow("size-budget-limit", "size-budget-reason", noLimit);
+  setOptionRow("size-engine", "size-engine-reason", other || copied || (mode === "compact" || hdrFile ? "This conversion always uses x265." : ""));
+  document.querySelectorAll('input[name="conversion-video"]').forEach(r => { r.disabled = Boolean(other); });
+}
 
 // The goals are not peers: a goal can skip a file outright (HDR with Save
 // space, 1080p SDR with Shrink). When step 2 opens, the server reads the first
@@ -2390,46 +2498,32 @@ async function loadGoalProfile(key) {
   if (!current()) return;
   state.goalProfileAbort = null;
   state.goalProfile = data?.profile && data.goals ? {...state.goalProfile, status: "ready", data} : {...state.goalProfile, status: "error"};
+  // Each file starts from the saved defaults; they never replace a choice.
+  if (!state.goalExplicit && !state.goalCarry) applyConversionDefaults();
   // The file's tracks are read after its profile, never beside it.
   scheduleKeepTracks();
-  const recommended = state.goalProfile.data?.recommended;
-  // The recommendation fills in an unchosen goal; it never replaces a choice.
-  if (recommended && goalNames[recommended] && !state.goalExplicit) setProcessingMode(recommended);
   controls();
 }
 function sourceProfileText(profile) {
   return [profile.resolution, profile.dynamic_range, profile.video_codec, profile.bit_depth ? `${profile.bit_depth}-bit` : "", profile.size_bytes ? bytes(profile.size_bytes) : ""].filter(Boolean).join(" · ");
 }
-const keepsHDRNote = "Keeps HDR, up to 4K, at least 30% smaller; Dolby Vision becomes HDR10";
 function renderGoalProfile() {
   const p = state.goalProfile, ready = p?.status === "ready" ? p.data : null;
   const line = $("source-profile");
   line.hidden = !ready && p?.status !== "error";
   line.textContent = ready ? `${sourceProfileText(ready.profile)}${p.batch ? " · based on the first file" : ""}` : p?.status === "error" ? "Could not read this file" : "";
-  for (const mode of Object.keys(goalNames)) {
-    const note = $(`goal-note-${mode}`), verdict = ready?.goals?.[mode];
-    const keepsHDR = verdict?.keeps_hdr && verdict.status !== "skip";
-    const text = ready?.recommended === mode ? "Recommended for this file" : verdict?.status === "skip" ? `Skips ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}` : keepsHDR ? keepsHDRNote : "";
-    note.hidden = !text;
-    note.textContent = text;
-    note.dataset.kind = ready?.recommended === mode ? "recommended" : keepsHDR ? "keeps" : "skip";
-  }
 }
-// More goals opens for a selected or recommended goal inside it. A goal
-// picked only by the form's own default stays hidden while the file is read.
+// More options opens for a goal chosen inside it.
 function syncMoreGoals() {
-  const p = state.goalProfile;
-  if ((!p || p.status === "loading") && !state.goalExplicit) return;
-  const wanted = [processingMode(), p?.status === "ready" ? p.data.recommended : ""];
-  if (wanted.some(mode => moreGoals.includes(mode))) $("more-goals").open = true;
+  if (moreGoals.includes(processingMode())) $("more-goals").open = true;
 }
 // What the server says the chosen goal will do to the first chosen file.
 function goalSkipWarning() {
   const p = state.goalProfile, mode = processingMode();
   const verdict = p?.status === "ready" ? p.data.goals?.[mode] : null;
-  if (mode === "size" && verdict?.keeps_hdr && $("size-budget-kind").value) return `Save space will skip ${p.batch ? "the first file" : "this file"}: a size limit cannot be applied to HDR or Dolby Vision. Remove the limit to convert it keeping HDR.`;
+  if (mode === "size" && verdict?.via_shrink && $("size-budget-kind").value) return `This will skip ${p.batch ? "the first file" : "this file"}: a size limit cannot be applied to HDR or Dolby Vision. Remove the limit to convert it.`;
   if (verdict?.status !== "skip") return "";
-  return `${goalNames[mode]} will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
+  return `This will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
 }
 // Languages to keep. The Save space and Shrink goals keep the audio and
 // subtitle tracks in these languages (plus the original-language audio and any
@@ -2676,7 +2770,11 @@ function keepTrackTarget() {
 }
 function keepLanguageInputs() {
   const kt = keepTracks;
-  return kt.scope === "saved" ? {} : {keep_languages: kt.scope === "all" ? [] : [...kt.languages]};
+  return {
+    ...(kt.scope === "saved" ? {} : {keep_languages: kt.scope === "all" ? [] : [...kt.languages]}),
+    ...(radioValue("keep-commentary") === "drop" ? {drop_commentary: true} : {}),
+    ...(radioValue("keep-channels") === "stereo" ? {prefer_stereo: true} : {}),
+  };
 }
 // The inputs the choice adds to a job. The saved list sends nothing; boxes that
 // were changed send both lists, so what is frozen is what was on screen.
@@ -2711,6 +2809,8 @@ wireLanguageInput({input: "keep-job-input", add: "keep-job-add", note: "keep-job
 function keepTracksQuery(path) {
   const kt = keepTracks, params = new URLSearchParams({path});
   if (kt.scope !== "saved") params.set("keep_languages", kt.scope === "all" ? "" : kt.languages.join(","));
+  if (radioValue("keep-commentary") === "drop") params.set("drop_commentary", "true");
+  if (radioValue("keep-channels") === "stereo") params.set("prefer_stereo", "true");
   return params.toString();
 }
 // Called whenever the form changes. A new file or a new language list reads the
@@ -3004,7 +3104,7 @@ function syncTrackBoxes() {
   const data = loading ? null : keepTracks.data;
   // A goal that skips the file has nothing to estimate.
   goalEstimate($("goal-estimate"), goalSkipWarning() ? null : data, mode, trackKept, {budget: sizeBudgetBytes("size-budget", data?.size_bytes), codec: data?.video_codec || profile?.video_codec,
-    query: data ? goalEstimateQuery(keepTracks.path, mode, trackKept, data, {height: shrinkHeight("compact-height"), budgetPrefix: "size-budget"}) : "",
+    query: data ? goalEstimateQuery(keepTracks.path, viaShrink() ? "compact" : mode, trackKept, data, {height: viaShrink() ? 2160 : shrinkHeight("compact-height"), budgetPrefix: "size-budget"}) : "",
     rerender: () => syncTrackBoxes()});
 }
 function renderKeepTracks() {
@@ -3020,9 +3120,10 @@ function renderKeepTracks() {
   });
   const data = target.single ? kt.data : null;
   const saved = keepLanguages.status === "ready" ? keepLanguages.saved : null;
-  $("keep-tracks-summary").textContent = kt.picks ? "Tracks chosen by hand" : kt.scope === "all" ? "Keep every track"
-    : kt.scope === "job" ? (kt.languages.length ? `This job: ${languageNames(kt.languages)}` : "Keep every track")
-    : saved ? (saved.length ? `Saved list: ${languageNames(saved)}` : "Keep every track") : "Saved list";
+  const languagesSummary = kt.scope === "all" ? "Every language"
+    : kt.scope === "job" ? (kt.languages.length ? `This job: ${languageNames(kt.languages)}` : "Every language")
+    : saved ? (saved.length ? `Saved list: ${languageNames(saved)}` : "Every language") : "Saved list";
+  $("keep-tracks-summary").textContent = kt.picks ? "Tracks chosen by hand" : [languagesSummary, radioValue("keep-commentary") === "drop" ? "no commentary" : "", radioValue("keep-channels") === "stereo" ? "prefer 2.0" : ""].filter(Boolean).join(" · ");
   $("keep-tracks-file").hidden = !target.single;
   if (!target.single) return;
   if (data && kt.built !== data) {
@@ -3100,15 +3201,11 @@ function controls() {
   state.technicalShown = technical;
   $("legacy-controls").hidden = !technical;
   $("processing-goal").disabled = technical;
-  $("hardware-option").hidden = processingMode() !== "size";
-  $("compact-height-option").hidden = processingMode() !== "compact";
-  $("compact-hdr-option").hidden = processingMode() !== "compact";
-  $("size-budget-option").hidden = processingMode() !== "size";
+  refreshGoalProfile();
+  renderConversionOptions();
   updateSizeBudgetFields("size-budget");
   renderSegmented(["size-budget"]);
-  refreshGoalProfile();
   renderGoalProfile();
-  renderShrinkTitle();
   syncMoreGoals();
   refreshKeepTracks();
   renderKeepTracks();
@@ -3116,7 +3213,7 @@ function controls() {
   $("advanced-state").textContent = technical ? "On · goal not used" : "Off";
   $("advanced-state").dataset.on = technical ? "true" : "false";
   $("processing-policy").hidden = technical;
-  $("processing-policy").textContent = "Automatic encodes the whole file with fixed settings, then verifies the result. Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
+  $("processing-policy").textContent = "Automatic encodes the whole file with fixed settings, then verifies the result." + savingFloor() + " Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
   $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
@@ -3393,6 +3490,7 @@ async function buildAndSubmitJob(mode = "encode") {
   else if (simple && inputs.mode === "size") {
     // Always explicit, so the choice on screen is the choice that is frozen.
     inputs.allow_hardware = $("allow-hardware").checked;
+    if (keepsHDR("compact-hdr")) inputs.save_space_keep_hdr = true;
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
   if (simple && keepGoals.includes(goal)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
@@ -5427,26 +5525,21 @@ function applyGoalSettings(path, goal) {
   for (const key of ["max_height", "allow_slow_preset"]) if (goal[key] != null) inputs[key] = goal[key];
   // A height the Resolution choice offers is shown there instead of carried;
   // a carried 720 or 1440 leaves both unpicked, so either pick replaces it.
+  let mode = goalKeyOf(goal.mode, goal.audio_only === true);
   if (goal.mode === "compact") {
-    setShrinkHeight("compact-height", goal.max_height ?? 1080);
     setKeepHDR("compact-hdr", goal.keep_hdr === true);
     if (shrinkOffers(goal.max_height ?? 1080)) delete inputs.max_height;
+    // Shrink at 4K is what the options call keeping the resolution.
+    if (goal.max_height === 2160) { mode = "size"; setProcessingMode("size"); }
+    else setShrinkHeight("compact-height", goal.max_height ?? 1080);
   }
-  state.goalCarry = {path, mode: goalKeyOf(goal.mode, goal.audio_only === true), inputs};
-  renderShrinkTitle();
+  if (goal.mode === "size") setKeepHDR("compact-hdr", goal.save_space_keep_hdr === true);
+  state.goalCarry = {path, mode, inputs};
 }
 // Drops what applyGoalSettings carried, so a later ordinary pick of the same
 // file adds no hidden settings.
 function clearGoalCarry() {
   state.goalCarry = null;
-  renderShrinkTitle();
-}
-// The Shrink card names the height the form will send: the Resolution choice,
-// or a carried 720 or 1440 from an earlier job of the same file.
-function renderShrinkTitle() {
-  const carry = state.goalCarry;
-  const carried = carry?.mode === "compact" && carry.path === $("path").value.trim() ? carry.inputs.max_height : null;
-  $("goal-title-compact").textContent = shrinkLabel(carried || shrinkHeight("compact-height"), keepsHDR("compact-hdr"));
 }
 // Shrink offers 1080p, the smallest, or 4K, for HDR kept at its resolution.
 function shrinkOffers(height) {
@@ -5458,7 +5551,7 @@ function shrinkLabel(height, keepHDR = false) {
 }
 // Shrink converts HDR to SDR unless Keep HDR is picked.
 function keepsHDR(name) {
-  return shrinkRadios(name).find(r => r.checked)?.value === "keep";
+  return shrinkRadios(name).find(r => r.checked && !r.disabled)?.value === "keep";
 }
 function setKeepHDR(name, keep) {
   for (const radio of shrinkRadios(name)) radio.checked = radio.value === (keep ? "keep" : "sdr");
@@ -5474,14 +5567,7 @@ function shrinkHeight(name, fallback = 1080) {
 function setShrinkHeight(name, height) {
   for (const radio of shrinkRadios(name)) radio.checked = Number(radio.value) === height;
 }
-// Choosing a resolution replaces a height carried from an earlier job.
-for (const radio of shrinkRadios("compact-height"))
-  radio.addEventListener("change", () => {
-    if (state.goalCarry?.inputs) delete state.goalCarry.inputs.max_height;
-    controls();
-  });
 for (const radio of shrinkRadios("reconfigure-height")) radio.addEventListener("change", updateReconfigureHardware);
-for (const radio of shrinkRadios("compact-hdr")) radio.addEventListener("change", renderShrinkTitle);
 for (const radio of shrinkRadios("reconfigure-hdr")) radio.addEventListener("change", updateReconfigureHardware);
 // The series or movie the earlier job was made for, so the new job is listed
 // and replaced the same way.
@@ -5504,7 +5590,10 @@ function openGoalForm(path, options = {}) {
   state.fileMedia = null;
   state.fileService = null;
   clearGoalCarry();
-  if (options.mode) setProcessingMode(goalKeyOf(options.mode, options.goal?.audio_only === true));
+  if (options.mode) {
+    applyConversionDefaults();
+    setProcessingMode(goalKeyOf(options.mode, options.goal?.audio_only === true));
+  }
   if (options.goal) applyGoalSettings(path, options.goal);
   applyLibraryContext(options.context, options.goal);
   if (options.languages) presetKeepLanguages(options.languages);

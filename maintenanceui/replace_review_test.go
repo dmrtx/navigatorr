@@ -416,3 +416,49 @@ func TestReplaceWhenDoneOfAFileWhoseBatchIsNotListed(t *testing.T) {
 		}
 	}
 }
+
+func TestConversionDefaultsAreAServerPreference(t *testing.T) {
+	_, h := testUI(t)
+	defaults := func() store.ConversionDefaults {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/preferences", "", true)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		var body struct {
+			ConversionDefaults store.ConversionDefaults `json:"conversion_defaults"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.ConversionDefaults
+	}
+	if got := defaults(); got != (store.ConversionDefaults{HDR: "sdr", MaxHeight: 2160, Encoder: "fast", DropCommentary: true}) {
+		t.Fatalf("built-in defaults = %+v", got)
+	}
+	want := store.ConversionDefaults{HDR: "keep", MaxHeight: 1080, Encoder: "small", PreferStereo: true}
+	w := request(h, "PUT", "/api/maintenance/preferences", `{"conversion_defaults":{"hdr":"keep","max_height":1080,"encoder":"small","drop_commentary":false,"prefer_stereo":true}}`, true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := defaults(); got != want {
+		t.Fatalf("saved defaults = %+v", got)
+	}
+	// Saving one preference leaves the other, and a refused value changes nothing.
+	if w := request(h, "PUT", "/api/maintenance/preferences", `{"replace_when_done_default":true}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, bad := range []string{
+		`{"conversion_defaults":{"hdr":"dolby","max_height":1080,"encoder":"small"}}`,
+		`{"conversion_defaults":{"hdr":"sdr","max_height":720,"encoder":"small"}}`,
+		`{"conversion_defaults":{"hdr":"sdr","max_height":1080,"encoder":"gpu"}}`,
+		`{}`,
+	} {
+		if w := request(h, "PUT", "/api/maintenance/preferences", bad, true); w.Code != 400 {
+			t.Fatal(bad, w.Code)
+		}
+	}
+	if got := defaults(); got != want {
+		t.Fatalf("defaults after refused writes = %+v", got)
+	}
+}

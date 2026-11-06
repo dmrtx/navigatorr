@@ -85,7 +85,8 @@ func (s *Server) replaceWhenDone(w http.ResponseWriter, r *http.Request) {
 }
 
 // preferences are the server-side defaults both clients show:
-// GET, or PUT {"replace_when_done_default": bool}.
+// GET, or PUT {"replace_when_done_default": bool} and/or
+// {"conversion_defaults": {...}}.
 func (s *Server) preferences(w http.ResponseWriter, r *http.Request) {
 	st := s.engine.Deps().Store
 	if st == nil {
@@ -94,15 +95,28 @@ func (s *Server) preferences(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPut {
 		var body struct {
-			ReplaceWhenDoneDefault *bool `json:"replace_when_done_default"`
+			ReplaceWhenDoneDefault *bool                     `json:"replace_when_done_default"`
+			ConversionDefaults     *store.ConversionDefaults `json:"conversion_defaults"`
 		}
-		if decode(w, r, &body) != nil || body.ReplaceWhenDoneDefault == nil {
-			fail(w, 400, `send {"replace_when_done_default": true|false}`)
+		if decode(w, r, &body) != nil || (body.ReplaceWhenDoneDefault == nil && body.ConversionDefaults == nil) {
+			fail(w, 400, `send {"replace_when_done_default": true|false} or {"conversion_defaults": {...}}`)
 			return
 		}
-		if err := st.SetReplaceWhenDoneDefault(*body.ReplaceWhenDoneDefault); err != nil {
-			fail(w, 500, "preferences not saved")
-			return
+		if body.ConversionDefaults != nil {
+			if err := body.ConversionDefaults.Validate(); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+			if err := st.SetConversionDefaults(*body.ConversionDefaults); err != nil {
+				fail(w, 500, "preferences not saved")
+				return
+			}
+		}
+		if body.ReplaceWhenDoneDefault != nil {
+			if err := st.SetReplaceWhenDoneDefault(*body.ReplaceWhenDoneDefault); err != nil {
+				fail(w, 500, "preferences not saved")
+				return
+			}
 		}
 	}
 	value, err := st.ReplaceWhenDoneDefault()
@@ -110,5 +124,10 @@ func (s *Server) preferences(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "preferences unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{store.ReplaceWhenDoneDefaultKey: value})
+	conversion, err := st.ConversionDefaults()
+	if err != nil {
+		fail(w, 500, "preferences unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]any{store.ReplaceWhenDoneDefaultKey: value, store.ConversionDefaultsKey: conversion})
 }
