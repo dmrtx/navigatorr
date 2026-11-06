@@ -5,10 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -964,6 +968,84 @@ func TestPromotionWaitsForAnUploadTheWorkerIsStillDoing(t *testing.T) {
 	}
 	if len(rp.w.published) != 3 {
 		t.Fatalf("publish requested %d times", len(rp.w.published))
+	}
+}
+
+// A publish request the worker drops without answering (the connection closed
+// or reset, the answer cut short) says nothing about the candidate: the
+// worker may be copying it right now. The promotion must keep waiting and ask
+// again, through the real client, instead of failing as "refused" and asking
+// the user to retry; the request is idempotent, so the next ask finds the copy
+// finished.
+func TestPromotionWaitsWhenThePublishRequestGetsNoAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		reset bool
+	}{
+		{name: "closed without an answer"},
+		{name: "connection reset", reset: true},
+		{name: "answer cut short", reply: "HTTP/1.1 200 OK\r\nContent-Length: 400\r\n\r\n{\"id\":"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := newRetainedPromotion(t)
+			var asks atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if asks.Add(1) <= 2 {
+					conn, _, err := w.(http.Hijacker).Hijack()
+					if err != nil {
+						t.Errorf("hijack: %v", err)
+						return
+					}
+					if tc.reply != "" {
+						_, _ = conn.Write([]byte(tc.reply))
+					}
+					if tcp, ok := conn.(*net.TCPConn); ok && tc.reset {
+						_ = tcp.SetLinger(0)
+					}
+					_ = conn.Close()
+					return
+				}
+				writeCandidateFile(t, rp.candidate, string(rp.content))
+				rp.published = true
+				_, _ = w.Write([]byte(`{"id":"job-source","status":"completed"}`))
+			}))
+			defer srv.Close()
+			exec, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{
+				BaseURL:      srv.URL,
+				PathMappings: []transcode.PathMapping{{Local: "/local/media", Remote: "/Volumes/media"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rp.w.publish = func(ctx context.Context, jobID string) (transcode.JobStatus, error) {
+				return exec.PublishRetained(ctx, jobID)
+			}
+			r := runLocalPromotion(t, rp.promotionHarness)
+			r = rp.resume(r.ID, "approve")
+			for wait := 1; wait <= 2; wait++ {
+				if r.Status != StatusWaitingExternal || int(asks.Load()) != wait {
+					t.Fatalf("wait %d: %s asks=%d %s", wait, r.Status, asks.Load(), r.Error)
+				}
+				if strings.Contains(r.Error, "refused") {
+					t.Fatalf("a dropped connection was reported as a refusal: %q", r.Error)
+				}
+				if _, err := os.Stat(rp.original); err != nil {
+					t.Fatalf("the original was touched: %v", err)
+				}
+				if released := rp.w.releases(); len(released) != 0 {
+					t.Fatalf("a candidate the worker is still copying was released: %v", released)
+				}
+				var rerr error
+				r, rerr = rp.engine.Resume(context.Background(), r.ID, "", nil)
+				if rerr != nil {
+					t.Fatal(rerr)
+				}
+			}
+			if r.Status != StatusCompleted || asks.Load() != 3 {
+				t.Fatalf("promotion: %+v asks=%d", r, asks.Load())
+			}
+		})
 	}
 }
 
