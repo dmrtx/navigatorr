@@ -845,6 +845,31 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 			t.Fatalf("job-disk-1 = pid %d blocked %q deferred %v, want started with room on the disk", job.PID, job.RetentionBlocked, job.deferredPublication())
 		}
 	})
+	t.Run("a full budget does not skip the free-disk floor", func(t *testing.T) {
+		free := int64(1000)
+		f := newRetainedFixture(t, func(c *WorkerConfig) {
+			c.RetainedCandidatesMaxBytes = srcSize + srcSize/2
+			c.MinFreeDiskBytes = 95
+		})
+		f.w.freeDisk = func(string) (int64, error) { return free, nil }
+		f.retain("job-both-1") // fills the budget
+		free = 100
+		// The fallback would publish on encode, and that needs the disk too.
+		f.submit("job-both-2", "on_approval")
+		if job := f.loadQueued("job-both-2"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk || job.PublishFallback != "" {
+			t.Fatalf("job-both-2 = pid %d blocked %q fallback %q, want waiting on the disk floor", job.PID, job.RetentionBlocked, job.PublishFallback)
+		}
+		f.submitWaiting("job-both-3")
+		if job := f.loadQueued("job-both-3"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
+			t.Fatalf("job-both-3 = pid %d blocked %q, want waiting on the disk floor", job.PID, job.RetentionBlocked)
+		}
+		// With room on the disk only the budget is left, and it falls back.
+		free = 1000
+		f.schedule()
+		if job := f.loadQueued("job-both-2"); job.PID == 0 || job.RetentionBlocked != "" || job.PublishFallback != transcode.PublishFallbackRetentionFull {
+			t.Fatalf("job-both-2 = pid %d blocked %q fallback %q, want started, retention_full", job.PID, job.RetentionBlocked, job.PublishFallback)
+		}
+	})
 	t.Run("an unmeasurable disk holds the job rather than guesses", func(t *testing.T) {
 		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 1 })
 		f.w.freeDisk = func(string) (int64, error) { return 0, errors.New("statfs failed") }

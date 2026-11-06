@@ -827,11 +827,8 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 	if err != nil {
 		return fmt.Errorf("measuring retained candidates: %w", err)
 	}
-	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
-		if held+expected > limit {
-			return &retentionRefusal{reason: retentionBlockedBudget, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
-		}
-	}
+	// The floor goes first: a budget refusal may let the job fall back to
+	// publishing on encode, and that needs the disk too.
 	if floor := w.cfg.MinFreeDiskBytes; floor > 0 {
 		free, err := w.freeDiskBytes()
 		if err != nil {
@@ -840,6 +837,11 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		// Encodes admitted earlier have not written their candidates yet.
 		if left := free - unwritten - expected; left < floor {
 			return &retentionRefusal{reason: retentionBlockedDisk, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
+		}
+	}
+	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
+		if held+expected > limit {
+			return &retentionRefusal{reason: retentionBlockedBudget, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
 		}
 	}
 	return nil
