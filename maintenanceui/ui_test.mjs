@@ -5203,6 +5203,38 @@ test("a file waiting in the coordinator's slot queue shows its place, not the la
   assert.match(h.run("telemetry(job)").children[0].textContent, /It is next in line\./);
 });
 
+test("a job asked to run next says so while it waits, and a waiting job is not encoding", async () => {
+  const h = harness();
+  h.context.job = {action_name:"transcode_media",status:"waiting_external",waiting_condition:"worker_busy",queue_priority:true,work:{phase:"waiting_for_worker",queue_position:1}};
+  assert.equal(h.run("queuePresentation(job).status"), "Run next · Waiting for a slot");
+  assert.notEqual(h.run("statusClass(queuePresentation(job).status)"), "failed");
+  const said = h.run("telemetry(job)").children[0].textContent;
+  assert.match(said, /goes ahead of the queue and takes the first free slot\. It is next in line\./);
+  assert.doesNotMatch(said, /as many jobs as it allows/);
+  // Others in the queue read as before, without the flag.
+  h.context.job = {action_name:"transcode_media",status:"waiting_external",waiting_condition:"worker_busy",work:{phase:"waiting_for_worker",queue_position:3}};
+  assert.equal(h.run("queuePresentation(job).status"), "Waiting for a free worker slot");
+  assert.equal(h.run("conversionStatusOf(job)"), "queued");
+  assert.equal(h.run("conversionStatusOf({status:'waiting_external',waiting_condition:'transcode_complete'})"), "encoding");
+
+  // Held in the worker's queue for lack of disk: says so, not "a worker slot".
+  h.context.job = {action_name:"transcode_media",status:"waiting_external",waiting_condition:"transcode_complete",waiting_reason:"Transcoding media (queued, progress: 0.0%); phase: queued; waiting for room on the worker to keep the candidate (free_disk)",worker:{transcode_phase:"queued",transcode_status:"queued",queue_position:1}};
+  assert.equal(h.run("queuePresentation(job).status"), "Waiting for disk space");
+  assert.equal(h.run("conversionStatusOf(job)"), "queued");
+  const noRoom = h.run("telemetry(job)").children[0].textContent;
+  assert.match(noRoom, /starts by itself when there is room/);
+  assert.doesNotMatch(noRoom, /worker slot/);
+  h.context.job = {...h.context.job, waiting_reason:"Transcoding media (queued); waiting for room on the worker to keep the candidate (retention_budget)"};
+  assert.equal(h.run("queuePresentation(job).status"), "Waiting for candidate space");
+  // In the worker's line for an ordinary slot, the wording does not change.
+  h.context.job = {...h.context.job, waiting_reason:"Transcoding media (queued, progress: 0.0%); phase: queued"};
+  assert.equal(h.run("workerRoomWait(job)"), null);
+
+  const waiting = await openDetail({...detailJob(), status:"waiting_external", waiting_condition:"worker_busy", conversion_status:"queued", queue_priority:true, current_step:0, outcome:null});
+  assert.equal(allTextOf(waiting.elements.get("detail-status")).replace(/^\W+/u, ""), "Queued · Run next");
+  assert.doesNotMatch(allTextOf(waiting.elements.get("detail-summary")), /Step \d+ of \d+/);
+});
+
 test("phase cost detail shows measured worker CPU time and keeps an older worker's unknown", () => {
   const h = harness();
   h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{worker_encode:{duration_ms:500,attempts:1,active_compute_ms:1800},worker_probe:{duration_ms:40,attempts:1,active_compute_ms:null}}});');

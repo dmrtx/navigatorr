@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -99,5 +100,66 @@ func TestNoResultRunDoesNotResolveAFailure(t *testing.T) {
 	}
 	if by := f.resolvedBy(failed); by != nil {
 		t.Fatalf("resolved by %v", by)
+	}
+}
+
+// The list snapshot keeps only some inputs, so this reads through the endpoint.
+func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seed := func(id, condition string, inputs string) {
+		t.Helper()
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: condition, InputsJSON: inputs, OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	priority := `{"path":"/media/a.mkv","queue_priority":true}`
+	seed("first", "worker_busy", priority)
+	seed("started", "transcode_complete", priority)
+	seed("plain", "worker_busy", `{"path":"/media/b.mkv"}`)
+	seed("held", "worker_drain", `{"path":"/media/c.mkv"}`)
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "no-room", ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", InputsJSON: priority, StateJSON: `{"transcode_phase":"queued"}`}); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]struct {
+		status   string
+		priority any
+	}{
+		"first":   {"queued", true},
+		"started": {"encoding", nil},
+		"plain":   {"queued", nil},
+		"held":    {"queued", nil},
+		"no-room": {"queued", true},
+	} {
+		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", id, w.Code, w.Body)
+		}
+		var body struct {
+			Jobs []map[string]any `json:"jobs"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil || len(body.Jobs) != 1 {
+			t.Fatalf("%s: %v %s", id, err, w.Body)
+		}
+		if job := body.Jobs[0]; job["conversion_status"] != want.status || job["queue_priority"] != want.priority {
+			t.Fatalf("%s: status %v priority %v", id, job["conversion_status"], job["queue_priority"])
+		}
+	}
+	// The list reads the trimmed snapshot, not the full record.
+	w := request(h, "GET", "/api/maintenance/operations", "", true)
+	var list struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, job := range list.Jobs {
+		if job["id"] == "first" {
+			found = job["queue_priority"] == true
+		}
+	}
+	if !found {
+		t.Fatalf("the list lost the Run next flag: %s", w.Body)
 	}
 }
