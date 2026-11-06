@@ -22,9 +22,9 @@ import (
 //     check fails on quality, encodes again one rung better. The first rung
 //     that passes is kept. A rung refused for its size stops the ladder: a
 //     better rung only makes the file larger. So does a failed check whose
-//     last two scores point short of its limit on the next rung. An x265 first
-//     rung that only just missed tries one setting in between before the next
-//     frozen rung, since each rung is a whole-file encode.
+//     last two frozen scores point short of its limit on the next rung. A size
+//     goal's x265 first rung that only just missed tries one setting in between
+//     before the next frozen rung, since each rung is a whole-file encode.
 //
 // A rung is a function of the frozen policy, the source and the record's
 // Values and Rung, so validation rebuilds it and needs no other evidence. The
@@ -511,22 +511,13 @@ func (t qualityLadderTrend) improved() bool {
 // last rung to a projection 0.1 points short of the p5 floor.
 const ladderProjectionMargin = 1.0
 
-// qualityLadderStepScale is the distance to the next rung in units of the
-// distance between the last two: an added rung leaves the steps uneven.
-func qualityLadderStepScale(prevQ, lastQ, nextQ int) float64 {
-	if prevQ == lastQ {
-		return 1
-	}
-	return math.Abs(float64(nextQ-lastQ)) / math.Abs(float64(lastQ-prevQ))
-}
-
 // qualityLadderProjectedMiss extrapolates each check the last rung failed
-// along a straight line through the last two rungs, scale times their distance
-// further. It returns the first check that would still miss its limit on the next rung,
+// along a straight line through the last two rungs, one rung step further. It
+// returns the first check that would still miss its limit on the next rung,
 // or one that did not improve at all, and nil when every check it can
 // project would reach its limit. Only checks with a numeric limit and scores
 // on both rungs are projected; with nothing to go on the ladder goes on.
-func qualityLadderProjectedMiss(prev, last *FinalQualitySummary, scale float64) *qualityLadderTrend {
+func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderTrend {
 	if prev == nil || last == nil || last.Limits == nil {
 		return nil
 	}
@@ -554,7 +545,7 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary, scale float64) 
 		}
 		seen[t.Metric] = true
 		t.Previous, t.Last, t.Limit = *before, *now, *limit
-		t.Projected = t.Last + (t.Last-t.Previous)*scale
+		t.Projected = t.Last + (t.Last - t.Previous)
 		// The projection is a straight line through two scores, not a
 		// measurement: a trend that lands within ladderProjectionMargin of
 		// the limit still gets its encode, flat or not. A hair more absorbs
@@ -644,10 +635,10 @@ func lowestGridWindowMean(windows []transcode.FinalWindowScore) *float64 {
 
 // qualityLadderWithInsertedRung is the record's values with the setting a
 // narrow miss on the first rung adds after it, and false when none fits: the
-// ladder is not x265 or is past its first rung, the miss is not narrow, or the
-// next frozen rung is as close as the shortfall calls for.
-func qualityLadderWithInsertedRung(rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore) ([]int, bool) {
-	if rec.VideoCodec != transcode.VideoCodecLibX265 || rec.Rung != 0 || len(rec.Values) < 2 {
+// ladder is not a size goal's x265 or is past its first rung, the miss is not
+// narrow, or the next frozen rung is as close as the shortfall calls for.
+func qualityLadderWithInsertedRung(mode string, rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore) ([]int, bool) {
+	if !ladderAddsRungs(mode, rec.VideoCodec) || rec.Rung != 0 || len(rec.Values) < 2 {
 		return nil, false
 	}
 	shortfall, ok := qualityLadderShortfall(final, windows)
@@ -661,14 +652,22 @@ func qualityLadderWithInsertedRung(rec *QualityLadderRecord, final *FinalQuality
 	return slices.Insert(slices.Clone(rec.Values), 1, rec.Values[0]-steps), true
 }
 
+// ladderAddsRungs reports whether a narrow miss may add a rung to the ladder:
+// only a size goal trades an extra encode for bytes, and VideoToolbox quality
+// has no measured step to size one by.
+func ladderAddsRungs(mode, codec string) bool {
+	return mode == "size" && codec == transcode.VideoCodecLibX265
+}
+
 // ladderValuesMatch reports whether a record's values are the frozen rungs, or
-// on an x265 ladder those plus one value strictly between the first two.
-func ladderValuesMatch(values []int, r *ModeRecipe) bool {
+// where the ladder adds rungs those plus one value strictly between the first
+// two.
+func ladderValuesMatch(mode string, values []int, r *ModeRecipe) bool {
 	if slices.Equal(values, r.QualityValues) {
 		return true
 	}
 	frozen := r.QualityValues
-	return r.VideoCodec == transcode.VideoCodecLibX265 && len(frozen) >= 2 && len(values) == len(frozen)+1 &&
+	return ladderAddsRungs(mode, r.VideoCodec) && len(frozen) >= 2 && len(values) == len(frozen)+1 &&
 		values[0] == frozen[0] && values[1] < frozen[0] && values[1] > frozen[1] && slices.Equal(values[2:], frozen[1:])
 }
 
@@ -694,7 +693,7 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		return StepResult{Status: StepFailed, Error: "frozen goal recipe is missing or does not match the encode (fail closed)"}, true
 	}
 	r := ladderRecipe(snapshot, rec)
-	if rec.VideoCodec != r.VideoCodec || !ladderValuesMatch(rec.Values, r) || rec.Rung < 0 || rec.Rung >= len(rec.Values) {
+	if rec.VideoCodec != r.VideoCodec || !ladderValuesMatch(snapshot.Mode, rec.Values, r) || rec.Rung < 0 || rec.Rung >= len(rec.Values) {
 		return StepResult{Status: StepFailed, Error: "frozen goal recipe is missing or does not match the encode (fail closed)"}, true
 	}
 	reason := st.ReasonCode
@@ -727,17 +726,22 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		}
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
 	}
-	// Each rung is a whole-file encode. When the last two rungs' scores show
-	// the next one would still miss, the ladder ends as if it had.
-	if n := len(rec.Tried); n >= 2 && rec.Rung >= 1 && rec.Tried[n-2].Quality == rec.Values[rec.Rung-1] && rec.Tried[n-1].Quality == rec.Values[rec.Rung] {
-		scale := qualityLadderStepScale(rec.Values[rec.Rung-1], rec.Values[rec.Rung], rec.Values[rec.Rung+1])
-		if trend := qualityLadderProjectedMiss(rec.Tried[n-2].Final, rec.Tried[n-1].Final, scale); trend != nil {
-			msg := fmt.Sprintf("Each step tried missed this goal's quality limits: %s. The ladder stops before %s because the trend shows it would not reach them: %s. No candidate is offered; original preserved.",
-				qualityLadderTriedWords(rec), recipeRungShort(rec.VideoCodec, rec.Values[rec.Rung+1]), qualityLadderTrendMessage(rec.VideoCodec, rec.Values[rec.Rung-1], rec.Values[rec.Rung], rec.Values[rec.Rung+1], trend))
-			return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
+	// Each rung is a whole-file encode. When the last two frozen rungs' scores
+	// show the next one would still miss, the ladder ends as if it had. An added
+	// rung is not one of them: its short step says little, and it must never
+	// cost the ladder a frozen rung it would otherwise have encoded.
+	if last := slices.Index(r.QualityValues, rec.Values[rec.Rung]); last >= 1 {
+		prevQ, lastQ, nextQ := r.QualityValues[last-1], r.QualityValues[last], rec.Values[rec.Rung+1]
+		n := len(rec.Tried)
+		if i := slices.IndexFunc(rec.Tried, func(t QualityLadderRung) bool { return t.Quality == prevQ }); i >= 0 && rec.Tried[n-1].Quality == lastQ {
+			if trend := qualityLadderProjectedMiss(rec.Tried[i].Final, rec.Tried[n-1].Final); trend != nil {
+				msg := fmt.Sprintf("Each step tried missed this goal's quality limits: %s. The ladder stops before %s because the trend shows it would not reach them: %s. No candidate is offered; original preserved.",
+					qualityLadderTriedWords(rec), recipeRungShort(rec.VideoCodec, nextQ), qualityLadderTrendMessage(rec.VideoCodec, prevQ, lastQ, nextQ, trend))
+				return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
+			}
 		}
 	}
-	values, added := qualityLadderWithInsertedRung(rec, tried.Final, st.QualityEvidence.Windows)
+	values, added := qualityLadderWithInsertedRung(snapshot.Mode, rec, tried.Final, st.QualityEvidence.Windows)
 	if !added {
 		values = rec.Values
 	}
@@ -832,7 +836,7 @@ func (e *Engine) endQualityLadder(ctx context.Context, ec *ExecutionContext, sna
 // and final validation pinned to the stored request.
 func qualityLadderPlanMatches(snapshot *ModePolicySnapshot, state map[string]any, plan *transcode.Plan, rec *QualityLadderRecord) bool {
 	r := ladderRecipe(snapshot, rec)
-	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !ladderValuesMatch(rec.Values, r) || rec.Rung < 0 || rec.Rung >= len(rec.Values) {
+	if r == nil || r.Kind != RecipeQualityLadder || rec == nil || plan == nil || rec.VideoCodec != r.VideoCodec || rec.Preset != r.Preset || !ladderValuesMatch(snapshot.Mode, rec.Values, r) || rec.Rung < 0 || rec.Rung >= len(rec.Values) {
 		return false
 	}
 	if plan.SizePolicy == nil || plan.SizePolicy.MaxCandidateBytes != 0 || plan.QualityValidation == nil || plan.QualityValidation.BenchmarkRequestDigest != getString(state, "benchmark_request_digest") {

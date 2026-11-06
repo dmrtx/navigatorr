@@ -82,6 +82,9 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 		d.Picture = "Same resolution. HDR and Dolby Vision files are skipped: Shrink or Audio only handles them."
 	}
 	d.Video = describeRecipe(p.Recipe)
+	if p.Mode == "size" && p.Recipe != nil && p.Recipe.Kind == RecipeQualityLadder {
+		d.Video += " An x265 encode that narrowly misses at the first setting is tried once at a setting in between before the next one."
+	}
 	if p.Size != nil && p.Size.EightBitMain10 {
 		d.Video += " An 8-bit source may become 10-bit HEVC on a worker proven to keep its quality."
 	}
@@ -153,9 +156,6 @@ func describeRecipe(r *ModeRecipe) string {
 	text := ladder(r) + ", until an encode passes the quality check; one that fails is encoded again at the next, better setting. The ladder stops early when an encode misses the saving, since a better setting is only larger, or when the scores show the next setting would still miss."
 	if r.Fallback != nil {
 		text += " A worker without the media engine uses " + ladder(r.Fallback) + "; when every media engine setting misses, x265 is offered as a next step."
-	}
-	if r.VideoCodec == transcode.VideoCodecLibX265 || r.Fallback != nil {
-		text += " An x265 encode that narrowly misses at the first setting is tried once at a setting in between before the next one."
 	}
 	return text
 }

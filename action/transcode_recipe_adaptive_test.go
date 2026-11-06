@@ -24,16 +24,17 @@ func TestQualityLadderInsertsRungAfterNarrowMiss(t *testing.T) {
 		shortfall float64
 		values    []int
 	}{
-		"size, a hair short":      {size, 0.4, []int{22, 21, 19, 16}},
-		"size, a point short":     {size, 1.0, []int{22, 21, 19, 16}},
-		"size, over a point":      {size, 1.2, []int{22, 20, 19, 16}},
-		"size, 2.5 short":         {size, 2.5, []int{22, 20, 19, 16}},
-		"size, too far":           {size, 2.6, []int{22, 19, 16}},
-		"size, far short":         {size, 8, []int{22, 19, 16}},
-		"quality":                 {map[string]any{"mode": "quality"}, 1, []int{20, 19, 17, 14}},
-		"x265_preserve":           {map[string]any{"mode": "x265_preserve"}, 2, []int{24, 22, 21, 18}},
-		"compact, one value fits": {map[string]any{"mode": "compact"}, 1, []int{18, 17, 16, 14}},
-		"compact, the anchor":     {map[string]any{"mode": "compact"}, 1.2, []int{18, 16, 14}},
+		"size, a hair short":  {size, 0.4, []int{22, 21, 19, 16}},
+		"size, a point short": {size, 1.0, []int{22, 21, 19, 16}},
+		"size, over a point":  {size, 1.2, []int{22, 20, 19, 16}},
+		"size, 2.5 short":     {size, 2.5, []int{22, 20, 19, 16}},
+		"size, too far":       {size, 2.6, []int{22, 19, 16}},
+		"size, far short":     {size, 8, []int{22, 19, 16}},
+		"slow preset":         {map[string]any{"allow_hardware": false, "allow_slow_preset": true}, 1, []int{22, 21, 19, 16}},
+		// Only a size goal trades an extra encode for bytes.
+		"quality":       {map[string]any{"mode": "quality"}, 1, []int{20, 17, 14}},
+		"x265_preserve": {map[string]any{"mode": "x265_preserve"}, 1, []int{24, 21, 18}},
+		"compact":       {map[string]any{"mode": "compact"}, 1, []int{18, 16, 14}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := newRecipeCase(t, tc.inputs, nil)
@@ -164,18 +165,82 @@ func TestQualityLadderInsertedRungOutcomes(t *testing.T) {
 			t.Fatalf("%+v %+v", res, rec)
 		}
 	})
-	t.Run("the trend is scaled to the distance left", func(t *testing.T) {
-		c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
-		planRecipe(t, c)
-		advanceRung(t, c, failedP5(c, 2.5))
-		// p5 rose 0.2 over two CRF steps, so about 0.1 over the one step to
-		// CRF 19: more than a point short.
-		res := advanceRung(t, c, failedP5(c, 2.3))
+	t.Run("is rejected for its size", func(t *testing.T) {
+		c := start(t)
+		res := advanceRung(t, c, transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "insufficient_savings", CandidateSizeBytes: 9_000_000_000})
 		rec := QualityLadderOf(c.ec.State)
-		if res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || !strings.Contains(rec.Message, "stops before CRF 19") || !strings.Contains(rec.Message, "about 81.8 at CRF 19") {
+		if res.RewindTo != "" || rec.Outcome != "insufficient_savings" || rec.Rung != 1 || !strings.Contains(rec.Message, "x265 CRF 20") {
 			t.Fatalf("%+v %+v", res, rec)
 		}
 	})
+	t.Run("passes the validate step", func(t *testing.T) {
+		c := start(t)
+		validateRecipeCase(t, c, 50)
+		res, err := c.engine.stepTranscodeValidate(context.Background(), c.ec)
+		rec := QualityLadderOf(c.ec.State)
+		if err != nil || res.Status != StepCompleted || rec.Outcome != QualityLadderPassed || !strings.Contains(rec.Message, "x265 CRF 20 passed") || !strings.Contains(rec.Message, "(step 2 of 4)") {
+			t.Fatalf("%+v %v %+v", res, err, rec)
+		}
+	})
+	t.Run("fails the validate step with another CRF", func(t *testing.T) {
+		c := start(t)
+		plan := *getPlan(c.ec.State["plan"])
+		plan.Quality = 21
+		plan.PlanDigest = ""
+		plan.PlanDigest, _ = transcode.DigestPlan(&plan)
+		c.ec.State["plan"] = &plan
+		validateRecipeCase(t, c, 50)
+		if res, _ := c.engine.stepTranscodeValidate(context.Background(), c.ec); res.Status != StepFailed || !strings.Contains(res.Error, "frozen recipe") {
+			t.Fatalf("%+v", res)
+		}
+	})
+}
+
+// An added rung never costs the ladder a frozen rung it would have encoded:
+// the trend reads only frozen rungs, so the decisions match a ladder without it.
+func TestQualityLadderTrendSkipsInsertedRung(t *testing.T) {
+	for name, tc := range map[string]struct{ first, inserted float64 }{
+		"barely better": {2.5, 2.3},
+		"flat":          {2.5, 2.5},
+		"worse":         {1.5, 3},
+		"much worse":    {0.5, 6},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+			planRecipe(t, c)
+			advanceRung(t, c, failedP5(c, tc.first))
+			res := advanceRung(t, c, failedP5(c, tc.inserted))
+			rec := QualityLadderOf(c.ec.State)
+			if res.RewindTo != "submit_transcode" || rec.Rung != 2 || getPlan(c.ec.State["plan"]).Quality != 19 || rec.Outcome != QualityLadderEncoding {
+				t.Fatalf("%+v %+v", res, rec)
+			}
+		})
+	}
+	// From CRF 19 on, CRF 22 and 19 decide CRF 16, with or without CRF 20.
+	limit := func(c *budgetCase) float64 { return *stateQualityLimits(c.ec.State).VMAFP5 }
+	c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(95, limit(c)-2.5))
+	advanceRung(t, c, failedRung(95, limit(c)-0.1))
+	res := advanceRung(t, c, failedRung(95, limit(c)-2.3))
+	rec := QualityLadderOf(c.ec.State)
+	if res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || rec.Rung != 2 || len(rec.Tried) != 3 {
+		t.Fatalf("%+v %+v", res, rec)
+	}
+	for _, want := range []string{"stops before CRF 16", "from 81.5 at x265 CRF 22 to 81.7 at CRF 19", "about 81.9 at CRF 16"} {
+		if !strings.Contains(rec.Message, want) {
+			t.Fatalf("message %q lacks %q", rec.Message, want)
+		}
+	}
+	// A trend on course goes on, as it does without the added rung.
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(95, limit(c)-2.5))
+	advanceRung(t, c, failedRung(95, limit(c)-2))
+	res = advanceRung(t, c, failedRung(95, limit(c)-1))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 3 || getPlan(c.ec.State["plan"]).Quality != 16 {
+		t.Fatalf("%+v %+v", res, rec)
+	}
 }
 
 // A VideoToolbox ladder keeps its frozen rungs; its x265 fallback is an x265
@@ -217,33 +282,35 @@ func TestQualityLadderInsertionNeedsANarrowQualityMiss(t *testing.T) {
 // be the frozen ones or those plus a value the ladder could have inserted.
 func TestLadderValuesMatch(t *testing.T) {
 	x265 := &ModeRecipe{VideoCodec: transcode.VideoCodecLibX265, QualityValues: []int{22, 19, 16}}
-	compact := &ModeRecipe{VideoCodec: transcode.VideoCodecLibX265, QualityValues: []int{18, 16, 14}}
+	quality := &ModeRecipe{VideoCodec: transcode.VideoCodecLibX265, QualityValues: []int{20, 17, 14}}
 	vt := &ModeRecipe{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, QualityValues: []int{60, 65, 70}}
 	for name, tc := range map[string]struct {
+		mode   string
 		r      *ModeRecipe
 		values []int
 		want   bool
 	}{
-		"frozen":                    {x265, []int{22, 19, 16}, true},
-		"inserted 21":               {x265, []int{22, 21, 19, 16}, true},
-		"inserted 20":               {x265, []int{22, 20, 19, 16}, true},
-		"compact inserted":          {compact, []int{18, 17, 16, 14}, true},
-		"VideoToolbox frozen":       {vt, []int{60, 65, 70}, true},
-		"VideoToolbox inserted":     {vt, []int{60, 62, 65, 70}, false},
-		"empty":                     {x265, nil, false},
-		"a rung missing":            {x265, []int{22, 19}, false},
-		"repeats the first":         {x265, []int{22, 22, 19, 16}, false},
-		"repeats the second":        {x265, []int{22, 19, 19, 16}, false},
-		"above the first":           {x265, []int{22, 23, 19, 16}, false},
-		"below the second":          {x265, []int{22, 18, 19, 16}, false},
-		"between later rungs":       {x265, []int{22, 19, 18, 16}, false},
-		"two inserted":              {x265, []int{22, 21, 20, 19, 16}, false},
-		"first rung changed":        {x265, []int{21, 20, 19, 16}, false},
-		"last rung changed":         {x265, []int{22, 20, 19, 15}, false},
-		"same length, other values": {x265, []int{22, 20, 16}, false},
+		"frozen":                    {"size", x265, []int{22, 19, 16}, true},
+		"inserted 21":               {"size", x265, []int{22, 21, 19, 16}, true},
+		"inserted 20":               {"size", x265, []int{22, 20, 19, 16}, true},
+		"quality frozen":            {"quality", quality, []int{20, 17, 14}, true},
+		"quality inserted":          {"quality", quality, []int{20, 19, 17, 14}, false},
+		"VideoToolbox frozen":       {"size", vt, []int{60, 65, 70}, true},
+		"VideoToolbox inserted":     {"size", vt, []int{60, 62, 65, 70}, false},
+		"empty":                     {"size", x265, nil, false},
+		"a rung missing":            {"size", x265, []int{22, 19}, false},
+		"repeats the first":         {"size", x265, []int{22, 22, 19, 16}, false},
+		"repeats the second":        {"size", x265, []int{22, 19, 19, 16}, false},
+		"above the first":           {"size", x265, []int{22, 23, 19, 16}, false},
+		"below the second":          {"size", x265, []int{22, 18, 19, 16}, false},
+		"between later rungs":       {"size", x265, []int{22, 19, 18, 16}, false},
+		"two inserted":              {"size", x265, []int{22, 21, 20, 19, 16}, false},
+		"first rung changed":        {"size", x265, []int{21, 20, 19, 16}, false},
+		"last rung changed":         {"size", x265, []int{22, 20, 19, 15}, false},
+		"same length, other values": {"size", x265, []int{22, 20, 16}, false},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := ladderValuesMatch(tc.values, tc.r); got != tc.want {
+			if got := ladderValuesMatch(tc.mode, tc.values, tc.r); got != tc.want {
 				t.Fatalf("got %v", got)
 			}
 		})
@@ -279,37 +346,5 @@ func TestQualityLadderPlanMatchesInsertedRung(t *testing.T) {
 	res, handled := c.engine.advanceQualityLadder(context.Background(), c.ec, failedP5(c, 0.5))
 	if !handled || res.Status != StepFailed {
 		t.Fatalf("%+v %v", res, handled)
-	}
-}
-
-func TestQualityLadderStepScale(t *testing.T) {
-	for _, tc := range []struct {
-		prev, last, next int
-		want             float64
-	}{
-		{22, 19, 16, 1},
-		{22, 21, 19, 2},
-		{22, 20, 19, 0.5},
-		{21, 19, 16, 1.5},
-		{18, 17, 16, 1},
-		{60, 65, 70, 1},
-		{22, 22, 19, 1},
-	} {
-		if got := qualityLadderStepScale(tc.prev, tc.last, tc.next); got != tc.want {
-			t.Errorf("%d %d %d: got %v, want %v", tc.prev, tc.last, tc.next, got, tc.want)
-		}
-	}
-	f := func(v float64) *float64 { return &v }
-	limits := &QualityLimits{VMAFP5: f(84)}
-	rung := func(v float64) *FinalQualitySummary {
-		return &FinalQualitySummary{FailedChecks: []string{"quality_vmaf_p5_below_minimum"}, Measured: QualityNumbers{VMAFP5: f(v)}, Limits: limits}
-	}
-	// One point gained: at twice the distance it reaches the margin, at half
-	// it falls short.
-	if got := qualityLadderProjectedMiss(rung(80), rung(81), 2); got != nil {
-		t.Fatalf("scale 2 stopped on %+v", got)
-	}
-	if got := qualityLadderProjectedMiss(rung(80), rung(81), 0.5); got == nil || got.Projected != 81.5 {
-		t.Fatalf("scale 0.5: %+v", got)
 	}
 }

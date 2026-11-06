@@ -375,7 +375,7 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 		"no limits":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), &FinalQualitySummary{Verdict: "fail", FailedChecks: p5, Measured: QualityNumbers{VMAFP5: f(80)}}, "", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := qualityLadderProjectedMiss(tc.prev, tc.last, 1)
+			got := qualityLadderProjectedMiss(tc.prev, tc.last)
 			if tc.metric == "" {
 				if got != nil {
 					t.Fatalf("stopped on %+v", got)
