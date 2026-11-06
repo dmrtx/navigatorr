@@ -69,10 +69,13 @@ func TestSourceProfileHDRSkipsSizeAndRecommendsCompact(t *testing.T) {
 	if p.Resolution != "4K" || p.DynamicRange != "HDR10" || p.VideoCodec != "HEVC" || p.BitDepth != 10 || p.SizeBytes != 63_000_000_000 {
 		t.Fatalf("%+v", p)
 	}
-	for _, mode := range []string{"size", "quality", "x265_preserve"} {
+	for _, mode := range []string{"quality", "x265_preserve"} {
 		if v := out.Goals[mode]; v.Status != "skip" || v.ReasonCode != "hdr_requires_compact" {
 			t.Fatalf("%s: %+v", mode, v)
 		}
+	}
+	if v := out.Goals["size"]; v.Status != "ok" || !v.KeepsHDR {
+		t.Fatalf("size: %+v", v)
 	}
 	if v := out.Goals["compact"]; v.Status != "ok" {
 		t.Fatalf("compact: %+v", v)
@@ -129,7 +132,7 @@ func TestSourceProfileHDRWithoutFrameEvidenceLeavesCompactUnknown(t *testing.T) 
 	w := request(h, "GET", "/api/maintenance/source-profile?path="+url.QueryEscape(video), "", true)
 	var out profileResponse
 	json.Unmarshal(w.Body.Bytes(), &out)
-	if w.Code != 200 || out.Goals["compact"].Status != "unknown" || out.Goals["size"].Status != "skip" || out.Recommended != "compact" {
+	if w.Code != 200 || out.Goals["compact"].Status != "unknown" || out.Goals["size"].Status != "unknown" || out.Recommended != "compact" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }

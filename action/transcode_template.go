@@ -43,7 +43,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	// profile_config and its x265 settings, is judged before the hash and the
 	// probe. Admission ran the same checks; this repeats them for requests
 	// stored before they existed.
-	req, err := e.validateTranscodeRequest(ec.ActionName, ec.Inputs)
+	req, err := e.validateTranscodeRequest(ec.ActionName, withoutSaveSpaceRequest(ec.Inputs))
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
 	}
@@ -255,6 +255,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	gateRep := coverArtGateReport(&rep, func() bool { return workerSupportsCoverArt(ctx, e.actionWorker(ec)) })
 	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
+		if saveSpaceTakesHDR(ec.Inputs) && isSourceHDRorDV(gateRep) {
+			if modeSnapshot, err = routeSaveSpaceHDR(ec, modeSnapshot); err != nil {
+				return StepResult{Status: StepFailed, Error: err.Error()}, nil
+			}
+		}
 		var reason string
 		if modeSnapshot.Size != nil && modeSnapshot.Size.AudioOnly {
 			reason = audioOnlySourceReason(gateRep)

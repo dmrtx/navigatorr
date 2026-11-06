@@ -144,7 +144,7 @@ func explainResult(r operationRecord) resultExplanation {
 		// Replaced below by the measured score and its limit when known.
 		e.Happened = happenedLine(qualityCause(r).Summary)
 	case "hdr_requires_compact":
-		e.Happened = "Save space keeps the picture as it is and cannot encode HDR or Dolby Vision."
+		e.Happened = "This goal does not encode HDR or Dolby Vision. Save space without a size limit and Shrink do."
 	case "compact_not_needed":
 		e.Happened = "The file is already 1080p SDR or smaller, so Shrink to 1080p SDR has nothing to shrink."
 	case "audio_only_nothing_to_convert":

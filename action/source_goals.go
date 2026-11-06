@@ -25,6 +25,9 @@ const AudioOnlyGoal = "audio_only"
 type GoalVerdict struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reason_code,omitempty"`
+	// KeepsHDR marks a Save space verdict that holds without a size limit: the
+	// file runs as Shrink keeping HDR (routeSaveSpaceHDR).
+	KeepsHDR bool `json:"keeps_hdr,omitempty"`
 }
 
 // SourceGoals is the per-goal preview of a single source and the goal worth
@@ -79,7 +82,26 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 	for _, mode := range SourceGoalModes {
 		reason := modeSourceReason(mode, gateRep, hfrSupported)
 		verdict := GoalVerdict{Status: GoalOK}
+		keepHDR := mode == "size" && reason == "hdr_requires_compact"
+		if keepHDR {
+			reason = modeSourceReason("compact", gateRep, hfrSupported)
+		}
 		switch {
+		case keepHDR && reason == "":
+			verdict.KeepsHDR = true
+			policy, err := saveSpaceHDRPolicy(false, nil)
+			if err != nil {
+				verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: "compact_policy_unavailable"}
+				break
+			}
+			_, reason = compactSourcePlanWith(ctx, gateRep, &policy, classify)
+			switch reason {
+			case "":
+			case "compact_frame_evidence_unavailable", "compact_policy_unavailable":
+				verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: reason, KeepsHDR: true}
+			default:
+				verdict = GoalVerdict{Status: GoalSkip, ReasonCode: reason}
+			}
 		case reason == "hfr_quality_unavailable" && hfrErr != nil:
 			verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: "worker_capabilities_unavailable"}
 		case reason == "" && mode == "compact":
@@ -118,17 +140,13 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 // never recommended.
 func recommendedGoal(rep *mediainspect.DetailedReport, goals map[string]GoalVerdict) string {
 	video := rep.MainVideo()
-	if len(video) == 1 && goals["compact"].Status == GoalOK && isSourceHDRorDV(rep) {
+	// When the compact check could not read an HDR source's frames in time, the
+	// job's own preflight re-checks it.
+	if status := goals["compact"].Status; len(video) == 1 && (status == GoalOK || status == GoalUnknown) && isSourceHDRorDV(rep) {
 		return "compact"
 	}
 	if goals["size"].Status != GoalSkip {
 		return "size"
-	}
-	// Save space would skip an HDR source. When the compact check could not read
-	// its frames in time, compact is still the only goal that converts it; the
-	// job's own preflight re-checks it.
-	if len(video) == 1 && goals["compact"].Status == GoalUnknown && isSourceHDRorDV(rep) {
-		return "compact"
 	}
 	return ""
 }

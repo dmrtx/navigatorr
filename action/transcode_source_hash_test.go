@@ -56,7 +56,6 @@ func TestPreflightProbeExitsSkipSourceHash(t *testing.T) {
 	for _, tc := range []struct {
 		name, probe, mode, reason string
 	}{
-		{"HDR source in size mode", hdrProbeJSON, "size", "hdr_requires_compact"},
 		{"HDR source in quality mode", hdrProbeJSON, "quality", "hdr_requires_compact"},
 		{"unsupported bit depth", deepProbeJSON, "size", "unsupported_source"},
 	} {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
 )
 
@@ -125,5 +126,43 @@ func TestBatchReportsTheSizeOfItsSelectionBeforeEncoding(t *testing.T) {
 	}
 	if !slices.Equal(got, []int64{4_000_000_000, 2_500_000_000, 0}) {
 		t.Fatal(got)
+	}
+}
+
+// A Save space file routed to keep HDR shows the goal it really runs, and a
+// plain one in the same batch keeps the batch's.
+func TestBatchItemsShowTheGoalARoutedFileRuns(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	seedOperation(t, st, "batch", "transcode_batch", "running", map[string]any{"mode": "size"}, nil, nil)
+	children := map[string]map[string]any{
+		"plain":  {"mode": "size"},
+		"routed": {"mode": "compact", "keep_hdr": true, "max_height": float64(2160), action.SaveSpaceRequestKey: map[string]any{"mode": "size"}},
+	}
+	for key, inputs := range children {
+		path := "/media/" + key + ".mkv"
+		inputs["parent_action_id"], inputs["path"] = "batch", path
+		state := map[string]any{"mode_policy": map[string]any{"compact": map[string]any{"max_height": float64(2160), "keep_hdr": true}}}
+		seedOperation(t, st, key, "transcode_media", "running", inputs, nil, state)
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch", ItemKey: key, FilePath: path, DisplayLabel: key, ChildActionID: key, Status: "running", Decision: "transcode"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := request(h, "GET", "/api/maintenance/batch-items?id=batch", "", true)
+	var page struct{ Items []batchItemView }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, item := range page.Items {
+		switch item.ItemKey {
+		case "plain":
+			if item.Mode != "size" || item.KeepHDR {
+				t.Errorf("plain file: %+v", item)
+			}
+		case "routed":
+			if item.Mode != "compact" || !item.KeepHDR || item.MaxHeight != 2160 {
+				t.Errorf("routed file: %+v", item)
+			}
+		}
 	}
 }
