@@ -77,6 +77,7 @@ func TestJobDetailCarriesTheGoalSettings(t *testing.T) {
 		"path": "/media/series/Sample/Sample Episode 1.mkv", "mode": "size", "allow_hardware": false, "allow_slow_preset": true,
 		"size_budget_source": "siblings", "size_budget_sibling_multiplier": 1.8, "media_type": "tv", "is_anime": true,
 		"library_context": map[string]any{"service": "sonarr", "id": 7}, "keep_languages": []any{"eng"}, "idempotency": "receipt",
+		"save_space_keep_hdr": true, "drop_commentary": true, "prefer_stereo": true,
 	}, map[string]any{"tracks": report}, map[string]any{"mode": "size"})
 	seedOperation(t, st, "compact-goal", "transcode_media", "completed", map[string]any{"path": "/media/movies/Sample.mkv", "mode": "compact", "max_height": 720}, map[string]any{"tracks": report}, map[string]any{"mode": "compact"})
 	seedOperation(t, st, "quality-goal", "transcode_media", "completed", map[string]any{"path": "/media/movies/Other.mkv", "mode": "quality"}, map[string]any{"tracks": report}, map[string]any{"mode": "quality"})
@@ -91,7 +92,7 @@ func TestJobDetailCarriesTheGoalSettings(t *testing.T) {
 		return page.Jobs[0]
 	}
 	goal := operationMap(read("size-goal")["goal"])
-	want := map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true, "size_budget_source": "siblings", "size_budget_sibling_multiplier": 1.8, "media_type": "tv", "is_anime": true}
+	want := map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true, "size_budget_source": "siblings", "size_budget_sibling_multiplier": 1.8, "media_type": "tv", "is_anime": true, "save_space_keep_hdr": true, "drop_commentary": true, "prefer_stereo": true}
 	if len(goal) != len(want) {
 		t.Fatalf("goal %v", goal)
 	}

@@ -138,6 +138,7 @@ func TestBatchItemsShowTheGoalARoutedFileRuns(t *testing.T) {
 	children := map[string]map[string]any{
 		"plain":  {"mode": "size"},
 		"routed": {"mode": "compact", "keep_hdr": true, "max_height": float64(2160), action.SaveSpaceRequestKey: map[string]any{"mode": "size"}},
+		"sdr":    {"mode": "compact", "max_height": float64(2160), action.SaveSpaceRequestKey: map[string]any{"mode": "size"}},
 	}
 	for key, inputs := range children {
 		path := "/media/" + key + ".mkv"
@@ -158,6 +159,10 @@ func TestBatchItemsShowTheGoalARoutedFileRuns(t *testing.T) {
 		case "plain":
 			if item.Mode != "size" || item.KeepHDR {
 				t.Errorf("plain file: %+v", item)
+			}
+		case "sdr":
+			if item.Mode != "compact" || item.KeepHDR || item.MaxHeight != 2160 {
+				t.Errorf("file routed to SDR: %+v", item)
 			}
 		case "routed":
 			if item.Mode != "compact" || !item.KeepHDR || item.MaxHeight != 2160 {

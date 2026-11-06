@@ -74,7 +74,7 @@ func TestSourceProfileHDRSkipsSizeAndRecommendsCompact(t *testing.T) {
 			t.Fatalf("%s: %+v", mode, v)
 		}
 	}
-	if v := out.Goals["size"]; v.Status != "ok" || !v.KeepsHDR {
+	if v := out.Goals["size"]; v.Status != "ok" || !v.ViaShrink {
 		t.Fatalf("size: %+v", v)
 	}
 	if v := out.Goals["compact"]; v.Status != "ok" {

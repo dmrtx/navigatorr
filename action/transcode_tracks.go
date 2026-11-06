@@ -36,6 +36,8 @@ const (
 	inputKeepLanguages       = "keep_languages"
 	inputKeepAudioStreams    = "keep_audio_streams"
 	inputKeepSubtitleStreams = "keep_subtitle_streams"
+	inputDropCommentary      = "drop_commentary"
+	inputPreferStereo        = "prefer_stereo"
 	trackSelectionKey        = "track_selection"
 	trackReportKey           = "track_report"
 	// trackLanguagesKey holds the languages a goal froze (state of the job or
@@ -64,17 +66,40 @@ type trackInput struct {
 	languages *[]string
 	audio     *[]int
 	subtitles *[]int
+	// dropCommentary and preferStereo trim the audio the languages keep.
+	dropCommentary bool
+	preferStereo   bool
 }
 
-func (t trackInput) given() bool { return t.languages != nil || t.audio != nil || t.subtitles != nil }
+func (t trackInput) given() bool {
+	return t.languages != nil || t.audio != nil || t.subtitles != nil || t.dropCommentary || t.preferStereo
+}
 
-// modeTrackInput reads keep_languages, keep_audio_streams and
-// keep_subtitle_streams. All three belong to the size and compact goals; the
-// stream lists name source streams of one file, so they are for a single
-// transcode_media job only.
+// modeTrackInput reads keep_languages, keep_audio_streams,
+// keep_subtitle_streams, drop_commentary and prefer_stereo. All of them belong
+// to the size and compact goals; the stream lists name source streams of one
+// file, so they are for a single transcode_media job only.
 func modeTrackInput(mode string, inputs map[string]any) (trackInput, error) {
 	var in trackInput
 	present := ""
+	for _, key := range []string{inputDropCommentary, inputPreferStereo} {
+		raw, has := inputs[key]
+		if !has || raw == nil {
+			continue
+		}
+		value, ok := raw.(bool)
+		if !ok {
+			return in, inputErr(key, "%s must be true or false", key)
+		}
+		if value {
+			present = firstNonEmpty(present, key)
+		}
+		if key == inputDropCommentary {
+			in.dropCommentary = value
+		} else {
+			in.preferStereo = value
+		}
+	}
 	for _, key := range []string{inputKeepLanguages, inputKeepAudioStreams, inputKeepSubtitleStreams} {
 		if raw, has := inputs[key]; has && raw != nil {
 			present = firstNonEmpty(present, key)
@@ -195,7 +220,7 @@ func trackPolicyFor(mode string, in trackInput, global []string) (*transcode.Tra
 	if err != nil {
 		return nil, err
 	}
-	p := &transcode.TrackPolicy{Languages: canonical, AudioStreams: in.audio, SubtitleStreams: in.subtitles}
+	p := &transcode.TrackPolicy{Languages: canonical, AudioStreams: in.audio, SubtitleStreams: in.subtitles, DropCommentary: in.dropCommentary, PreferStereo: in.preferStereo}
 	if !p.Active() {
 		return nil, nil
 	}
@@ -287,7 +312,7 @@ func trackInfosOfStreams(audio, subtitles []mediainspect.DetailedStream) []trans
 	out := make([]transcode.TrackInfo, 0, len(audio)+len(subtitles))
 	add := func(kind string, streams []mediainspect.DetailedStream) {
 		for _, s := range streams {
-			out = append(out, transcode.TrackInfo{Index: s.Index, Kind: kind, Language: s.Language, Title: s.Title, Codec: s.Codec, Disposition: s.Disposition})
+			out = append(out, transcode.TrackInfo{Index: s.Index, Kind: kind, Language: s.Language, Title: s.Title, Codec: s.Codec, Channels: s.Channels, Disposition: s.Disposition})
 		}
 	}
 	add("audio", audio)

@@ -71,7 +71,7 @@ func CompressionPolicyToday() (CompressionToday, error) {
 // HDR, which only Save space takes.
 func sameResolutionPicture(goal string) string {
 	if goal == "size" {
-		return "Same resolution. HDR and Dolby Vision files run as Shrink keeping HDR, up to 4K and with its quality settings: Dolby Vision 7/8 and HDR10+ come out as HDR10. With a size limit they are skipped."
+		return "Same resolution. HDR and Dolby Vision files run as Shrink, up to 4K and with its quality settings: they come out in SDR, or in HDR10 or HLG when the job keeps HDR. With a size limit they are skipped."
 	}
 	return "Same resolution. HDR and Dolby Vision files are skipped: Save space, Shrink or Audio only handles them."
 }

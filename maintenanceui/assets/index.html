@@ -325,74 +325,78 @@
                 </p>
               </div>
               <fieldset id="processing-goal" class="processing-goal">
-                <legend>Choose your goal</legend>
+                <legend>What to do</legend>
                 <p id="source-profile" class="metadata source-profile" role="status" hidden></p>
-                <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="size" checked /><span class="goal-text"><strong class="goal-title">Save space</strong><small class="goal-desc">Use it for most files, 4K included. Same look and resolution, at least 15% smaller; lossless and high-bitrate audio becomes AAC.</small><em id="goal-note-size" class="goal-note" hidden></em></span></label>
-                  <div class="goal-body">
-                    <div id="hardware-option" class="goal-option" hidden>
-                      <span id="size-engine-label" class="goal-option-label">Encoder</span>
-                      <div class="segmented" role="radiogroup" aria-labelledby="size-engine-label">
-                        <label><input type="radio" name="size-engine" value="fast" checked /><span>Fast · media engine</span></label>
-                        <label><input type="radio" name="size-engine" value="small" /><span>Smallest · x265</span></label>
-                      </div>
-                      <input id="allow-hardware" type="checkbox" checked hidden />
-                    </div>
-                    <div id="size-budget-option" class="goal-option" hidden>
-                      <span id="size-budget-label" class="goal-option-label">Size limit</span>
-                      <div class="segmented" role="radiogroup" aria-labelledby="size-budget-label">
-                        <label><input type="radio" name="size-budget-limit" value="" checked /><span>None</span></label>
-                        <label><input type="radio" name="size-budget-limit" value="siblings" /><span>Like other episodes</span></label>
-                        <label><input type="radio" name="size-budget-limit" value="fixed" /><span>Fixed</span></label>
-                      </div>
-                      <select id="size-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
-                      <div id="size-budget-fixed" class="budget-fields" hidden>
-                        <span class="budget-prefix">At most</span>
-                        <label id="size-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
-                        <label id="size-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
-                        <select id="size-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
-                      </div>
-                      <div id="size-budget-multiplier-label" class="budget-fields" hidden>
-                        <span class="budget-prefix">Up to</span>
-                        <span class="stepper"><button id="size-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="size-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
-                        <span class="budget-prefix">× their bitrate</span>
-                      </div>
-                      <p id="size-budget-readout" class="goal-readout" role="status" hidden></p>
-                      <p class="muted size-budget-help">The whole file is encoded to fit the limit, and the measured quality is shown.</p>
-                    </div>
+                <div hidden>
+                  <input type="radio" name="processing-mode" value="size" checked />
+                  <input type="radio" name="processing-mode" value="compact" />
+                  <input type="radio" name="processing-mode" value="audio_only" />
+                  <input type="radio" name="processing-mode" value="x265_preserve" />
+                  <input type="radio" name="processing-mode" value="quality" />
+                </div>
+                <div class="goal-option">
+                  <span id="conversion-video-label" class="goal-option-label">Video</span>
+                  <div class="segmented" role="radiogroup" aria-labelledby="conversion-video-label">
+                    <label><input type="radio" name="conversion-video" value="compress" checked /><span>Compress</span></label>
+                    <label><input type="radio" name="conversion-video" value="copy" /><span>Keep as it is</span></label>
                   </div>
                 </div>
-                <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="compact" /><span class="goal-text"><strong id="goal-title-compact" class="goal-title">Shrink to 1080p SDR</strong><small class="goal-desc">Use it for 4K you don't need. Converted to SDR unless you keep HDR, at least 30% smaller; lossless audio becomes AAC.</small><em id="goal-note-compact" class="goal-note" hidden></em></span></label>
-                  <div class="goal-body">
-                    <div id="compact-height-option" class="goal-option" hidden>
-                      <span id="compact-height-label" class="goal-option-label">Resolution</span>
-                      <div class="segmented" role="radiogroup" aria-labelledby="compact-height-label">
-                        <label><input type="radio" name="compact-height" value="1080" checked /><span>1080p · smallest</span></label>
-                        <label><input type="radio" name="compact-height" value="2160" /><span>Keep 4K</span></label>
-                      </div>
-                      <p class="muted size-budget-help">Keep 4K keeps the resolution, in SDR or HDR as chosen below. An SDR file already in 4K is left as it is; Save space keeps it in 4K.</p>
-                    </div>
-                    <div id="compact-hdr-option" class="goal-option" hidden>
-                      <span id="compact-hdr-label" class="goal-option-label">HDR</span>
-                      <div class="segmented" role="radiogroup" aria-labelledby="compact-hdr-label">
-                        <label><input type="radio" name="compact-hdr" value="sdr" checked /><span>Convert to SDR · smallest</span></label>
-                        <label><input type="radio" name="compact-hdr" value="keep" /><span>Keep HDR</span></label>
-                      </div>
-                      <p class="muted size-budget-help">Keep HDR encodes HDR10 and HLG with x265 10-bit and keeps their metadata; Dolby Vision becomes HDR10. It saves less than SDR and encodes slower.</p>
-                    </div>
+                <div class="goal-option">
+                  <span id="compact-hdr-label" class="goal-option-label">HDR and Dolby Vision</span>
+                  <div class="segmented" role="radiogroup" aria-labelledby="compact-hdr-label">
+                    <label><input type="radio" name="compact-hdr" value="sdr" checked /><span>Convert to SDR</span></label>
+                    <label><input type="radio" name="compact-hdr" value="keep" /><span>Keep HDR</span></label>
                   </div>
+                  <p id="compact-hdr-reason" class="muted size-budget-help" hidden></p>
                 </div>
-                <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="audio_only" /><span class="goal-text"><strong class="goal-title">Audio only</strong><small class="goal-desc">Use it to keep the picture exactly as it is, 4K and HDR included. The video is copied; only heavy audio becomes AAC and unkept tracks are removed. Any smaller result is kept.</small><em id="goal-note-audio_only" class="goal-note" hidden></em></span></label>
+                <div class="goal-option">
+                  <span id="compact-height-label" class="goal-option-label">Resolution</span>
+                  <div class="segmented" role="radiogroup" aria-labelledby="compact-height-label">
+                    <label><input type="radio" name="compact-height" value="2160" checked /><span>Keep</span></label>
+                    <label><input type="radio" name="compact-height" value="1080" /><span>1080p</span></label>
+                  </div>
+                  <p id="compact-height-reason" class="muted size-budget-help" hidden></p>
                 </div>
-                <div class="goal-card">
-                  <label class="goal-head"><input type="radio" name="processing-mode" value="x265_preserve" /><span class="goal-text"><strong class="goal-title">Keep quality, convert to x265</strong><small class="goal-desc">Re-encodes H.264, MPEG-2, MPEG-4 and AVI video to x265 at the same visual quality; files already in HEVC are left alone.</small><em id="goal-note-x265_preserve" class="goal-note" hidden></em></span></label>
+                <div id="size-budget-option" class="goal-option">
+                  <span id="size-budget-label" class="goal-option-label">Size limit</span>
+                  <div class="segmented" role="radiogroup" aria-labelledby="size-budget-label">
+                    <label><input type="radio" name="size-budget-limit" value="" checked /><span>None</span></label>
+                    <label><input type="radio" name="size-budget-limit" value="siblings" /><span>Like other episodes</span></label>
+                    <label><input type="radio" name="size-budget-limit" value="fixed" /><span>Fixed</span></label>
+                  </div>
+                  <select id="size-budget-kind" hidden><option value="">None</option><option value="percent">% of original</option><option value="gb">GB</option><option value="siblings">Match other episodes</option></select>
+                  <div id="size-budget-fixed" class="budget-fields" hidden>
+                    <span class="budget-prefix">At most</span>
+                    <label id="size-budget-gb-label" class="budget-input" hidden><span class="sr-only">Limit in GB</span><input id="size-budget-gb" type="number" min="0.05" step="0.05" inputmode="decimal" placeholder="1.5" /></label>
+                    <label id="size-budget-percent-label" class="budget-input" hidden><span class="sr-only">Limit as a percent of the original</span><input id="size-budget-percent" type="number" min="5" max="85" step="1" inputmode="decimal" placeholder="33" /></label>
+                    <select id="size-budget-unit" aria-label="Limit unit"><option value="gb">GB</option><option value="percent">% of the original</option></select>
+                  </div>
+                  <div id="size-budget-multiplier-label" class="budget-fields" hidden>
+                    <span class="budget-prefix">Up to</span>
+                    <span class="stepper"><button id="size-budget-multiplier-down" type="button" aria-label="Lower the multiplier">−</button><input id="size-budget-multiplier" type="number" min="1" max="4" step="0.1" value="1.5" inputmode="decimal" aria-label="Multiplier of the other episodes' bitrate" /><button id="size-budget-multiplier-up" type="button" aria-label="Raise the multiplier">+</button></span>
+                    <span class="budget-prefix">× their bitrate</span>
+                  </div>
+                  <p id="size-budget-readout" class="goal-readout" role="status" hidden></p>
+                  <p id="size-budget-reason" class="muted size-budget-help" hidden></p>
                 </div>
                 <details id="more-goals" class="more-goals">
-                  <summary>More goals</summary>
-                  <div class="goal-card">
-                    <label class="goal-head"><input type="radio" name="processing-mode" value="quality" /><span class="goal-text"><strong class="goal-title">Strict quality</strong><small class="goal-desc">Use it when picture quality matters more than space; may save little.</small><em id="goal-note-quality" class="goal-note" hidden></em></span></label>
+                  <summary>More options</summary>
+                  <div class="goal-option">
+                    <span id="conversion-goal-label" class="goal-option-label">Goal</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="conversion-goal-label">
+                      <label><input type="radio" name="conversion-goal" value="" checked /><span>These options</span></label>
+                      <label><input type="radio" name="conversion-goal" value="x265_preserve" /><span>Keep quality, convert to x265</span></label>
+                      <label><input type="radio" name="conversion-goal" value="quality" /><span>Strict quality</span></label>
+                    </div>
+                  </div>
+                  <div id="hardware-option" class="goal-option">
+                    <span id="size-engine-label" class="goal-option-label">Encoder</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="size-engine-label">
+                      <label><input type="radio" name="size-engine" value="fast" checked /><span>Fast · media engine</span></label>
+                      <label><input type="radio" name="size-engine" value="small" /><span>Smallest · x265</span></label>
+                    </div>
+                    <input id="allow-hardware" type="checkbox" checked hidden />
+                    <p id="size-engine-reason" class="muted size-budget-help" hidden></p>
                   </div>
                 </details>
               </fieldset>
@@ -417,6 +421,21 @@
                     <p id="keep-job-note" class="metadata" role="status"></p>
                   </div>
                   <p class="muted">Tracks in the file's original language and untagged tracks are always kept.</p>
+                  <div class="goal-option">
+                    <span id="keep-commentary-label" class="goal-option-label">Commentary tracks</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="keep-commentary-label">
+                      <label><input type="radio" name="keep-commentary" value="drop" checked /><span>Remove</span></label>
+                      <label><input type="radio" name="keep-commentary" value="keep" /><span>Keep</span></label>
+                    </div>
+                  </div>
+                  <div class="goal-option">
+                    <span id="keep-channels-label" class="goal-option-label">Audio channels</span>
+                    <div class="segmented" role="radiogroup" aria-labelledby="keep-channels-label">
+                      <label><input type="radio" name="keep-channels" value="all" checked /><span>Keep all</span></label>
+                      <label><input type="radio" name="keep-channels" value="stereo" /><span>Prefer 2.0</span></label>
+                    </div>
+                    <p class="muted size-budget-help">Prefer 2.0 keeps a language's stereo track and removes its 5.1 and 7.1. A language without one keeps what it has.</p>
+                  </div>
                   <div id="keep-tracks-file" class="goal-option" hidden>
                     <p id="keep-tracks-status" class="metadata" role="status"></p>
                     <div id="keep-tracks-preview" class="stream-preview" hidden></div>
@@ -434,6 +453,7 @@
               </details>
               <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
               <label id="replace-auto-label" class="check replace-auto" hidden><input id="replace-auto" type="checkbox" />Replace automatically when done</label>
+              <div class="conversion-defaults"><button id="save-conversion-defaults" type="button" class="quiet">Save as default</button><span id="conversion-defaults-status" class="metadata" role="status"></span></div>
               <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <details id="advanced-profiles" class="advanced-profiles">
               <summary><span>Advanced: technical profiles</span><span id="advanced-state" class="advanced-state">Off</span></summary>
