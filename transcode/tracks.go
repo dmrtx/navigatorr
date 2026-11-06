@@ -277,6 +277,15 @@ func (t TrackInfo) IsCommentary() bool {
 	return t.Disposition["comment"] > 0 || commentaryTitle.MatchString(t.Title)
 }
 
+// describedTitle matches a track title naming an audio description.
+var describedTitle = regexp.MustCompile(`(?i)descrip|deskrip`)
+
+// isAccessibility reports a track made for an impaired audience, which is no
+// stand-in for the language's main mix.
+func (t TrackInfo) isAccessibility() bool {
+	return t.Disposition["visual_impaired"] > 0 || t.Disposition["hearing_impaired"] > 0 || describedTitle.MatchString(t.Title)
+}
+
 // trimAudio applies DropCommentary and PreferStereo to the kept audio indexes.
 func trimAudio(p *TrackPolicy, audio []TrackInfo, kept []int) []int {
 	if !p.DropCommentary && !p.PreferStereo {
@@ -290,7 +299,7 @@ func trimAudio(p *TrackPolicy, audio []TrackInfo, kept []int) []int {
 	}
 	stereo := map[string]bool{}
 	for _, t := range tracks {
-		if t.Channels == 2 && !t.IsCommentary() {
+		if t.Channels == 2 && !t.IsCommentary() && !t.isAccessibility() {
 			stereo[CanonicalLanguage(t.Language)] = true
 		}
 	}

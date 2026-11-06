@@ -433,6 +433,7 @@ func TestSelectTracksTrimsCommentaryAndSurround(t *testing.T) {
 		{"stereo where there is one", TrackPolicy{PreferStereo: true}, tracks, []int{2, 3, 4, 5, 6, 7, 8}},
 		{"both", TrackPolicy{DropCommentary: true, PreferStereo: true}, tracks, []int{2, 4, 5, 6}},
 		{"a stereo commentary is not the language's stereo", TrackPolicy{PreferStereo: true}, []TrackInfo{audio(1, "eng", "", 6), audio(2, "eng", "Commentary", 2)}, nil},
+		{"an audio description is not the language's stereo", TrackPolicy{PreferStereo: true}, []TrackInfo{audio(1, "eng", "", 6), {Index: 2, Kind: "audio", Language: "eng", Channels: 2, Disposition: map[string]int{"visual_impaired": 1}}, audio(3, "spa", "", 6), audio(4, "spa", "Audiodescripción", 2)}, nil},
 		{"the last track stays", TrackPolicy{DropCommentary: true}, []TrackInfo{audio(1, "eng", "Commentary", 2)}, nil},
 		{"after the languages", TrackPolicy{Languages: []string{"eng"}, PreferStereo: true}, []TrackInfo{audio(1, "eng", "", 6), audio(2, "eng", "", 2), audio(3, "spa", "", 2)}, []int{2}},
 	} {

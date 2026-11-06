@@ -3450,6 +3450,7 @@ for (const group of segmentedGroups)
   for (const radio of segmentRadios(group.name))
     radio.addEventListener("change", () => {
       if (!radio.checked) return;
+      if (group.form === "size-budget") state.goalExplicit = true;
       group.write($(group.field), radio.value, group.form);
       sizeBudgetForms[group.form]();
     });
@@ -5534,6 +5535,9 @@ function applyGoalSettings(path, goal) {
     else setShrinkHeight("compact-height", goal.max_height ?? 1080);
   }
   if (goal.mode === "size") setKeepHDR("compact-hdr", goal.save_space_keep_hdr === true);
+  // The job's track rules, not the saved ones; a job from before them had none.
+  setRadioValue("keep-commentary", goal.drop_commentary === true ? "drop" : "keep");
+  setRadioValue("keep-channels", goal.prefer_stereo === true ? "stereo" : "all");
   state.goalCarry = {path, mode, inputs};
 }
 // Drops what applyGoalSettings carried, so a later ordinary pick of the same

@@ -5815,6 +5815,29 @@ test("Save as default keeps the choices on the server and starts the next form f
   assert.equal(other.h.run('radioValue("keep-commentary")'), "drop");
 });
 
+test("reopening a job restores its track rules over the saved ones", () => {
+  const { h } = goalHarness();
+  h.run('conversionDefaults.drop_commentary = true; conversionDefaults.prefer_stereo = false; applyConversionDefaults()');
+  h.run('applyGoalSettings("/media/one.mkv", {mode:"size", prefer_stereo:true})');
+  assert.equal(h.run('radioValue("keep-commentary")'), "keep");
+  assert.equal(h.run('radioValue("keep-channels")'), "stereo");
+  h.run('applyGoalSettings("/media/one.mkv", {mode:"size", drop_commentary:true})');
+  assert.equal(h.run('radioValue("keep-commentary")'), "drop");
+  assert.equal(h.run('radioValue("keep-channels")'), "all");
+});
+
+test("an encoder picked while the file is read stays picked", async () => {
+  const { h, pick } = goalHarness();
+  h.run('api = async () => ({profile: {resolution: "4K"}, goals: {size: {status: "ok"}}}); $("allow-hardware").checked = true');
+  h.run("controls()");
+  assert.equal(h.run("state.goalProfile.status"), "loading");
+  pick("size-engine", "small");
+  assert.equal(h.run('$("allow-hardware").checked'), false);
+  await h.run('loadGoalProfile("/media/movie.mkv")');
+  assert.equal(h.run("state.goalProfile.status"), "ready");
+  assert.equal(h.run('$("allow-hardware").checked'), false);
+});
+
 test("options name the goal the server runs", () => {
   const { h, click, pick, mode } = goalHarness();
   click("compact");

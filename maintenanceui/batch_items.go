@@ -180,7 +180,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 						if childInputs[action.SaveSpaceRequestKey] != nil {
 							view.Mode, view.AudioOnly = "compact", false
 							view.MaxHeight = compactMaxHeight(r.state["mode_policy"])
-							view.KeepHDR = true
+							view.KeepHDR = childInputs["keep_hdr"] == true
 						}
 						view.WaitingReason = batchReasonText(child.WaitingReason, true)
 						if child.Status == store.ActionStatusWaitingDecision {
