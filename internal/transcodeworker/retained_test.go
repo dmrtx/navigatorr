@@ -1191,6 +1191,85 @@ func TestRetained_FreeDiskFloorCountsEncodesNotYetWritten(t *testing.T) {
 	}
 }
 
+// A job the floor holds back takes room from the source cache instead of
+// waiting on an idle worker, and only as much as it needs.
+func TestRetained_FreeDiskFloorTakesRoomFromTheSourceCache(t *testing.T) {
+	const entrySize = 100
+	// The disk has 1000 bytes free once the cache is gone, and each byte the
+	// cache holds comes off that. The floor is set so the job fits with the
+	// cache holding at most `keep` bytes.
+	setup := func(t *testing.T, keep int64) (*retainedFixture, string) {
+		t.Helper()
+		const empty = 1000
+		reserve := int64(len("dummy-media"))
+		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = empty - keep - reserve })
+		cacheDir := f.w.sourceCacheDir()
+		f.w.freeDisk = func(string) (int64, error) {
+			var held int64
+			names, _ := os.ReadDir(cacheDir)
+			for _, e := range names {
+				if fi, err := e.Info(); err == nil && fi.Mode().IsRegular() {
+					held += fi.Size()
+				}
+			}
+			return empty - held, nil
+		}
+		return f, cacheDir
+	}
+	exists := func(path string) bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}
+
+	t.Run("oldest first, pinned last, no more than it needs", func(t *testing.T) {
+		f, cacheDir := setup(t, entrySize)
+		pinnedOld := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 5*time.Hour)
+		old := writeCacheEntry(t, cacheDir, "bbbb", entrySize, 4*time.Hour)
+		newer := writeCacheEntry(t, cacheDir, "cccc", entrySize, 3*time.Hour)
+		if err := os.MkdirAll(sourceCachePinDir(cacheDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sourceCachePinDir(cacheDir), "aaaa."+pinOwnerTag("job-held")), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.submit("job-room", "on_approval")
+		if job := f.loadQueued("job-room"); job.PID == 0 || job.RetentionBlocked != "" {
+			t.Fatalf("job-room = pid %d blocked %q: the cache had room to give", job.PID, job.RetentionBlocked)
+		}
+		if exists(old) || exists(newer) || !exists(pinnedOld) {
+			t.Fatalf("old %v newer %v pinned %v: unpinned entries go first, and the pinned one was not needed", exists(old), exists(newer), exists(pinnedOld))
+		}
+	})
+
+	t.Run("drops nothing when it cannot free enough", func(t *testing.T) {
+		f, cacheDir := setup(t, -entrySize)
+		entry := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 3*time.Hour)
+		f.submit("job-short", "on_approval")
+		if job := f.loadQueued("job-short"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
+			t.Fatalf("job-short = pid %d blocked %q: it must keep waiting", job.PID, job.RetentionBlocked)
+		}
+		if !exists(entry) {
+			t.Fatal("the cache was emptied for a job that still cannot start")
+		}
+	})
+
+	t.Run("leaves fresh entries and shared bytes", func(t *testing.T) {
+		f, cacheDir := setup(t, 0)
+		fresh := writeCacheEntry(t, cacheDir, "aaaa", entrySize, time.Minute)
+		linked := writeCacheEntry(t, cacheDir, "bbbb", entrySize, 3*time.Hour)
+		if err := os.Link(linked, filepath.Join(t.TempDir(), "job-link.mkv")); err != nil {
+			t.Skipf("hard links unsupported: %v", err)
+		}
+		f.submit("job-kept", "on_approval")
+		if job := f.loadQueued("job-kept"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
+			t.Fatalf("job-kept = pid %d blocked %q", job.PID, job.RetentionBlocked)
+		}
+		if !exists(fresh) || !exists(linked) {
+			t.Fatalf("fresh %v linked %v: neither may be dropped", exists(fresh), exists(linked))
+		}
+	})
+}
+
 // An approved publication only copies a finished file. It must not wait for
 // the encode slot (a long encode would hold an approved replacement for an
 // hour), and it must not take that slot from the next encode either; its own
