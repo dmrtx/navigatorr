@@ -129,7 +129,7 @@ jobs:
     name: layout (browser)
     needs: changes
     if: needs.changes.outputs.layout == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     steps:
