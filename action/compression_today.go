@@ -82,6 +82,9 @@ func describeCompression(goal string, p *ModePolicySnapshot) CompressionGoal {
 		d.Picture = "Same resolution. HDR and Dolby Vision files are skipped: Shrink or Audio only handles them."
 	}
 	d.Video = describeRecipe(p.Recipe)
+	if p.Mode == "size" && p.Recipe != nil && p.Recipe.Kind == RecipeQualityLadder {
+		d.Video += " An x265 encode that narrowly misses at the first setting is tried once at a setting in between before the next one."
+	}
 	if p.Size != nil && p.Size.EightBitMain10 {
 		d.Video += " An 8-bit source may become 10-bit HEVC on a worker proven to keep its quality."
 	}
