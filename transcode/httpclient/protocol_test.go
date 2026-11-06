@@ -353,6 +353,42 @@ func TestHTTPExecutor_PublishRetainedTransportFailuresAreUncertain(t *testing.T)
 	}
 }
 
+// An answer the executor received in full but cannot use is not a dropped
+// connection: it is never a wait. A redirect, a body past the bound and a 200
+// that is not a job status stay definitive, so a worker or proxy that answers
+// wrongly is reported instead of waited on.
+func TestHTTPExecutor_PublishRetainedUnusableAnswersAreNotUncertain(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		httpErr bool
+	}{
+		{"redirect", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "/elsewhere", http.StatusTemporaryRedirect)
+		}, true},
+		{"body past the bound", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(strings.Repeat("x", maxHTTPResponseBytes+2)))
+		}, true},
+		{"200 that is not a job status", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`<html>welcome</html>`))
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			_, err := newTestHTTPExecutor(t, srv).PublishRetained(context.Background(), "job-1")
+			if err == nil || IsTransportUncertain(err) {
+				t.Fatalf("a complete answer the executor cannot use must not be uncertain: %T: %v", err, err)
+			}
+			var he *HTTPError
+			if tc.httpErr != errors.As(err, &he) {
+				t.Fatalf("want *HTTPError=%v, got %T: %v", tc.httpErr, err, err)
+			}
+		})
+	}
+}
+
 // The worker answers a publish request only after it has read the whole
 // candidate, so the request has a deadline of its own. Neither the executor's
 // request timeout nor the client's overall Timeout may end it first, while the
