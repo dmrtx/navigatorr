@@ -1253,20 +1253,30 @@ func TestRetained_FreeDiskFloorTakesRoomFromTheSourceCache(t *testing.T) {
 		}
 	})
 
-	t.Run("leaves fresh entries and shared bytes", func(t *testing.T) {
+	// One entry each: it alone could free the room, so only its own guard keeps it.
+	held := func(t *testing.T, f *retainedFixture, id, entry string) {
+		t.Helper()
+		f.submit(id, "on_approval")
+		if job := f.loadQueued(id); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
+			t.Fatalf("%s = pid %d blocked %q: it must keep waiting", id, job.PID, job.RetentionBlocked)
+		}
+		if !exists(entry) {
+			t.Fatal("the entry was dropped")
+		}
+	}
+
+	t.Run("leaves an entry populated in the last hour", func(t *testing.T) {
 		f, cacheDir := setup(t, 0)
-		fresh := writeCacheEntry(t, cacheDir, "aaaa", entrySize, time.Minute)
-		linked := writeCacheEntry(t, cacheDir, "bbbb", entrySize, 3*time.Hour)
+		held(t, f, "job-fresh", writeCacheEntry(t, cacheDir, "aaaa", entrySize, time.Minute))
+	})
+
+	t.Run("leaves bytes shared with a job", func(t *testing.T) {
+		f, cacheDir := setup(t, 0)
+		linked := writeCacheEntry(t, cacheDir, "aaaa", entrySize, 3*time.Hour)
 		if err := os.Link(linked, filepath.Join(t.TempDir(), "job-link.mkv")); err != nil {
 			t.Skipf("hard links unsupported: %v", err)
 		}
-		f.submit("job-kept", "on_approval")
-		if job := f.loadQueued("job-kept"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk {
-			t.Fatalf("job-kept = pid %d blocked %q", job.PID, job.RetentionBlocked)
-		}
-		if !exists(fresh) || !exists(linked) {
-			t.Fatalf("fresh %v linked %v: neither may be dropped", exists(fresh), exists(linked))
-		}
+		held(t, f, "job-linked", linked)
 	})
 }
 
