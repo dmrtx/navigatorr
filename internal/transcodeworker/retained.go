@@ -855,12 +855,14 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 // job:
 //   - within the limits: it starts and keeps its candidate.
 //   - the retention budget is full and the job did not ask to wait: it starts
-//     and publishes on encode (PublishFallback). A batch child must not wait:
-//     nothing in its batch can be approved until every child has encoded.
-//   - the retention budget is full and the job asked to wait, or the free-disk
-//     floor would be crossed: it stays queued and the scheduler moves on to
-//     the next job. A job that publishes on encode needs that disk too, so
-//     the floor never falls back. The slot is checked again on every pass.
+//     and publishes on encode (PublishFallback), with no free-disk check. A
+//     batch child must not wait: nothing in its batch can be approved until
+//     every child has encoded, so its siblings' candidates would hold the disk
+//     it waits for.
+//   - the retention budget is full and the job asked to wait, or the budget has
+//     room and the free-disk floor would be crossed: it stays queued and the
+//     scheduler moves on to the next job. The slot is checked again on every
+//     pass.
 //   - the limits cannot be measured: it stays queued and err says why.
 //
 // The source cache gives way before a job waits for the floor: its entries can

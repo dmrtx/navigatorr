@@ -341,8 +341,9 @@ What the worker PR does where this document left a choice, or differs from it.
   (`retention_blocked: retention_budget` in its status). A job without it starts
   and publishes on encode (`publish_fallback: retention_full`; `publish_policy`
   keeps the requested value, so the execution-spec digest of a resubmit still
-  matches). Past the floor, every job waits (`retention_blocked: free_disk`). A
-  waiting job never holds back the jobs queued behind it; the scheduler's
+  matches), with no floor check: a batch child must not wait on its siblings'
+  candidates. Within the budget, a job past the floor waits
+  (`retention_blocked: free_disk`). A waiting job never holds back the jobs queued behind it; the scheduler's
   periodic sweep checks it again. The worker advertises
   `start_retention_admission` alongside `deferred_publication`.
 - **Stale directories.** The sweep also removes a job directory older than an hour
