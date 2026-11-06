@@ -154,6 +154,9 @@ func describeRecipe(r *ModeRecipe) string {
 	if r.Fallback != nil {
 		text += " A worker without the media engine uses " + ladder(r.Fallback) + "; when every media engine setting misses, x265 is offered as a next step."
 	}
+	if r.VideoCodec == transcode.VideoCodecLibX265 || r.Fallback != nil {
+		text += " An x265 encode that narrowly misses at the first setting is tried once at a setting in between before the next one."
+	}
 	return text
 }
 
