@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -26,11 +27,16 @@ type TrackPolicy struct {
 	Languages       []string `json:"languages,omitempty"`
 	AudioStreams    *[]int   `json:"audio_streams,omitempty"`
 	SubtitleStreams *[]int   `json:"subtitle_streams,omitempty"`
+	// DropCommentary removes the commentary tracks the language rule kept.
+	DropCommentary bool `json:"drop_commentary,omitempty"`
+	// PreferStereo keeps only a language's stereo tracks when it also has
+	// tracks of more channels.
+	PreferStereo bool `json:"prefer_stereo,omitempty"`
 }
 
 // Active reports whether the policy can remove any track.
 func (p *TrackPolicy) Active() bool {
-	return p != nil && (len(p.Languages) > 0 || p.AudioStreams != nil || p.SubtitleStreams != nil)
+	return p != nil && (len(p.Languages) > 0 || p.AudioStreams != nil || p.SubtitleStreams != nil || p.DropCommentary || p.PreferStereo)
 }
 
 // Validate checks a frozen policy: canonical languages, well-formed indexes.
@@ -64,7 +70,7 @@ func (p *TrackPolicy) Clone() *TrackPolicy {
 	if p == nil {
 		return nil
 	}
-	c := &TrackPolicy{Languages: slices.Clone(p.Languages)}
+	c := &TrackPolicy{Languages: slices.Clone(p.Languages), DropCommentary: p.DropCommentary, PreferStereo: p.PreferStereo}
 	if p.AudioStreams != nil {
 		v := slices.Clone(*p.AudioStreams)
 		c.AudioStreams = &v
@@ -84,6 +90,7 @@ type TrackInfo struct {
 	Language    string
 	Title       string
 	Codec       string
+	Channels    int
 	Disposition map[string]int
 }
 
@@ -181,6 +188,10 @@ func OriginalAudioTrack(tracks []TrackInfo) (TrackInfo, bool) {
 //   - Subtitles: a subtitle is kept when its language is in L, is the
 //     original audio track's language, or is untagged / "und". Forced
 //     subtitles follow the same rule.
+//   - Audio the rule keeps then loses its commentary tracks (DropCommentary)
+//     and, per language, the tracks of more than two channels when that
+//     language has a stereo track that is not a commentary (PreferStereo). A
+//     track of unknown channels stays, and so does the last track of a file.
 //   - Explicit stream lists replace the rule for their kind, exactly.
 //
 // Languages are compared in canonical form, so ger matches deu. An explicit
@@ -229,6 +240,9 @@ func SelectTracks(p *TrackPolicy, tracks []TrackInfo) (*TrackSelection, error) {
 			}
 		}
 	}
+	if p.AudioStreams == nil {
+		keepAudio = trimAudio(p, audio, keepAudio)
+	}
 
 	var keepSubs []int
 	switch {
@@ -252,6 +266,47 @@ func SelectTracks(p *TrackPolicy, tracks []TrackInfo) (*TrackSelection, error) {
 		return nil, nil
 	}
 	return &TrackSelection{KeepAudio: nonNil(keepAudio), KeepSubtitles: nonNil(keepSubs)}, nil
+}
+
+// commentaryTitle matches a track title naming a commentary, in the languages
+// titles usually come in.
+var commentaryTitle = regexp.MustCompile(`(?i)comment|comentari|kommentar`)
+
+// IsCommentary reports a commentary track, by its disposition or its title.
+func (t TrackInfo) IsCommentary() bool {
+	return t.Disposition["comment"] > 0 || commentaryTitle.MatchString(t.Title)
+}
+
+// trimAudio applies DropCommentary and PreferStereo to the kept audio indexes.
+func trimAudio(p *TrackPolicy, audio []TrackInfo, kept []int) []int {
+	if !p.DropCommentary && !p.PreferStereo {
+		return kept
+	}
+	var tracks []TrackInfo
+	for _, t := range audio {
+		if slices.Contains(kept, t.Index) {
+			tracks = append(tracks, t)
+		}
+	}
+	stereo := map[string]bool{}
+	for _, t := range tracks {
+		if t.Channels == 2 && !t.IsCommentary() {
+			stereo[CanonicalLanguage(t.Language)] = true
+		}
+	}
+	out := []int{}
+	for _, t := range tracks {
+		switch {
+		case p.DropCommentary && t.IsCommentary():
+		case p.PreferStereo && !t.IsCommentary() && t.Channels > 2 && stereo[CanonicalLanguage(t.Language)]:
+		default:
+			out = append(out, t.Index)
+		}
+	}
+	if len(out) == 0 {
+		return kept
+	}
+	return out
 }
 
 func nonNil(v []int) []int {

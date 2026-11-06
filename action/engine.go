@@ -415,7 +415,7 @@ func immutableActionInputsMatch(existingJSON string, requested map[string]any) (
 	// dedicated Run argument or inside inputs. It does not change workflow
 	// semantics and therefore is excluded from the immutable payload check.
 	delete(existing, "idempotency_key")
-	// A Save space action routed to keep HDR answers to the request it was.
+	// A Save space action routed to Shrink answers to the request it was.
 	if original, ok := existing[SaveSpaceRequestKey].(map[string]any); ok {
 		if _, resent := requested[SaveSpaceRequestKey]; !resent {
 			existing = original

@@ -25,9 +25,9 @@ const AudioOnlyGoal = "audio_only"
 type GoalVerdict struct {
 	Status     string `json:"status"`
 	ReasonCode string `json:"reason_code,omitempty"`
-	// KeepsHDR marks a Save space verdict that holds without a size limit: the
-	// file runs as Shrink keeping HDR (routeSaveSpaceHDR).
-	KeepsHDR bool `json:"keeps_hdr,omitempty"`
+	// ViaShrink marks a Save space verdict that holds without a size limit: the
+	// HDR or Dolby Vision file runs as Shrink at its resolution (routeSaveSpaceHDR).
+	ViaShrink bool `json:"via_shrink,omitempty"`
 }
 
 // SourceGoals is the per-goal preview of a single source and the goal worth
@@ -82,14 +82,14 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 	for _, mode := range SourceGoalModes {
 		reason := modeSourceReason(mode, gateRep, hfrSupported)
 		verdict := GoalVerdict{Status: GoalOK}
-		keepHDR := mode == "size" && reason == "hdr_requires_compact"
-		if keepHDR {
+		viaShrink := mode == "size" && reason == "hdr_requires_compact"
+		if viaShrink {
 			reason = modeSourceReason("compact", gateRep, hfrSupported)
 		}
 		switch {
-		case keepHDR && reason == "":
-			verdict.KeepsHDR = true
-			policy, err := saveSpaceHDRPolicy(false, nil)
+		case viaShrink && reason == "":
+			verdict.ViaShrink = true
+			policy, err := saveSpaceHDRPolicy(false, nil, false)
 			if err != nil {
 				verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: "compact_policy_unavailable"}
 				break
@@ -98,7 +98,7 @@ func (e *Engine) SourceGoals(ctx context.Context, path string, rep *mediainspect
 			switch reason {
 			case "":
 			case "compact_frame_evidence_unavailable", "compact_policy_unavailable":
-				verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: reason, KeepsHDR: true}
+				verdict = GoalVerdict{Status: GoalUnknown, ReasonCode: reason, ViaShrink: true}
 			default:
 				verdict = GoalVerdict{Status: GoalSkip, ReasonCode: reason}
 			}

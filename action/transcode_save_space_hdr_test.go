@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -35,16 +36,16 @@ func saveSpaceHDRPreflight(t *testing.T, e *Engine, ec *ExecutionContext) StepRe
 	return result
 }
 
-func assertRoutedToShrinkKeepingHDR(t *testing.T, ec *ExecutionContext) *ModePolicySnapshot {
+func assertRoutedToShrink(t *testing.T, ec *ExecutionContext, keepHDR bool) *ModePolicySnapshot {
 	t.Helper()
-	if ec.Inputs["mode"] != "compact" || ec.Inputs["keep_hdr"] != true || ec.Inputs["max_height"] != float64(2160) {
+	if ec.Inputs["mode"] != "compact" || (ec.Inputs["keep_hdr"] == true) != keepHDR || ec.Inputs["max_height"] != float64(2160) || ec.Inputs[saveSpaceKeepHDRInput] != nil {
 		t.Fatalf("inputs %+v", ec.Inputs)
 	}
 	if err := validateModeInputs(ec.Inputs); err != nil {
 		t.Fatalf("the routed inputs are refused: %v", err)
 	}
 	policy, err := freezeModePolicy(ec)
-	if err != nil || policy.Mode != "compact" || !policy.Compact.KeepHDR || policy.Compact.MaxHeight != 2160 || policy.Compact.ChainVersion != transcode.CompactChainVersion {
+	if err != nil || policy.Mode != "compact" || policy.Compact.KeepHDR != keepHDR || policy.Compact.MaxHeight != 2160 || policy.Compact.ChainVersion != transcode.CompactChainVersion {
 		t.Fatalf("frozen %+v %v", policy, err)
 	}
 	return policy
@@ -52,7 +53,7 @@ func assertRoutedToShrinkKeepingHDR(t *testing.T, ec *ExecutionContext) *ModePol
 
 // The file decides in preflight: every later step, the worker and the history
 // see the goal that really runs, and the request stays as it was sent.
-func TestSaveSpacePreflightRunsAnHDRSourceAsShrinkKeepingHDR(t *testing.T) {
+func TestSaveSpacePreflightRunsAnHDRSourceAsShrinkInSDR(t *testing.T) {
 	e, st, file := saveSpaceHDRFixture(t, hdrProbeJSON)
 	ec := &ExecutionContext{InstanceID: "routed", ActionName: "transcode_media", Inputs: map[string]any{"path": file, "mode": "size", "allow_hardware": true, "keep_languages": []any{"jpn"}}, State: map[string]any{}}
 	seedActionInstance(t, st, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
@@ -60,7 +61,7 @@ func TestSaveSpacePreflightRunsAnHDRSourceAsShrinkKeepingHDR(t *testing.T) {
 	if getString(result.Outputs, "reason_code") == "hdr_requires_compact" {
 		t.Fatalf("skipped: %+v", result)
 	}
-	policy := assertRoutedToShrinkKeepingHDR(t, ec)
+	policy := assertRoutedToShrink(t, ec, false)
 	if policy.Tracks == nil || len(policy.Tracks.Languages) != 1 || policy.Tracks.Languages[0] != "jpn" {
 		t.Fatalf("languages lost: %+v", policy.Tracks)
 	}
@@ -73,7 +74,7 @@ func TestSaveSpacePreflightRunsAnHDRSourceAsShrinkKeepingHDR(t *testing.T) {
 	}
 	digest := policy.Digest
 	again := requeuedSaveSpaceHDR(t, e, ec)
-	if policy := assertRoutedToShrinkKeepingHDR(t, again); policy.Digest != digest {
+	if policy := assertRoutedToShrink(t, again, false); policy.Digest != digest {
 		t.Fatalf("a repeated preflight froze %s, then %s", digest, policy.Digest)
 	}
 	if request, _ := again.Inputs[SaveSpaceRequestKey].(map[string]any); request["mode"] != "size" {
@@ -115,7 +116,7 @@ func TestSaveSpaceHDRReplayFindsTheActionWithoutTheFile(t *testing.T) {
 	}
 	ec := parseExecutionContext(inst, e)
 	saveSpaceHDRPreflight(t, e, ec)
-	assertRoutedToShrinkKeepingHDR(t, ec)
+	assertRoutedToShrink(t, ec, false)
 	inst.InputsJSON = toJSON(ec.Inputs)
 	if err := st.UpdateActionInstance(*inst); err != nil {
 		t.Fatal(err)
@@ -195,12 +196,12 @@ func TestSaveSpaceBatchChildRoutesItself(t *testing.T) {
 	child := &ExecutionContext{InstanceID: "child", ActionName: "transcode_media", Inputs: map[string]any{"path": items[0].FilePath, "mode": "size", "parent_action_id": res.ID, "batch_item_key": items[0].ItemKey}, State: map[string]any{}}
 	seedActionInstance(t, st, child.InstanceID, child.ActionName, StatusRunning, 0, "", child.Inputs, child.State)
 	saveSpaceHDRPreflight(t, e, child)
-	policy := assertRoutedToShrinkKeepingHDR(t, child)
+	policy := assertRoutedToShrink(t, child, false)
 	if policy.Tracks == nil || len(policy.Tracks.Languages) != 1 || policy.Tracks.Languages[0] != "jpn" {
 		t.Fatalf("languages lost: %+v", policy.Tracks)
 	}
 	// A requeued child must not fight the parent's goal.
-	assertRoutedToShrinkKeepingHDR(t, requeuedSaveSpaceHDR(t, e, child))
+	assertRoutedToShrink(t, requeuedSaveSpaceHDR(t, e, child), false)
 	// It still answers to the parent: a file taken out of the batch stops.
 	items[0].Decision = "skip"
 	if err := st.UpdateTranscodeBatchItem(items[0]); err != nil {
@@ -264,7 +265,7 @@ func TestSaveSpaceGoalChangeRoutesAnHDRChild(t *testing.T) {
 	child := &ExecutionContext{InstanceID: "goal-child", ActionName: "transcode_media", Inputs: map[string]any{"path": items[0].FilePath, "mode": "size", "parent_action_id": res.ID, "batch_item_key": items[0].ItemKey}, State: map[string]any{}}
 	seedActionInstance(t, st, child.InstanceID, child.ActionName, StatusRunning, 0, "", child.Inputs, child.State)
 	saveSpaceHDRPreflight(t, e, child)
-	assertRoutedToShrinkKeepingHDR(t, child)
+	assertRoutedToShrink(t, child, false)
 }
 
 func TestRoutedRequestSurvivesTheStoredRoundTrip(t *testing.T) {
@@ -286,5 +287,26 @@ func TestRoutedRequestSurvivesTheStoredRoundTrip(t *testing.T) {
 	}
 	if matches, _ := immutableActionInputsMatch(string(raw), map[string]any{"path": "x", "mode": "compact", "keep_hdr": true}); matches {
 		t.Error("a Shrink request found a routed Save space job")
+	}
+}
+
+// Keeping HDR is the request's choice, and a batch child inherits it.
+func TestSaveSpaceKeepsHDROnlyWhenAsked(t *testing.T) {
+	e, st, file := saveSpaceHDRFixture(t, hdrProbeJSON)
+	ec := &ExecutionContext{InstanceID: "kept", ActionName: "transcode_media", Inputs: map[string]any{"path": file, "mode": "size", saveSpaceKeepHDRInput: true}, State: map[string]any{}}
+	seedActionInstance(t, st, ec.InstanceID, ec.ActionName, StatusRunning, 0, "", ec.Inputs, ec.State)
+	saveSpaceHDRPreflight(t, e, ec)
+	policy := assertRoutedToShrink(t, ec, true)
+	if request, _ := ec.Inputs[SaveSpaceRequestKey].(map[string]any); request[saveSpaceKeepHDRInput] != true {
+		t.Fatalf("request lost the choice: %+v", request)
+	}
+	if again := assertRoutedToShrink(t, requeuedSaveSpaceHDR(t, e, ec), true); again.Digest != policy.Digest {
+		t.Fatalf("a repeated preflight froze %s, then %s", policy.Digest, again.Digest)
+	}
+	if !slices.Contains(modeChildInputs, saveSpaceKeepHDRInput) {
+		t.Fatal("a batch child would lose the choice")
+	}
+	if err := validateModeInputs(map[string]any{"path": file, "mode": "compact", saveSpaceKeepHDRInput: true}); err == nil {
+		t.Fatal("a Shrink request accepted save_space_keep_hdr")
 	}
 }

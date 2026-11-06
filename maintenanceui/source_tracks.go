@@ -204,7 +204,8 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 	// boxes ticked here are what an untouched submit keeps. Nothing to remove
 	// (or no languages) is no selection: every track stays.
 	infos := action.TrackInfosOf(rep)
-	selection, err := transcode.SelectTracks(&transcode.TrackPolicy{Languages: languages}, infos)
+	q := r.URL.Query()
+	selection, err := transcode.SelectTracks(&transcode.TrackPolicy{Languages: languages, DropCommentary: q.Get("drop_commentary") == "true", PreferStereo: q.Get("prefer_stereo") == "true"}, infos)
 	if err != nil {
 		fail(w, 500, "could not choose the tracks")
 		return

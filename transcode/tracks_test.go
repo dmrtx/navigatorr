@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -404,5 +405,56 @@ func TestTrackSelectionValidateAndEqual(t *testing.T) {
 	}
 	if !a.Keeps("audio", 1) || a.Keeps("audio", 2) || !a.Keeps("video", 9) || !(*TrackSelection)(nil).Keeps("audio", 2) {
 		t.Error("Keeps")
+	}
+}
+
+func TestSelectTracksTrimsCommentaryAndSurround(t *testing.T) {
+	audio := func(index int, language, title string, channels int) TrackInfo {
+		return TrackInfo{Index: index, Kind: "audio", Language: language, Title: title, Channels: channels}
+	}
+	tracks := []TrackInfo{
+		audio(1, "eng", "Surround 7.1", 8),
+		audio(2, "eng", "Stereo", 2),
+		audio(3, "eng", "Director's Commentary", 2),
+		audio(4, "spa", "5.1", 6),
+		audio(5, "jpn", "", 0),
+		audio(6, "jpn", "", 6),
+		audio(7, "fre", "Comentarios del director", 6),
+		{Index: 8, Kind: "audio", Language: "deu", Channels: 6, Disposition: map[string]int{"comment": 1}},
+		{Index: 9, Kind: "subtitle", Language: "eng"},
+	}
+	for _, c := range []struct {
+		name   string
+		policy TrackPolicy
+		tracks []TrackInfo
+		want   []int
+	}{
+		{"commentary", TrackPolicy{DropCommentary: true}, tracks, []int{1, 2, 4, 5, 6}},
+		{"stereo where there is one", TrackPolicy{PreferStereo: true}, tracks, []int{2, 3, 4, 5, 6, 7, 8}},
+		{"both", TrackPolicy{DropCommentary: true, PreferStereo: true}, tracks, []int{2, 4, 5, 6}},
+		{"a stereo commentary is not the language's stereo", TrackPolicy{PreferStereo: true}, []TrackInfo{audio(1, "eng", "", 6), audio(2, "eng", "Commentary", 2)}, nil},
+		{"the last track stays", TrackPolicy{DropCommentary: true}, []TrackInfo{audio(1, "eng", "Commentary", 2)}, nil},
+		{"after the languages", TrackPolicy{Languages: []string{"eng"}, PreferStereo: true}, []TrackInfo{audio(1, "eng", "", 6), audio(2, "eng", "", 2), audio(3, "spa", "", 2)}, []int{2}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			sel, err := SelectTracks(&c.policy, c.tracks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.want == nil {
+				if sel != nil {
+					t.Fatalf("removed tracks: %+v", sel)
+				}
+				return
+			}
+			if sel == nil || !slices.Equal(sel.KeepAudio, c.want) {
+				t.Fatalf("kept %+v, want %v", sel, c.want)
+			}
+		})
+	}
+	picked := []int{1}
+	sel, err := SelectTracks(&TrackPolicy{AudioStreams: &picked, DropCommentary: true, PreferStereo: true}, tracks)
+	if err != nil || !slices.Equal(sel.KeepAudio, picked) {
+		t.Fatalf("a manual pick was changed: %+v %v", sel, err)
 	}
 }

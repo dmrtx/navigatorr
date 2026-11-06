@@ -712,6 +712,9 @@ func validateModeInputs(inputs map[string]any) error {
 	if err != nil {
 		return err
 	}
+	if _, err := modeSaveSpaceKeepHDRInput(mode, inputs); err != nil {
+		return err
+	}
 	// Whether the global list or the job's own is in force is decided when the
 	// goal freezes; here the inputs only have to be well formed.
 	trackPolicy, err := trackPolicyFor(mode, tracks, nil)
@@ -872,10 +875,10 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 const saveSpaceHDRMaxHeight = 2160
 
 // saveSpaceTakesHDR reports a size goal that hands HDR and Dolby Vision sources
-// to Shrink's keep-HDR chain, the only encode proven to keep HDR. That chain
-// plans no size limit and has its own minimum saving, so a goal that names
-// either one keeps its rule and skips the file (hdr_requires_compact), and the
-// audio-only goal copies the picture and needs none of this.
+// to Shrink's chains, the only encodes proven on them. Those chains plan no size
+// limit and have their own minimum saving, so a goal that names either one keeps
+// its rule and skips the file (hdr_requires_compact), and the audio-only goal
+// copies the picture and needs none of this.
 func saveSpaceTakesHDR(inputs map[string]any) bool {
 	if getString(inputs, "mode") != "size" || getBool(inputs, "audio_only") || getBool(inputs, "accept_smaller_saving") {
 		return false
@@ -888,10 +891,32 @@ func saveSpaceTakesHDR(inputs map[string]any) bool {
 	return true
 }
 
+// saveSpaceKeepHDRInput is the Save space input that keeps an HDR or Dolby
+// Vision source in HDR. Without it such a source comes out in SDR, at its
+// resolution, including a job admitted before the input existed.
+const saveSpaceKeepHDRInput = "save_space_keep_hdr"
+
+// modeSaveSpaceKeepHDRInput reads save_space_keep_hdr: size mode only, and off
+// unless the operation says true.
+func modeSaveSpaceKeepHDRInput(mode string, inputs map[string]any) (bool, error) {
+	raw, has := inputs[saveSpaceKeepHDRInput]
+	if !has || raw == nil {
+		return false, nil
+	}
+	value, ok := raw.(bool)
+	if !ok {
+		return false, inputErr(saveSpaceKeepHDRInput, "save_space_keep_hdr must be true or false")
+	}
+	if value && mode != "size" {
+		return false, inputErr(saveSpaceKeepHDRInput, "save_space_keep_hdr is only supported with mode=size")
+	}
+	return value, nil
+}
+
 // saveSpaceHDRPolicy freezes the goal an HDR source of a Save space request
 // runs under. The request's track selection carries over.
-func saveSpaceHDRPolicy(anime bool, tracks *transcode.TrackPolicy) (ModePolicySnapshot, error) {
-	return modePolicyGoal("compact", anime, saveSpaceHDRMaxHeight, nil, false, nil, tracks, false, false, true)
+func saveSpaceHDRPolicy(anime bool, tracks *transcode.TrackPolicy, keepHDR bool) (ModePolicySnapshot, error) {
+	return modePolicyGoal("compact", anime, saveSpaceHDRMaxHeight, nil, false, nil, tracks, false, false, keepHDR)
 }
 
 // SaveSpaceRequestKey holds, in the inputs of a routed action, the request as
@@ -915,12 +940,14 @@ func withoutSaveSpaceRequest(inputs map[string]any) map[string]any {
 }
 
 // routeSaveSpaceHDR turns a Save space action whose preflight found an HDR or
-// Dolby Vision source into the Shrink goal that keeps HDR, so every later step,
-// the worker and the history see the goal that really runs. A batch child is
-// routed the same way, whatever goal row it came from.
+// Dolby Vision source into the Shrink goal at its resolution, in SDR unless the
+// request keeps HDR, so every later step, the worker and the history see the
+// goal that really runs. A batch child is routed the same way, whatever goal
+// row it came from.
 func routeSaveSpaceHDR(ec *ExecutionContext, frozen *ModePolicySnapshot) (*ModePolicySnapshot, error) {
 	anime := getBool(ec.State, "resolved_is_anime") || getBool(ec.Inputs, "is_anime") || getString(ec.Inputs, "media_type") == "anime"
-	policy, err := saveSpaceHDRPolicy(anime, frozen.Tracks)
+	keepHDR := getBool(ec.Inputs, saveSpaceKeepHDRInput)
+	policy, err := saveSpaceHDRPolicy(anime, frozen.Tracks, keepHDR)
 	if err != nil {
 		return nil, err
 	}
@@ -928,12 +955,14 @@ func routeSaveSpaceHDR(ec *ExecutionContext, frozen *ModePolicySnapshot) (*ModeP
 	for key, value := range ec.Inputs {
 		request[key] = value
 	}
-	for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset"} {
+	for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", saveSpaceKeepHDRInput} {
 		delete(ec.Inputs, key)
 	}
 	ec.Inputs[SaveSpaceRequestKey] = request
 	ec.Inputs["mode"] = "compact"
-	ec.Inputs["keep_hdr"] = true
+	if keepHDR {
+		ec.Inputs["keep_hdr"] = true
+	}
 	ec.Inputs["max_height"] = float64(saveSpaceHDRMaxHeight)
 	ec.State["mode_policy"] = policy
 	return freezeModePolicy(ec)

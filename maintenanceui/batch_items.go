@@ -176,7 +176,7 @@ func (s *Server) batchItems(w http.ResponseWriter, req *http.Request) {
 					if childInputs["parent_action_id"] == id && childInputs["path"] == item.FilePath {
 						r := operationRecord{inst: *child, inputs: childInputs, outputs: decodeOperationJSON(child.OutputsJSON), state: decodeOperationJSON(child.StateJSON)}
 						attempt = &r
-						// A Save space child routed to keep HDR says what it really runs.
+						// A Save space child routed to Shrink says what it really runs.
 						if childInputs[action.SaveSpaceRequestKey] != nil {
 							view.Mode, view.AudioOnly = "compact", false
 							view.MaxHeight = compactMaxHeight(r.state["mode_policy"])

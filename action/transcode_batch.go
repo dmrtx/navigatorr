@@ -35,7 +35,7 @@ func (e *Engine) registerTranscodeBatchTemplate() {
 		},
 		RequiredInputs: []string{},
 		OptionalInputs: []string{
-			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "keep_hdr", "audio_only", "accept_smaller_saving", "paths", "service", "series_id",
+			"mode", "keep_languages", "max_height", "allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "keep_hdr", "save_space_keep_hdr", "drop_commentary", "prefer_stereo", "audio_only", "accept_smaller_saving", "paths", "service", "series_id",
 			"episode_file_ids",
 			"season",
 			"profile",
@@ -452,7 +452,7 @@ func (e *Engine) stepTranscodeBatchResolve(ctx context.Context, ec *ExecutionCon
 				if err != nil {
 					return StepResult{Status: StepFailed, Error: err.Error()}, nil
 				}
-				policy, err := saveSpaceHDRPolicy(isAnime, parent.Tracks)
+				policy, err := saveSpaceHDRPolicy(isAnime, parent.Tracks, getBool(ec.Inputs, saveSpaceKeepHDRInput))
 				if err != nil {
 					return StepResult{Status: StepFailed, Error: err.Error()}, nil
 				}
@@ -1055,6 +1055,10 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 	}, nil
 }
 
+// modeChildInputs are the goal inputs a batch hands each child. Track selection
+// is not among them: the child takes it from the policy the batch froze.
+var modeChildInputs = []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "keep_hdr", saveSpaceKeepHDRInput, "audio_only", "accept_smaller_saving"}
+
 // applyGoalPolicyInputs makes the child inputs of a goal-changed item agree
 // with the policy that attempt froze. The parent's goal-specific inputs (the
 // media engine choice and the compact output height) belong to the parent's
@@ -1071,6 +1075,7 @@ func applyGoalPolicyInputs(inputs map[string]any, rawPolicy any) {
 	delete(inputs, "size_budget_sibling_multiplier")
 	delete(inputs, "max_height")
 	delete(inputs, "keep_hdr")
+	delete(inputs, saveSpaceKeepHDRInput)
 	delete(inputs, "audio_only")
 	delete(inputs, "accept_smaller_saving")
 	var policy ModePolicySnapshot
@@ -1196,7 +1201,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 	if mode := getString(ec.Inputs, "mode"); mode != "" {
 		childInputs["mode"] = mode
-		for _, key := range []string{"allow_hardware", "hardware_margin_percent", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "max_height", "keep_hdr", "audio_only", "accept_smaller_saving"} {
+		for _, key := range modeChildInputs {
 			if v, ok := ec.Inputs[key]; ok && v != nil {
 				childInputs[key] = v
 			}

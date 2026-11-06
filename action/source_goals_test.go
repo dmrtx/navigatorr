@@ -34,7 +34,7 @@ func TestSourceGoalsMatchTheJobGates(t *testing.T) {
 			want := modeSourceReason(mode, rep, false)
 			v := got.Goals[mode]
 			if mode == "size" && want == "hdr_requires_compact" {
-				policy, err := saveSpaceHDRPolicy(false, nil)
+				policy, err := saveSpaceHDRPolicy(false, nil, false)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -64,7 +64,7 @@ func TestSourceGoalsRecommendation(t *testing.T) {
 		return mediainspect.DynamicRange{}, errors.New("no frames")
 	}
 	g := e.SourceGoals(context.Background(), "/media/movie.mkv", hdr, failing)
-	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].Status != GoalUnknown || !g.Goals["size"].KeepsHDR || g.Goals["quality"].ReasonCode != "hdr_requires_compact" || g.Recommended != "compact" || g.Dynamic != nil {
+	if g.Goals["compact"].Status != GoalUnknown || g.Goals["size"].Status != GoalUnknown || !g.Goals["size"].ViaShrink || g.Goals["quality"].ReasonCode != "hdr_requires_compact" || g.Recommended != "compact" || g.Dynamic != nil {
 		t.Fatalf("%+v", g)
 	}
 }
