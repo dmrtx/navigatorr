@@ -810,6 +810,7 @@ const (
 type retentionRefusal struct {
 	reason string
 	msg    string
+	short  int64 // bytes missing for the free-disk floor
 }
 
 func (e *retentionRefusal) Error() string { return e.msg }
@@ -836,7 +837,7 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		}
 		// Encodes admitted earlier have not written their candidates yet.
 		if left := free - unwritten - expected; left < floor {
-			return &retentionRefusal{reason: retentionBlockedDisk, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
+			return &retentionRefusal{reason: retentionBlockedDisk, short: floor - left, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
 		}
 	}
 	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
@@ -864,6 +865,9 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 //     the floor never falls back. The slot is checked again on every pass.
 //   - the limits cannot be measured: it stays queued and err says why.
 //
+// The source cache gives way before a job waits for the floor: its entries can
+// be read again, and nothing else frees that disk while the worker sits idle.
+//
 // The job record is saved only when what it says changes, so a job that keeps
 // waiting does not rewrite its record (or the log) on every pass. Callers hold
 // the capacity lock and the job's lock.
@@ -873,6 +877,9 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 	}
 	err := w.admitDeferredLocked(job.RetainReserveBytes)
 	var refusal *retentionRefusal
+	if errors.As(err, &refusal) && w.freeSourceCacheRoom(refusal.short) {
+		err = w.admitDeferredLocked(job.RetainReserveBytes)
+	}
 	switch {
 	case err == nil:
 		if job.RetentionBlocked != "" {
