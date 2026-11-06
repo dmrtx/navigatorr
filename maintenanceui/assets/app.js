@@ -2285,6 +2285,7 @@ function sourceSummary() {
 function finishSubmission(mode) {
   if (mode === "encode") {
     state.goalExplicit = false;
+    $("queue-priority").checked = false;
     clearGoalCarry();
     resetKeepTracks();
     state.selected.clear();
@@ -2422,6 +2423,12 @@ function renderConversionOptions() {
   setOptionRow("size-budget-limit", "size-budget-reason", noLimit);
   setOptionRow("size-engine", "size-engine-reason", other || copied || (mode === "compact" || hdrFile ? "This conversion always uses x265." : ""));
   document.querySelectorAll('input[name="conversion-video"]').forEach(r => { r.disabled = Boolean(other); });
+  // The queue keeps a batch's files together, so only one file can go first.
+  const oneFile = $("scope").value !== "batch";
+  $("queue-priority").disabled = !oneFile;
+  if (!oneFile) $("queue-priority").checked = false;
+  $("queue-priority-reason").hidden = oneFile;
+  $("queue-priority-reason").textContent = oneFile ? "" : "Only a single file can run next.";
 }
 
 // The goals are not peers: a goal can skip a file outright (HDR with Save
@@ -2470,7 +2477,10 @@ function refreshGoalProfile() {
   }
   // Moving from one file to another is a new visit. In a batch the key is just
   // the first selected file, so unticking it keeps the goal the user chose.
-  if (current?.key && current.key !== key && !current.batch && !target.batch) state.goalExplicit = false;
+  if (current?.key && current.key !== key && !current.batch && !target.batch) {
+    state.goalExplicit = false;
+    $("queue-priority").checked = false;
+  }
   state.goalProfile = {key, status: "loading", batch: target.batch};
   clearTimeout(state.goalProfileTimer);
   state.goalProfileTimer = setTimeout(() => { if (state.goalProfile?.key === key) loadGoalProfile(key); }, 150);
@@ -3557,6 +3567,7 @@ async function buildAndSubmitJob(mode = "encode") {
   }
   if (!replaceAuto.known) await loadReplaceAuto();
   Object.assign(inputs, mode === "preview" ? replaceAutoValue(false) : replaceAutoInput("replace-auto"));
+  if (mode !== "preview" && !batch && $("queue-priority").checked) inputs.queue_priority = true;
   const request = JSON.stringify({ name, inputs });
   let receipt;
   try {
@@ -5593,6 +5604,7 @@ function openGoalForm(path, options = {}) {
   $("scope").value = "file";
   state.fileMedia = null;
   state.fileService = null;
+  $("queue-priority").checked = false;
   clearGoalCarry();
   if (options.mode) {
     applyConversionDefaults();
