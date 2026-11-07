@@ -93,50 +93,65 @@ func TestSubmitRefusesPreviewTrackForOldWorker(t *testing.T) {
 // A submit left uncertain skips the capability gates, because the job may be on
 // the worker already. A worker that forgot the job (or dropped its retained
 // candidate) is sent a new one, which needs the same gates as a first submit.
-func TestResubmitAfterLostJobRefusesPreviewTrackForOldWorker(t *testing.T) {
-	for _, lost := range []struct {
-		name   string
-		status func(jobID string) (transcode.JobStatus, error)
+func TestResubmitAfterLostJobRefusesTrackSourcesForOldWorker(t *testing.T) {
+	cover := mediainspect.DetailedStream{Index: 1, Kind: "video", Codec: "mjpeg", PixelFormat: "yuvj420p", Width: 600, Height: 900, BitDepth: 8, Disposition: map[string]int{"attached_pic": 1}}
+	for _, source := range []struct {
+		name         string
+		video        []mediainspect.DetailedStream
+		capabilities func(supported bool) transcode.WorkerCapabilities
+		wantError    string
 	}{
-		{"worker forgot the job", func(jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
-		}},
-		{"retention ended", func(jobID string) (transcode.JobStatus, error) {
-			return transcode.JobStatus{ID: jobID, Status: transcode.StatusExpired}, nil
-		}},
+		{"preview track", previewTrackReport().Video, func(ok bool) transcode.WorkerCapabilities {
+			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, ThumbnailTracks: ok}
+		}, "preview image"},
+		{"cover art", []mediainspect.DetailedStream{previewTrackReport().Video[0], cover}, func(ok bool) transcode.WorkerCapabilities {
+			return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, CoverArt: ok}
+		}, "cover art"},
 	} {
-		for _, tc := range []struct {
-			name       string
-			capability bool
-			wantSubmit bool
+		for _, lost := range []struct {
+			name   string
+			status func(jobID string) (transcode.JobStatus, error)
 		}{
-			{"old worker", false, false},
-			{"thumbnail-track worker", true, true},
+			{"worker forgot the job", func(jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+			}},
+			{"retention ended", func(jobID string) (transcode.JobStatus, error) {
+				return transcode.JobStatus{ID: jobID, Status: transcode.StatusExpired}, nil
+			}},
 		} {
-			t.Run(lost.name+"/"+tc.name, func(t *testing.T) {
-				mock := &mockTranscodeExecutor{
-					capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
-						return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, ThumbnailTracks: tc.capability}, nil
-					},
-					statusFunc: func(_ context.Context, jobID string) (transcode.JobStatus, error) { return lost.status(jobID) },
-				}
-				e := NewEngine(EngineDeps{Transcode: mock})
-				ec := testReconcileEC("job-preview-track")
-				ec.State["job_id"] = "job-preview-track"
-				ec.State["transcode_reconcile"] = true
-				ec.State["resolved_path"] = "/media/movies/Movie/Movie.mp4"
-				ec.State["original"] = map[string]any{"video": previewTrackReport().Video}
-				res, err := e.stepTranscodeSubmit(context.Background(), ec)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if submitted := atomic.LoadInt32(&mock.submitCalls) > 0; submitted != tc.wantSubmit {
-					t.Fatalf("submitted=%v status=%s error=%s", submitted, res.Status, res.Error)
-				}
-				if !tc.wantSubmit && (res.Status != StepFailed || !strings.Contains(res.Error, "preview image")) {
-					t.Fatalf("status=%s error=%s", res.Status, res.Error)
-				}
-			})
+			for _, tc := range []struct {
+				name       string
+				capability bool
+				wantSubmit bool
+			}{
+				{"old worker", false, false},
+				{"capable worker", true, true},
+			} {
+				t.Run(source.name+"/"+lost.name+"/"+tc.name, func(t *testing.T) {
+					mock := &mockTranscodeExecutor{
+						capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+							return source.capabilities(tc.capability), nil
+						},
+						statusFunc: func(_ context.Context, jobID string) (transcode.JobStatus, error) { return lost.status(jobID) },
+					}
+					e := NewEngine(EngineDeps{Transcode: mock})
+					ec := testReconcileEC("job-track-source")
+					ec.State["job_id"] = "job-track-source"
+					ec.State["transcode_reconcile"] = true
+					ec.State["resolved_path"] = "/media/movies/Movie/Movie.mp4"
+					ec.State["original"] = map[string]any{"video": source.video}
+					res, err := e.stepTranscodeSubmit(context.Background(), ec)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if submitted := atomic.LoadInt32(&mock.submitCalls) > 0; submitted != tc.wantSubmit {
+						t.Fatalf("submitted=%v status=%s error=%s", submitted, res.Status, res.Error)
+					}
+					if !tc.wantSubmit && (res.Status != StepFailed || !strings.Contains(res.Error, source.wantError)) {
+						t.Fatalf("status=%s error=%s", res.Status, res.Error)
+					}
+				})
+			}
 		}
 	}
 }

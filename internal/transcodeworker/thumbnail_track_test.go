@@ -190,6 +190,17 @@ func TestVideoCopyProofSkipsPreviewTrackListedFirst(t *testing.T) {
 	if err != nil || evidence.Verdict != "pass" {
 		t.Fatalf("a correct copy was refused: %+v %v", evidence, err)
 	}
+
+	// A candidate left with only the preview track has no programme video to
+	// copy: its lone track counts as the programme, and the proof refuses it.
+	onlyPreview := filepath.Join(dir, "only-preview.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source,
+		"-map", "0:v:0", "-map", "0:a", "-c", "copy", onlyPreview).CombinedOutput(); err != nil {
+		t.Fatalf("only-preview fixture: %v %s", err, out)
+	}
+	if evidence, err := w.validateVideoCopy(ctx, source, onlyPreview, plan, "sha256:p", mustSize(t, onlyPreview)); err == nil || evidence.Verdict == "pass" {
+		t.Fatalf("accepted a candidate that kept only the preview track: %+v %v", evidence, err)
+	}
 }
 
 func TestProgrammeVideoSkipsPreviewTrack(t *testing.T) {
