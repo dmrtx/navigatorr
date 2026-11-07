@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
@@ -55,6 +56,35 @@ func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath str
 		}
 		w.recordSchedulerSweep(name, start, time.Now().UTC(), count, err)
 	}
+	w.refreshRetentionRoom(time.Now().UTC())
+}
+
+// refreshRetentionRoom measures the room left to retain candidates, so the
+// coordinator can keep from giving this worker a conversion it cannot hold
+// (see transcode.RetentionRoom). The health probe only reads the last
+// measure: it never touches jobs. A worker with no budget reports none, and a
+// measure that fails keeps the previous one, which the coordinator stops
+// trusting once it is old.
+func (w *Worker) refreshRetentionRoom(now time.Time) {
+	limit := w.cfg.RetainedCandidatesMaxBytes
+	if limit <= 0 || !w.cfg.DeferredPublication {
+		w.schedulerMu.Lock()
+		w.retentionRoom = nil
+		w.schedulerMu.Unlock()
+		return
+	}
+	capLock, err := acquireCapacityLock(filepath.Clean(w.cfg.StateDir))
+	if err != nil {
+		return
+	}
+	held, _, err := w.retainedBytesLocked()
+	capLock.Unlock()
+	if err != nil {
+		return
+	}
+	w.schedulerMu.Lock()
+	w.retentionRoom = &transcode.RetentionRoom{ObservedAt: now, CapacityBytes: limit, RoomBytes: max(0, limit-held)}
+	w.schedulerMu.Unlock()
 }
 func (w *Worker) recordSchedulerSweep(name string, start, now time.Time, count int, err error) {
 	w.schedulerMu.Lock()
@@ -90,6 +120,10 @@ func (w *Worker) SchedulerObservation(now time.Time) transcode.SchedulerObservat
 	}
 	w.schedulerMu.Lock()
 	defer w.schedulerMu.Unlock()
+	if w.retentionRoom != nil {
+		room := *w.retentionRoom
+		result.Retention = &room
+	}
 	result.Sweeps = make(map[string]transcode.SchedulerSweepObservation, len(w.schedulerHealth.Sweeps))
 	staleAfter := 3 * w.schedulerInterval
 	if staleAfter < 15*time.Second {

@@ -284,6 +284,11 @@ Everything below assumed the candidate was on the share. Each place must read
 4. UI and storage view.
 5. Make `on_approval` the default only after measured use. `on_encode` stays for
    workers with small disks.
+6. Retention room in the worker's health (revision 6, see "Giving a conversion
+   only to a worker that can retain it"). The field is optional on both sides, so
+   either can go first: a server that does not know it ignores it, and a worker
+   that does not send it is taken to have room. It has effect once the workers
+   report it and the server reads it.
 
 Once `on_approval` is on, moving a job to a different or older worker is unsafe.
 
@@ -399,6 +404,60 @@ submit rather than silently publishing on encode.
 **Batch children defer too** (revision 4; revisions 1 to 3 refused them at
 admission). `publishPolicyFor` no longer looks at `parent_action_id`. "Batches"
 below gives the reasoning and the one rule that keeps a batch from stalling.
+
+**Giving a conversion only to a worker that can retain it.** A standalone
+conversion on a worker that publishes on approval waits, queued on the worker,
+until the worker has room for the candidate, and the worker reserves the size of
+the source for it. The conversion keeps the worker it was given, so the
+coordinator gives it one only if that worker reports room for it
+(`action/worker_retention_fit.go`):
+
+- The worker measures `retention` once per scheduler pass and publishes it in the
+  `scheduler` object of `GET /v1/health`: `observed_at`, `capacity_bytes`
+  (`retained_candidates_max_bytes`) and `room_bytes` (what is left of it after the
+  candidates it holds and the reservations of jobs that have not written theirs;
+  never negative). The probe only reads the last measure. A worker with no budget,
+  or with deferred publication off, reports none, and a measure that fails keeps
+  the previous one.
+- The coordinator needs `source bytes` (the size stamped at submit,
+  `submitted_source_bytes`) of room on that worker. A batch child needs none: the
+  worker starts it to publish on encode when the budget is full. A worker that
+  publishes on encode needs none either.
+- A report that is missing, older than 45 seconds, or dated more than 45 seconds
+  ahead of the coordinator's clock says nothing, and the worker is taken to have
+  room, as it was before workers reported it. Workers that have not been rolled
+  out yet behave as before, and so does a worker whose report stops arriving;
+  the clocks of the nodes must agree to within that margin.
+- Each conversion in the queue is a claim on the free slots of the workers it can
+  be given: the ready ones that report room for its file. A conversion takes a
+  slot only if that leaves every conversion ahead of it as well placed as it was
+  (a matching of the claims ahead to the free slots, `action/transcode_queue_claims.go`),
+  and only on a worker where that holds. So a file that fits one node never holds
+  a smaller one back from a slot on the other, and a smaller one never takes the
+  slot the file ahead of it is waiting for. The place shown in the queue counts
+  the conversions ahead that could be given the same workers, busy or not.
+- A conversion no ready worker has room for waits unassigned in the transcode
+  queue ("No node has room to retain its candidate"), and the ones behind it pass.
+  That is deliberate: a node's idle slot is worth more than strict order. It
+  also means a large file can wait a long time while smaller ones keep using the
+  room that frees up; room comes back when a retained candidate is approved or
+  discarded, and the file is placed ahead of later ones for the slot as soon as
+  a worker reports room for it.
+- A worker that is down for a moment still counts when deciding whether the file
+  fits anywhere, so the file waits for it instead of being left on a node that
+  can never hold it. A file larger than the whole budget of every worker fits
+  nowhere, and waiting for room would never help: it is assigned as before and
+  the worker decides.
+- The report is read when the conversion is assigned, up to a pass (2 s) plus the
+  probe cache (5 s) after it was measured. A worker with more than one slot can
+  be given two conversions in that window that together do not fit; the second
+  stays queued on the worker (`retention_budget`), as before this existed, and
+  the worker's own slot accounting (see #381) keeps it from holding the slot.
+- The size is the one stamped when the conversion was admitted, before it is
+  first given a worker. A file whose size could not be read then (a stalled
+  mount; the stat is bounded) needs no room and is not kept off any node.
+- The free-disk floor is not part of the report. It depends on what else sits on
+  the work disk, so the worker still decides it when the job starts.
 
 **Where the candidate is.** `candidate_location` is `share` (or absent) or
 `worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot

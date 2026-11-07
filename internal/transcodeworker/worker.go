@@ -261,8 +261,11 @@ type Worker struct {
 	// through WaitBackgroundCleanup, or it would exit before they ran.
 	partialCleanup sync.WaitGroup
 
-	schedulerMu        sync.Mutex
-	schedulerHealth    transcode.SchedulerObservation
+	schedulerMu     sync.Mutex
+	schedulerHealth transcode.SchedulerObservation
+	// retentionRoom is the last measure of the room left to retain candidates
+	// (see refreshRetentionRoom); guarded by schedulerMu.
+	retentionRoom      *transcode.RetentionRoom
 	schedulerInterval  time.Duration
 	schedulerSweepHook func(string) error
 
