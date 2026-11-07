@@ -43,18 +43,42 @@ func TestBuildExecutionPlanLeavesPreviewTrackOut(t *testing.T) {
 	if !reflect.DeepEqual(video, []int{0}) {
 		t.Fatalf("video actions = %v", video)
 	}
+}
 
-	// Two-pass x265 maps the first video stream, so it still refuses a preview
-	// track beside the programme video.
+// Two-pass x265 analyses the first video stream that is not cover art, so a
+// preview track after the programme video is left out like in any other plan,
+// and one before it is refused: it would be analysed in the programme's place.
+func TestTwoPassPlanWithPreviewTrack(t *testing.T) {
 	twoPass := coverArtPlan()
 	twoPass.Quality = 0
 	twoPass.X265 = &transcode.X265Settings{BitrateKbps: 2000, TwoPass: true, Lookahead: 20, BFrames: 4, RefFrames: 3, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
 	twoPass.PlanDigest, _ = transcode.DigestPlan(twoPass)
-	if _, err := BuildExecutionPlan(twoPass, previewTrackStreams(), 60); err == nil {
-		t.Fatal("two-pass accepted a preview track beside the programme video")
+
+	ep, err := BuildExecutionPlan(twoPass, previewTrackStreams(), 60)
+	if err != nil {
+		t.Fatalf("two-pass refused a preview track after the programme video: %v", err)
+	}
+	if !reflect.DeepEqual(ep.Thumbnails, []int{2}) {
+		t.Fatalf("thumbnails = %v", ep.Thumbnails)
 	}
 	if _, err := BuildExecutionPlan(twoPass, previewTrackStreams()[:2], 60); err != nil {
 		t.Fatalf("two-pass rejected a source without a preview track: %v", err)
+	}
+
+	streams := previewTrackStreams()
+	previewFirst := []SourceStream{streams[2], streams[0], streams[1]}
+	previewFirst[0].Index, previewFirst[1].Index, previewFirst[2].Index = 0, 1, 2
+	if _, err := BuildExecutionPlan(twoPass, previewFirst, 60); err == nil || !strings.Contains(err.Error(), "preview image track") {
+		t.Fatalf("two-pass accepted a preview track before the programme video: %v", err)
+	}
+
+	// Cover art before the programme is not analysed: 0:V skips it.
+	coverFirst := []SourceStream{coverArtStreams()[3], streams[0], streams[1], streams[2]}
+	for i := range coverFirst {
+		coverFirst[i].Index = i
+	}
+	if _, err := BuildExecutionPlan(twoPass, coverFirst, 60); err != nil {
+		t.Fatalf("two-pass refused cover art before the programme video: %v", err)
 	}
 }
 
@@ -118,10 +142,11 @@ func TestProgrammeVideoSkipsPreviewTrack(t *testing.T) {
 	}
 }
 
-// TestPreviewTrackRealEncode runs the production encode path on a synthetic MP4
-// whose second video track is a few mjpeg pictures at 0.25 fps and checks the
-// output carries one video stream, not two.
-func TestPreviewTrackRealEncode(t *testing.T) {
+// previewTrackFixture builds a synthetic MP4 whose second video track is a few
+// mjpeg pictures at 0.25 fps, the shape chapter thumbnails have in a real file.
+// It skips the test when the tools are missing.
+func previewTrackFixture(t *testing.T) (ctx context.Context, ffmpeg, dir, source string, probe SourceProbe) {
+	t.Helper()
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg unavailable")
@@ -131,13 +156,13 @@ func TestPreviewTrackRealEncode(t *testing.T) {
 		t.Skip("ffprobe unavailable")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	available, err := ProbeAvailableEncoders(ctx, ffmpeg)
 	if err != nil || !available["libx265"] {
 		t.Skip("libx265 unavailable")
 	}
-	dir := t.TempDir()
-	source := filepath.Join(dir, "source.mp4")
+	dir = t.TempDir()
+	source = filepath.Join(dir, "source.mp4")
 	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error",
 		"-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=12",
 		"-f", "lavfi", "-i", "testsrc=size=160x90:rate=0.25:duration=12",
@@ -146,14 +171,26 @@ func TestPreviewTrackRealEncode(t *testing.T) {
 		"-c:v:0", "mpeg4", "-pix_fmt:v:0", "yuv420p", "-c:v:1", "mjpeg", "-pix_fmt:v:1", "yuvj420p", "-c:a", "aac", "-t", "12", source).CombinedOutput(); err != nil {
 		t.Fatalf("source fixture: %v %s", err, out)
 	}
-	srcProbe, err := ProbeSourceDetails(ctx, ffprobe, source)
+	probe, err = ProbeSourceDetails(ctx, ffprobe, source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, previews := splitProgrammeVideo(srcProbe.Streams); countStreams(srcProbe.Streams, "video") != 2 || len(previews) != 1 {
-		t.Fatalf("fixture does not have the production preview-track shape: %+v", srcProbe.Streams)
+	if _, previews := splitProgrammeVideo(probe.Streams); countStreams(probe.Streams, "video") != 2 || len(previews) != 1 {
+		t.Fatalf("fixture does not have the production preview-track shape: %+v", probe.Streams)
 	}
-	ep, err := BuildExecutionPlan(coverArtPlan(), srcProbe.Streams, srcProbe.DurationSec)
+	return ctx, ffmpeg, dir, source, probe
+}
+
+// runPreviewTrackEncode runs the production encode path for plan on the fixture
+// and checks the candidate carries one video stream, not two.
+func runPreviewTrackEncode(t *testing.T, plan *transcode.Plan) {
+	t.Helper()
+	ctx, ffmpeg, dir, source, srcProbe := previewTrackFixture(t)
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ep, err := BuildExecutionPlan(plan, srcProbe.Streams, srcProbe.DurationSec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,4 +215,21 @@ func TestPreviewTrackRealEncode(t *testing.T) {
 	if countMainVideo(candProbe.Streams) != countMainVideo(srcProbe.Streams) {
 		t.Fatalf("programme video count changed: source %d, candidate %d", countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams))
 	}
+}
+
+// TestPreviewTrackRealEncode runs the production encode path on a synthetic MP4
+// whose second video track is a few mjpeg pictures at 0.25 fps and checks the
+// output carries one video stream, not two.
+func TestPreviewTrackRealEncode(t *testing.T) {
+	runPreviewTrackEncode(t, coverArtPlan())
+}
+
+// The two-pass path analyses 0:V:0 and encodes with the same unmap, so a
+// preview track after the programme video ends up out of the output too.
+func TestPreviewTrackRealTwoPassEncode(t *testing.T) {
+	plan := coverArtPlan()
+	plan.Quality = 0
+	plan.X265 = &transcode.X265Settings{BitrateKbps: 400, TwoPass: true, Lookahead: 20, BFrames: 4, RefFrames: 3, AQMode: 2, AQStrength: 1, PsyRD: 1, PsyRDOQ: 1}
+	plan.PlanDigest, _ = transcode.DigestPlan(plan)
+	runPreviewTrackEncode(t, plan)
 }

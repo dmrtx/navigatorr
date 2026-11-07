@@ -31,6 +31,12 @@ func workerSupportsThumbnailTracks(ctx context.Context, worker transcode.Executo
 	return err == nil && caps.ThumbnailTracks
 }
 
+// isPreviewImageTrack reports whether s looks like a track of still preview
+// images, whichever role the stream has in its file.
+func isPreviewImageTrack(s mediainspect.DetailedStream) bool {
+	return mediainspect.IsThumbnailTrack(s.Kind, s.Codec, s.FPS, s.Disposition)
+}
+
 // coverArtGateReport returns the report the source-class gates (the modes and the
 // auto selector) should judge. Treating cover art as cover
 // needs a worker with the cover_art capability; against an older worker the

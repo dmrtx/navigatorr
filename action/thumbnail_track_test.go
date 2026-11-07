@@ -94,14 +94,20 @@ func TestSubmitRefusesPreviewTrackForOldWorker(t *testing.T) {
 // the track as a second video stream fails even when the loss is accepted.
 func TestValidateCandidateDetailedLeavesPreviewTrackOut(t *testing.T) {
 	original := previewTrackReport()
+	const programme = `{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 804, "bits_per_raw_sample": "8", "avg_frame_rate": "24000/1001"}`
+	const previewOnly = `{"index": 0, "codec_type": "video", "codec_name": "mjpeg", "pix_fmt": "yuvj420p", "width": 640, "height": 268, "avg_frame_rate": "24500/4338459"}`
 	for _, tc := range []struct {
-		name, extraStream, decision string
-		wantStatus                  StepStatus
-		wantReason                  string
+		name, video, extraStream, decision string
+		wantStatus                         StepStatus
+		wantReason                         string
 	}{
-		{"left out", "", "", StepCompleted, ""},
-		{"re-encoded as video", `,{"index": 2, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 640, "height": 268}`, "", StepFailed, "Video stream count mismatch"},
-		{"re-encoded as video, loss accepted", `,{"index": 2, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 640, "height": 268}`, "accept_loss", StepFailed, "Video stream count mismatch"},
+		{"left out", programme, "", "", StepCompleted, ""},
+		{"re-encoded as video", programme, `,{"index": 2, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 640, "height": 268}`, "", StepFailed, "Video stream count mismatch"},
+		{"re-encoded as video, loss accepted", programme, `,{"index": 2, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 640, "height": 268}`, "accept_loss", StepFailed, "Video stream count mismatch"},
+		// MainVideo takes the track as the programme when it is the only video,
+		// so the count matches; the programme is gone all the same.
+		{"programme lost, only the preview track left", previewOnly, "", "", StepFailed, "preview image track"},
+		{"programme lost, loss accepted", previewOnly, "", "accept_loss", StepFailed, "preview image track"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -109,7 +115,7 @@ func TestValidateCandidateDetailedLeavesPreviewTrackOut(t *testing.T) {
 			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			probe := `{"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 804, "bits_per_raw_sample": "8", "avg_frame_rate": "24000/1001"},{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2}` + tc.extraStream + `], "format": {"format_name": "matroska,webm", "duration": "8682"}}`
+			probe := `{"streams": [` + tc.video + `,{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2}` + tc.extraStream + `], "format": {"format_name": "matroska,webm", "duration": "8682"}}`
 			ffprobe := filepath.Join(dir, "ffprobe")
 			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
 				t.Fatal(err)
