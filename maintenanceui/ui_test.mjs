@@ -7698,6 +7698,14 @@ test("a new file starts from the automatic choice, and a stale or failed read ca
   assert.equal(h.run("keepTracks.status"), "error");
   assert.deepEqual(plain(h.run("keepTrackInputs(true, '/media/third.mkv')")), {});
   assert.deepEqual(boxes("audio"), []);
+  // With no tracks to tick, the file edits the languages, and keeps them shown while it is read again.
+  assert.equal(el("keep-job-languages").hidden, false);
+  h.run('keepTracks.languages = ["eng"]; keepTracks.scope = "job"; controls()');
+  assert.equal(h.run("keepTracks.status"), "loading");
+  assert.equal(el("keep-job-languages").hidden, false);
+  // Another file starts over from its tracks.
+  h.run('$("path").value = "/media/fourth.mkv"; controls();');
+  assert.equal(el("keep-job-languages").hidden, true);
 });
 
 test("saving a different list in Settings refreshes the picker's pre-checked tracks", async () => {
@@ -7923,6 +7931,9 @@ test("the markup carries the languages editor and the picker inside the forms th
   assert.doesNotMatch(picker, /keep-scope/);
   assert.doesNotMatch(picker, /keep-all|Keep all tracks|Tick all/);
   assert.match(picker, /keep at least one/i);
+  // Every selection, one file or a batch, chooses what happens to commentary.
+  assert.match(picker, /<div id="keep-commentary-row" class="goal-option">/);
+  assert.doesNotMatch(source, /keep-commentary-row/);
   // The job form is a form: an editor inside it must not open another one.
   assert.doesNotMatch(picker, /<form\b/);
   assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<div id="keep-tracks"'), "the choice follows the goal");

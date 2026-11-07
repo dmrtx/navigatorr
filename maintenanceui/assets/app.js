@@ -2760,7 +2760,7 @@ function replaceAutoValue(value) {
 // way the server's rules would keep them (the server answers, so the rules live
 // in one place); changing a box sends explicit stream lists instead.
 const keepGoals = ["size", "compact", "audio_only"];
-const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
+const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", failed: "", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
 // Which file or files the choice is for; null while the goal keeps no tracks.
 function keepTrackTarget() {
   if ($("technical").checked || !keepGoals.includes(processingMode())) return null;
@@ -2818,7 +2818,7 @@ function refreshKeepTracks() {
   clearTimeout(kt.timer);
   kt.key = key;
   if (!file) {
-    Object.assign(kt, {status: "idle", data: null, picks: null, path: "", notice: "", error: ""});
+    Object.assign(kt, {status: "idle", failed: "", data: null, picks: null, path: "", notice: "", error: ""});
     return;
   }
   // A new file starts from the automatic choice. The same file with other
@@ -2854,7 +2854,7 @@ async function loadKeepTracks(key, seq) {
   if (!current()) return;
   kt.abort = null;
   const ready = Boolean(data?.audio || data?.subtitles);
-  Object.assign(kt, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. The job still follows the languages."});
+  Object.assign(kt, {status: ready ? "ready" : "error", failed: ready ? "" : kt.path, data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. The job still follows the languages."});
   renderKeepTracks();
 }
 const trackCodecs = {eac3: "E-AC-3", ac3: "AC-3", truehd: "TrueHD", subrip: "SRT", ass: "ASS", ssa: "SSA", hdmv_pgs_subtitle: "PGS", dvd_subtitle: "VobSub", webvtt: "WebVTT", mov_text: "Text"};
@@ -3104,9 +3104,8 @@ function renderKeepTracks() {
   const kt = keepTracks, target = keepTrackTarget();
   $("keep-tracks").hidden = !target;
   if (!target) return;
-  // One file ticks its own tracks; a batch has no one file to tick, so it edits the languages.
-  $("keep-commentary-row").hidden = target.single;
-  $("keep-job-languages").hidden = target.single;
+  // One file ticks its own tracks; a batch, or a file whose tracks could not be read, edits the languages.
+  $("keep-job-languages").hidden = target.single && kt.failed !== kt.path;
   $("keep-job-empty").hidden = keepLanguagesShown().length > 0;
   renderLanguageChips($("keep-job-list"), keepLanguagesShown(), code => {
     keepTracks.languages = keepLanguagesShown().filter(language => language !== code);
