@@ -5757,7 +5757,7 @@ function submissionHarnessGoal() {
   const sent = [];
   h.context.sent = sent;
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false;');
   const pick = (name, value) => {
     h.segments.get(name).forEach((r) => (r.checked = r.value === value));
     h.segments.get(name).find((r) => r.value === value).listeners.get("change")();
@@ -7199,23 +7199,11 @@ test("a review that opens by itself keeps its buttons off until the layout settl
   assert.ok(!reject.disabled && !approve.disabled);
 });
 
-// Languages to keep: the Settings editor, the goal form's track picker, and the
-// track report in the job details.
+// Languages: the goal form's track picker and the track report in the job details.
 const plain = (value) => JSON.parse(JSON.stringify(value ?? null));
 
-test("language entries accept names, codes and older spellings and say why one is refused", () => {
+test("track languages read as one name whatever their spelling", () => {
   const h = harness();
-  const parse = (text) => h.run(`parseLanguage(${JSON.stringify(text)})`);
-  assert.equal(parse("French"), "fra");
-  assert.equal(parse("fre"), "fra");
-  assert.equal(parse("FR"), "fra");
-  assert.equal(parse(" Spanish (spa) "), "spa");
-  assert.equal(parse("untagged"), "und");
-  // Any other three letters go to the server, which checks them against ISO 639-2.
-  assert.equal(parse("xyz"), "xyz");
-  assert.equal(parse(""), "");
-  assert.equal(parse("english please"), "");
-  assert.equal(parse("e"), "");
   const canonical = (tag) => h.run(`canonicalLanguage(${JSON.stringify(tag)})`);
   assert.equal(canonical("es-419"), "spa");
   assert.equal(canonical("ger"), "deu");
@@ -7223,121 +7211,6 @@ test("language entries accept names, codes and older spellings and say why one i
   assert.equal(h.run('languageName("fre")'), "French");
   assert.equal(h.run('languageName("und")'), "Untagged");
   assert.equal(h.run('languageName("xyz")'), "xyz");
-  assert.deepEqual(plain(h.run('addLanguageTo(["eng"], "Spanish")')), { languages: ["eng", "spa"] });
-  assert.match(h.run('addLanguageTo(["eng"], "English")').message, /English is already in the list/);
-  assert.match(h.run('addLanguageTo([], "und")').message, /Untagged tracks are always kept/);
-  assert.match(h.run('addLanguageTo([], "??")').message, /Enter a language/);
-  assert.equal(h.run('sameLanguages(["eng", "spa"], ["spa", "eng"])'), true);
-  assert.equal(h.run('sameLanguages(["eng"], ["eng", "spa"])'), false);
-});
-
-function languagesHarness() {
-  const h = harness();
-  h.context.calls = [];
-  h.run(`api = async (path, body, opts) => {
-    calls.push([path, body, opts?.method]);
-    if (opts?.method === "PUT") {
-      if (body.languages.includes("xyz")) throw new Error('"xyz" is not an ISO 639-2 language code');
-      return { languages: [...body.languages].sort(), default: ["eng", "jpn", "spa"], is_default: false, revision: 2 };
-    }
-    return { languages: ["eng", "jpn", "spa"], default: ["eng", "jpn", "spa"], is_default: true, revision: 1 };
-  };`);
-  const el = (id) => h.elements.get(id);
-  const chips = () => el("keep-languages-list").children.map((chip) => chip.children[0].textContent);
-  return { h, el, chips };
-}
-
-test("Settings lists the languages to keep with readable names and disables what does nothing", async () => {
-  const { h, el, chips } = languagesHarness();
-  h.run("renderKeepLanguages()");
-  assert.equal(el("keep-languages-state").textContent, "Loading…");
-  assert.equal(el("keep-language-add").disabled, true, "nothing to edit before the list is read");
-  await h.run("loadKeepLanguages()");
-  assert.deepEqual(plain(h.context.calls), [["keep-languages", null, null]]);
-  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
-  assert.equal(el("keep-languages-list").children[0].children[1].textContent, "eng");
-  assert.equal(el("keep-languages-state").textContent, "Default");
-  assert.equal(el("keep-languages-apply").disabled, true, "nothing changed yet");
-  assert.equal(el("keep-languages-reset").disabled, true, "already the default");
-  assert.equal(el("keep-languages-off").disabled, false);
-  assert.equal(el("keep-language-add").disabled, false);
-});
-
-test("Settings stages additions and removals and saves them with Apply", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  // Add by name, both with the button and with Enter, which must not submit the job form.
-  el("keep-language-input").value = "French";
-  el("keep-language-add").listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
-  assert.equal(el("keep-language-input").value, "");
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.equal(el("keep-languages-apply").disabled, false);
-  let prevented = 0;
-  el("keep-language-input").value = "German";
-  el("keep-language-input").listeners.get("keydown")({ key: "Enter", preventDefault: () => prevented++ });
-  assert.equal(prevented, 1);
-  assert.deepEqual(chips(), ["English", "French", "German", "Japanese", "Spanish"]);
-  el("keep-language-input").listeners.get("keydown")({ key: "a", preventDefault: () => prevented++ });
-  assert.equal(prevented, 1, "other keys are left alone");
-  // Remove one with its own button.
-  el("keep-languages-list").children[2].children[2].listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
-  // A refused entry says why and changes nothing.
-  el("keep-language-input").value = "English";
-  el("keep-language-add").listeners.get("click")();
-  assert.match(el("keep-languages-note").textContent, /already in the list/);
-  assert.equal(chips().length, 4);
-  // Nothing is sent until Apply.
-  assert.equal(h.context.calls.length, 1);
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: ["eng", "jpn", "spa", "fra"] }, "PUT"]);
-  assert.match(el("keep-languages-note").textContent, /^Saved\. It applies to jobs created from now on/);
-  assert.equal(el("keep-languages-state").textContent, "Custom");
-  assert.equal(el("keep-languages-apply").disabled, true);
-  assert.equal(el("keep-languages-reset").disabled, false);
-});
-
-test("Settings resets to the default and turns the setting off", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  el("keep-languages-off").listeners.get("click")();
-  assert.deepEqual(chips(), []);
-  assert.equal(el("keep-languages-list").hidden, true);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.equal(el("keep-languages-off").disabled, true);
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: [] }, "PUT"]);
-  assert.equal(el("keep-languages-state").textContent, "Off: every track is kept");
-  el("keep-languages-reset").listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[2][1]), { languages: ["eng", "jpn", "spa"] });
-  assert.equal(el("keep-languages-state").textContent, "Default");
-});
-
-test("Settings shows the server's refusal and a reload never replaces an edited draft", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  el("keep-language-input").value = "xyz";
-  el("keep-language-add").listeners.get("click")();
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.match(el("keep-languages-note").textContent, /"xyz" is not an ISO 639-2 language code/);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.ok(chips().includes("xyz"), "the draft is kept so it can be corrected");
-  assert.equal(el("keep-languages-apply").disabled, false, "and saved again");
-  // Another tab changed the saved list; the unsaved draft stays.
-  h.run('api = async () => ({ languages: ["eng"], default: ["eng", "jpn", "spa"], is_default: false, revision: 3 });');
-  await h.run("loadKeepLanguages()");
-  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng"]);
-  assert.ok(chips().includes("xyz"));
-  // A list that cannot be read is said so and not edited.
-  const failed = languagesHarness();
-  failed.h.run('api = async () => { throw new Error("down"); };');
-  await failed.h.run("loadKeepLanguages()");
-  assert.equal(failed.el("keep-languages-state").textContent, "Could not load the list");
-  assert.equal(failed.el("keep-language-add").disabled, true);
 });
 
 function keepFixture() {
@@ -7360,7 +7233,6 @@ function keepHarness() {
   const h = harness({ radios: true });
   h.context.tracks = keepFixture();
   h.run(`$("scope").value = "file"; $("service").value = "folder:/media"; $("path").value = "/media/movie.mkv"; $("technical").checked = false;
-    keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; keepLanguages.draft = ["eng", "jpn", "spa"]; keepLanguages.defaults = ["eng", "jpn", "spa"];
     var queries = []; api = async (path) => { queries.push(path); return tracks; };
     controls = () => { refreshKeepTracks(); renderKeepTracks(); };`);
   const el = (id) => h.elements.get(id);
@@ -7724,25 +7596,11 @@ test("a new file starts with every track, and a stale or failed read cannot chan
   assert.deepEqual(boxes("audio"), []);
 });
 
-test("saving a different list in Settings leaves the form's tracks alone", async () => {
-  const { h, open, tick } = keepHarness();
-  await open();
-  tick("audio", 4, false);
-  const before = h.run("queries.length"), key = h.run("keepTracks.key");
-  h.run('api = async (path, body, opts) => opts?.method === "PUT" ? { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] } : tracks;');
-  await h.run('saveKeepLanguages(["eng", "fra"])');
-  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
-  assert.equal(h.run("keepTracks.status"), "ready");
-  assert.equal(h.run("keepTracks.key"), key);
-  assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [1, 2, 3]);
-  assert.equal(h.run("queries.length"), before);
-});
-
 test("submitting a Save space or Shrink job sends the picker's choice, and other goals send none", async () => {
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false;');
   await h.run('buildAndSubmitJob("encode")');
   assert.equal(sent[0].mode, "size");
   assert.deepEqual(sent[0].keep_languages, [], "every track, whatever the saved list");
@@ -7904,7 +7762,7 @@ test("Choose tracks is offered in the details of a finished file that kept untag
 
 test("Choose tracks opens the goal form for the file with its goal and every track", async () => {
   const h = harness({ radios: true });
-  h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; controls = () => { renderKeepTracks(); };');
+  h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; controls = () => { renderKeepTracks(); };');
   h.run('$("technical").checked = false; $("job-detail").open = true;');
   h.context.job = trackReportFixture({ mode: "compact" });
   const choose = h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks");
@@ -7946,11 +7804,9 @@ test("the job form has no explanatory paragraphs, only status lines", () => {
   assert.doesNotMatch(source, /Automatic encodes the whole file|AAC is lossy/);
 });
 
-test("the markup carries the languages editor and the picker inside the forms they belong to", () => {
-  const section = markup.slice(markup.indexOf('<section id="settings-languages"'), markup.indexOf("</section>", markup.indexOf('<section id="settings-languages"')));
-  for (const id of ["keep-languages-state", "keep-language-input", "keep-language-add", "keep-languages-list", "keep-languages-apply", "keep-languages-reset", "keep-languages-off", "keep-languages-note", "language-options"])
-    assert.match(section, new RegExp(`id="${id}"`), id);
-  assert.match(section, /id="keep-languages-note"[^>]*role="status"/);
+test("the markup carries the track picker inside the job form and no languages list", () => {
+  // Tracks are picked by hand: Settings has no list of languages to keep.
+  assert.doesNotMatch(markup, /settings-languages|keep-language/);
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
   const picker = form.slice(form.indexOf('<div id="keep-tracks"'), form.indexOf('<p id="goal-overridden"'));
   assert.ok(picker, "the picker is part of the goal step");
@@ -7973,7 +7829,7 @@ test("Choose tracks starts the new job with the earlier job's goal, size limit, 
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear();');
   const choose = async (job) => {
     h.context.job = job;
     await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
@@ -8025,7 +7881,7 @@ test("cancelling Choose tracks drops the carried goal settings, and a carried he
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear();');
   const note = () => h.elements.get("compact-height-reason");
   h.context.job = trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720, allow_slow_preset: true } });
   await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();

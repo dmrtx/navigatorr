@@ -871,7 +871,7 @@ function selectTab(tab, fromRoute = false) {
   else if (!fromRoute) safe(loadStorage);
   // The node's job settings come from the worker activity report.
   if (tab === "advanced" && (!state.activityCheckedAt || Date.now() - state.activityCheckedAt > 5000)) void refreshWorkerActivity();
-  if (tab === "advanced") { void loadKeepLanguages(); void loadReplaceAuto(); }
+  if (tab === "advanced") void loadReplaceAuto();
   if (tab === "library" && state.libraryNeedsLoad && !fromRoute) safe(loadLibrary);
   else if (tab === "library") void refreshFileMarks();
   if (tab === "library" && $("service").value.startsWith("folder:") && state.folderSizeTargets?.size) {
@@ -1171,8 +1171,6 @@ async function initialize() {
   $("workspace").hidden = false;
   $("worker-status").hidden = false;
   void refreshWorkers();
-  // The picker in the goal form names the saved languages.
-  void loadKeepLanguages();
   void loadReplaceAuto();
   void loadConversionDefaults();
   $("logout").hidden = !state.localSession;
@@ -2518,11 +2516,9 @@ function goalSkipWarning() {
   if (verdict?.status !== "skip") return "";
   return `This will skip ${p.batch ? "the first file" : "this file"}: ${goalSkipText(verdict.reason_code)}. The original is kept and nothing is converted.${p.batch ? " The other files are checked one by one." : ""}`;
 }
-// Languages to keep. The Save space and Shrink goals keep the audio and
-// subtitle tracks in these languages (plus the original-language audio and any
-// untagged track, which the server always keeps). A language is its ISO 639-2
-// terminology code, the spelling the server stores and compares by; names,
-// two-letter codes and the bibliographic spellings are accepted when typing.
+// Language names for the track lists. A language is its ISO 639-2
+// terminology code; two-letter codes, regional tags and the bibliographic
+// spellings read as the same language.
 const languageTable = [
   // code, name, ISO 639-1, bibliographic spelling
   ["ara", "Arabic", "ar"], ["bul", "Bulgarian", "bg"], ["cat", "Catalan", "ca"], ["ces", "Czech", "cs", "cze"],
@@ -2556,127 +2552,6 @@ function languageName(tag) {
   const code = canonicalLanguage(tag);
   return languageNameOf.get(code) || code;
 }
-// What was typed, as a language code: "", or a three-letter code the server
-// will check against ISO 639-2.
-function parseLanguage(text) {
-  const raw = String(text ?? "").trim().toLowerCase();
-  const known = languageAliases.get(raw) || languageAliases.get(raw.replace(/\s*\([a-z]{3}\)$/, ""));
-  return known || (/^[a-z]{3}$/.test(raw) ? raw : "");
-}
-function addLanguageTo(languages, text) {
-  const code = parseLanguage(text);
-  if (!code) return {message: "Enter a language such as English or eng."};
-  if (code === "und") return {message: "Untagged tracks are always kept."};
-  if (languages.includes(code)) return {message: `${languageName(code)} is already in the list.`};
-  return {languages: [...languages, code]};
-}
-const sameLanguages = (a, b) => a.length === b.length && [...a].sort().every((code, i) => code === [...b].sort()[i]);
-const languagesByName = languages => [...languages].sort((a, b) => languageName(a).localeCompare(languageName(b)));
-const languageNames = languages => languagesByName(languages).map(languageName).join(", ");
-// The suggestions offered while typing; choosing one types the name.
-$("language-options").append(...languageTable.map(([code, name]) => Object.assign(document.createElement("option"), {value: name, label: code})));
-function renderLanguageChips(list, languages, remove) {
-  list.hidden = !languages.length;
-  list.replaceChildren(...languagesByName(languages).map(code => {
-    const item = node("li", "", "language-chip");
-    const drop = button("×", () => remove(code), "chip-remove");
-    drop.setAttribute("aria-label", `Remove ${languageName(code)}`);
-    item.append(node("span", languageName(code)), node("span", code, "metadata"), drop);
-    return item;
-  }));
-}
-// Both language editors add the same way: say why an entry was refused, or take
-// it. The goal form's one sits inside the job form, so Enter adds the language
-// instead of submitting the job.
-function wireLanguageInput({input, add, note}, current, set) {
-  const submit = () => {
-    const result = addLanguageTo(current(), $(input).value);
-    $(note).textContent = result.message || "";
-    if (!result.languages) return;
-    $(input).value = "";
-    set(result.languages);
-  };
-  $(add).addEventListener("click", submit);
-  $(input).addEventListener("keydown", event => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    submit();
-  });
-}
-
-// The setting, in Settings: edited as a draft and saved with Apply, like the
-// node's parallel jobs. A load never replaces a draft that has been edited.
-const keepLanguages = {status: "idle", saved: [], draft: [], defaults: [], saving: false, request: 0};
-function applyKeepLanguages(data, adopt) {
-  const k = keepLanguages, clean = adopt || sameLanguages(k.draft, k.saved);
-  k.saved = [...data.languages];
-  k.defaults = [...(data.default || [])];
-  k.status = "ready";
-  if (clean) k.draft = [...k.saved];
-}
-async function loadKeepLanguages() {
-  const k = keepLanguages, auth = state.authRevision, request = ++k.request;
-  if (k.status === "idle") { k.status = "loading"; renderKeepLanguages(); }
-  try {
-    const data = await api("keep-languages");
-    if (auth !== state.authRevision || request !== k.request) return;
-    applyKeepLanguages(data, false);
-  } catch {
-    if (auth !== state.authRevision || request !== k.request) return;
-    if (k.status !== "ready") k.status = "error";
-  }
-  renderKeepLanguages();
-  renderKeepTracks();
-}
-function keepLanguagesState(k) {
-  if (k.status === "error") return "Could not load the list";
-  if (k.status !== "ready") return "Loading…";
-  if (!sameLanguages(k.draft, k.saved)) return "Not saved yet";
-  if (!k.saved.length) return "Off: every track is kept";
-  return sameLanguages(k.saved, k.defaults) ? "Default" : "Custom";
-}
-function stageKeepLanguages(languages) {
-  keepLanguages.draft = languages;
-  $("keep-languages-note").textContent = "";
-  renderKeepLanguages();
-}
-function renderKeepLanguages() {
-  const k = keepLanguages, ready = k.status === "ready";
-  $("keep-languages-state").textContent = keepLanguagesState(k);
-  renderLanguageChips($("keep-languages-list"), k.draft, code => {
-    stageKeepLanguages(k.draft.filter(language => language !== code));
-    $("keep-language-input").focus();
-  });
-  $("keep-language-input").disabled = !ready;
-  $("keep-language-add").disabled = !ready;
-  $("keep-languages-apply").disabled = !ready || k.saving || sameLanguages(k.draft, k.saved);
-  $("keep-languages-reset").disabled = !ready || sameLanguages(k.draft, k.defaults);
-  $("keep-languages-off").disabled = !ready || !k.draft.length;
-}
-async function saveKeepLanguages(languages) {
-  const k = keepLanguages, note = $("keep-languages-note"), auth = state.authRevision;
-  if (k.saving) return;
-  k.saving = true;
-  note.textContent = "Saving…";
-  renderKeepLanguages();
-  try {
-    const data = await api("keep-languages", {languages}, {method: "PUT"});
-    if (auth !== state.authRevision) return;
-    k.request++;
-    applyKeepLanguages(data, true);
-    note.textContent = "Saved. It applies to jobs created from now on; jobs already queued keep the list they started with.";
-  } catch (e) {
-    note.textContent = e.message;
-  } finally {
-    k.saving = false;
-    renderKeepLanguages();
-    renderKeepTracks();
-  }
-}
-wireLanguageInput({input: "keep-language-input", add: "keep-language-add", note: "keep-languages-note"}, () => keepLanguages.draft, stageKeepLanguages);
-$("keep-languages-apply").addEventListener("click", () => void saveKeepLanguages(keepLanguages.draft));
-$("keep-languages-reset").addEventListener("click", () => stageKeepLanguages([...keepLanguages.defaults]));
-$("keep-languages-off").addEventListener("click", () => stageKeepLanguages([]));
 
 // "Replace automatically when done": off unless asked for. The default lives
 // on the server, so every client starts new jobs the same way; each job keeps

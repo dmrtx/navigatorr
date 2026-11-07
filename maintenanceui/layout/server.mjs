@@ -61,7 +61,6 @@ function defaults(name, params, world) {
     case "bootstrap": return bootstrap;
     case "workers": return { nodes: [], workers: [] };
     case "worker-activity": return { nodes: [], active: [], slots: {} };
-    case "keep-languages": return { languages: ["spa", "eng", "jpn"] };
     case "preferences": return { replace_when_done_default: false };
     case "operations": {
       const id = params.get("id");
