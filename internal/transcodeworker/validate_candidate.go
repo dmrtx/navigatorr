@@ -128,6 +128,14 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if sv, cv := countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams); sv > 0 && cv != sv {
 		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv))
 	}
+	// The plan unmaps the source's preview tracks. One left in the candidate
+	// means the map did not take: a second video the programme count above
+	// does not see.
+	if len(execPlan.Thumbnails) > 0 {
+		if _, kept := splitProgrammeVideo(candProbe.Streams); len(kept) > 0 {
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate still carries %d preview image track(s) the plan leaves out (fail closed, never publish)", ErrSourceInvalid, len(kept)))
+		}
+	}
 	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
 		return attest, candidateInvalid(fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc))
 	}
@@ -217,18 +225,19 @@ func firstStreamOfKind(streams []SourceStream, kind string) *SourceStream {
 	return nil
 }
 
-// firstMainVideo returns the first programme video stream, skipping cover art.
+// firstMainVideo returns the first programme video stream, skipping cover art
+// and preview-image tracks.
 func firstMainVideo(streams []SourceStream) *SourceStream {
-	for i := range streams {
-		if strings.EqualFold(strings.TrimSpace(streams[i].Kind), "video") && !streams[i].IsAttachedPicture() {
-			return &streams[i]
-		}
+	programme, _ := splitProgrammeVideo(streams)
+	if len(programme) == 0 {
+		return nil
 	}
-	return nil
+	return &programme[0]
 }
 
 func countMainVideo(streams []SourceStream) int {
-	return countStreams(streams, "video") - countCoverArt(streams)
+	programme, _ := splitProgrammeVideo(streams)
+	return len(programme)
 }
 
 func countCoverArt(streams []SourceStream) int {

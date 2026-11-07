@@ -212,7 +212,7 @@ func TestVideoCopyKeepsAndChecksLeadingNonKeyPackets(t *testing.T) {
 	plan := sizeAudioOnlyTestPlan(t, 8)
 	for _, source := range []string{leading, noKey} {
 		name := filepath.Base(source)
-		packets, err := probeVideoPackets(ctx, ffprobe, source)
+		packets, err := probeVideoPackets(ctx, ffprobe, source, 0)
 		if err != nil || len(packets) == 0 || packets[0].key {
 			t.Fatalf("%s fixture does not start with a non-key packet: %d %v", name, len(packets), err)
 		}

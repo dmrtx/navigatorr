@@ -64,6 +64,17 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	if len(origVideo) > 0 && len(outVideo) != len(origVideo) {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video stream count mismatch: original=%d output=%d programme video streams (fail closed)", len(origVideo), len(outVideo))}, nil
 	}
+	// A preview-image track is never the output's programme video. When the
+	// source's programme is real video, an output carrying one has either lost
+	// that video (MainVideo falls back to the track when it is all there is) or
+	// kept a track the encode leaves out; neither is for accept_loss to publish.
+	if len(origVideo) > 0 && !isPreviewImageTrack(origVideo[0]) {
+		for _, v := range outRep.Video {
+			if !mediainspect.IsAttachedPicture(v) && isPreviewImageTrack(v) {
+				return StepResult{Status: StepFailed, Error: fmt.Sprintf("Candidate carries a preview image track (stream %d, %s) where the source's programme video should be (fail closed)", v.Index, v.Codec)}, nil
+			}
+		}
+	}
 	if plan.ExpectedBitDepth > 0 && outVideo[0].BitDepth != plan.ExpectedBitDepth {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Video bit depth mismatch: plan requires %d-bit output but candidate is %d-bit (fail closed)", plan.ExpectedBitDepth, outVideo[0].BitDepth)}, nil
 	}

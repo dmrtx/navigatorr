@@ -243,10 +243,8 @@ func finalWindowsFitVideo(plan *transcode.Plan, scan sourceVideoScan) error {
 // programmeVideoIndex is the stream index of the source's first programme
 // video stream, or -1.
 func programmeVideoIndex(streams []SourceStream) int {
-	for _, s := range streams {
-		if strings.EqualFold(strings.TrimSpace(s.Kind), "video") && !s.IsAttachedPicture() {
-			return s.Index
-		}
+	if programme, _ := splitProgrammeVideo(streams); len(programme) > 0 {
+		return programme[0].Index
 	}
 	return -1
 }

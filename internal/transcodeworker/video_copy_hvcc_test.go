@@ -115,7 +115,7 @@ func TestVideoCopyFactsIgnoreHVCCCompleteness(t *testing.T) {
 	runFFmpeg(t, ctx, ffmpeg, "-nostdin", "-v", "error", "-y", "-i", mkvmerge, "-map", "0:v:0", "-c", "copy", remux)
 
 	facts := func(path string) videoStreamFacts {
-		f, err := probeVideoStreamFacts(ctx, ffprobe, path)
+		f, err := probeVideoStreamFacts(ctx, ffprobe, path, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

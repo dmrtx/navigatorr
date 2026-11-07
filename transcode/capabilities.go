@@ -78,6 +78,11 @@ type WorkerCapabilities struct {
 	ExplicitMain10Benchmarks bool                 `json:"explicit_main10_benchmarks,omitempty"`
 	CompactAudio             bool                 `json:"compact_audio,omitempty"`
 	CoverArt                 bool                 `json:"cover_art,omitempty"`
+	// ThumbnailTracks reports a worker that leaves a source's preview-image
+	// tracks (an MP4's chapter thumbnails) out of the video encode and the
+	// output instead of encoding them as a second video stream. Like
+	// TrackSelection, it is not part of the pinned capability fingerprint.
+	ThumbnailTracks bool `json:"thumbnail_tracks,omitempty"`
 	// DeferredPublication reports a worker that accepts publish_policy
 	// on_approval: it keeps a validated candidate on its local disk and
 	// publishes it to the share only when asked (POST /v1/jobs/{id}/publish).

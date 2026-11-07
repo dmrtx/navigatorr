@@ -259,6 +259,9 @@ esac
 	if !caps.CoverArt {
 		t.Error("worker must advertise cover_art so the server admits sources with cover art")
 	}
+	if !caps.ThumbnailTracks {
+		t.Error("worker must advertise thumbnail_tracks so the server admits sources with preview image tracks")
+	}
 	if !caps.LearnSourceDigest {
 		t.Error("worker must advertise learn_source_digest so the server skips its own source hash")
 	}
