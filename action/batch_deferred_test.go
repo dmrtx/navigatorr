@@ -205,6 +205,40 @@ func TestTheWaitStepRecordsAFallbackTheWorkerChoseAtStart(t *testing.T) {
 	}
 }
 
+// A job the worker keeps queued for lack of room to retain its candidate is
+// marked on the action while it waits, and unmarked once it starts, so the
+// server can give its slot to the next conversion in between.
+func TestTheWaitStepMarksAJobQueuedForRetentionRoomUntilItStarts(t *testing.T) {
+	w := newRetainedExecutor()
+	e := NewEngine(EngineDeps{Transcode: w})
+	ec := testReconcileEC("")
+	ec.State["job_id"] = "job-existing"
+	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
+	status := func(s transcode.JobStatus) {
+		s.ID, s.PublishPolicy = "job-existing", transcode.PublishPolicyOnApproval
+		w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) { return s, nil }
+		if res, err := e.stepTranscodeWait(context.Background(), ec); err != nil || res.Status != StepWaitingExternal {
+			t.Fatalf("%+v: %+v %v", s, res, err)
+		}
+	}
+	for _, reason := range []string{"retention_budget", "free_disk"} {
+		status(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: reason})
+		if got := getString(ec.State, workerRetentionBlockedKey); got != reason {
+			t.Fatalf("queued for %s: marked %q", reason, got)
+		}
+	}
+	// Queued behind a running job, with room: it holds the slot it waits for.
+	status(transcode.JobStatus{Status: transcode.StatusQueued})
+	if _, ok := ec.State[workerRetentionBlockedKey]; ok {
+		t.Fatalf("a job no longer short of room is still marked: %v", ec.State)
+	}
+	status(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: "retention_budget"})
+	status(transcode.JobStatus{Status: transcode.StatusRunning})
+	if _, ok := ec.State[workerRetentionBlockedKey]; ok {
+		t.Fatalf("a running job is still marked: %v", ec.State)
+	}
+}
+
 func TestOnlyABatchChildSpillsAndOnlyForARetentionRefusal(t *testing.T) {
 	deferred := func() *transcode.Request { return &transcode.Request{PublishPolicy: transcode.PublishPolicyOnApproval} }
 	child := func() *ExecutionContext {

@@ -165,6 +165,25 @@ func recordPublishFallback(ec *ExecutionContext, st transcode.JobStatus) {
 	log.Printf("action %s: the worker had no room to retain another candidate when job %s started; it publishes on encode", ec.InstanceID, st.ID)
 }
 
+// workerRetentionBlockedKey is why the worker keeps this action's queued job
+// from starting (retention_budget or free_disk). The store's count of the
+// actions on a worker reads it by this name.
+const workerRetentionBlockedKey = "worker_retention_blocked"
+
+// recordRetentionBlock marks an action whose job the worker holds queued for
+// lack of room to retain its candidate, and unmarks it once the job has room.
+// The worker starts the next job meanwhile, so a marked action holds no video
+// slot: counting it would leave the node idle behind a job that cannot start
+// while other conversions wait for a slot. The count leaves out one marked
+// action per worker (see Store.CountActiveWorkerActions), not every one.
+func recordRetentionBlock(ec *ExecutionContext, st transcode.JobStatus) {
+	if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
+		ec.State[workerRetentionBlockedKey] = st.RetentionBlocked
+		return
+	}
+	delete(ec.State, workerRetentionBlockedKey)
+}
+
 // spillRetentionRefusal handles a worker that refused a deferred submit because
 // it has no room left to retain another candidate. A batch child must not wait
 // for that room: nothing in a batch can be approved until every child has

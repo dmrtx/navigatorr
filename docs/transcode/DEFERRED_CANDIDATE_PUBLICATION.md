@@ -344,7 +344,14 @@ What the worker PR does where this document left a choice, or differs from it.
   matches), with no floor check: a batch child must not wait on its siblings'
   candidates. Within the budget, a job past the floor waits
   (`retention_blocked: free_disk`). A waiting job never holds back the jobs queued behind it; the scheduler's
-  periodic sweep checks it again. The worker advertises
+  periodic sweep checks it again. The coordinator does the same: while it polls
+  a job queued with `retention_blocked`, it marks the action
+  (`worker_retention_blocked`) and leaves one such action per worker out of
+  that worker's count of assigned conversions, so the next conversion in the
+  transcode queue takes the slot instead of the node sitting idle. A second
+  blocked job on the same worker holds the slot, so a budget that is full for
+  everything does not move the whole queue onto one worker. The mark clears
+  once the job starts or has room, and it counts again. The worker advertises
   `start_retention_admission` alongside `deferred_publication`.
 - **Stale directories.** The sweep also removes a job directory older than an hour
   that holds nothing but its lock file. That is the whole collector: it never
