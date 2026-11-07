@@ -1,6 +1,7 @@
 package action
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"slices"
 	"sort"
@@ -599,4 +600,131 @@ func trackReportOf(state map[string]any) *TrackSelectionReport {
 		return nil
 	}
 	return &r
+}
+
+// inputTrackPicks is a filesystem batch's tracks picked by hand, per file: a
+// map of the batch's paths to {"audio": [...], "subtitles": [...]}, source
+// stream indexes as keep_audio_streams and keep_subtitle_streams take them for
+// one file. A file it does not name follows the batch's languages.
+const inputTrackPicks = "track_picks"
+
+// filePicks is one file's tracks picked by hand; a nil list leaves that kind to
+// the languages.
+type filePicks struct {
+	audio     *[]int
+	subtitles *[]int
+}
+
+// batchTrackPicks reads track_picks, keyed by the batch's resolved paths. Each
+// key must resolve to one of paths.
+func (e *Engine) batchTrackPicks(inputs map[string]any, paths []string) (map[string]filePicks, error) {
+	raw, has := inputs[inputTrackPicks]
+	if !has || raw == nil {
+		return nil, nil
+	}
+	rows, ok := raw.(map[string]any)
+	if !ok {
+		return nil, inputErr(inputTrackPicks, "track_picks must map a path of the batch to {\"audio\": [...], \"subtitles\": [...]}")
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	if mode := getString(inputs, "mode"); mode != "size" && mode != "compact" {
+		return nil, inputErr(inputTrackPicks, "track_picks is only supported with mode=size or mode=compact")
+	}
+	if len(paths) == 0 {
+		return nil, inputErr(inputTrackPicks, "track_picks names files of a batch of paths")
+	}
+	out := make(map[string]filePicks, len(rows))
+	for path, value := range rows {
+		clean, err := e.deps.Fs.ResolveRead(path)
+		if err != nil || !slices.Contains(paths, clean) {
+			return nil, inputErr(inputTrackPicks, "track_picks names %q, which is not in paths", path)
+		}
+		picks, err := parseFilePicks(path, value)
+		if err != nil {
+			return nil, err
+		}
+		if picks.audio != nil || picks.subtitles != nil {
+			out[clean] = picks
+		}
+	}
+	return out, nil
+}
+
+func parseFilePicks(path string, value any) (filePicks, error) {
+	var picks filePicks
+	row, ok := value.(map[string]any)
+	if !ok {
+		return picks, inputErr(inputTrackPicks, "track_picks for %q must be {\"audio\": [...], \"subtitles\": [...]}", path)
+	}
+	for key, list := range row {
+		indexes, ok := intList(list)
+		if !ok || key != "audio" && key != "subtitles" {
+			return picks, inputErr(inputTrackPicks, "track_picks for %q takes audio and subtitles, each a list of source stream indexes", path)
+		}
+		sort.Ints(indexes)
+		indexes = slices.Compact(indexes)
+		if key == "audio" {
+			if len(indexes) == 0 {
+				return picks, inputErr(inputTrackPicks, "track_picks for %q must keep at least one audio stream", path)
+			}
+			picks.audio = &indexes
+		} else {
+			picks.subtitles = &indexes
+		}
+	}
+	return picks, nil
+}
+
+// batchItemKeyOf is the key a filesystem batch gives the file at path.
+func batchItemKeyOf(path string) string {
+	return fmt.Sprintf("file-%x", sha256.Sum256([]byte(path)))
+}
+
+// itemTrackPicks is the picks a filesystem batch's inputs hold for one of its
+// items, found by the item's key.
+func (e *Engine) itemTrackPicks(inputs map[string]any, itemKey string) (filePicks, bool) {
+	rows, _ := inputs[inputTrackPicks].(map[string]any)
+	if len(rows) == 0 || e.deps.Fs == nil {
+		return filePicks{}, false
+	}
+	for path, value := range rows {
+		if clean, err := e.deps.Fs.ResolveRead(path); err == nil && batchItemKeyOf(clean) == itemKey {
+			picks, err := parseFilePicks(path, value)
+			return picks, err == nil && (picks.audio != nil || picks.subtitles != nil)
+		}
+	}
+	return filePicks{}, false
+}
+
+// withFilePicks is a goal snapshot with one file's picks added to its tracks,
+// digested again. A goal without track selection is returned as it is.
+func withFilePicks(raw any, picks filePicks) (any, error) {
+	snapshot := stateModePolicy(map[string]any{"mode_policy": raw})
+	if snapshot == nil {
+		return nil, fmt.Errorf("mode policy is unreadable")
+	}
+	if snapshot.Mode != "size" && snapshot.Mode != "compact" {
+		return raw, nil
+	}
+	out := *snapshot
+	tracks := &transcode.TrackPolicy{}
+	if snapshot.Tracks != nil {
+		tracks = snapshot.Tracks.Clone()
+	}
+	if picks.audio != nil {
+		tracks.AudioStreams = picks.audio
+	}
+	if picks.subtitles != nil {
+		tracks.SubtitleStreams = picks.subtitles
+	}
+	if err := tracks.Validate(); err != nil {
+		return nil, err
+	}
+	out.Tracks = tracks
+	if err := digestModePolicy(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }

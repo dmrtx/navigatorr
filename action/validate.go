@@ -367,13 +367,23 @@ func validateTranscodeBatch(_ context.Context, e *Engine, inputs map[string]any)
 	if err := e.rejectSearchInputs("transcode_batch", inputs); err != nil {
 		return nil, err
 	}
-	if paths, present, err := batchPathsInput(inputs); err != nil {
+	paths, present, err := batchPathsInput(inputs)
+	if err != nil {
 		return nil, err
-	} else if present && e.deps.Fs != nil {
+	}
+	var resolved []string
+	if present && e.deps.Fs != nil {
 		for _, p := range paths {
-			if _, err := e.deps.Fs.ResolveRead(p); err != nil {
+			clean, err := e.deps.Fs.ResolveRead(p)
+			if err != nil {
 				return nil, inputErr("paths", "batch source path is outside allowed read roots: %v", err)
 			}
+			resolved = append(resolved, clean)
+		}
+	}
+	if inputs[inputTrackPicks] != nil && e.deps.Fs != nil {
+		if _, err := e.batchTrackPicks(inputs, resolved); err != nil {
+			return nil, err
 		}
 	}
 	return inputs, nil
