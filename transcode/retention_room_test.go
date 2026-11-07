@@ -27,6 +27,8 @@ func TestRetentionRoomFit(t *testing.T) {
 		{"larger than the whole budget", fresh(30*gib, 30*gib), 30*gib + 1, RetentionTooLarge},
 		{"larger than the whole budget with none left", fresh(30*gib, 0), 40 * gib, RetentionTooLarge},
 		{"an old report says nothing", &RetentionRoom{ObservedAt: now.Add(-2 * RetentionRoomMaxAge), CapacityBytes: 30 * gib, RoomBytes: 0}, 29 * gib, RetentionFits},
+		{"a report dated far ahead says nothing", &RetentionRoom{ObservedAt: now.Add(2 * RetentionRoomMaxAge), CapacityBytes: 30 * gib, RoomBytes: 0}, 29 * gib, RetentionFits},
+		{"a report dated slightly ahead is still trusted", &RetentionRoom{ObservedAt: now.Add(5 * time.Second), CapacityBytes: 30 * gib, RoomBytes: 0}, 29 * gib, RetentionFull},
 		{"a report at the limit is still trusted", &RetentionRoom{ObservedAt: now.Add(-RetentionRoomMaxAge), CapacityBytes: 30 * gib, RoomBytes: 0}, 29 * gib, RetentionFull},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

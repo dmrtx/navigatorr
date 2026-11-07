@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -50,10 +51,21 @@ func newRoomReporter(capacity, room int64) *roomReporter {
 // picked on a tie, so a conversion that lands on m1 was kept off m4.
 func retentionWorkers(t *testing.T, m4, m1 transcode.Executor) *Engine {
 	t.Helper()
-	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+	return retentionWorkersInOrder(t, true, m4, m1)
+}
+
+// retentionWorkersInOrder is retentionWorkers with m4 first or, when m4First is
+// false, m1 first, which is the one a tie then picks.
+func retentionWorkersInOrder(t *testing.T, m4First bool, m4, m1 transcode.Executor) *Engine {
+	t.Helper()
+	workers := []transcode.NamedWorker{
 		{Name: "m4", Executor: m4, MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval},
 		{Name: "m1", Executor: m1, MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval, Podcast: true},
-	})
+	}
+	if !m4First {
+		workers[0], workers[1] = workers[1], workers[0]
+	}
+	set, err := transcode.NewWorkerSet(workers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,5 +218,87 @@ func TestAWorkerThatPublishesOnEncodeNeedsNoRetentionRoom(t *testing.T) {
 	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
 	if name, _, waiting := convert(t, e, "conv-a", 29*gib, ""); waiting || name != "m4" {
 		t.Fatalf("a worker that publishes on encode was kept off: assigned %q (waiting %v)", name, waiting)
+	}
+}
+
+func TestAConversionBehindOneOnlyOneWorkerCanHoldDoesNotTakeThatWorkersSlot(t *testing.T) {
+	m4 := newRoomReporter(30*gib, 11*gib)
+	m1 := newRoomReporter(100*gib, 100*gib)
+	// m1 comes first, so a tie between two free workers picks it.
+	e := retentionWorkersInOrder(t, false, m4, m1)
+	seedActionInstance(t, e.deps.Store, "busy-m1", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m1"})
+
+	// The big file fits m1 only, and waits for its slot.
+	if name, res, waiting := convert(t, e, "conv-a", 29*gib, ""); !waiting || name != "" {
+		t.Fatalf("m1 is busy and m4 cannot hold the file: assigned %q, %+v", name, res)
+	}
+	finishAction(t, e, "busy-m1")
+	// m1 is free and the big file has not been polled yet: a small file, which
+	// fits both and would tie on m1, takes m4 and leaves m1 to the big one.
+	if name, res, waiting := convert(t, e, "conv-b", 1*gib, ""); waiting || name != "m4" {
+		t.Fatalf("the small file took the slot the big one waits for: assigned %q (waiting %v), %+v", name, waiting, res)
+	}
+	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
+		t.Fatalf("the big file did not take m1: %+v", res)
+	} else if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
+		t.Fatalf("the big file went to %q (%+v)", got, res)
+	}
+}
+
+func TestTheQueuePositionCountsTheConversionsThatCouldUseTheSameWorkers(t *testing.T) {
+	m4 := newRoomReporter(30*gib, 30*gib)
+	m1 := newRoomReporter(100*gib, 100*gib)
+	e := retentionWorkers(t, m4, m1)
+	seedActionInstance(t, e.deps.Store, "busy-m4", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m4"})
+	seedActionInstance(t, e.deps.Store, "busy-m1", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m1"})
+
+	// Both slots are busy: where a conversion stands does not depend on which
+	// slot frees first.
+	for i, id := range []string{"conv-a", "conv-b", "conv-c"} {
+		name, res, waiting := convert(t, e, id, 5*gib, "")
+		if !waiting || name != "" {
+			t.Fatalf("%s: assigned %q (waiting %v), %+v", id, name, waiting, res)
+		}
+		if got := getInt(res.Outputs, workerSlotPositionKey); got != i+1 {
+			t.Fatalf("%s: position %d, want %d (%+v)", id, got, i+1, res)
+		}
+	}
+	// A slot frees: the first in line takes it, the others keep their places.
+	finishAction(t, e, "busy-m4")
+	if name, res, waiting := convert(t, e, "conv-d", 5*gib, ""); !waiting || name != "" || getInt(res.Outputs, workerSlotPositionKey) != 4 {
+		t.Fatalf("a later conversion took the slot ahead of the ones waiting: assigned %q (waiting %v), %+v", name, waiting, res)
+	}
+	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
+		t.Fatalf("the first in line did not take the free slot: %+v", res)
+	}
+}
+
+func TestAFileOnlyAnOfflineWorkerCouldEverHoldWaitsForIt(t *testing.T) {
+	m4 := newRoomReporter(30*gib, 30*gib)
+	m1 := newRoomReporter(100*gib, 100*gib)
+	m1.doctorFunc = func(context.Context) error { return errors.New("offline") }
+	e := retentionWorkers(t, m4, m1)
+
+	// 50 GiB never fits m4, even empty; m1 could, once it is back. Leaving the
+	// file to m4 would strand it there.
+	if name, res, waiting := convert(t, e, "conv-a", 50*gib, ""); !waiting || name != "" || !strings.Contains(res.WaitingReason, "room to retain") {
+		t.Fatalf("assigned %q (waiting %v), %+v", name, waiting, res)
+	}
+	m1.doctorFunc = nil
+	e.workerStateFor("m1").obs.CheckedAt = time.Time{} // check it again
+	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
+		t.Fatalf("m1 is back and holds the file: %+v", res)
+	}
+	if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
+		t.Fatalf("assigned %q, want m1", got)
+	}
+}
+
+func TestAReportDatedAheadOfTheClockIsNotTrusted(t *testing.T) {
+	ahead := newRoomReporter(30*gib, 0)
+	ahead.age = -2 * transcode.RetentionRoomMaxAge // observed "in the future"
+	e := retentionWorkers(t, ahead, newRoomReporter(100*gib, 100*gib))
+	if name, _, waiting := convert(t, e, "conv-a", 29*gib, ""); waiting || name != "m4" {
+		t.Fatalf("a report from the future was trusted: assigned %q (waiting %v)", name, waiting)
 	}
 }

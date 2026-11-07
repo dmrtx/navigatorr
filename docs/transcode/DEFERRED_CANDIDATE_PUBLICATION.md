@@ -423,18 +423,36 @@ coordinator gives it one only if that worker reports room for it
   `submitted_source_bytes`) of room on that worker. A batch child needs none: the
   worker starts it to publish on encode when the budget is full. A worker that
   publishes on encode needs none either.
-- A report that is missing, or older than 45 seconds, says nothing and the worker
-  is taken to have room, as it was before workers reported it. Workers that have
-  not been rolled out yet behave as before.
-- With a free slot on a worker that reports it cannot hold the file, the
-  conversion is not assigned there: it takes another worker's free slot that can,
-  or waits unassigned in the transcode queue ("No node with a free slot has room
-  to retain its candidate"). A conversion that waits this way does not hold back
-  the ones behind it from slots it cannot use, but stays ahead of them for the
-  slots it can, so it is not starved by later, smaller files.
-- A file larger than the whole budget of every ready worker fits nowhere, and
-  waiting for room would never help: it is assigned as before and the worker
-  decides.
+- A report that is missing, older than 45 seconds, or dated more than 45 seconds
+  ahead of the coordinator's clock says nothing, and the worker is taken to have
+  room, as it was before workers reported it. Workers that have not been rolled
+  out yet behave as before, and so does a worker whose report stops arriving;
+  the clocks of the nodes must agree to within that margin.
+- Each conversion in the queue is a claim on the free slots of the workers it can
+  be given: the ready ones that report room for its file. A conversion takes a
+  slot only if that leaves every conversion ahead of it as well placed as it was
+  (a matching of the claims ahead to the free slots, `action/transcode_queue_claims.go`),
+  and only on a worker where that holds. So a file that fits one node never holds
+  a smaller one back from a slot on the other, and a smaller one never takes the
+  slot the file ahead of it is waiting for. The place shown in the queue counts
+  the conversions ahead that could be given the same workers, busy or not.
+- A conversion no ready worker has room for waits unassigned in the transcode
+  queue ("No node has room to retain its candidate"), and the ones behind it pass.
+  That is deliberate: a node's idle slot is worth more than strict order. It
+  also means a large file can wait a long time while smaller ones keep using the
+  room that frees up; room comes back when a retained candidate is approved or
+  discarded, and the file is placed ahead of later ones for the slot as soon as
+  a worker reports room for it.
+- A worker that is down for a moment still counts when deciding whether the file
+  fits anywhere, so the file waits for it instead of being left on a node that
+  can never hold it. A file larger than the whole budget of every worker fits
+  nowhere, and waiting for room would never help: it is assigned as before and
+  the worker decides.
+- The report is read when the conversion is assigned, up to a pass (2 s) plus the
+  probe cache (5 s) after it was measured. A worker with more than one slot can
+  be given two conversions in that window that together do not fit; the second
+  stays queued on the worker (`retention_budget`), as before this existed, and
+  the worker's own slot accounting (see #381) keeps it from holding the slot.
 - The free-disk floor is not part of the report. It depends on what else sits on
   the work disk, so the worker still decides it when the job starts.
 

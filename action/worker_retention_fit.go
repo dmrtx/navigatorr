@@ -20,10 +20,11 @@ import (
 // unassigned, out of the way of the conversions behind it (see
 // transcodeQueueTurn).
 //
-// A worker that does not report its room, or whose report is old, is taken to
-// have it, as before workers reported it. A file larger than the whole budget
-// of every ready worker fits nowhere, ever: waiting would never help, so the
-// workers decide it as before.
+// A worker that does not report its room, or whose report is old or dated
+// ahead of the coordinator's clock, is taken to have it, as before workers
+// reported it. A file larger than the whole budget of every worker fits
+// nowhere, ever: waiting would never help, so the workers decide it as before.
+// Who may take which free slot is worked out in transcode_queue_claims.go.
 
 // retentionNeed is the room a conversion needs on a worker that keeps its
 // candidate until it is approved: the size of its file. A batch child needs
@@ -41,9 +42,12 @@ func conversionRetentionNeed(ec *ExecutionContext) int64 {
 }
 
 // retentionEligible says, for each worker, whether a conversion that needs
-// need bytes of retention room may be given it. Workers that are not ready
-// are left eligible: readiness is judged apart.
-func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, ready []bool, need int64) []bool {
+// need bytes of retention room may be given it. Readiness is judged apart, but
+// a worker that is not ready still counts when deciding whether the file fits
+// anywhere: one that is down for a moment may be the only one big enough, and
+// the file must wait for it rather than be left on a worker that can never
+// hold it. A worker with no report from it is taken to be able to.
+func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, need int64) []bool {
 	out := make([]bool, len(workers))
 	for i := range out {
 		out[i] = true
@@ -54,10 +58,8 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 	fits := make([]transcode.RetentionFit, len(workers))
 	holdsSomewhere := false
 	for i, w := range workers {
-		if !ready[i] || w.PublishPolicy != transcode.PublishPolicyOnApproval {
-			if ready[i] {
-				holdsSomewhere = true // publishes on encode: needs no room
-			}
+		if w.PublishPolicy != transcode.PublishPolicyOnApproval {
+			holdsSomewhere = true // publishes on encode: needs no room
 			continue
 		}
 		fits[i] = e.workerObservation(ctx, w).Retention.Fit(need, e.now())
@@ -74,8 +76,14 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 	return out
 }
 
-// retentionWaitReason words the wait of a conversion that has a free slot
-// nowhere it could be retained.
-func retentionWaitReason(need int64) string {
-	return fmt.Sprintf("No node with a free slot has room to retain its candidate (%.1f GiB); waiting for room, or for a node that has it", float64(need)/(1<<30))
+// retentionNoRoomReason words the wait of a conversion that no node has room
+// to retain.
+func retentionNoRoomReason(need int64) string {
+	return fmt.Sprintf("No node has room to retain its candidate (%.1f GiB); waiting for room, or for a node that has it", float64(need)/(1<<30))
+}
+
+// retentionNoSlotReason words the wait of a conversion that has a node with
+// room to retain it, but none with a free slot.
+func retentionNoSlotReason(need int64) string {
+	return fmt.Sprintf("Waiting for a free slot on a node with room to retain its candidate (%.1f GiB)", float64(need)/(1<<30))
 }

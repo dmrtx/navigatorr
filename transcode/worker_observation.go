@@ -65,7 +65,12 @@ const (
 )
 
 func (r *RetentionRoom) Fit(need int64, now time.Time) RetentionFit {
-	if r == nil || need <= 0 || r.CapacityBytes <= 0 || now.Sub(r.ObservedAt) > RetentionRoomMaxAge {
+	if r == nil || need <= 0 || r.CapacityBytes <= 0 {
+		return RetentionFits
+	}
+	// A report dated further ahead than it may be old is as untrustworthy as an
+	// old one: the worker's clock is off, and its age cannot be known.
+	if age := now.Sub(r.ObservedAt); age > RetentionRoomMaxAge || age < -RetentionRoomMaxAge {
 		return RetentionFits
 	}
 	switch {

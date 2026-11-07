@@ -50,27 +50,44 @@ func TestRetentionRoomIsNeverNegative(t *testing.T) {
 	}
 }
 
-func TestRetentionRoomIsNotReportedWithoutABudgetOrDeferredPublication(t *testing.T) {
-	for name, mutate := range map[string]func(*WorkerConfig){
+func TestRetentionRoomIsDroppedWhenTheBudgetOrDeferredPublicationIsTurnedOff(t *testing.T) {
+	for name, turnOff := range map[string]func(*WorkerConfig){
 		"no limit":                 func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 0 },
-		"deferred publication off": func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 1000; c.DeferredPublication = false },
+		"deferred publication off": func(c *WorkerConfig) { c.DeferredPublication = false },
 	} {
 		t.Run(name, func(t *testing.T) {
-			f := newRetainedFixture(t, mutate)
+			f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 1000 })
 			now := time.Now().UTC()
-			// A previous measure is dropped when the worker stops retaining.
-			f.w.schedulerMu.Lock()
-			f.w.retentionRoom = nil
-			f.w.schedulerMu.Unlock()
 			f.w.refreshRetentionRoom(now)
-			if room := f.w.SchedulerObservation(now).Retention; room != nil {
-				t.Fatalf("reported %+v, want none", room)
+			if f.w.SchedulerObservation(now).Retention == nil {
+				t.Fatal("a worker with a budget reports its room")
 			}
-			data, err := json.Marshal(f.w.SchedulerObservation(now))
+			turnOff(f.cfg)
+			later := now.Add(time.Second)
+			f.w.refreshRetentionRoom(later)
+			if room := f.w.SchedulerObservation(later).Retention; room != nil {
+				t.Fatalf("reported %+v after the budget was turned off, want none", room)
+			}
+			data, err := json.Marshal(f.w.SchedulerObservation(later))
 			if err != nil || strings.Contains(string(data), "retention") {
 				t.Fatalf("health carries a retention field (%v): %s", err, data)
 			}
 		})
+	}
+}
+
+func TestRetentionRoomCountsTheReservationOfAStartedJobAndNothingForAQueuedOne(t *testing.T) {
+	srcSize := int64(len("dummy-media"))
+	budget := 10 * srcSize
+	f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = budget })
+	now := time.Now().UTC()
+
+	f.submit("job-a", "on_approval") // starts and reserves the size of its source
+	f.submit("job-b", "on_approval") // queued behind it: holds nothing yet
+	f.w.refreshRetentionRoom(now)
+	room := f.w.SchedulerObservation(now).Retention
+	if room == nil || room.CapacityBytes != budget || room.RoomBytes != budget-srcSize {
+		t.Fatalf("with one started and one queued job the worker reports %+v, want room %d", room, budget-srcSize)
 	}
 }
 
