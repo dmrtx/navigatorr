@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -271,26 +272,63 @@ func TestTheQueuePositionCountsTheConversionsThatCouldUseTheSameWorkers(t *testi
 	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
 		t.Fatalf("the first in line did not take the free slot: %+v", res)
 	}
+	// Those left waiting each move up one place.
+	for id, want := range map[string]int{"conv-b": 1, "conv-c": 2, "conv-d": 3} {
+		res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, id))
+		if !waiting || getInt(res.Outputs, workerSlotPositionKey) != want {
+			t.Fatalf("%s: position %d (waiting %v), want %d", id, getInt(res.Outputs, workerSlotPositionKey), waiting, want)
+		}
+	}
+}
+
+// The queue decides on the size stamped when the conversion was admitted, so
+// it must be there before the conversion is first given a worker.
+func TestAnAdmittedConversionNeedsTheRoomOfItsFileBeforeItIsGivenAWorker(t *testing.T) {
+	mediaDir := t.TempDir()
+	source := mediaDir + "/big.mkv"
+	f, err := os.Create(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(29 * gib); err != nil { // sparse
+		t.Fatal(err)
+	}
+	f.Close()
+	e, st := setupTranscodeEngine(t, &mockTranscodeExecutor{}, createFakeFFprobeScript(t, defaultValidFFprobeJSON), []string{mediaDir}, []string{mediaDir}, false)
+	defer st.Close()
+	res, err := e.Enqueue(WithOrigin(context.Background(), "web"), "transcode_media", map[string]any{"path": source, "mode": "quality"}, "big")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need := conversionRetentionNeed(parseExecutionContextMust(t, e, res.ID)); need != 29*gib {
+		t.Fatalf("the admitted conversion needs %d bytes of room, want %d", need, 29*gib)
+	}
 }
 
 func TestAFileOnlyAnOfflineWorkerCouldEverHoldWaitsForIt(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 30*gib)
-	m1 := newRoomReporter(100*gib, 100*gib)
-	m1.doctorFunc = func(context.Context) error { return errors.New("offline") }
-	e := retentionWorkers(t, m4, m1)
+	// A worker that is down either still has its last report or none at all.
+	for name, silent := range map[string]bool{"with its last report": false, "with no report": true} {
+		t.Run(name, func(t *testing.T) {
+			m4 := newRoomReporter(30*gib, 30*gib)
+			m1 := newRoomReporter(100*gib, 100*gib)
+			m1.silent = silent
+			m1.doctorFunc = func(context.Context) error { return errors.New("offline") }
+			e := retentionWorkers(t, m4, m1)
 
-	// 50 GiB never fits m4, even empty; m1 could, once it is back. Leaving the
-	// file to m4 would strand it there.
-	if name, res, waiting := convert(t, e, "conv-a", 50*gib, ""); !waiting || name != "" || !strings.Contains(res.WaitingReason, "room to retain") {
-		t.Fatalf("assigned %q (waiting %v), %+v", name, waiting, res)
-	}
-	m1.doctorFunc = nil
-	e.workerStateFor("m1").obs.CheckedAt = time.Time{} // check it again
-	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-		t.Fatalf("m1 is back and holds the file: %+v", res)
-	}
-	if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
-		t.Fatalf("assigned %q, want m1", got)
+			// 50 GiB never fits m4, even empty; m1 could, once it is back. Leaving the
+			// file to m4 would strand it there.
+			if name, res, waiting := convert(t, e, "conv-a", 50*gib, ""); !waiting || name != "" || !strings.Contains(res.WaitingReason, "room to retain") {
+				t.Fatalf("assigned %q (waiting %v), %+v", name, waiting, res)
+			}
+			m1.doctorFunc = nil
+			e.workerStateFor("m1").obs.CheckedAt = time.Time{} // check it again
+			if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
+				t.Fatalf("m1 is back and holds the file: %+v", res)
+			}
+			if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
+				t.Fatalf("assigned %q, want m1", got)
+			}
+		})
 	}
 }
 

@@ -453,6 +453,9 @@ coordinator gives it one only if that worker reports room for it
   be given two conversions in that window that together do not fit; the second
   stays queued on the worker (`retention_budget`), as before this existed, and
   the worker's own slot accounting (see #381) keeps it from holding the slot.
+- The size is the one stamped when the conversion was admitted, before it is
+  first given a worker. A file whose size could not be read then (a stalled
+  mount; the stat is bounded) needs no room and is not kept off any node.
 - The free-disk floor is not part of the report. It depends on what else sits on
   the work disk, so the worker still decides it when the job starts.
 
