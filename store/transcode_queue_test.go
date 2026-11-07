@@ -82,6 +82,29 @@ func TestActiveWorkerCountLeavesOutChildrenHeldBeforeSubmit(t *testing.T) {
 	}
 }
 
+// A conversion the worker keeps queued for lack of room to retain its
+// candidate runs nothing: its worker starts the next job, so it holds no slot
+// there. Once the room is there it counts again.
+func TestActiveWorkerCountLeavesOutJobsWaitingForRetentionRoom(t *testing.T) {
+	s := openTest(t)
+	add := func(id, state string) {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("running", `{"worker":"node-a","job_id":"j1"}`)
+	add("no-room", `{"worker":"node-a","job_id":"j2","worker_retention_blocked":"retention_budget"}`)
+	add("no-disk", `{"worker":"node-a","job_id":"j3","worker_retention_blocked":"free_disk"}`)
+	add("started", `{"worker":"node-a","job_id":"j4","worker_retention_blocked":""}`)
+	counts, err := s.CountActiveWorkerActions("transcode_media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts["node-a"] != 2 {
+		t.Fatalf("counts %v, want node-a=2 (running and started)", counts)
+	}
+}
+
 func TestQueuedBatchItemsCarryTheBatchPriority(t *testing.T) {
 	s := openTest(t)
 	for id, inputs := range map[string]string{"first": `{"queue_priority":true}`, "plain": `{}`} {
