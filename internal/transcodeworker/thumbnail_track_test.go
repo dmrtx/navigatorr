@@ -122,6 +122,26 @@ func TestBuildFFmpegArgsUnmapsPreviewTrack(t *testing.T) {
 	}
 }
 
+// Tracks picked by hand map audio and subtitles one by one; the preview track
+// is still unmapped, and only the picked audio stays.
+func TestBuildFFmpegArgsUnmapsPreviewTrackWithPickedTracks(t *testing.T) {
+	plan := sizeV5TestPlan(transcode.AudioModeSizeAACBed)
+	plan.ModePolicyVersion = transcode.ModePolicyV9
+	plan.SizePolicy.MinSavingsPercent = transcode.SizeSmallerSavingPercent
+	plan.Tracks = &transcode.TrackSelection{KeepAudio: []int{1}}
+	ep, err := BuildExecutionPlan(resign(plan), previewTrackStreams(), 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := BuildFFmpegArgs(ep, "/in.mp4", "/out.mkv", "/progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "-map 0:v? -map -0:2 -map 0:1 -map 0:t?") {
+		t.Fatalf("picked tracks lost the preview unmap:\n%s", joined)
+	}
+}
+
 func TestProgrammeVideoSkipsPreviewTrack(t *testing.T) {
 	streams := previewTrackStreams()
 	if countMainVideo(streams) != 1 {
