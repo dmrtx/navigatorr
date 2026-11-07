@@ -174,7 +174,8 @@ const workerRetentionBlockedKey = "worker_retention_blocked"
 // lack of room to retain its candidate, and unmarks it once the job has room.
 // The worker starts the next job meanwhile, so a marked action holds no video
 // slot: counting it would leave the node idle behind a job that cannot start
-// while other conversions wait for a slot.
+// while other conversions wait for a slot. The count leaves out one marked
+// action per worker (see Store.CountActiveWorkerActions), not every one.
 func recordRetentionBlock(ec *ExecutionContext, st transcode.JobStatus) {
 	if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
 		ec.State[workerRetentionBlockedKey] = st.RetentionBlocked

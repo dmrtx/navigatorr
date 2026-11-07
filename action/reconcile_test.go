@@ -150,6 +150,65 @@ func TestConcurrentResumeAndReconcilerShareDurableClaim(t *testing.T) {
 	}
 }
 
+// The reconciler's poll of a job its worker keeps queued for lack of room to
+// retain the candidate marks the action in the store, which then leaves it out
+// of its worker's count; the poll that finds the job running clears the mark.
+func TestReconcilerPollMarksAJobQueuedForRetentionRoomInTheStore(t *testing.T) {
+	st := setupTestStore(t)
+	now := time.Now().UTC()
+	var remote atomic.Value
+	remote.Store(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: "retention_budget"})
+	mock := &mockTranscodeExecutor{}
+	mock.submitFunc = func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
+		return transcode.Job{ID: req.ID}, nil
+	}
+	mock.statusFunc = func(ctx context.Context, id string) (transcode.JobStatus, error) {
+		s := remote.Load().(transcode.JobStatus)
+		s.ID = id
+		return s, nil
+	}
+	workers, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: transcode.DefaultWorkerName, Executor: mock, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(EngineDeps{Store: st, Transcode: mock, Workers: workers, Now: func() time.Time { return now }})
+	e.RegisterTemplate(ActionTemplate{Name: "transcode_media", AutoReconcile: true, Steps: []StepDefinition{
+		{Name: "preflight", Run: func(ctx context.Context, ec *ExecutionContext) (StepResult, error) {
+			return StepResult{Status: StepCompleted, Outputs: testReconcileEC("").State}, nil
+		}},
+		{Name: "submit_transcode", Run: e.stepTranscodeSubmit},
+		{Name: "wait_transcode", Run: e.stepTranscodeWait},
+	}})
+	res, err := e.Run(context.Background(), "transcode_media", nil)
+	if err != nil || res.Status != StatusWaitingExternal {
+		t.Fatalf("run: %+v %v", res, err)
+	}
+	active := func() int {
+		t.Helper()
+		counts, err := st.CountActiveWorkerActions("transcode_media")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return counts[transcode.DefaultWorkerName]
+	}
+	poll := func() {
+		t.Helper()
+		now = now.Add(time.Minute)
+		if err := e.ReconcileOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	poll()
+	if got := getString(actionState(t, st, res.ID), workerRetentionBlockedKey); got != "retention_budget" || active() != 0 {
+		t.Fatalf("queued for room: marked %q, %d counted on its worker", got, active())
+	}
+	remote.Store(transcode.JobStatus{Status: transcode.StatusRunning})
+	poll()
+	if _, ok := actionState(t, st, res.ID)[workerRetentionBlockedKey]; ok || active() != 1 {
+		t.Fatalf("running: state %v, %d counted on its worker", actionState(t, st, res.ID), active())
+	}
+}
+
 func TestReconcilerNeverApprovesDecisionAndHonorsPollSchedule(t *testing.T) {
 	st := setupTestStore(t)
 	var calls atomic.Int32

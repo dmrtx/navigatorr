@@ -97,7 +97,10 @@ func TestWorkersAtTheirCapMakeTheJobWait(t *testing.T) {
 // A conversion its worker keeps queued for lack of room to retain the
 // candidate runs nothing there: the worker starts the next job, so the server
 // hands the slot to the next conversion instead of leaving the node idle
-// behind a job that cannot start. Once the job has room it holds a slot again.
+// behind a job that cannot start. Only one such job is left out: when the room
+// is short for everything the queue does not move wholesale onto that node,
+// where the jobs would stay while the other node has room. Once a job has room
+// it holds a slot again.
 func TestAJobWaitingForRetentionRoomDoesNotHoldItsWorkersSlot(t *testing.T) {
 	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
 		{Name: "m1", Executor: poolWorker(2), MaxParallelJobs: 1},
@@ -128,9 +131,15 @@ func TestAJobWaitingForRetentionRoomDoesNotHoldItsWorkersSlot(t *testing.T) {
 	if name, res, waiting := assignNew(t, e, "conv-next", "transcode_media"); waiting || name != "m4" {
 		t.Fatalf("m4 holds a job that cannot start: assigned %q (waiting %v), %+v", name, waiting, res)
 	}
-	// m4 now has a running job and a blocked one; the blocked one gets room and
-	// is back in the count, so the node is full again.
+	// The room is short for that one too: m4 holds two jobs that cannot start,
+	// and the third waits in the server's queue instead of joining them.
+	mark("conv-next", "retention_budget")
+	if name, res, waiting := assignNew(t, e, "conv-third", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("a second blocked job on m4 holds its slot: assigned %q, %+v", name, res)
+	}
+	// Room again: both count, the node stays full.
 	mark("conv-1", "")
+	mark("conv-next", "")
 	if name, res, waiting := assignNew(t, e, "conv-later", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("both jobs on m4 hold a slot again: assigned %q, %+v", name, res)
 	}

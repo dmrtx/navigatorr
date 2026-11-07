@@ -124,19 +124,23 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 // CountActiveWorkerActions counts the unfinished actions of one kind by the
 // worker they were assigned. Actions without a worker yet are not counted,
 // nor a child held by its paused or decision-waiting batch before it sent
-// anything to its worker: it uses no slot there. Nor is one whose job the
-// worker keeps queued for lack of room to retain its candidate: the worker
-// starts the next job meanwhile.
+// anything to its worker: it uses no slot there.
+//
+// One action per worker whose job the worker keeps queued for lack of room to
+// retain its candidate (worker_retention_blocked) is not counted either: the
+// worker starts the next job meanwhile. Only one, so that when the room is
+// short for everything, the conversions do not all move onto that worker, where
+// they stay: the second one that cannot start holds the slot.
 func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT json_extract(state_json, '$.worker'), COUNT(*)
+	rows, err := s.db.Query(`SELECT json_extract(state_json, '$.worker'),
+		COUNT(*) - MIN(1, SUM(COALESCE(json_extract(state_json, '$.worker_retention_blocked'), '') != ''))
 		FROM action_instances
 		WHERE status IN ('pending', 'waiting_external', 'running')
 		AND action_name = ?
 		AND json_valid(state_json)
 		AND json_type(state_json, '$.worker') = 'text'
-		AND COALESCE(json_extract(state_json, '$.worker_retention_blocked'), '') = ''
 		AND NOT (COALESCE(waiting_condition, '') IN ('parent_paused', 'parent_waiting_decision')
 			AND COALESCE(json_extract(state_json, '$.job_id'), '') = ''
 			AND COALESCE(json_extract(state_json, '$.external_reference'), '') = ''
