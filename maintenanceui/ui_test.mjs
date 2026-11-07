@@ -83,15 +83,13 @@ const segmentGroups = {
   "reconfigure-engine": ["fast", "small"],
   "reconfigure-budget-limit": ["", "siblings", "fixed"],
   "conversion-video": ["copy", "compress", "x265_preserve", "quality"],
-  "keep-commentary": ["drop", "keep"],
-  "keep-channels": ["all", "stereo"],
   "compact-height": ["2160", "1080"],
   "reconfigure-height": ["1080", "2160"],
   "compact-hdr": ["sdr", "keep"],
   "reconfigure-hdr": ["sdr", "keep"],
 };
 // What the form's markup checks: the options a new form shows.
-const segmentDefaults = { "conversion-video": "compress", "keep-commentary": "drop", "keep-channels": "all", "compact-height": "2160", "compact-hdr": "sdr" };
+const segmentDefaults = { "conversion-video": "compress", "compact-height": "2160", "compact-hdr": "sdr" };
 function harness({ radios: withRadios = false, segments: withSegments = false } = {}) {
   const elements = new Map();
   let interval;
@@ -3933,7 +3931,7 @@ test("processing modes omit stale tuning and keep anime library context", async 
     h.context.capture=(_tool,args)=>{sent=JSON.parse(args.inputs);return {id:"submitted"};};
     h.run(`processingMode=()=>${JSON.stringify(mode)};$("custom").checked=true;$("min-savings").value="2";$("max-growth").value="40";$("priority").value="savings";$("preserve-depth").checked=false;state.fileMedia={id:7,seriesType:"anime"};state.fileService="sonarr";tool=async(...args)=>capture(...args);`);
     await h.run('buildAndSubmitJob("encode")');
-    assert.deepEqual(sent,{mode,path:"/media/one.mp4",media_type:"tv",is_anime:true,library_context:{service:"sonarr",id:7}});
+    assert.deepEqual(sent,{mode,...(["size","compact"].includes(mode)?{keep_languages:[]}:{}),path:"/media/one.mp4",media_type:"tv",is_anime:true,library_context:{service:"sonarr",id:7}});
   }
 });
 
@@ -4433,8 +4431,8 @@ test("the process button says how many files it starts", () => {
 test("technical profiles are one toggle in the form, below the goal, not folded away", () => {
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
   assert.match(form, /<div id="advanced-profiles"[\s\S]*id="technical"[\s\S]*id="legacy-controls"/);
-  assert.match(form, /goal above is not used/);
-  assert.doesNotMatch(form, /<details/);
+  assert.match(form, /id="goal-overridden"[^>]*>Goal not used: a technical profile is on\.</);
+  assert.doesNotMatch(form.slice(form.indexOf('<div id="advanced-profiles"')), /<details/);
   assert.ok(form.indexOf('id="processing-goal"') < form.indexOf('id="advanced-profiles"'));
   assert.doesNotMatch(markup, /Technical tools and legacy profiles/);
 });
@@ -4617,17 +4615,7 @@ test("size goal discloses which audio becomes AAC", () => {
   assert.match(source, /"size_aac_bed" \? "AAC-LC · [^"]*Atmos keeps its 5\.1\/7\.1 bed, objects dropped"/);
 });
 
-test("the form says how much smaller a result has to be", () => {
-  const { h } = goalHarness();
-  assert.match(h.run("savingFloor()"), /at least 15% smaller/);
-  h.run('setProcessingMode("compact")');
-  assert.match(h.run("savingFloor()"), /at least 30% smaller/);
-  h.run('setProcessingMode("size"); state.goalProfile = {status: "ready", data: {goals: {size: {status: "ok", via_shrink: true}}}}');
-  assert.match(h.run("savingFloor()"), /at least 30% smaller/);
-  h.run('$("size-budget-kind").value = "percent"');
-  assert.equal(h.run("savingFloor()"), "");
-  h.run('$("size-budget-kind").value = ""; setProcessingMode("audio_only")');
-  assert.equal(h.run("savingFloor()"), "");
+test("Shrink's name says how much smaller a result has to be", () => {
   assert.match(markup, /<option value="compact">Shrink to SDR · At least 30% smaller, HDR removed/);
   assert.match(source, /item\.mode === "compact" \? shrinkLabel\(item\.max_height, item\.keep_hdr\)/);
 });
@@ -5769,7 +5757,7 @@ function submissionHarnessGoal() {
   const sent = [];
   h.context.sent = sent;
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false;');
   const pick = (name, value) => {
     h.segments.get(name).forEach((r) => (r.checked = r.value === value));
     h.segments.get(name).find((r) => r.value === value).listeners.get("change")();
@@ -5796,8 +5784,6 @@ test("the goal step starts from the saved defaults and shows the file", async ()
   assert.equal(line().textContent, "4K · HDR10 · HEVC · 10-bit · 63.00 GB");
   assert.equal(h.run('radioValue("compact-hdr")'), "sdr");
   assert.equal(h.run('radioValue("compact-height")'), "2160");
-  assert.equal(h.run('radioValue("keep-commentary")'), "drop");
-  assert.equal(h.run('radioValue("keep-channels")'), "all");
 });
 
 test("saved defaults fill the options, and 1080p is not offered for a file no taller", async () => {
@@ -5809,8 +5795,6 @@ test("saved defaults fill the options, and 1080p is not offered for a file no ta
   assert.equal(mode(), "compact");
   assert.equal(h.run('radioValue("compact-hdr")'), "keep");
   assert.equal(h.run('$("allow-hardware").checked'), false);
-  assert.equal(h.run('radioValue("keep-commentary")'), "keep");
-  assert.equal(h.run('radioValue("keep-channels")'), "stereo");
   h.context.profile = goalProfileFixture({ profile: { resolution: "1080p", dynamic_range: "SDR", dynamic_range_class: "sdr", height: 1080, video_codec: "H.264", bit_depth: 8, size_bytes: 4e9 }, goals: { size: { status: "ok" }, compact: { status: "skip", reason_code: "compact_not_needed" } } });
   h.run('$("path").value = "/media/small.mkv"; controls()');
   await h.run('loadGoalProfile("/media/small.mkv")');
@@ -5825,12 +5809,10 @@ test("Save as default keeps the choices on the server and starts the next form f
   h.run('$("allow-hardware").checked = true');
   pick("compact-hdr", "keep");
   pick("compact-height", "1080");
-  pick("keep-commentary", "keep");
-  pick("keep-channels", "stereo");
   await h.run("saveConversionDefaults()");
   assert.equal(h.run("saved.path"), "preferences");
   assert.equal(h.run("saved.opts.method"), "PUT");
-  assert.equal(JSON.stringify(h.run("saved.body.conversion_defaults")), JSON.stringify({ hdr: "keep", max_height: 1080, encoder: "fast", drop_commentary: false, prefer_stereo: true }));
+  assert.equal(JSON.stringify(h.run("saved.body.conversion_defaults")), JSON.stringify({ hdr: "keep", max_height: 1080, encoder: "fast", drop_commentary: false, prefer_stereo: false }), "no track is removed without being unticked");
   assert.equal(h.elements.get("conversion-defaults-status").textContent, "Saved as your default");
   h.run("applyConversionDefaults()");
   assert.equal(h.run("processingMode()"), "compact");
@@ -5839,7 +5821,6 @@ test("Save as default keeps the choices on the server and starts the next form f
   other.h.run("api = async () => ({})");
   await other.h.run("loadConversionDefaults()");
   assert.equal(other.mode(), "size");
-  assert.equal(other.h.run('radioValue("keep-commentary")'), "drop");
 });
 
 test("Run next asks for one file to go first, once", async () => {
@@ -5870,17 +5851,6 @@ test("Run next stays on offer for a batch", () => {
   h.run('$("queue-priority").checked = true; $("scope").value = "batch"; renderConversionOptions();');
   assert.equal(el("queue-priority").checked, true);
   assert.notEqual(el("queue-priority").disabled, true);
-});
-
-test("reopening a job restores its track rules over the saved ones", () => {
-  const { h } = goalHarness();
-  h.run('conversionDefaults.drop_commentary = true; conversionDefaults.prefer_stereo = false; applyConversionDefaults()');
-  h.run('applyGoalSettings("/media/one.mkv", {mode:"size", prefer_stereo:true})');
-  assert.equal(h.run('radioValue("keep-commentary")'), "keep");
-  assert.equal(h.run('radioValue("keep-channels")'), "stereo");
-  h.run('applyGoalSettings("/media/one.mkv", {mode:"size", drop_commentary:true})');
-  assert.equal(h.run('radioValue("keep-commentary")'), "drop");
-  assert.equal(h.run('radioValue("keep-channels")'), "all");
 });
 
 test("an encoder picked while the file is read stays picked", async () => {
@@ -6175,7 +6145,7 @@ test("segmented controls send the same payloads as the fields they drive", async
     const { h } = submissionHarness(options);
     let sent = null;
     h.context.capture = (_tool, args) => { sent = JSON.parse(args.inputs); return { id: "submitted" }; };
-    h.run('processingMode=()=>"size";tool=async(...args)=>capture(...args);setRadioValue("keep-commentary", "keep");');
+    h.run('processingMode=()=>"size";tool=async(...args)=>capture(...args);');
     await setup(h);
     await h.run('buildAndSubmitJob("encode")');
     return sent;
@@ -7229,23 +7199,11 @@ test("a review that opens by itself keeps its buttons off until the layout settl
   assert.ok(!reject.disabled && !approve.disabled);
 });
 
-// Languages to keep: the Settings editor, the goal form's track picker, and the
-// track report in the job details.
+// Languages: the goal form's track picker and the track report in the job details.
 const plain = (value) => JSON.parse(JSON.stringify(value ?? null));
 
-test("language entries accept names, codes and older spellings and say why one is refused", () => {
+test("track languages read as one name whatever their spelling", () => {
   const h = harness();
-  const parse = (text) => h.run(`parseLanguage(${JSON.stringify(text)})`);
-  assert.equal(parse("French"), "fra");
-  assert.equal(parse("fre"), "fra");
-  assert.equal(parse("FR"), "fra");
-  assert.equal(parse(" Spanish (spa) "), "spa");
-  assert.equal(parse("untagged"), "und");
-  // Any other three letters go to the server, which checks them against ISO 639-2.
-  assert.equal(parse("xyz"), "xyz");
-  assert.equal(parse(""), "");
-  assert.equal(parse("english please"), "");
-  assert.equal(parse("e"), "");
   const canonical = (tag) => h.run(`canonicalLanguage(${JSON.stringify(tag)})`);
   assert.equal(canonical("es-419"), "spa");
   assert.equal(canonical("ger"), "deu");
@@ -7253,121 +7211,6 @@ test("language entries accept names, codes and older spellings and say why one i
   assert.equal(h.run('languageName("fre")'), "French");
   assert.equal(h.run('languageName("und")'), "Untagged");
   assert.equal(h.run('languageName("xyz")'), "xyz");
-  assert.deepEqual(plain(h.run('addLanguageTo(["eng"], "Spanish")')), { languages: ["eng", "spa"] });
-  assert.match(h.run('addLanguageTo(["eng"], "English")').message, /English is already in the list/);
-  assert.match(h.run('addLanguageTo([], "und")').message, /Untagged tracks are always kept/);
-  assert.match(h.run('addLanguageTo([], "??")').message, /Enter a language/);
-  assert.equal(h.run('sameLanguages(["eng", "spa"], ["spa", "eng"])'), true);
-  assert.equal(h.run('sameLanguages(["eng"], ["eng", "spa"])'), false);
-});
-
-function languagesHarness() {
-  const h = harness();
-  h.context.calls = [];
-  h.run(`api = async (path, body, opts) => {
-    calls.push([path, body, opts?.method]);
-    if (opts?.method === "PUT") {
-      if (body.languages.includes("xyz")) throw new Error('"xyz" is not an ISO 639-2 language code');
-      return { languages: [...body.languages].sort(), default: ["eng", "jpn", "spa"], is_default: false, revision: 2 };
-    }
-    return { languages: ["eng", "jpn", "spa"], default: ["eng", "jpn", "spa"], is_default: true, revision: 1 };
-  };`);
-  const el = (id) => h.elements.get(id);
-  const chips = () => el("keep-languages-list").children.map((chip) => chip.children[0].textContent);
-  return { h, el, chips };
-}
-
-test("Settings lists the languages to keep with readable names and disables what does nothing", async () => {
-  const { h, el, chips } = languagesHarness();
-  h.run("renderKeepLanguages()");
-  assert.equal(el("keep-languages-state").textContent, "Loading…");
-  assert.equal(el("keep-language-add").disabled, true, "nothing to edit before the list is read");
-  await h.run("loadKeepLanguages()");
-  assert.deepEqual(plain(h.context.calls), [["keep-languages", null, null]]);
-  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
-  assert.equal(el("keep-languages-list").children[0].children[1].textContent, "eng");
-  assert.equal(el("keep-languages-state").textContent, "Default");
-  assert.equal(el("keep-languages-apply").disabled, true, "nothing changed yet");
-  assert.equal(el("keep-languages-reset").disabled, true, "already the default");
-  assert.equal(el("keep-languages-off").disabled, false);
-  assert.equal(el("keep-language-add").disabled, false);
-});
-
-test("Settings stages additions and removals and saves them with Apply", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  // Add by name, both with the button and with Enter, which must not submit the job form.
-  el("keep-language-input").value = "French";
-  el("keep-language-add").listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
-  assert.equal(el("keep-language-input").value, "");
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.equal(el("keep-languages-apply").disabled, false);
-  let prevented = 0;
-  el("keep-language-input").value = "German";
-  el("keep-language-input").listeners.get("keydown")({ key: "Enter", preventDefault: () => prevented++ });
-  assert.equal(prevented, 1);
-  assert.deepEqual(chips(), ["English", "French", "German", "Japanese", "Spanish"]);
-  el("keep-language-input").listeners.get("keydown")({ key: "a", preventDefault: () => prevented++ });
-  assert.equal(prevented, 1, "other keys are left alone");
-  // Remove one with its own button.
-  el("keep-languages-list").children[2].children[2].listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "French", "Japanese", "Spanish"]);
-  // A refused entry says why and changes nothing.
-  el("keep-language-input").value = "English";
-  el("keep-language-add").listeners.get("click")();
-  assert.match(el("keep-languages-note").textContent, /already in the list/);
-  assert.equal(chips().length, 4);
-  // Nothing is sent until Apply.
-  assert.equal(h.context.calls.length, 1);
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: ["eng", "jpn", "spa", "fra"] }, "PUT"]);
-  assert.match(el("keep-languages-note").textContent, /^Saved\. It applies to jobs created from now on/);
-  assert.equal(el("keep-languages-state").textContent, "Custom");
-  assert.equal(el("keep-languages-apply").disabled, true);
-  assert.equal(el("keep-languages-reset").disabled, false);
-});
-
-test("Settings resets to the default and turns the setting off", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  el("keep-languages-off").listeners.get("click")();
-  assert.deepEqual(chips(), []);
-  assert.equal(el("keep-languages-list").hidden, true);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.equal(el("keep-languages-off").disabled, true);
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[1]), ["keep-languages", { languages: [] }, "PUT"]);
-  assert.equal(el("keep-languages-state").textContent, "Off: every track is kept");
-  el("keep-languages-reset").listeners.get("click")();
-  assert.deepEqual(chips(), ["English", "Japanese", "Spanish"]);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.deepEqual(plain(h.context.calls[2][1]), { languages: ["eng", "jpn", "spa"] });
-  assert.equal(el("keep-languages-state").textContent, "Default");
-});
-
-test("Settings shows the server's refusal and a reload never replaces an edited draft", async () => {
-  const { h, el, chips } = languagesHarness();
-  await h.run("loadKeepLanguages()");
-  el("keep-language-input").value = "xyz";
-  el("keep-language-add").listeners.get("click")();
-  await h.run("saveKeepLanguages(keepLanguages.draft)");
-  assert.match(el("keep-languages-note").textContent, /"xyz" is not an ISO 639-2 language code/);
-  assert.equal(el("keep-languages-state").textContent, "Not saved yet");
-  assert.ok(chips().includes("xyz"), "the draft is kept so it can be corrected");
-  assert.equal(el("keep-languages-apply").disabled, false, "and saved again");
-  // Another tab changed the saved list; the unsaved draft stays.
-  h.run('api = async () => ({ languages: ["eng"], default: ["eng", "jpn", "spa"], is_default: false, revision: 3 });');
-  await h.run("loadKeepLanguages()");
-  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng"]);
-  assert.ok(chips().includes("xyz"));
-  // A list that cannot be read is said so and not edited.
-  const failed = languagesHarness();
-  failed.h.run('api = async () => { throw new Error("down"); };');
-  await failed.h.run("loadKeepLanguages()");
-  assert.equal(failed.el("keep-languages-state").textContent, "Could not load the list");
-  assert.equal(failed.el("keep-language-add").disabled, true);
 });
 
 function keepFixture() {
@@ -7390,9 +7233,7 @@ function keepHarness() {
   const h = harness({ radios: true });
   h.context.tracks = keepFixture();
   h.run(`$("scope").value = "file"; $("service").value = "folder:/media"; $("path").value = "/media/movie.mkv"; $("technical").checked = false;
-    keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; keepLanguages.draft = ["eng", "jpn", "spa"]; keepLanguages.defaults = ["eng", "jpn", "spa"];
     var queries = []; api = async (path) => { queries.push(path); return tracks; };
-    conversionDefaults.drop_commentary = false; setRadioValue("keep-commentary", "keep");
     controls = () => { refreshKeepTracks(); renderKeepTracks(); };`);
   const el = (id) => h.elements.get(id);
   const open = async () => {
@@ -7401,23 +7242,28 @@ function keepHarness() {
   };
   const boxes = (kind) => plain(h.run(`keepTracks.boxes.filter(e => e.kind === "${kind}").map(e => e.box.checked)`));
   const inputs = (single = true, path = "/media/movie.mkv") => plain(h.run(`keepTrackInputs(${single}, ${JSON.stringify(path)})`));
-  return { h, el, open, boxes, inputs };
+  // A box changed the way a click changes it.
+  const tick = (kind, index, on) => h.run(`(() => { const e = keepTracks.boxes.find(e => e.kind === "${kind}" && e.track.index === ${index}); e.box.checked = ${on}; e.box.listeners.get("change")(); })()`);
+  return { h, el, open, boxes, inputs, tick };
 }
 
-test("the picker lists the file's tracks, checked as the server's rules keep them, and a default submit sends nothing", async () => {
-  const { h, el, open, boxes, inputs } = keepHarness();
+test("the picker lists every track of the file, folded, and an untouched submit keeps every track", async () => {
+  const { h, el, boxes, inputs } = keepHarness();
   h.run("controls()");
   assert.equal(el("keep-tracks").hidden, false);
   assert.equal(el("keep-tracks-status").textContent, "Reading the file's tracks…");
+  assert.equal(el("keep-tracks-status").hidden, false);
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  assert.deepEqual(plain(h.run("queries")), ["source-tracks?path=%2Fmedia%2Fmovie.mkv"]);
-  assert.deepEqual(boxes("audio"), [true, false, true, true]);
-  assert.deepEqual(boxes("subtitles"), [true, false, true]);
+  assert.deepEqual(plain(h.run("queries")), ["source-tracks?path=%2Fmedia%2Fmovie.mkv&keep_languages="], "read with no language rule");
+  assert.deepEqual(boxes("audio"), [true, true, true, true]);
+  assert.deepEqual(boxes("subtitles"), [true, true, true]);
   assert.equal(el("keep-audio").hidden, false);
   assert.equal(el("keep-audio-list").children.length, 4);
   assert.equal(el("keep-subtitle-list").children.length, 3);
-  assert.equal(el("keep-tracks-summary").textContent, "English, Japanese, Spanish");
-  assert.equal(el("keep-tracks-status").textContent, "Keeping 3 of 4 audio tracks and 2 of 3 subtitles.");
+  assert.equal(el("keep-audio-count").textContent, "4 of 4");
+  assert.equal(el("keep-subtitle-count").textContent, "3 of 3");
+  assert.equal(el("keep-tracks-summary").textContent, "Every track kept");
+  assert.equal(el("keep-tracks-status").hidden, true);
   assert.equal(el("keep-tracks-reset").hidden, true);
   // Language, codec, channels and title read as one line; badges say what the track is.
   const first = el("keep-audio-list").children[0].children[0];
@@ -7425,8 +7271,8 @@ test("the picker lists the file's tracks, checked as the server's rules keep the
   assert.equal(first.children[1].children[1].textContent, "E-AC-3 · 5.1 · Surround");
   assert.deepEqual(first.children[2].children.map((badge) => badge.textContent), ["Original", "Default"]);
   assert.equal(el("keep-audio-list").children[2].children[0].children[1].children[0].textContent, "Untagged");
-  assert.deepEqual(inputs(), {}, "the automatic choice sends no stream lists");
-  assert.deepEqual(inputs(false), {});
+  assert.deepEqual(inputs(), { keep_languages: [] }, "every language, and no stream lists");
+  assert.deepEqual(inputs(false), { keep_languages: [] });
 });
 
 // Every leaf's text under a preview, in order.
@@ -7450,12 +7296,13 @@ test("one file's tracks show their size and what the goal makes of them, and aud
   await open();
   const plan = (list, i) => el(list).children[i].children[0].children[1].children[2];
   assert.equal(plan("keep-audio-list", 0).textContent, "4.00 GB (40%) → AAC 384 kbps · 240.0 MB");
-  assert.equal(plan("keep-audio-list", 1).textContent, "280.0 MB (3%) → Removed");
+  assert.equal(plan("keep-audio-list", 1).textContent, "280.0 MB (3%) → Copied");
   assert.equal(plan("keep-audio-list", 2).textContent, "80.0 MB (1%) → Copied");
   assert.equal(plan("keep-subtitle-list", 0).textContent, "50.0 KB");
   assert.equal(plan("keep-subtitle-list", 2).hidden, true, "a subtitle of unknown size kept says nothing");
-  const preview = leaves(el("keep-tracks-preview"));
-  assert.equal(el("keep-tracks-preview").hidden, false);
+  h.run('streamPreview($("reconfigure-preview"), keepTracks.data, "size", (k, t) => t.keep)');
+  const preview = leaves(el("reconfigure-preview"));
+  assert.equal(el("reconfigure-preview").hidden, false);
   assert.deepEqual(preview.slice(0, 10), [
     "File", "10.00 GB",
     "Video", "≈ 3.00 GB · 30% · re-encoded, its new size is set by the encode",
@@ -7466,50 +7313,50 @@ test("one file's tracks show their size and what the goal makes of them, and aud
   assert.ok(preview.includes("Audio and track choices alone save about 6.30 GB, 63% of the file; the video encode saves on top of that."));
   assert.ok(preview.includes("Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about 320.0 MB more. A size budget switches to it when the budget needs it."));
   assert.ok(preview.includes("Audio weighs more than the video in this file (6.58 GB against 3.00 GB). After this goal it is about 560.0 MB."));
-  assert.equal(el("keep-tracks-summary").textContent, "Audio outweighs video · English, Japanese, Spanish");
+  assert.equal(el("keep-tracks-summary").textContent, "Audio outweighs video · Every track kept");
 
   // Under compact the stronger level is not offered; a goal that copies the audio says so.
-  h.run('setProcessingMode("compact"); renderKeepTracks()');
-  assert.ok(!leaves(el("keep-tracks-preview")).some((t) => t.startsWith("Stronger audio")));
-  h.run('streamPreview($("keep-tracks-preview"), keepTracks.data, "quality", () => true)');
-  const copied = leaves(el("keep-tracks-preview"));
+  h.run('streamPreview($("reconfigure-preview"), keepTracks.data, "compact", (k, t) => t.keep)');
+  assert.ok(!leaves(el("reconfigure-preview")).some((t) => t.startsWith("Stronger audio")));
+  h.run('streamPreview($("reconfigure-preview"), keepTracks.data, "quality", () => true)');
+  const copied = leaves(el("reconfigure-preview"));
   assert.ok(copied.includes("Audio kept") && copied.includes("6.86 GB · 69% · copied"));
   assert.ok(copied.some((t) => t.includes("This goal copies it, so most of the file stays as it is")));
 
   // A converted track of unknown size stays out of both audio totals, and a
   // conversion that grows a track still reads as a conversion, not a copy.
-  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+  h.run(`streamPreview($("reconfigure-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
     {index: 1, keep: true, bytes: 500e6, outputs: {compact: {output: "copy", bytes: 500e6}}},
     {index: 2, keep: true, bytes: 0, outputs: {compact: {output: "aac", kbps: 384, bytes: 200e6}}}]}, "compact", (k, t) => t.keep)`);
-  let shown = leaves(el("keep-tracks-preview"));
+  let shown = leaves(el("reconfigure-preview"));
   assert.ok(shown.includes("500.0 MB · 50% → about 500.0 MB"), shown.join(" | "));
   assert.ok(shown.includes("One kept audio track states no size, so it is left out of these totals."));
   assert.ok(shown.some((t) => t.startsWith("Audio weighs more than the video") && t.endsWith("After this goal it is about 500.0 MB.")));
-  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
+  h.run(`streamPreview($("reconfigure-preview"), {size_bytes: 1e9, video_bytes: 300e6, subtitles: [], audio: [
     {index: 1, keep: true, bytes: 400e6, outputs: {compact: {output: "aac", kbps: 128, bytes: 500e6}}}]}, "compact", (k, t) => t.keep)`);
-  shown = leaves(el("keep-tracks-preview"));
+  shown = leaves(el("reconfigure-preview"));
   assert.ok(shown.includes("400.0 MB · 40% → about 500.0 MB"), shown.join(" | "));
   assert.ok(!shown.some((t) => t.includes("This goal copies it")));
 
   // A file the probe could not size shows no preview.
-  h.run('streamPreview($("keep-tracks-preview"), {audio: [], subtitles: []}, "size", () => true)');
-  assert.equal(el("keep-tracks-preview").hidden, true);
+  h.run('streamPreview($("reconfigure-preview"), {audio: [], subtitles: []}, "size", () => true)');
+  assert.equal(el("reconfigure-preview").hidden, true);
 });
 
 test("Audio only previews the video as copied and what the audio alone saves", () => {
   const h = harness();
   h.context.tracks = sizedFixture();
-  h.run('streamPreview($("keep-tracks-preview"), tracks, "audio_only", (k, t) => t.keep)');
-  const shown = leaves(h.elements.get("keep-tracks-preview"));
+  h.run('streamPreview($("reconfigure-preview"), tracks, "audio_only", (k, t) => t.keep)');
+  const shown = leaves(h.elements.get("reconfigure-preview"));
   assert.ok(shown.includes("≈ 3.00 GB · 30% · copied unchanged"), shown.join(" | "));
   assert.ok(shown.includes("6.58 GB · 66% → about 560.0 MB"));
   assert.ok(shown.includes("This goal saves about 6.30 GB, 63% of the file, from the audio and the tracks removed; the video stays as it is."));
   assert.ok(!shown.some((t) => t.startsWith("Stronger audio")));
   assert.equal(h.run('trackOutputText(tracks.audio[0], "audio_only")'), "AAC 384 kbps · 240.0 MB");
   // Nothing converts and nothing is removed: the goal has nothing to save.
-  h.run(`streamPreview($("keep-tracks-preview"), {size_bytes: 1e9, video_bytes: 800e6, subtitles: [], audio: [
+  h.run(`streamPreview($("reconfigure-preview"), {size_bytes: 1e9, video_bytes: 800e6, subtitles: [], audio: [
     {index: 1, keep: true, bytes: 100e6, outputs: {size: {output: "copy", bytes: 100e6}}}]}, "audio_only", () => true)`);
-  assert.ok(leaves(h.elements.get("keep-tracks-preview")).some((t) => t.startsWith("Nothing here gets smaller")));
+  assert.ok(leaves(h.elements.get("reconfigure-preview")).some((t) => t.startsWith("Nothing here gets smaller")));
 });
 
 test("Change goal offers Audio only, shows a saved one and sends it as the size goal", async () => {
@@ -7569,97 +7416,90 @@ test("one file's Change goal previews its streams under the goal picked", async 
   assert.equal(el("reconfigure-preview").hidden, false);
 });
 
-test("hand-picked tracks send explicit lists, and picking the automatic choice again sends none", async () => {
-  const { h, el, open, boxes, inputs } = keepHarness();
+test("unticked tracks send explicit lists, and ticking every box again sends none", async () => {
+  const { h, el, open, boxes, inputs, tick } = keepHarness();
   await open();
-  h.run('toggleTrack("subtitles", 6, true)');
-  assert.deepEqual(boxes("subtitles"), [true, true, true]);
-  assert.deepEqual(inputs(), { keep_audio_streams: [1, 3, 4], keep_subtitle_streams: [5, 6, 7] });
-  assert.equal(el("keep-tracks-summary").textContent, "Tracks chosen by hand");
+  tick("subtitles", 6, false);
+  assert.deepEqual(boxes("subtitles"), [true, false, true]);
+  assert.deepEqual(inputs(), { keep_languages: [], keep_audio_streams: [1, 2, 3, 4], keep_subtitle_streams: [5, 7] });
+  assert.equal(el("keep-tracks-summary").textContent, "Chosen by hand");
+  assert.equal(el("keep-subtitle-count").textContent, "2 of 3");
   assert.equal(el("keep-tracks-reset").hidden, false);
-  assert.equal(el("keep-tracks-status").textContent, "Keeping 3 of 4 audio tracks and 3 of 3 subtitles.");
-  h.run('toggleTrack("audio", 2, true); toggleTrack("subtitles", 5, false)');
-  assert.deepEqual(inputs(), { keep_audio_streams: [1, 2, 3, 4], keep_subtitle_streams: [6, 7] });
-  // The boxes are the user's own again once they match what the rules would do.
-  h.run('toggleTrack("audio", 2, false); toggleTrack("subtitles", 5, true); toggleTrack("subtitles", 6, false)');
+  tick("audio", 2, false);
+  assert.deepEqual(inputs(), { keep_languages: [], keep_audio_streams: [1, 3, 4], keep_subtitle_streams: [5, 7] });
+  // Every box ticked again is no choice at all.
+  tick("audio", 2, true);
+  tick("subtitles", 6, true);
   assert.equal(h.run("keepTracks.picks"), null);
-  assert.deepEqual(inputs(), {});
+  assert.deepEqual(inputs(), { keep_languages: [] });
   assert.equal(el("keep-tracks-reset").hidden, true);
-  // The reset button drops hand-picked boxes.
-  h.run('toggleTrack("audio", 4, false)');
-  assert.deepEqual(boxes("audio"), [true, false, true, false]);
+  // Keep every track drops the picks.
+  tick("audio", 4, false);
+  assert.deepEqual(boxes("audio"), [true, true, true, false]);
   el("keep-tracks-reset").listeners.get("click")();
-  assert.deepEqual(boxes("audio"), [true, false, true, true]);
-  assert.deepEqual(inputs(), {});
-  // Only this file's picks apply to it, and a batch never takes stream lists.
-  h.run('toggleTrack("audio", 4, false)');
-  assert.deepEqual(inputs(true, "/media/other.mkv"), {});
-  assert.deepEqual(inputs(false), {});
+  assert.deepEqual(boxes("audio"), [true, true, true, true]);
+  assert.deepEqual(inputs(), { keep_languages: [] });
+  // Only this file's picks apply to it.
+  tick("audio", 4, false);
+  assert.deepEqual(inputs(true, "/media/other.mkv"), { keep_languages: [] });
 });
 
 test("a file always keeps at least one audio track", async () => {
-  const { h, open, boxes, inputs } = keepHarness();
+  const { h, open, boxes, inputs, tick } = keepHarness();
   await open();
-  h.run('toggleTrack("audio", 1, false); toggleTrack("audio", 3, false)');
+  tick("audio", 1, false);
+  tick("audio", 2, false);
+  tick("audio", 3, false);
   assert.deepEqual(boxes("audio"), [false, false, false, true]);
   assert.equal(h.run("keepTracks.boxes.find(e => e.kind === 'audio' && e.track.index === 4).box.disabled"), true, "the last one cannot be unticked");
   assert.equal(h.run("keepTracks.boxes.find(e => e.kind === 'audio' && e.track.index === 3).box.disabled"), false);
-  h.run('toggleTrack("audio", 4, false)');
-  assert.deepEqual(boxes("audio"), [false, false, false, true]);
-  assert.deepEqual(inputs(), { keep_audio_streams: [4], keep_subtitle_streams: [5, 7] });
-  // A box change goes through the checkbox's own listener.
-  h.run('keepTracks.boxes[0].box.checked = true; keepTracks.boxes[0].box.listeners.get("change")()');
-  assert.deepEqual(boxes("audio"), [true, false, false, true]);
+  h.run('keepTracks.picks = pickTrack(keepTracks.picks, keepTracks.data, "audio", 4, false)');
+  assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [4]);
+  assert.deepEqual(inputs(), { keep_languages: [], keep_audio_streams: [4], keep_subtitle_streams: [5, 6, 7] });
   // Should an empty audio list ever reach a submit, it is refused rather than sent.
   h.run("keepTracks.picks.audio.clear()");
   assert.throws(() => h.run('keepTrackInputs(true, "/media/movie.mkv")'), /Keep at least one audio track/);
 });
 
-test("the languages and every track change what the picker reads and sends", async () => {
-  const { h, el, open, boxes, inputs } = keepHarness();
-  await open();
-  h.run('toggleTrack("subtitles", 6, true)');
-  // Editing this job's languages starts from the saved list and reads the file again.
-  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
-  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
-  assert.equal(h.run("keepTracks.picks"), null, "the boxes follow the languages again");
-  assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=eng%2Cjpn%2Cspa");
-  assert.equal(el("keep-job-languages").hidden, true, "one file ticks its own tracks");
-  assert.equal(el("keep-tracks-summary").textContent, "English, Japanese, Spanish");
-  assert.deepEqual(inputs(), { keep_languages: ["eng", "jpn", "spa"] });
-  h.context.tracks = { ...keepFixture(), languages: ["eng", "fra", "jpn", "spa"] };
-  h.context.tracks.audio[1].keep = true;
-  el("keep-job-input").value = "French";
-  el("keep-job-add").listeners.get("click")();
-  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa", "fra"]);
-  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  assert.equal(h.run("queries.at(-1)"), "source-tracks?path=%2Fmedia%2Fmovie.mkv&keep_languages=eng%2Cjpn%2Cspa%2Cfra");
-  assert.deepEqual(boxes("audio"), [true, true, true, true]);
-  assert.deepEqual(inputs(), { keep_languages: ["eng", "jpn", "spa", "fra"] });
-  // Removing a language goes through its chip.
-  el("keep-job-list").children.find((chip) => chip.children[0].textContent === "French").children[2].listeners.get("click")();
-  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
-  // Every track: an empty list, which the server reads as no filtering.
-  h.run('keepTracks.languages = []; keepTracks.scope = "job"; controls()');
-  assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=");
-  assert.deepEqual(inputs(), { keep_languages: [] });
-  assert.equal(el("keep-tracks-summary").textContent, "Every language");
-  assert.equal(el("keep-job-languages").hidden, true);
-  // Back to the saved list sends nothing again.
-  h.run('keepTracks.scope = "saved"; controls()');
-  assert.deepEqual(inputs(), {});
-  // A batch has no track list but still takes the language choice.
-  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls(); toggleTrack("audio", 1, true)');
-  assert.deepEqual(inputs(false), { keep_languages: ["eng", "jpn", "spa"] });
-});
-
-test("a language list for a batch is chosen without reading any file's tracks", () => {
+test("a folder batch picks its tracks file by file, and a file never opened keeps every track", async () => {
   const { h, el } = keepHarness();
-  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls(); renderKeepTracks();');
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); controls();');
   assert.equal(el("keep-tracks").hidden, false);
   assert.equal(el("keep-tracks-file").hidden, true);
-  assert.equal(h.run("queries.length"), 0);
-  assert.deepEqual(plain(h.run("keepTrackInputs(false, '/media/a.mkv')")), { keep_languages: ["eng", "jpn", "spa"] });
+  assert.equal(el("batch-tracks-open").hidden, false);
+  assert.equal(el("keep-tracks-summary").textContent, "Every track kept");
+  assert.equal(h.run("queries.length"), 0, "no file is read until it is opened");
+  await el("batch-tracks-open").listeners.get("click")();
+  assert.equal(el("batch-tracks").open, true);
+  const files = el("batch-tracks-list").children;
+  assert.equal(files.length, 2);
+  const details = files[0].children[0], summary = details.children[0];
+  assert.equal(summary.children[0].textContent, "a.mkv");
+  assert.equal(summary.children[1].textContent, "");
+  // Opening a file reads its tracks, every one ticked.
+  details.open = true;
+  await details.listeners.get("toggle")();
+  assert.deepEqual(plain(h.run("queries")), ["source-tracks?path=%2Fmedia%2Fa.mkv&keep_languages="]);
+  const row = (kind, index) => `batchTracks.files.get("/media/a.mkv").rows.find(r => r.kind === "${kind}" && r.track.index === ${index})`;
+  assert.equal(h.run(`${row("subtitles", 6)}.box.checked`), true);
+  h.run(`${row("subtitles", 6)}.box.checked = false; ${row("subtitles", 6)}.box.listeners.get("change")()`);
+  assert.equal(summary.children[1].textContent, "Audio 4 of 4 · subtitles 2 of 3");
+  assert.equal(el("keep-tracks-summary").textContent, "Removing tracks in 1 file");
+  assert.deepEqual(plain(h.run('keepTrackInputs(false, "", ["/media/a.mkv", "/media/b.mkv"])')), { keep_languages: [], track_picks: { "/media/a.mkv": { audio: [1, 2, 3, 4], subtitles: [5, 7] } } });
+  // A file no longer in the batch sends nothing for it.
+  assert.deepEqual(plain(h.run('keepTrackInputs(false, "", ["/media/b.mkv"])')), { keep_languages: [] });
+  // The last audio track stays ticked here too.
+  for (const index of [1, 2, 3]) h.run(`${row("audio", index)}.box.checked = false; ${row("audio", index)}.box.listeners.get("change")()`);
+  assert.equal(h.run(`${row("audio", 4)}.box.disabled`), true);
+  // A whole folder is listed the way the batch will be.
+  h.run('state.folderSelected = new Set(); state.folder = "/media"; api = async (path) => { queries.push(path); return {paths: ["/media/c.mkv"]}; };');
+  await h.run("openBatchTracks()");
+  assert.match(h.run("queries.at(-1)"), /^folder\?path=%2Fmedia&files=1&recursive=0$/);
+  assert.equal(el("batch-tracks-list").children[0].children[0].children[0].children[0].textContent, "c.mkv");
+  // A series batch has no paths to pick in.
+  h.run('$("service").value = "sonarr";');
+  assert.equal(h.run("batchTracksOffered()"), false);
+  assert.deepEqual(plain(h.run("keepTrackInputs(false, '', undefined)")), { keep_languages: [] });
   // Goals that keep no tracks, and technical profiles, hide the whole choice.
   h.run('$("scope").value = "file"; $("technical").checked = true; renderKeepTracks();');
   assert.equal(el("keep-tracks").hidden, true);
@@ -7667,10 +7507,66 @@ test("a language list for a batch is chosen without reading any file's tracks", 
   assert.equal(el("keep-tracks").hidden, true);
 });
 
-test("a new file starts from the automatic choice, and a stale or failed read cannot change the boxes", async () => {
-  const { h, el, open, boxes } = keepHarness();
+test("the file-by-file screen shows its picks again when reopened, even after a read that ended while it was closed", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); controls();');
+  const reopen = async () => {
+    el("batch-tracks").close();
+    el("batch-tracks").listeners.get("close")();
+    await el("batch-tracks-open").listeners.get("click")();
+  };
+  const file = (n) => el("batch-tracks-list").children[n].children[0];
+  const unfold = async (details) => { details.open = true; await details.listeners.get("toggle")(); };
+  const shown = (details) => details.children[1].children.flatMap(c => c.children).map(row => row.children[0]?.children[0]?.checked).filter(v => v !== undefined);
+  await el("batch-tracks-open").listeners.get("click")();
+  await unfold(file(0));
+  h.run('batchTracks.files.get("/media/a.mkv").rows.find(r => r.kind === "subtitles" && r.track.index === 6).box.checked = false; batchTracks.files.get("/media/a.mkv").rows.find(r => r.kind === "subtitles" && r.track.index === 6).box.listeners.get("change")()');
+  await reopen();
+  assert.equal(file(0).children[0].children[1].textContent, "Audio 4 of 4 · subtitles 2 of 3", "the pick is shown before unfolding");
+  await unfold(file(0));
+  assert.deepEqual(shown(file(0)), [true, true, true, true, true, false, true], "the reopened screen lists the rows, with the pick");
+  // A read still running when the screen closes fills the screen opened after it.
+  h.run('var release; api = (path) => new Promise(resolve => { queries.push(path); release = () => resolve(tracks); });');
+  const reading = unfold(file(1));
+  await reopen();
+  await unfold(file(1));
+  assert.equal(file(1).children[1].children[0].textContent, "Reading the tracks…");
+  h.run("release()");
+  await reading;
+  assert.deepEqual(shown(file(1)), [true, true, true, true, true, true, true]);
+  assert.equal(h.run("queries.filter(q => q.includes('b.mkv')).length"), 1, "the file is read once");
+});
+
+test("the batch summary counts only picks in files the batch would send", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folder = "/media"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); controls();');
+  h.run('batchTracks.files.set("/media/a.mkv", {status: "ready", data: tracks, picks: pickTrack(null, tracks, "subtitles", 6, false)}); renderKeepTracks();');
+  assert.equal(el("keep-tracks-summary").textContent, "Removing tracks in 1 file");
+  h.run('state.folderSelected = new Set(["/media/b.mkv", "/media/c.mkv"]); renderKeepTracks();');
+  assert.equal(el("keep-tracks-summary").textContent, "Every track kept");
+  assert.deepEqual(plain(h.run('keepTrackInputs(false, "", ["/media/b.mkv", "/media/c.mkv"])')), { keep_languages: [] });
+  // The whole folder: its own files, and its subfolders' only when recursive.
+  h.run('state.folderSelected = new Set(); batchTracks.files.set("/media/sub/d.mkv", {status: "ready", data: tracks, picks: pickTrack(null, tracks, "subtitles", 6, false)});');
+  assert.equal(h.run("batchTracksSummary()"), "Removing tracks in 1 file");
+  h.run('$("recursive").checked = true;');
+  assert.equal(h.run("batchTracksSummary()"), "Removing tracks in 2 files");
+  h.run('state.folder = "/other";');
+  assert.equal(h.run("batchTracksSummary()"), "Every track kept");
+});
+
+test("an expired sign-in closes the file-by-file screen", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv"]); controls();');
+  await el("batch-tracks-open").listeners.get("click")();
+  assert.equal(el("batch-tracks").open, true);
+  h.run("invalidateAuthentication()");
+  assert.equal(el("batch-tracks").open, false);
+});
+
+test("a new file starts with every track, and a stale or failed read cannot change the boxes", async () => {
+  const { h, el, open, boxes, tick } = keepHarness();
   await open();
-  h.run('toggleTrack("audio", 4, false)');
+  tick("audio", 4, false);
   // Another file: picks are gone at once and the old tracks are not shown for it.
   h.run('$("path").value = "/media/other.mkv"; controls();');
   assert.equal(h.run("keepTracks.picks"), null);
@@ -7688,66 +7584,55 @@ test("a new file starts from the automatic choice, and a stale or failed read ca
   await pending;
   assert.equal(h.run("keepTracks.data"), null);
   assert.equal(h.run("keepTracks.status"), "loading");
-  // The server's own refusal is shown; any other failure leaves the job on the languages.
+  // The server's own refusal is shown; any other failure keeps every track.
   h.run('api = async () => { throw Object.assign(new Error("keep_languages: not a language"), { status: 400 }); };');
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
   assert.equal(el("keep-tracks-status").textContent, "keep_languages: not a language");
   h.run('api = async () => { throw new Error("down"); };');
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  assert.equal(el("keep-tracks-status").textContent, "Could not read this file's tracks. The job still follows the languages.");
+  assert.equal(el("keep-tracks-status").textContent, "Could not read this file's tracks. Every track is kept.");
   assert.equal(h.run("keepTracks.status"), "error");
-  assert.deepEqual(plain(h.run("keepTrackInputs(true, '/media/third.mkv')")), {});
+  assert.deepEqual(plain(h.run("keepTrackInputs(true, '/media/third.mkv')")), { keep_languages: [] });
   assert.deepEqual(boxes("audio"), []);
-  // With no tracks to tick, the file edits the languages, and keeps them shown while it is read again.
-  assert.equal(el("keep-job-languages").hidden, false);
-  h.run('keepTracks.languages = ["eng"]; keepTracks.scope = "job"; controls()');
-  assert.equal(h.run("keepTracks.status"), "loading");
-  assert.equal(el("keep-job-languages").hidden, false);
-  // Another file starts over from its tracks.
-  h.run('$("path").value = "/media/fourth.mkv"; controls();');
-  assert.equal(el("keep-job-languages").hidden, true);
 });
 
-test("saving a different list in Settings refreshes the picker's pre-checked tracks", async () => {
-  const { h, open } = keepHarness();
-  await open();
-  const before = h.run("queries.length");
-  h.run('api = async (path, body, opts) => opts?.method === "PUT" ? { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] } : tracks;');
-  await h.run('saveKeepLanguages(["eng", "fra"])');
-  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
-  assert.equal(h.run("keepTracks.status"), "loading", "the file is read again with the new list");
-  assert.ok(h.run("keepTracks.key") !== "", "and the key stays for the same file");
-  assert.equal(h.run("queries.length"), before, "the read itself waits for the debounce");
-});
-
-test("submitting a single Save space or Shrink job sends the picker's choice, and other goals send none", async () => {
+test("submitting a Save space or Shrink job sends the picker's choice, and other goals send none", async () => {
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false;');
   await h.run('buildAndSubmitJob("encode")');
   assert.equal(sent[0].mode, "size");
-  assert.equal("keep_languages" in sent[0] || "keep_audio_streams" in sent[0], false, "the saved list is applied by the server");
+  assert.deepEqual(sent[0].keep_languages, [], "every track, whatever the saved list");
+  assert.equal("keep_audio_streams" in sent[0], false);
   // Hand-picked tracks, for this file only.
-  h.run(`keepTracks.path = "/media/one.mp4"; keepTracks.scope = "job"; keepTracks.languages = ["eng", "fra"];
-    keepTracks.picks = { audio: new Set([4, 1]), subtitles: new Set([5]) }; $("path").value = "/media/one.mp4"; $("scope").value = "file"; state.folderSelected = new Set(["/media/one.mp4"]);`);
+  h.run(`keepTracks.path = "/media/one.mp4"; keepTracks.picks = { audio: new Set([4, 1]), subtitles: new Set([5]) };
+    $("path").value = "/media/one.mp4"; $("scope").value = "file"; state.folderSelected = new Set(["/media/one.mp4"]);`);
   await h.run('buildAndSubmitJob("encode")');
-  assert.deepEqual(sent[1].keep_languages, ["eng", "fra"]);
+  assert.deepEqual(sent[1].keep_languages, []);
   assert.deepEqual(sent[1].keep_audio_streams, [1, 4]);
   assert.deepEqual(sent[1].keep_subtitle_streams, [5]);
-  // A finished submission starts the next file from the saved list.
-  assert.equal(h.run("keepTracks.scope"), "saved");
+  assert.equal("drop_commentary" in sent[1] || "prefer_stereo" in sent[1], false);
+  // A finished submission starts the next file with every track.
   assert.equal(h.run("keepTracks.picks"), null);
   // Quality keeps every track as it always did, and says nothing about them.
-  h.run('processingMode = () => "quality"; keepTracks.scope = "job"; keepTracks.languages = ["fra"]; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
+  h.run('processingMode = () => "quality"; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
   await h.run('buildAndSubmitJob("encode")');
   assert.equal(sent[2].mode, "quality");
   assert.equal("keep_languages" in sent[2], false);
   // The shrink goal takes the same choice.
-  h.run('processingMode = () => "compact"; keepTracks.scope = "job"; keepTracks.languages = []; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
+  h.run('processingMode = () => "compact"; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
   await h.run('buildAndSubmitJob("encode")');
   assert.equal(sent[3].mode, "compact");
   assert.deepEqual(sent[3].keep_languages, []);
+  // A folder batch sends each opened file's picks.
+  h.run(`processingMode = () => "size"; $("path").value = ""; $("scope").value = "batch"; $("service").value = "folder:/media"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]);
+    batchTracks.files.set("/media/b.mkv", {status: "ready", data: {audio: [{index: 1}], subtitles: [{index: 2}, {index: 3}]}, picks: {audio: new Set([1]), subtitles: new Set([3])}});`);
+  await h.run('buildAndSubmitJob("encode")');
+  assert.deepEqual(sent[4].paths, ["/media/a.mkv", "/media/b.mkv"]);
+  assert.deepEqual(sent[4].keep_languages, []);
+  assert.deepEqual(sent[4].track_picks, { "/media/b.mkv": { audio: [1], subtitles: [3] } });
+  assert.equal(h.run("batchTracks.files.size"), 0, "the next batch starts with every track");
 });
 
 function trackReportFixture(overrides = {}) {
@@ -7875,9 +7760,9 @@ test("Choose tracks is offered in the details of a finished file that kept untag
   assert.ok(labels({ ...job, mode: "compact" }, true).includes("Choose tracks"));
 });
 
-test("Choose tracks opens the goal form for the file with its goal and languages", async () => {
+test("Choose tracks opens the goal form for the file with its goal and every track", async () => {
   const h = harness({ radios: true });
-  h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; controls = () => { renderKeepTracks(); };');
+  h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; controls = () => { renderKeepTracks(); };');
   h.run('$("technical").checked = false; $("job-detail").open = true;');
   h.context.job = trackReportFixture({ mode: "compact" });
   const choose = h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks");
@@ -7889,14 +7774,8 @@ test("Choose tracks opens the goal form for the file with its goal and languages
   assert.equal(h.run("state.goalExplicit"), true);
   assert.equal(h.run("state.tab"), "library");
   assert.equal(h.run("state.fileStep"), "configure");
-  assert.equal(h.run("keepTracks.scope"), "job");
-  assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
-  // A job made with no language filter starts the form on every track.
-  h.context.job = trackReportFixture({ tracks: { ...trackReportFixture().tracks, languages: [] } });
-  await h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
-  assert.equal(h.run("keepTracks.scope"), "job");
-  assert.deepEqual(plain(h.run("keepTracks.languages")), []);
-  // Opening a file the ordinary way takes no goal or languages with it.
+  assert.equal(h.run("keepTracks.picks"), null, "the boxes start ticked, to untick by hand");
+  // Opening a file the ordinary way takes no goal with it.
   h.run('openGoalForm("/media/plain.mkv")');
   assert.equal(h.elements.get("path").value, "/media/plain.mkv");
 });
@@ -7917,34 +7796,40 @@ test("a batch's file rows carry the tracks they kept as short chips with numbers
 });
 
 
-test("the markup carries the languages editor and the picker inside the forms they belong to", () => {
-  const section = markup.slice(markup.indexOf('<section id="settings-languages"'), markup.indexOf("</section>", markup.indexOf('<section id="settings-languages"')));
-  for (const id of ["keep-languages-state", "keep-language-input", "keep-language-add", "keep-languages-list", "keep-languages-apply", "keep-languages-reset", "keep-languages-off", "keep-languages-note", "language-options"])
-    assert.match(section, new RegExp(`id="${id}"`), id);
-  assert.match(section, /original language and untagged tracks are always kept/i);
-  assert.match(section, /id="keep-languages-note"[^>]*role="status"/);
+// Hard rule: a control's label says what it does; no paragraph under it explains it.
+test("the job form has no explanatory paragraphs, only status lines", () => {
+  const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
+  const texts = [...form.matchAll(/<p\b([^>]*)>([^<]*)<\/p>/g)].filter(([, , text]) => text.trim()).map(([, attrs]) => /id="([^"]+)"/.exec(attrs)?.[1] || "");
+  assert.deepEqual(texts, ["source-summary", "goal-overridden", "worker-submit-status"]);
+  assert.doesNotMatch(source, /Automatic encodes the whole file|AAC is lossy/);
+});
+
+test("the markup carries the track picker inside the job form and no languages list", () => {
+  // Tracks are picked by hand: Settings has no list of languages to keep.
+  assert.doesNotMatch(markup, /settings-languages|keep-language/);
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
   const picker = form.slice(form.indexOf('<div id="keep-tracks"'), form.indexOf('<p id="goal-overridden"'));
   assert.ok(picker, "the picker is part of the goal step");
-  for (const id of ["keep-tracks-summary", "keep-job-languages", "keep-job-list", "keep-job-input", "keep-job-add", "keep-job-note", "keep-tracks-file", "keep-tracks-status", "keep-audio", "keep-audio-list", "keep-subtitles", "keep-subtitle-list", "keep-tracks-reset"])
+  for (const id of ["keep-tracks-summary", "keep-tracks-file", "keep-tracks-status", "keep-audio", "keep-audio-count", "keep-audio-list", "keep-subtitles", "keep-subtitle-count", "keep-subtitle-list", "keep-tracks-reset", "batch-tracks-open"])
     assert.match(picker, new RegExp(`id="${id}"`), id);
   assert.doesNotMatch(picker, /keep-scope/);
   assert.doesNotMatch(picker, /keep-all|Keep all tracks|Tick all/);
-  assert.match(picker, /keep at least one/i);
-  // Every selection, one file or a batch, chooses what happens to commentary.
-  assert.match(picker, /<div id="keep-commentary-row" class="goal-option">/);
-  assert.doesNotMatch(source, /keep-commentary-row/);
+  // No rule removes tracks on its own: no language list, commentary or channel choice.
+  assert.doesNotMatch(picker, /keep-job|keep-commentary|keep-channels|always kept/);
+  // Each kind of track starts folded.
+  assert.match(picker, /<details id="keep-audio" class="track-group">/);
+  assert.match(picker, /<details id="keep-subtitles" class="track-group">/);
+  assert.match(markup, /<dialog id="batch-tracks"/);
   // The job form is a form: an editor inside it must not open another one.
   assert.doesNotMatch(picker, /<form\b/);
   assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<div id="keep-tracks"'), "the choice follows the goal");
-  assert.match(css, /\.track-list\s*\{[^}]*overflow-y:\s*auto/);
 });
 
 test("Choose tracks starts the new job with the earlier job's goal, size limit, encoder and library", async () => {
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear();');
   const choose = async (job) => {
     h.context.job = job;
     await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
@@ -7961,7 +7846,7 @@ test("Choose tracks starts the new job with the earlier job's goal, size limit, 
   assert.equal(sent[0].media_type, "tv");
   assert.equal(sent[0].is_anime, true);
   assert.deepEqual(plain(sent[0].library_context), { service: "sonarr", id: 7 });
-  assert.deepEqual(sent[0].keep_languages, ["eng", "jpn", "spa"], "the languages the earlier job used");
+  assert.deepEqual(sent[0].keep_languages, [], "every track until one is unticked");
   assert.equal(h.run("state.goalCarry"), null, "what was carried is used once");
   // Save space with the media engine off and a limit like the other episodes.
   await choose(trackReportFixture({ goal: { mode: "size", allow_hardware: false, allow_slow_preset: true, size_budget_source: "siblings", size_budget_sibling_multiplier: 1.8 }, replacement_context: { service: "filesystem", source: "parent_batch" } }));
@@ -7996,7 +7881,7 @@ test("cancelling Choose tracks drops the carried goal settings, and a carried he
   const { h } = submissionHarness({ radios: true });
   const sent = [];
   h.context.capture = (_tool, args) => { sent.push(JSON.parse(args.inputs)); return { id: "submitted" }; };
-  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear(); keepLanguages.status = "ready"; keepLanguages.saved = ["eng"];');
+  h.run('tool = async (...args) => capture(...args); $("technical").checked = false; $("path").value = ""; state.folderSelected = new Set(); state.selected.clear();');
   const note = () => h.elements.get("compact-height-reason");
   h.context.job = trackReportFixture({ mode: "compact", goal: { mode: "compact", max_height: 720, allow_slow_preset: true } });
   await h.run("jobControls(job, true)").children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
@@ -8087,68 +7972,24 @@ test("HDR converts to SDR unless Keep HDR is picked, and each goal says so in it
   assert.equal(h.run("shrinkLabel(1080, true)"), "Shrink to 1080p, keeping HDR");
 });
 
-test("commentary and Prefer 2.0 are sent, change what the track list reads, and show in the summary", async () => {
-  const { h, pick } = goalHarness();
-  assert.equal(JSON.stringify(h.run("keepLanguageInputs()")), JSON.stringify({ drop_commentary: true }));
-  assert.match(h.run('keepTracksQuery("/media/movie.mkv")'), /drop_commentary=true/);
-  assert.doesNotMatch(h.run('keepTracksQuery("/media/movie.mkv")'), /prefer_stereo/);
-  pick("keep-commentary", "keep");
-  pick("keep-channels", "stereo");
-  assert.equal(JSON.stringify(h.run("keepLanguageInputs()")), JSON.stringify({ prefer_stereo: true }));
-  const query = h.run('keepTracksQuery("/media/movie.mkv")');
-  assert.match(query, /prefer_stereo=true/);
-  assert.doesNotMatch(query, /drop_commentary/);
-  assert.equal(h.run("state.goalExplicit"), true, "a track choice is the user's too");
-  assert.match(markup, /name="keep-commentary" value="drop" checked/);
-  assert.match(markup, /name="keep-channels" value="all" checked/);
-  assert.match(markup, /A language without one keeps what it has\./);
-  assert.match(source, /radioValue\("keep-commentary"\) === "drop" \? "no commentary"/);
+test("the form has no commentary or Prefer 2.0 choice and sends neither", () => {
+  const { h } = goalHarness();
+  assert.doesNotMatch(markup, /keep-commentary|keep-channels|Prefer 2\.0/);
+  assert.equal(h.run('keepTracksQuery("/media/movie.mkv")'), "path=%2Fmedia%2Fmovie.mkv&keep_languages=");
+  assert.deepEqual(plain(h.run('keepTrackInputs(true, "/media/movie.mkv")')), { keep_languages: [] });
 });
 
 test("a file without audio takes subtitle picks alone", async () => {
-  const { h, el, open, boxes, inputs } = keepHarness();
+  const { h, el, open, boxes, inputs, tick } = keepHarness();
   h.context.tracks = { ...keepFixture(), audio: [] };
   await open();
   assert.equal(el("keep-audio").hidden, true);
   assert.deepEqual(boxes("audio"), []);
-  assert.equal(el("keep-tracks-status").textContent, "Keeping 2 of 3 subtitles.");
-  h.run('toggleTrack("subtitles", 6, true)');
-  assert.deepEqual(inputs(), { keep_subtitle_streams: [5, 6, 7] }, "an empty audio list would be refused");
-  h.run('toggleTrack("subtitles", 6, false)');
-  assert.deepEqual(inputs(), {});
-});
-
-test("saving the list in Settings resets hand picks only where the form follows the saved list", async () => {
-  const { h, open } = keepHarness();
-  await open();
-  const changed = { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] };
-  // This job's own languages do not depend on the saved list.
-  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
-  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  h.run('toggleTrack("audio", 4, false)');
-  const key = h.run("keepTracks.key");
-  h.context.changed = changed;
-  h.run("applyKeepLanguages(changed, true)");
-  assert.deepEqual(plain(h.run("keepLanguages.saved")), ["eng", "fra"]);
-  assert.equal(h.run("keepTracks.key"), key);
-  assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [1, 3]);
-  // Every track neither.
-  h.run('keepTracks.languages = []; keepTracks.scope = "job"; controls()');
-  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  h.run('toggleTrack("audio", 4, false)');
-  h.context.changed = { languages: ["eng"], default: [] };
-  h.run("applyKeepLanguages(changed, true)");
-  assert.notEqual(h.run("keepTracks.picks"), null);
-  // The saved list does: the boxes follow it again.
-  h.run('keepTracks.scope = "saved"; controls()');
-  await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
-  h.run('toggleTrack("audio", 4, false)');
-  assert.notEqual(h.run("keepTracks.picks"), null);
-  h.context.changed = { languages: ["eng", "spa"], default: [] };
-  h.run("applyKeepLanguages(changed, true)");
-  assert.equal(h.run("keepTracks.picks"), null);
-  assert.equal(h.run("keepTracks.status"), "loading");
-  assert.equal(h.run("keepTracks.notice"), "The boxes follow the languages again.");
+  assert.equal(el("keep-subtitle-count").textContent, "3 of 3");
+  tick("subtitles", 6, false);
+  assert.deepEqual(inputs(), { keep_languages: [], keep_subtitle_streams: [5, 7] }, "an empty audio list would be refused");
+  tick("subtitles", 6, true);
+  assert.deepEqual(inputs(), { keep_languages: [] });
 });
 
 test("one file takes one source slot at a time: its tracks are read after its profile", async () => {
@@ -8163,8 +8004,8 @@ test("one file takes one source slot at a time: its tracks are read after its pr
   assert.equal(h.run("keepTracks.status"), "loading");
   const profileTimer = h.context.timers.length;
   assert.equal(profileTimer, 1, "only the profile read is scheduled");
-  // Changing the languages meanwhile does not start a second read.
-  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
+  // A form change meanwhile does not start a second read.
+  h.run("controls()");
   assert.equal(h.context.timers.length, profileTimer);
   await h.run('loadGoalProfile("/media/movie.mkv")');
   assert.deepEqual(plain(h.run("reads")), ["source-profile"]);
@@ -8172,9 +8013,6 @@ test("one file takes one source slot at a time: its tracks are read after its pr
   await h.context.timers.at(-1)();
   assert.deepEqual(plain(h.run("reads")), ["source-profile", "source-tracks"]);
   assert.equal(h.run("keepTracks.status"), "ready");
-  // With the profile already read, a language change reads the tracks at once.
-  h.run('keepTracks.languages = ["eng"]; refreshKeepTracks();');
-  assert.equal(h.context.timers.length, profileTimer + 2);
   // A failed profile read does not hold the tracks back either.
   h.run('$("path").value = "/media/next.mkv"; api = async (path) => { if (!path.startsWith("source-tracks")) throw new Error("no"); return tracks; }; refreshGoalProfile(); refreshKeepTracks();');
   const before = h.context.timers.length;
