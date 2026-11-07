@@ -337,9 +337,12 @@
                 <div class="goal-option">
                   <span id="conversion-video-label" class="goal-option-label">Video</span>
                   <div class="segmented" role="radiogroup" aria-labelledby="conversion-video-label">
+                    <label><input type="radio" name="conversion-video" value="copy" /><span>Keep</span></label>
                     <label><input type="radio" name="conversion-video" value="compress" checked /><span>Compress</span></label>
-                    <label><input type="radio" name="conversion-video" value="copy" /><span>Keep as it is</span></label>
+                    <label><input type="radio" name="conversion-video" value="x265_preserve" /><span>x265</span></label>
+                    <label><input type="radio" name="conversion-video" value="quality" /><span>Strict</span></label>
                   </div>
+                  <p id="conversion-video-note" class="muted size-budget-help" hidden></p>
                 </div>
                 <div class="goal-option">
                   <span id="compact-hdr-label" class="goal-option-label">HDR and Dolby Vision</span>
@@ -388,40 +391,22 @@
                     <input id="allow-hardware" type="checkbox" checked hidden />
                     <p id="size-engine-reason" class="muted size-budget-help" hidden></p>
                   </div>
-                <details id="more-goals" class="more-goals">
-                  <summary>More options</summary>
-                  <div class="goal-option">
-                    <span id="conversion-goal-label" class="goal-option-label">Goal</span>
-                    <div class="segmented" role="radiogroup" aria-labelledby="conversion-goal-label">
-                      <label><input type="radio" name="conversion-goal" value="" checked /><span>These options</span></label>
-                      <label><input type="radio" name="conversion-goal" value="x265_preserve" /><span>Keep quality, convert to x265</span></label>
-                      <label><input type="radio" name="conversion-goal" value="quality" /><span>Strict quality</span></label>
-                    </div>
-                  </div>
-                </details>
               </fieldset>
               <div id="goal-estimate" class="goal-estimate" role="status" aria-live="polite" hidden></div>
-              <details id="keep-tracks" class="keep-tracks" hidden>
-                <summary><span class="keep-tracks-title">Audio and subtitles</span><span id="keep-tracks-summary" class="metadata"></span></summary>
+              <div id="keep-tracks" class="keep-tracks" hidden>
+                <div class="keep-tracks-head"><span class="keep-tracks-title">Audio and subtitles</span><span id="keep-tracks-summary" class="metadata"></span></div>
                 <div class="keep-tracks-body">
-                  <div class="goal-option">
-                    <span id="keep-scope-label" class="goal-option-label">Languages to keep</span>
-                    <div class="segmented" role="radiogroup" aria-labelledby="keep-scope-label">
-                      <label><input type="radio" name="keep-scope" value="saved" checked /><span>Saved list</span></label>
-                      <label><input type="radio" name="keep-scope" value="job" /><span>This job only</span></label>
-                      <label><input type="radio" name="keep-scope" value="all" /><span>All tracks</span></label>
-                    </div>
-                  </div>
                   <div id="keep-job-languages" class="goal-option" hidden>
-                    <ul id="keep-job-list" class="language-chips" aria-label="Languages to keep for this job"></ul>
+                    <ul id="keep-job-list" class="language-chips" aria-label="Languages to keep"></ul>
+                    <p id="keep-job-empty" class="metadata" hidden>Every language stays. Add one to limit them.</p>
                     <div class="inline-form language-add">
-                      <input id="keep-job-input" list="language-options" aria-label="Add a language for this job" aria-describedby="keep-job-note" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Add a language" />
+                      <input id="keep-job-input" list="language-options" aria-label="Add a language" aria-describedby="keep-job-note" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Add a language" />
                       <button id="keep-job-add" type="button">Add</button>
                     </div>
                     <p id="keep-job-note" class="metadata" role="status"></p>
                   </div>
                   <p class="muted">Tracks in the file's original language and untagged tracks are always kept.</p>
-                  <div class="goal-option">
+                  <div id="keep-commentary-row" class="goal-option">
                     <span id="keep-commentary-label" class="goal-option-label">Commentary tracks</span>
                     <div class="segmented" role="radiogroup" aria-labelledby="keep-commentary-label">
                       <label><input type="radio" name="keep-commentary" value="drop" checked /><span>Remove</span></label>
@@ -450,15 +435,13 @@
                     <button id="keep-tracks-reset" type="button" class="quiet">Back to the automatic choice</button>
                   </div>
                 </div>
-              </details>
-              <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on in Advanced below. Turn it off to process with this goal.</p>
+              </div>
+              <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on below. Turn it off to process with this goal.</p>
               <label id="replace-auto-label" class="check replace-auto" hidden><input id="replace-auto" type="checkbox" />Replace automatically when done</label>
               <label id="queue-priority-label" class="check replace-auto"><input id="queue-priority" type="checkbox" />Run next, ahead of the queue</label>
-              <p id="queue-priority-reason" class="muted size-budget-help" hidden></p>
               <div class="conversion-defaults"><button id="save-conversion-defaults" type="button" class="quiet">Save as default</button><span id="conversion-defaults-status" class="metadata" role="status"></span></div>
               <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
-              <details id="advanced-profiles" class="advanced-profiles">
-              <summary><span>Advanced: technical profiles</span><span id="advanced-state" class="advanced-state">Off</span></summary>
+              <div id="advanced-profiles" class="advanced-profiles">
               <p class="metadata advanced-explain">Pick a specific profile, custom encoder settings or batch limits. While this is on, the goal above is not used: the profile chosen here decides the settings, and each file becomes a candidate you review before any original is replaced.</p>
               <label class="check technical-toggle"><input id="technical" type="checkbox" />Use a technical profile instead of the goal</label>
               <div id="legacy-controls" hidden>
@@ -614,7 +597,7 @@
                 </p>
               </div>
               </div>
-              </details>
+              </div>
               <div class="submit-actions">
                 <button id="preview" type="button">Preview selection</button
                 ><button class="primary" id="enqueue">Create candidate</button>

@@ -1018,7 +1018,8 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			switch r.inst.ActionName {
 			case "transcode_media", "transcode_batch":
 				job["replace_when_done"] = s.replaceWhenDoneOf(r, recordsByID, replaceWhenDone)
-				if r.inputs["queue_priority"] == true && waitingItsTurn(r) {
+				parent, hasParent := recordsByID[operationString(r.inputs["parent_action_id"])]
+				if (r.inputs["queue_priority"] == true || hasParent && parent.inputs["queue_priority"] == true) && waitingItsTurn(r) {
 					job["queue_priority"] = true
 				}
 				if skipped := operationString(operationValue(r, "replace_when_done_skipped")); skipped != "" {

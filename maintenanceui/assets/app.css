@@ -2754,7 +2754,7 @@ pre {
   .segmented { width: 100%; }
   .segmented label { flex: 1 1 auto; justify-content: center; text-align: center; }
 }
-.processing-goal > .goal-option, .more-goals > .goal-option { margin: 0 0 .85rem; }
+.processing-goal > .goal-option { margin: 0 0 .85rem; }
 .processing-goal .size-budget-help { margin: 0; font-size: 12px; }
 .conversion-defaults { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: 0 0 .75rem; }
 .source-profile { margin: 0 0 .5rem; overflow-wrap: anywhere; }
@@ -2762,27 +2762,12 @@ pre {
 .goal-note[data-kind="recommended"], .goal-note[data-kind="keeps"] { color: var(--forest); }
 .goal-note[data-kind="skip"] { color: var(--warning); }
 /* More goals is a quiet disclosure, not a second card around the goal cards. */
-.more-goals { margin: .45rem 0 0; }
-.more-goals > summary { display: flex; align-items: center; gap: 8px; min-height: var(--control-size); cursor: pointer; color: var(--muted); font-size: .9rem; list-style: none; }
-.more-goals > summary::-webkit-details-marker { display: none; }
-.more-goals > summary::before { content: "▸"; }
-.more-goals[open] > summary::before { content: "▾"; }
-.more-goals > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .technical-toggle { margin: .75rem 0; }
 .processing-goal:disabled { opacity: .55; }
 .processing-goal:disabled label { cursor: not-allowed; }
 .processing-goal:disabled .goal-card { background: var(--disabled); }
 .goal-overridden { margin: -.5rem 0 1rem; padding: .55rem .7rem; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
-.advanced-profiles { margin: 1rem 0; padding: 0 .85rem; border: 1px solid var(--line); border-radius: 8px; }
-.advanced-profiles > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; cursor: pointer; font-weight: 600; }
-.advanced-profiles > summary::before { content: "▸"; color: var(--muted); }
-.advanced-profiles[open] > summary::before { content: "▾"; }
-.advanced-profiles > summary > span:first-child { flex: 1; }
-.advanced-profiles > summary::-webkit-details-marker { display: none; }
-.advanced-profiles > summary { list-style: none; }
-.advanced-state { flex-shrink: 0; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; font-weight: 500; }
-.advanced-state[data-on="true"] { border-color: var(--accent); color: var(--accent); }
-.advanced-profiles[open] { padding-bottom: .5rem; }
+.advanced-profiles { margin: 1rem 0; padding: .5rem .85rem; border: 1px solid var(--line); border-radius: 8px; }
 .advanced-explain { margin: 0 0 .25rem; }
 #recipe-dirty[data-dirty="true"] { font-weight: 600; }
 #settings-worker { margin-bottom: 1.25rem; }
@@ -2943,7 +2928,7 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
     height: var(--control-size);
     transform: translateY(-50%);
   }
-  details:not(.advanced-profiles) > summary {
+  details > summary {
     padding-block: 12px;
   }
 }
@@ -3084,16 +3069,12 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .language-add { margin: 0; }
 .language-add input { width: 12rem; max-width: 100%; }
 .language-settings .settings-row { border-bottom: 0; }
-.keep-tracks { margin: 1rem 0; padding: 0 .85rem; border: 1px solid var(--line); border-radius: 8px; }
+.keep-tracks { margin: 1rem 0; padding: 0 .85rem .85rem; border: 1px solid var(--line); border-radius: 8px; }
 .keep-tracks[hidden] { display: none; }
-.keep-tracks > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; cursor: pointer; list-style: none; }
-.keep-tracks > summary::-webkit-details-marker { display: none; }
-.keep-tracks > summary::before { content: "▸"; color: var(--muted); }
-.keep-tracks[open] > summary::before { content: "▾"; }
+.keep-tracks-head { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .keep-tracks-title { flex: none; font-weight: 600; }
-.keep-tracks > summary .metadata { flex: 1; min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.keep-tracks-head .metadata { flex: 1; min-width: 0; overflow: hidden; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .keep-tracks .segmented label { white-space: nowrap; }
-.keep-tracks[open] { padding-bottom: .85rem; }
 .keep-tracks-body { display: grid; gap: .85rem; }
 .keep-tracks-body > p { margin: 0; }
 .track-group { margin: 0; padding: 0; border: 0; min-width: 0; }

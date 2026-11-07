@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -24,9 +25,14 @@ import (
 // and the server keeps the order. The order key is:
 //   - a single file: its creation time;
 //   - a batch item: its batch's creation time, then its place in the batch;
-//   - a single file asked with queue_priority=true: before everything else, in
-//     creation order among such files. It still waits for the job running on
-//     a worker to end; it only goes first in the queue.
+//   - a whole batch asked with queue_priority=true: before everything not asked
+//     first, in creation order among such batches, and its files stay together;
+//   - a single file asked with queue_priority=true: before everything else, so
+//     a long batch asked first does not hold it back, in creation order among
+//     such files.
+//
+// Either still waits for the job running on a worker to end; it only goes
+// first in the queue. Pausing a batch takes it out of the way of the rest.
 //
 // A conversion takes a worker when fewer conversions are ahead of it than
 // there are free slots. Ahead are the conversions waiting for a worker with a
@@ -47,18 +53,46 @@ const (
 // queueOrderTimeLayout has a fixed width so keys compare as strings.
 const queueOrderTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
-// queueOrder builds a sortable queue key: priority rank, time, group (the
-// batch or the action) and the place within the group.
-func queueOrder(priority bool, at time.Time, group string, seq int64) string {
-	rank := 1
-	if priority {
-		rank = 0
+// Queue ranks, first to last. Conversions already waiting keep their stamped
+// keys, so the values cannot be renumbered: "0~|" sorts after any "0|" key
+// because '~' follows '|', and before any "1|" key.
+const (
+	queueRankFileFirst  = "0"
+	queueRankBatchFirst = "0~"
+	queueRankPlain      = "1"
+)
+
+func fileQueueRank(first bool) string {
+	if first {
+		return queueRankFileFirst
 	}
-	return fmt.Sprintf("%d|%s|%s|%020d", rank, at.UTC().Format(queueOrderTimeLayout), group, seq)
+	return queueRankPlain
+}
+
+func batchQueueRank(first bool) string {
+	if first {
+		return queueRankBatchFirst
+	}
+	return queueRankPlain
+}
+
+// queueOrder builds a sortable queue key: rank, time, group (the batch or the
+// action) and the place within the group.
+func queueOrder(rank string, at time.Time, group string, seq int64) string {
+	return fmt.Sprintf("%s|%s|%s|%020d", rank, at.UTC().Format(queueOrderTimeLayout), group, seq)
+}
+
+// instanceAskedFirst reports an action created with queue_priority=true.
+func instanceAskedFirst(inst *store.ActionInstance) bool {
+	var inputs map[string]any
+	if json.Unmarshal([]byte(inst.InputsJSON), &inputs) != nil {
+		return false
+	}
+	return getBool(inputs, "queue_priority")
 }
 
 func batchItemQueueOrder(r store.QueuedBatchItemRow) string {
-	return queueOrder(false, parseStoreTime(r.BatchCreatedAt), r.BatchID, r.ItemID)
+	return queueOrder(batchQueueRank(r.Priority), parseStoreTime(r.BatchCreatedAt), r.BatchID, r.ItemID)
 }
 
 func parseStoreTime(s string) time.Time {
@@ -109,7 +143,7 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 		if item != nil {
 			seq = item.ID
 		}
-		key = queueOrder(false, parseStoreTime(parent.CreatedAt), parentID, seq)
+		key = queueOrder(batchQueueRank(instanceAskedFirst(parent)), parseStoreTime(parent.CreatedAt), parentID, seq)
 	} else {
 		inst, err := e.deps.Store.GetActionInstanceIfExists(ec.InstanceID)
 		if err != nil {
@@ -118,7 +152,7 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 		if inst == nil {
 			return "", fmt.Errorf("action %s not found", ec.InstanceID)
 		}
-		key = queueOrder(getBool(ec.Inputs, "queue_priority"), parseStoreTime(inst.CreatedAt), ec.InstanceID, 0)
+		key = queueOrder(fileQueueRank(getBool(ec.Inputs, "queue_priority")), parseStoreTime(inst.CreatedAt), ec.InstanceID, 0)
 	}
 	ec.State[transcodeQueueOrderKey] = key
 	ec.State[transcodeQueueSinceKey] = e.now().Format(time.RFC3339Nano)
