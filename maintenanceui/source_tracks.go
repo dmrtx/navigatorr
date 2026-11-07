@@ -1,7 +1,6 @@
 package maintenanceui
 
 import (
-	"context"
 	"net/http"
 	"net/url"
 	"slices"
@@ -187,16 +186,12 @@ func (s *Server) sourceTracks(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid " + field, "code": "invalid_params", "field": field})
 		return
 	}
-	path, release, ok := s.openSource(w, r)
+	path, info, ok := s.openSource(w, r)
 	if !ok {
 		return
 	}
-	defer release()
-	// The profile's budget: a volume that was asleep for the profile read is
-	// awake now, but a file read on its own may have to wake it.
-	ctx, cancel := context.WithTimeout(r.Context(), sourceProfileTimeout)
-	defer cancel()
-	rep, ok := s.probeSource(ctx, w, path, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) > 0 })
+	// Usually the profile's probe, kept: a file read on its own has the profile's budget.
+	rep, ok := s.readSource(r.Context(), w, path, info, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) > 0 })
 	if !ok {
 		return
 	}

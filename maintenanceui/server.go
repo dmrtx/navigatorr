@@ -70,6 +70,8 @@ type Server struct {
 	// probe and classify replace ffprobe in tests; nil uses the real ones.
 	probe    func(ctx context.Context, ffprobe, path string) (mediainspect.DetailedReport, error)
 	classify action.SourceClassifier
+	// sourceReads keeps what the goal form read in each file, until the file changes.
+	sourceReads sourceReadCache
 	// slotSync is the last slot push to each worker, by worker name.
 	slotSync struct {
 		mu    sync.Mutex

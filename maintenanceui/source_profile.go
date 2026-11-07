@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
 
@@ -31,10 +32,9 @@ type sourceProfile struct {
 }
 
 // openSource resolves the requested path against the read allow-list the file
-// browser uses and takes one of the two read slots. Nothing outside the
-// allow-list is touched, and only a regular video file is accepted. The caller
-// releases the slot when it is done.
-func (s *Server) openSource(w http.ResponseWriter, r *http.Request) (path string, release func(), ok bool) {
+// browser uses. Nothing outside the allow-list is touched, and only a regular
+// video file is accepted.
+func (s *Server) openSource(w http.ResponseWriter, r *http.Request) (path string, info os.FileInfo, ok bool) {
 	resolver := s.engine.Deps().Fs
 	if resolver == nil {
 		fail(w, 400, "filesystem navigation is unavailable")
@@ -45,24 +45,33 @@ func (s *Server) openSource(w http.ResponseWriter, r *http.Request) (path string
 		fail(w, 400, err.Error())
 		return "", nil, false
 	}
-	info, err := os.Stat(path)
+	info, err = os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || !videoPath(path) {
 		fail(w, 400, "choose a video file")
 		return "", nil, false
 	}
-	select {
-	case sourceProfileSlots <- struct{}{}:
-		return path, func() { <-sourceProfileSlots }, true
-	default:
-		fail(w, 429, "busy reading another file; try again")
-		return "", nil, false
-	}
+	return path, info, true
 }
 
-// probeSource reads the file's streams the way a transcode job will. A file
+// readSource is the file's probe: the one kept from an earlier read of this
+// same file when there is one, else a read the way a transcode job will make
+// it, in one of the two read slots and within sourceProfileTimeout. A file
 // that cannot be read is a handled status, never a gateway error: the console
 // takes 502, 503 and 504 for an unreachable server.
-func (s *Server) probeSource(ctx context.Context, w http.ResponseWriter, path string, valid func(*mediainspect.DetailedReport) bool) (*mediainspect.DetailedReport, bool) {
+func (s *Server) readSource(ctx context.Context, w http.ResponseWriter, path string, info os.FileInfo, valid func(*mediainspect.DetailedReport) bool) (*mediainspect.DetailedReport, bool) {
+	stamp := stampOf(info)
+	if kept := s.sourceReads.get(path, stamp); kept != nil && kept.report != nil && valid(kept.report) {
+		return kept.report, true
+	}
+	select {
+	case sourceProfileSlots <- struct{}{}:
+		defer func() { <-sourceProfileSlots }()
+	default:
+		fail(w, 429, "busy reading another file; try again")
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, sourceProfileTimeout)
+	defer cancel()
 	probe := s.probe
 	if probe == nil {
 		probe = mediainspect.InspectDetailed
@@ -76,25 +85,50 @@ func (s *Server) probeSource(ctx context.Context, w http.ResponseWriter, path st
 		fail(w, 422, "could not read this file")
 		return nil, false
 	}
+	s.sourceReads.putReport(path, stamp, rep)
 	return &rep, true
+}
+
+// classifySource is the classifier SourceGoals uses for path, answering from
+// the dynamic range kept for this same file when there is one.
+func (s *Server) classifySource(path string, info os.FileInfo) action.SourceClassifier {
+	stamp := stampOf(info)
+	return func(ctx context.Context, rep *mediainspect.DetailedReport) (mediainspect.DynamicRange, error) {
+		if kept := s.sourceReads.get(path, stamp); kept != nil && kept.dynamic != nil {
+			return *kept.dynamic, nil
+		}
+		var (
+			d   mediainspect.DynamicRange
+			err error
+		)
+		if s.classify != nil {
+			d, err = s.classify(ctx, rep)
+		} else {
+			d, err = mediainspect.ClassifySource(ctx, s.engine.Deps().Ffprobe, path, rep)
+		}
+		if err == nil {
+			s.sourceReads.putDynamic(path, stamp, d)
+		}
+		return d, err
+	}
 }
 
 // sourceProfile reads one video the way a transcode job will, and reports for
 // each goal whether the job's own source gates would skip it. Nothing is
 // queued or written.
 func (s *Server) sourceProfile(w http.ResponseWriter, r *http.Request) {
-	path, release, ok := s.openSource(w, r)
+	path, info, ok := s.openSource(w, r)
 	if !ok {
 		return
 	}
-	defer release()
+	rep, ok := s.readSource(r.Context(), w, path, info, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) == 1 })
+	if !ok {
+		return
+	}
+	// The decoded-frame check for HDR shares the probe's budget.
 	ctx, cancel := context.WithTimeout(r.Context(), sourceProfileTimeout)
 	defer cancel()
-	rep, ok := s.probeSource(ctx, w, path, func(rep *mediainspect.DetailedReport) bool { return len(rep.MainVideo()) == 1 })
-	if !ok {
-		return
-	}
-	goals := s.engine.SourceGoals(ctx, path, rep, s.classify)
+	goals := s.engine.SourceGoals(ctx, path, rep, s.classifySource(path, info))
 	writeJSON(w, 200, map[string]any{"profile": describeSource(rep, goals.Dynamic), "goals": goals.Goals, "recommended": goals.Recommended})
 }
 

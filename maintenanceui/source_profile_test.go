@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -187,5 +188,78 @@ func TestCompressionPageListsGoalsAndChanges(t *testing.T) {
 	}
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Goals) != 5 || page.Goals[0].Goal != "size" || page.Goals[0].Video == "" || len(page.Changes) == 0 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// The goal form reads a file once: opening it again, or listing its tracks,
+// answers from that read until the file changes.
+func TestSourceReadsAreKeptUntilTheFileChanges(t *testing.T) {
+	s, h := testUI(t)
+	root := t.TempDir()
+	video := filepath.Join(root, "movie.mkv")
+	if err := os.WriteFile(video, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	deps := s.engine.Deps()
+	deps.Fs, _ = fsop.NewResolver([]string{root}, nil)
+	s.engine = action.NewEngine(deps)
+	stream := mediainspect.DetailedStream{Kind: "video", Codec: "hevc", Width: 3840, Height: 2160, BitDepth: 10, FPS: 23.976, ColorTransfer: "smpte2084", ColorPrimaries: "bt2020", ColorSpace: "bt2020nc", PixelFormat: "yuv420p10le", MasteringDisplay: hdr10Mastering()}
+	probes, classifies := 0, 0
+	s.probe = func(_ context.Context, _, path string) (mediainspect.DetailedReport, error) {
+		probes++
+		return mediainspect.DetailedReport{Path: path, Probed: true, SizeBytes: 63_000_000_000, Video: []mediainspect.DetailedStream{stream}}, nil
+	}
+	s.classify = func(_ context.Context, rep *mediainspect.DetailedReport) (mediainspect.DynamicRange, error) {
+		classifies++
+		v := rep.MainVideo()[0]
+		return mediainspect.ClassifyDynamicRange(rep, &mediainspect.FrameSignals{Probed: true, Frames: 8, ColorTransfer: v.ColorTransfer, ColorPrimaries: v.ColorPrimaries, ColorSpace: v.ColorSpace}), nil
+	}
+	query := "?path=" + url.QueryEscape(video)
+	profile := func() profileResponse {
+		w := request(h, "GET", "/api/maintenance/source-profile"+query, "", true)
+		var out profileResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return out
+	}
+	first := profile()
+	if probes != 1 || classifies != 1 {
+		t.Fatalf("first read: %d probes, %d classifications", probes, classifies)
+	}
+	again := profile()
+	if w := request(h, "GET", "/api/maintenance/source-tracks"+query, "", true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if probes != 1 || classifies != 1 {
+		t.Fatalf("the same file was read again: %d probes, %d classifications", probes, classifies)
+	}
+	if again.Profile != first.Profile || again.Recommended != first.Recommended {
+		t.Fatalf("kept read answered differently: %+v, then %+v", first, again)
+	}
+	// Rewritten: another size, so it is read afresh.
+	if err := os.WriteFile(video, []byte("a longer fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profile()
+	if probes != 2 || classifies != 2 {
+		t.Fatalf("a changed file was not read again: %d probes, %d classifications", probes, classifies)
+	}
+}
+
+func TestSourceReadCacheKeepsTheMostRecentFiles(t *testing.T) {
+	var c sourceReadCache
+	stamp := sourceStamp{size: 1}
+	for i := range sourceCacheSize + 1 {
+		c.putReport(filepath.Join("/media", strconv.Itoa(i)), stamp, mediainspect.DetailedReport{Probed: true})
+	}
+	if c.get("/media/0", stamp) != nil {
+		t.Fatal("the oldest file outlived the bound")
+	}
+	if c.get("/media/1", stamp) == nil || c.get(filepath.Join("/media", strconv.Itoa(sourceCacheSize)), stamp) == nil {
+		t.Fatal("a recent file was dropped")
+	}
+	if c.get("/media/1", sourceStamp{size: 2}) != nil || c.get("/media/1", stamp) != nil {
+		t.Fatal("a read of another version of the file was kept")
 	}
 }
