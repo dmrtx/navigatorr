@@ -174,7 +174,7 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	if all := e.deps.Workers.All(); len(all) == 1 {
 		return e.recordAssignedWorker(ctx, ec, all[0].Name)
 	}
-	name, condition, err := e.pickVideoWorker(ctx)
+	name, condition, err := e.pickVideoWorker(ctx, conversionRetentionNeed(ec))
 	if err != nil {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: condition, WaitingReason: err.Error()}, true
 	}
@@ -197,11 +197,14 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 // pickVideoWorker chooses the ready worker with the most free video slots,
 // the first in config order on a tie. A worker with no free slot is never
 // chosen, so no worker holds a backlog: the transcode queue keeps the order.
+// A worker that reports no room to retain the conversion's candidate (need
+// bytes; see worker_retention_fit.go) is never chosen for it.
 // With nothing to choose it returns the waiting condition: worker_unreachable
 // when no worker is ready, worker_busy when every ready worker is full.
-func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
+func (e *Engine) pickVideoWorker(ctx context.Context, need int64) (string, string, error) {
 	workers := e.deps.Workers.All()
 	ready := e.workersReady(ctx, workers)
+	eligible := e.retentionEligible(ctx, workers, ready, need)
 	active := map[string]int{}
 	if e.deps.Store != nil {
 		counts, err := e.deps.Store.CountActiveWorkerActions("transcode_media")
@@ -212,7 +215,7 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 			active[e.resolveWorker(name)] += n
 		}
 	}
-	best, bestFree, anyReady := -1, 0, false
+	best, bestFree, anyReady, noRoom := -1, 0, false, false
 	for i, w := range workers {
 		if !ready[i] {
 			continue
@@ -222,6 +225,10 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 		if free <= 0 {
 			continue
 		}
+		if !eligible[i] {
+			noRoom = true
+			continue
+		}
 		if best < 0 || free > bestFree {
 			best, bestFree = i, free
 		}
@@ -229,6 +236,8 @@ func (e *Engine) pickVideoWorker(ctx context.Context) (string, string, error) {
 	switch {
 	case best >= 0:
 		return workers[best].Name, "", nil
+	case noRoom:
+		return "", "worker_busy", fmt.Errorf("%s", retentionWaitReason(need))
 	case anyReady:
 		return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
 	}

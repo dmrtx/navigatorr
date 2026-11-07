@@ -27,7 +27,56 @@ type SchedulerObservation struct {
 	Stale                 bool                                 `json:"stale"`
 	LastError             *WorkerDiagnostic                    `json:"last_error,omitempty"`
 	Sweeps                map[string]SchedulerSweepObservation `json:"sweeps,omitempty"`
+	// Retention is the room the worker has left to retain candidates. Nil from
+	// a worker that does not report it or has no retention limit.
+	Retention *RetentionRoom `json:"retention,omitempty"`
 }
+
+// RetentionRoom is how many bytes of candidates a worker can still retain,
+// measured the way it admits a job when its slot comes up: the candidates it
+// holds, and the source size reserved for each job that has started and not
+// written its candidate yet. The free-disk floor is not part of it.
+type RetentionRoom struct {
+	ObservedAt time.Time `json:"observed_at"`
+	// CapacityBytes is the worker's retained_candidates_max_bytes.
+	CapacityBytes int64 `json:"capacity_bytes"`
+	// RoomBytes is what is left of it, never negative.
+	RoomBytes int64 `json:"room_bytes"`
+}
+
+// RetentionRoomMaxAge is how long a worker's report of its retention room is
+// trusted. The worker takes it once per scheduler pass.
+const RetentionRoomMaxAge = 45 * time.Second
+
+// RetentionFit says whether a candidate of need bytes can be retained by the
+// worker that reported r, as of now. A report that is missing or old says
+// nothing: the candidate is taken to fit, as before workers reported it.
+type RetentionFit int
+
+const (
+	// RetentionFits: the room is enough now, or unknown.
+	RetentionFits RetentionFit = iota
+	// RetentionFull: the budget could hold the candidate, but not with what the
+	// worker holds now; room comes back when a candidate is approved or
+	// discarded.
+	RetentionFull
+	// RetentionTooLarge: the candidate is larger than the whole budget.
+	RetentionTooLarge
+)
+
+func (r *RetentionRoom) Fit(need int64, now time.Time) RetentionFit {
+	if r == nil || need <= 0 || r.CapacityBytes <= 0 || now.Sub(r.ObservedAt) > RetentionRoomMaxAge {
+		return RetentionFits
+	}
+	switch {
+	case need > r.CapacityBytes:
+		return RetentionTooLarge
+	case need > r.RoomBytes:
+		return RetentionFull
+	}
+	return RetentionFits
+}
+
 type WorkerObservation struct {
 	SchedulerObservation
 	// Name is the worker observed; empty on the summary of several workers.

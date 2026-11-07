@@ -284,6 +284,11 @@ Everything below assumed the candidate was on the share. Each place must read
 4. UI and storage view.
 5. Make `on_approval` the default only after measured use. `on_encode` stays for
    workers with small disks.
+6. Retention room in the worker's health (revision 6, see "Giving a conversion
+   only to a worker that can retain it"). The field is optional on both sides, so
+   either can go first: a server that does not know it ignores it, and a worker
+   that does not send it is taken to have room. It has effect once the workers
+   report it and the server reads it.
 
 Once `on_approval` is on, moving a job to a different or older worker is unsafe.
 
@@ -399,6 +404,39 @@ submit rather than silently publishing on encode.
 **Batch children defer too** (revision 4; revisions 1 to 3 refused them at
 admission). `publishPolicyFor` no longer looks at `parent_action_id`. "Batches"
 below gives the reasoning and the one rule that keeps a batch from stalling.
+
+**Giving a conversion only to a worker that can retain it.** A standalone
+conversion on a worker that publishes on approval waits, queued on the worker,
+until the worker has room for the candidate, and the worker reserves the size of
+the source for it. The conversion keeps the worker it was given, so the
+coordinator gives it one only if that worker reports room for it
+(`action/worker_retention_fit.go`):
+
+- The worker measures `retention` once per scheduler pass and publishes it in the
+  `scheduler` object of `GET /v1/health`: `observed_at`, `capacity_bytes`
+  (`retained_candidates_max_bytes`) and `room_bytes` (what is left of it after the
+  candidates it holds and the reservations of jobs that have not written theirs;
+  never negative). The probe only reads the last measure. A worker with no budget,
+  or with deferred publication off, reports none, and a measure that fails keeps
+  the previous one.
+- The coordinator needs `source bytes` (the size stamped at submit,
+  `submitted_source_bytes`) of room on that worker. A batch child needs none: the
+  worker starts it to publish on encode when the budget is full. A worker that
+  publishes on encode needs none either.
+- A report that is missing, or older than 45 seconds, says nothing and the worker
+  is taken to have room, as it was before workers reported it. Workers that have
+  not been rolled out yet behave as before.
+- With a free slot on a worker that reports it cannot hold the file, the
+  conversion is not assigned there: it takes another worker's free slot that can,
+  or waits unassigned in the transcode queue ("No node with a free slot has room
+  to retain its candidate"). A conversion that waits this way does not hold back
+  the ones behind it from slots it cannot use, but stays ahead of them for the
+  slots it can, so it is not starved by later, smaller files.
+- A file larger than the whole budget of every ready worker fits nowhere, and
+  waiting for room would never help: it is assigned as before and the worker
+  decides.
+- The free-disk floor is not part of the report. It depends on what else sits on
+  the work disk, so the worker still decides it when the job starts.
 
 **Where the candidate is.** `candidate_location` is `share` (or absent) or
 `worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot

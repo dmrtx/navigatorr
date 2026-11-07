@@ -131,3 +131,43 @@ func TestQueuedBatchItemsCarryTheBatchPriority(t *testing.T) {
 		t.Fatalf("priority by batch: %v", got)
 	}
 }
+
+// A waiting conversion carries the size its file had when it was submitted and
+// whether it is standalone, which is what the room its worker must have to
+// retain its candidate depends on.
+func TestTranscodeQueueWaitersCarryTheirSizeAndWhetherTheyAreStandalone(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateActionInstance(ActionInstance{ID: "batch", ActionName: "transcode_batch", Status: ActionStatusWaitingExternal, StateJSON: `{}`}); err != nil {
+		t.Fatal(err)
+	}
+	conv := func(id, inputs, state string) {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusWaitingExternal, InputsJSON: inputs, StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conv("single", `{}`, `{"transcode_queue_order":"1|a","submitted_source_bytes":31765000000}`)
+	conv("single-unknown", `{}`, `{"transcode_queue_order":"1|b"}`)
+	conv("child", `{"parent_action_id":"batch"}`, `{"transcode_queue_order":"1|c","submitted_source_bytes":5000}`)
+
+	waiters, err := s.ListTranscodeQueueWaiters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	type shape struct {
+		bytes      int64
+		standalone bool
+	}
+	got := map[string]shape{}
+	for _, w := range waiters {
+		got[w.ID] = shape{w.SourceBytes, w.Standalone}
+	}
+	want := map[string]shape{"single": {31765000000, true}, "single-unknown": {0, true}, "child": {5000, false}}
+	if len(got) != len(want) {
+		t.Fatalf("waiters: %+v", waiters)
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Fatalf("%s = %+v, want %+v (all: %+v)", id, got[id], w, got)
+		}
+	}
+}

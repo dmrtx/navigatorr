@@ -159,30 +159,72 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 	return key, nil
 }
 
-// freeVideoSlots is how many more conversions the ready workers can take:
-// for each, its video capacity minus the conversions assigned to it. A worker
-// already past its capacity frees nothing for the others.
-func (e *Engine) freeVideoSlots(ctx context.Context, workers []transcode.NamedWorker, ready []bool) (int, error) {
+// queueSlots are the ready workers and the free video slots of each: its
+// video capacity minus the conversions assigned to it. A worker already past
+// its capacity frees nothing for the others.
+type queueSlots struct {
+	workers []transcode.NamedWorker
+	ready   []bool
+	free    map[string]int
+}
+
+func (e *Engine) queueSlots(ctx context.Context) (queueSlots, error) {
+	workers := e.deps.Workers.All()
+	ready := e.readyForQueue(ctx, workers)
 	counts, err := e.deps.Store.CountActiveWorkerActions("transcode_media")
 	if err != nil {
-		return 0, err
+		return queueSlots{}, err
 	}
 	active := map[string]int{}
 	for name, n := range counts {
 		active[e.resolveWorker(name)] += n
 	}
-	free := 0
+	free := map[string]int{}
 	for i, w := range workers {
 		if ready[i] {
-			free += max(0, e.workerVideoCapacity(ctx, w)-active[w.Name])
+			free[w.Name] = max(0, e.workerVideoCapacity(ctx, w)-active[w.Name])
 		}
 	}
-	return free, nil
+	return queueSlots{workers: workers, ready: ready, free: free}, nil
 }
 
-// transcodeQueueAhead counts the conversions ahead of key: waiters with a
-// smaller key (self excluded) and queued batch items with a smaller key.
-func (e *Engine) transcodeQueueAhead(key, self string) (int, error) {
+// total is how many more conversions the ready workers can take.
+func (q queueSlots) total() int {
+	n := 0
+	for _, f := range q.free {
+		n += f
+	}
+	return n
+}
+
+// usableBy are the workers with a free slot that a conversion needing need
+// bytes of retention room may be given.
+func (e *Engine) usableBy(ctx context.Context, q queueSlots, need int64) []bool {
+	eligible := e.retentionEligible(ctx, q.workers, q.ready, need)
+	out := make([]bool, len(q.workers))
+	for i, w := range q.workers {
+		out[i] = q.ready[i] && eligible[i] && q.free[w.Name] > 0
+	}
+	return out
+}
+
+// slotsIn is the free slots on the workers in usable.
+func (q queueSlots) slotsIn(usable []bool) int {
+	n := 0
+	for i, w := range q.workers {
+		if usable[i] {
+			n += q.free[w.Name]
+		}
+	}
+	return n
+}
+
+// transcodeQueueAhead counts the conversions ahead of key that compete with a
+// conversion for the workers in usable: waiters with a smaller key (self
+// excluded) and queued batch items with a smaller key. A waiter that no worker
+// in usable can take goes first without holding the conversion back: it waits
+// for room elsewhere.
+func (e *Engine) transcodeQueueAhead(ctx context.Context, q queueSlots, usable []bool, key, self string) (int, error) {
 	waiters, err := e.deps.Store.ListTranscodeQueueWaiters()
 	if err != nil {
 		return 0, err
@@ -197,6 +239,9 @@ func (e *Engine) transcodeQueueAhead(key, self string) (int, error) {
 		if updated, err := time.Parse(time.RFC3339Nano, w.UpdatedAt); err == nil && e.now().Sub(updated) > slotWaiterStaleAfter {
 			continue
 		}
+		if need := retentionNeed(w.Standalone, w.SourceBytes); need > 0 && !sharesAWorker(usable, e.usableBy(ctx, q, need)) {
+			continue
+		}
 		ahead++
 	}
 	items, err := e.deps.Store.ListQueuedBatchItems()
@@ -209,6 +254,16 @@ func (e *Engine) transcodeQueueAhead(key, self string) (int, error) {
 		}
 	}
 	return ahead, nil
+}
+
+// sharesAWorker reports whether both masks include some worker.
+func sharesAWorker(a, b []bool) bool {
+	for i := range a {
+		if a[i] && b[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // readyForQueue is which workers count for the queue: the ready ones, or all
@@ -251,13 +306,16 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 		log.Printf("transcode queue: ordering %s: %v (assigning without queue order)", ec.InstanceID, err)
 		return StepResult{}, false
 	}
-	workers := e.deps.Workers.All()
-	free, err := e.freeVideoSlots(ctx, workers, e.readyForQueue(ctx, workers))
+	q, err := e.queueSlots(ctx)
 	if err != nil {
 		log.Printf("transcode queue: counting free slots for %s: %v (assigning without queue order)", ec.InstanceID, err)
 		return StepResult{}, false
 	}
-	ahead, err := e.transcodeQueueAhead(key, ec.InstanceID)
+	// Only the free slots on workers that can retain its candidate are its own.
+	need := conversionRetentionNeed(ec)
+	usable := e.usableBy(ctx, q, need)
+	free := q.slotsIn(usable)
+	ahead, err := e.transcodeQueueAhead(ctx, q, usable, key, ec.InstanceID)
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for %s: %v (assigning without queue order)", ec.InstanceID, err)
 		return StepResult{}, false
@@ -271,7 +329,10 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	ec.State[workerSlotPositionKey] = position
 	markWaitingForWorker(ec)
 	reason := fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
-	if ahead == 0 {
+	switch {
+	case free == 0 && q.total() > 0 && need > 0:
+		reason = retentionWaitReason(need)
+	case ahead == 0:
 		reason = "Next in the transcode queue; waiting for a worker slot to free"
 	}
 	return StepResult{
@@ -305,13 +366,14 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 	if first == "" {
 		return math.MaxInt
 	}
-	workers := e.deps.Workers.All()
-	free, err := e.freeVideoSlots(ctx, workers, e.readyForQueue(ctx, workers))
+	q, err := e.queueSlots(ctx)
 	if err != nil {
 		log.Printf("transcode queue: counting free slots for batch %s: %v", batchID, err)
 		return math.MaxInt
 	}
-	ahead, err := e.transcodeQueueAhead(first, "")
+	usable := e.usableBy(ctx, q, 0)
+	free := q.slotsIn(usable)
+	ahead, err := e.transcodeQueueAhead(ctx, q, usable, first, "")
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for batch %s: %v", batchID, err)
 		return math.MaxInt
