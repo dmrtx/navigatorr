@@ -142,6 +142,56 @@ func TestBuildFFmpegArgsUnmapsPreviewTrackWithPickedTracks(t *testing.T) {
 	}
 }
 
+// The audio-only goal copies the video and proves the copy against the source.
+// With the preview track listed first, the source's first video stream is not
+// the programme, and the proof must follow the programme's own index in each
+// file instead of "the first video".
+func TestVideoCopyProofSkipsPreviewTrackListedFirst(t *testing.T) {
+	ffmpeg, ffprobe, ctx := videoCopyTools(t)
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error",
+		"-f", "lavfi", "-i", "testsrc=size=160x90:rate=0.25:duration=12",
+		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=12",
+		"-f", "lavfi", "-i", "aevalsrc=sin(440*2*PI*t)|sin(550*2*PI*t):s=48000:c=stereo:d=12",
+		"-map", "0:v", "-map", "1:v", "-map", "2:a",
+		"-c:v:0", "mjpeg", "-pix_fmt:v:0", "yuvj420p",
+		"-c:v:1", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error", "-pix_fmt:v:1", "yuv420p",
+		"-c:a", "pcm_s24le", source).CombinedOutput(); err != nil {
+		t.Fatalf("source fixture: %v %s", err, out)
+	}
+	srcProbe, err := ProbeSourceDetails(ctx, ffprobe, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	programme, previews := splitProgrammeVideo(srcProbe.Streams)
+	if len(programme) != 1 || len(previews) != 1 || previews[0].Index >= programme[0].Index {
+		t.Fatalf("fixture does not list the preview track before the programme: %+v", srcProbe.Streams)
+	}
+	plan := sizeAudioOnlyTestPlan(t, 8)
+	ep, err := BuildExecutionPlan(plan, srcProbe.Streams, srcProbe.DurationSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if err := RunFFmpegPaths(ctx, ffmpeg, ep, source, candidate, filepath.Join(dir, "progress"), filepath.Join(dir, "ffmpeg.log")); err != nil {
+		log, _ := os.ReadFile(filepath.Join(dir, "ffmpeg.log"))
+		t.Fatalf("remux: %v\n%s", err, log)
+	}
+	candProbe, err := ProbeSourceDetails(ctx, ffprobe, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if countStreams(candProbe.Streams, "video") != 1 {
+		t.Fatalf("candidate kept the preview track: %+v", candProbe.Streams)
+	}
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
+	evidence, err := w.validateVideoCopy(ctx, source, candidate, plan, "sha256:c", mustSize(t, candidate))
+	if err != nil || evidence.Verdict != "pass" {
+		t.Fatalf("a correct copy was refused: %+v %v", evidence, err)
+	}
+}
+
 func TestProgrammeVideoSkipsPreviewTrack(t *testing.T) {
 	streams := previewTrackStreams()
 	if countMainVideo(streams) != 1 {

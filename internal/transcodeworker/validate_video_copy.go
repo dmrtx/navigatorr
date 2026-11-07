@@ -48,10 +48,11 @@ func compactFields(line string) map[string]string {
 	return fields
 }
 
-// probeVideoPackets lists the main video's packets (attached pictures
-// excluded) with a SHA-256 of each payload.
-func probeVideoPackets(ctx context.Context, ffprobePath, path string) ([]videoPacket, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_packets", "-show_data_hash", "sha256",
+// probeVideoPackets lists the packets of the video stream with the given
+// index, each with a SHA-256 of its payload. The caller passes the programme
+// video's index: "the first video" can be a preview track listed before it.
+func probeVideoPackets(ctx context.Context, ffprobePath, path string, stream int) ([]videoPacket, error) {
+	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", strconv.Itoa(stream), "-show_packets", "-show_data_hash", "sha256",
 		"-show_entries", "packet=pts_time,size,flags,data_hash", "-of", "compact=p=0", path)
 	stderr := newTailBuffer(4096)
 	cmd.Stderr = stderr
@@ -90,8 +91,8 @@ func probeVideoPackets(ctx context.Context, ffprobePath, path string) ([]videoPa
 	return packets, parseErr
 }
 
-func probeVideoStreamFacts(ctx context.Context, ffprobePath, path string) (videoStreamFacts, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", "V:0", "-show_data",
+func probeVideoStreamFacts(ctx context.Context, ffprobePath, path string, stream int) (videoStreamFacts, error) {
+	cmd := exec.CommandContext(ctx, ffprobePath, "-hide_banner", "-v", "error", "-select_streams", strconv.Itoa(stream), "-show_data",
 		"-show_entries", "stream=codec_name,extradata,sample_aspect_ratio,r_frame_rate,avg_frame_rate", "-of", "json", path)
 	out, err := cmd.Output()
 	chargeCPU(ctx, cmd)
@@ -269,10 +270,10 @@ func (w *Worker) validateVideoCopy(ctx context.Context, source, candidate string
 		facts                                                          videoStreamFacts
 	}
 	var srcFacts, candFacts videoStreamFacts
-	if srcFacts, err = probeVideoStreamFacts(ctx, w.ffprobePath, source); err != nil {
+	if srcFacts, err = probeVideoStreamFacts(ctx, w.ffprobePath, source, s.Index); err != nil {
 		return nil, err
 	}
-	if candFacts, err = probeVideoStreamFacts(ctx, w.ffprobePath, candidate); err != nil {
+	if candFacts, err = probeVideoStreamFacts(ctx, w.ffprobePath, candidate, c.Index); err != nil {
 		return nil, err
 	}
 	of := func(v mediainspect.DetailedStream, f videoStreamFacts) params {
@@ -305,10 +306,10 @@ func (w *Worker) validateVideoCopy(ctx context.Context, source, candidate string
 	}
 	candDone := make(chan listing, 1)
 	go func() {
-		p, err := probeVideoPackets(ctx, w.ffprobePath, candidate)
+		p, err := probeVideoPackets(ctx, w.ffprobePath, candidate, c.Index)
 		candDone <- listing{p, err}
 	}()
-	srcPackets, srcErr := probeVideoPackets(ctx, w.ffprobePath, source)
+	srcPackets, srcErr := probeVideoPackets(ctx, w.ffprobePath, source, s.Index)
 	cand := <-candDone
 	if srcErr != nil {
 		return nil, srcErr

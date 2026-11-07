@@ -237,7 +237,9 @@ func IsAttachedPicture(s DetailedStream) bool {
 
 // thumbnailTrackMaxFPS is the frame rate below which an image-codec video
 // stream is a track of previews, not video: a muxer writes chapter thumbnails
-// as one picture per chapter.
+// as one picture per chapter. The cut-off is a trade: a genuine image-codec
+// video under it, beside real video, is left out of the encode too. That is
+// very unlikely, and the alternative is refusing every file with thumbnails.
 const thumbnailTrackMaxFPS = 1.0
 
 // IsThumbnailTrack reports whether a video stream is a track of still preview
