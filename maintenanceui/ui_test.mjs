@@ -7635,6 +7635,62 @@ test("a folder batch picks its tracks file by file, and a file never opened keep
   assert.equal(el("keep-tracks").hidden, true);
 });
 
+test("the file-by-file screen shows its picks again when reopened, even after a read that ended while it was closed", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); controls();');
+  const reopen = async () => {
+    el("batch-tracks").close();
+    el("batch-tracks").listeners.get("close")();
+    await el("batch-tracks-open").listeners.get("click")();
+  };
+  const file = (n) => el("batch-tracks-list").children[n].children[0];
+  const unfold = async (details) => { details.open = true; await details.listeners.get("toggle")(); };
+  const shown = (details) => details.children[1].children.flatMap(c => c.children).map(row => row.children[0]?.children[0]?.checked).filter(v => v !== undefined);
+  await el("batch-tracks-open").listeners.get("click")();
+  await unfold(file(0));
+  h.run('batchTracks.files.get("/media/a.mkv").rows.find(r => r.kind === "subtitles" && r.track.index === 6).box.checked = false; batchTracks.files.get("/media/a.mkv").rows.find(r => r.kind === "subtitles" && r.track.index === 6).box.listeners.get("change")()');
+  await reopen();
+  assert.equal(file(0).children[0].children[1].textContent, "Audio 4 of 4 · subtitles 2 of 3", "the pick is shown before unfolding");
+  await unfold(file(0));
+  assert.deepEqual(shown(file(0)), [true, true, true, true, true, false, true], "the reopened screen lists the rows, with the pick");
+  // A read still running when the screen closes fills the screen opened after it.
+  h.run('var release; api = (path) => new Promise(resolve => { queries.push(path); release = () => resolve(tracks); });');
+  const reading = unfold(file(1));
+  await reopen();
+  await unfold(file(1));
+  assert.equal(file(1).children[1].children[0].textContent, "Reading the tracks…");
+  h.run("release()");
+  await reading;
+  assert.deepEqual(shown(file(1)), [true, true, true, true, true, true, true]);
+  assert.equal(h.run("queries.filter(q => q.includes('b.mkv')).length"), 1, "the file is read once");
+});
+
+test("the batch summary counts only picks in files the batch would send", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folder = "/media"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); controls();');
+  h.run('batchTracks.files.set("/media/a.mkv", {status: "ready", data: tracks, picks: pickTrack(null, tracks, "subtitles", 6, false)}); renderKeepTracks();');
+  assert.equal(el("keep-tracks-summary").textContent, "Removing tracks in 1 file");
+  h.run('state.folderSelected = new Set(["/media/b.mkv", "/media/c.mkv"]); renderKeepTracks();');
+  assert.equal(el("keep-tracks-summary").textContent, "Every track kept");
+  assert.deepEqual(plain(h.run('keepTrackInputs(false, "", ["/media/b.mkv", "/media/c.mkv"])')), { keep_languages: [] });
+  // The whole folder: its own files, and its subfolders' only when recursive.
+  h.run('state.folderSelected = new Set(); batchTracks.files.set("/media/sub/d.mkv", {status: "ready", data: tracks, picks: pickTrack(null, tracks, "subtitles", 6, false)});');
+  assert.equal(h.run("batchTracksSummary()"), "Removing tracks in 1 file");
+  h.run('$("recursive").checked = true;');
+  assert.equal(h.run("batchTracksSummary()"), "Removing tracks in 2 files");
+  h.run('state.folder = "/other";');
+  assert.equal(h.run("batchTracksSummary()"), "Every track kept");
+});
+
+test("an expired sign-in closes the file-by-file screen", async () => {
+  const { h, el } = keepHarness();
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv"]); controls();');
+  await el("batch-tracks-open").listeners.get("click")();
+  assert.equal(el("batch-tracks").open, true);
+  h.run("invalidateAuthentication()");
+  assert.equal(el("batch-tracks").open, false);
+});
+
 test("a new file starts with every track, and a stale or failed read cannot change the boxes", async () => {
   const { h, el, open, boxes, tick } = keepHarness();
   await open();

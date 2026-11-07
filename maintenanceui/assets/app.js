@@ -295,6 +295,7 @@ function invalidateAuthentication() {
   $("path-dialog").close();
   $("recipe-settings").close();
   $("replacement-choice").close();
+  $("batch-tracks").close();
   $("login").hidden = accessAuthenticated() || state.authMode !== "token";
   $("access-expired").hidden = !accessAuthenticated();
   $("workspace").hidden = true;
@@ -3116,8 +3117,15 @@ $("keep-tracks-reset").addEventListener("click", () => {
 // is read when opened, and a file never opened keeps every track.
 const batchTracks = {files: new Map(), seq: 0};
 const batchTracksOffered = () => $("service").value.startsWith("folder:");
+// A pick counts while its file is in the batch the form would send: the
+// ticked files, else the folder's (and, recursive, its subfolders').
+function batchTrackInBatch(path) {
+  if (state.folderSelected?.size) return state.folderSelected.has(path);
+  const folder = String(state.folder || "").replace(/\/+$/, "");
+  return path.startsWith(`${folder}/`) && ($("recursive").checked || path.lastIndexOf("/") === folder.length);
+}
 function batchTracksSummary() {
-  const picked = [...batchTracks.files.values()].filter(entry => entry.picks).length;
+  const picked = [...batchTracks.files].filter(([path, entry]) => entry.picks && batchTrackInBatch(path)).length;
   return !picked ? "Every track kept" : picked === 1 ? "Removing tracks in 1 file" : `Removing tracks in ${picked} files`;
 }
 function setBatchTracksStatus(text) {
@@ -3149,14 +3157,21 @@ function batchTrackFile(path) {
   details.append(summary, body);
   item.append(details);
   const render = () => renderBatchTrackFile(path, body, note);
+  const known = batchTracks.files.get(path);
+  if (known) known.render = render;
   details.addEventListener("toggle", () => details.open ? loadBatchTrackFile(path, render) : undefined);
   render();
   return item;
 }
+// A file draws through the render of the screen now shown, so a read that
+// ends after the screen was closed and opened again fills the new one.
 async function loadBatchTrackFile(path, render) {
   const files = batchTracks.files, known = files.get(path);
-  if (known && known.status !== "error") return;
-  const entry = {status: "loading", data: null, error: "", picks: null, rows: null};
+  if (known && known.status !== "error") {
+    known.render = render;
+    return render();
+  }
+  const entry = {status: "loading", data: null, error: "", picks: null, rows: null, body: null, render};
   files.set(path, entry);
   render();
   let data = null;
@@ -3168,7 +3183,7 @@ async function loadBatchTrackFile(path, render) {
   if (files.get(path) !== entry) return;
   const ready = Boolean(data?.audio || data?.subtitles);
   Object.assign(entry, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : entry.error || "Could not read this file's tracks."});
-  render();
+  entry.render();
 }
 function renderBatchTrackFile(path, body, note) {
   const entry = batchTracks.files.get(path);
@@ -3185,7 +3200,8 @@ function renderBatchTrackFile(path, body, note) {
     body.replaceChildren(...parts);
     return;
   }
-  if (!entry.rows) {
+  if (!entry.rows || entry.body !== body) {
+    entry.body = body;
     const toggle = (kind, index, on) => {
       entry.picks = pickTrack(entry.picks, entry.data, kind, index, on);
       renderBatchTrackFile(path, body, note);
