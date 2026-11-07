@@ -217,18 +217,19 @@ func firstStreamOfKind(streams []SourceStream, kind string) *SourceStream {
 	return nil
 }
 
-// firstMainVideo returns the first programme video stream, skipping cover art.
+// firstMainVideo returns the first programme video stream, skipping cover art
+// and preview-image tracks.
 func firstMainVideo(streams []SourceStream) *SourceStream {
-	for i := range streams {
-		if strings.EqualFold(strings.TrimSpace(streams[i].Kind), "video") && !streams[i].IsAttachedPicture() {
-			return &streams[i]
-		}
+	programme, _ := splitProgrammeVideo(streams)
+	if len(programme) == 0 {
+		return nil
 	}
-	return nil
+	return &programme[0]
 }
 
 func countMainVideo(streams []SourceStream) int {
-	return countStreams(streams, "video") - countCoverArt(streams)
+	programme, _ := splitProgrammeVideo(streams)
+	return len(programme)
 }
 
 func countCoverArt(streams []SourceStream) int {

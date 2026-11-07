@@ -235,16 +235,59 @@ func IsAttachedPicture(s DetailedStream) bool {
 	return (s.Kind == "" || s.Kind == "video") && s.Disposition["attached_pic"] > 0
 }
 
-// MainVideoStreams returns the video streams that carry the programme,
-// dropping attached pictures (cover art).
-func MainVideoStreams(streams []DetailedStream) []DetailedStream {
-	out := make([]DetailedStream, 0, len(streams))
+// thumbnailTrackMaxFPS is the frame rate below which an image-codec video
+// stream is a track of previews, not video: a muxer writes chapter thumbnails
+// as one picture per chapter.
+const thumbnailTrackMaxFPS = 1.0
+
+// IsThumbnailTrack reports whether a video stream is a track of still preview
+// images (an MP4's chapter thumbnails, written as an mjpeg video track) and not
+// programme video: an image codec at under one frame per second that is not
+// flagged attached_pic. A stream with no frame rate is never one. It is only
+// a preview track beside real video; see MainVideoStreams.
+func IsThumbnailTrack(kind, codec string, fps float64, disposition map[string]int) bool {
+	if kind != "" && kind != "video" || disposition["attached_pic"] > 0 || fps <= 0 || fps >= thumbnailTrackMaxFPS {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "mjpeg", "png":
+		return true
+	}
+	return false
+}
+
+// splitProgrammeVideo sorts the video streams other than cover art into the
+// ones that carry the programme and the preview tracks beside them. A file
+// whose only video is a preview-like track keeps it as its programme.
+func splitProgrammeVideo(streams []DetailedStream) (programme, thumbnails []DetailedStream) {
+	programme = make([]DetailedStream, 0, len(streams))
 	for _, s := range streams {
-		if !IsAttachedPicture(s) {
-			out = append(out, s)
+		switch {
+		case IsAttachedPicture(s):
+		case IsThumbnailTrack(s.Kind, s.Codec, s.FPS, s.Disposition):
+			thumbnails = append(thumbnails, s)
+		default:
+			programme = append(programme, s)
 		}
 	}
-	return out
+	if len(programme) == 0 {
+		return thumbnails, nil
+	}
+	return programme, thumbnails
+}
+
+// MainVideoStreams returns the video streams that carry the programme,
+// dropping attached pictures (cover art) and preview tracks.
+func MainVideoStreams(streams []DetailedStream) []DetailedStream {
+	programme, _ := splitProgrammeVideo(streams)
+	return programme
+}
+
+// ThumbnailTrackStreams returns the preview-image tracks that sit beside the
+// programme video. The output leaves them out.
+func ThumbnailTrackStreams(streams []DetailedStream) []DetailedStream {
+	_, thumbnails := splitProgrammeVideo(streams)
+	return thumbnails
 }
 
 // CoverArtStreams returns the attached-picture video streams.
@@ -274,6 +317,15 @@ func (r *DetailedReport) CoverArt() []DetailedStream {
 		return nil
 	}
 	return CoverArtStreams(r.Video)
+}
+
+// ThumbnailTracks returns the report's preview-image tracks beside the
+// programme video.
+func (r *DetailedReport) ThumbnailTracks() []DetailedStream {
+	if r == nil {
+		return nil
+	}
+	return ThumbnailTrackStreams(r.Video)
 }
 
 // InspectDetailed runs ffprobe with streams and chapters for rigorous transcode validation.

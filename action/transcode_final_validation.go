@@ -262,6 +262,9 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if len(rep.CoverArt()) > 0 && !caps.CoverArt {
 		return nil, fmt.Errorf("%s before encoding", errCoverArtWorker)
 	}
+	if len(rep.ThumbnailTracks()) > 0 && !caps.ThumbnailTracks {
+		return nil, fmt.Errorf("%s before encoding", errThumbnailTrackWorker)
+	}
 	switch plan.AudioMode {
 	case "he_aac":
 		if !caps.HEAACAudio {

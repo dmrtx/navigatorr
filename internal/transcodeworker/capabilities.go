@@ -220,6 +220,10 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// re-attached byte-identically; the server only admits such sources
 	// against workers that advertise it.
 	caps.CoverArt = true
+	// Preview-image tracks (chapter thumbnails) are left out of the encode and
+	// the output; the server only admits such sources against workers that
+	// advertise it.
+	caps.ThumbnailTracks = true
 	// Size policy v3 compacts lossless audio with the same AAC encoder.
 	caps.SizeModeV3 = caps.CompactAudio
 	// Audio-only size plans stream-copy the video (keeping leading non-key

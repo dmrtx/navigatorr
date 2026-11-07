@@ -18,6 +18,19 @@ func workerSupportsCoverArt(ctx context.Context, worker transcode.Executor) bool
 	return err == nil && caps.CoverArt
 }
 
+// errThumbnailTrackWorker is returned wherever a source with a preview-image
+// track (an MP4's chapter thumbnails) would reach a worker that encodes it as
+// a second video stream.
+const errThumbnailTrackWorker = "worker does not leave preview image tracks out of the video encode; upgrade the worker first"
+
+// workerSupportsThumbnailTracks reports whether the worker advertises the
+// thumbnail_tracks capability. Any lookup failure counts as unsupported (fail
+// closed).
+func workerSupportsThumbnailTracks(ctx context.Context, worker transcode.Executor) bool {
+	caps, err := worker.Capabilities(ctx)
+	return err == nil && caps.ThumbnailTracks
+}
+
 // coverArtGateReport returns the report the source-class gates (the modes and the
 // auto selector) should judge. Treating cover art as cover
 // needs a worker with the cover_art capability; against an older worker the

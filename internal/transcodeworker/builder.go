@@ -504,6 +504,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		"-i", sourcePath,
 		"-map", videoMap,
 	}
+	// Preview-image tracks match the video map; unmap them so they are not
+	// encoded as a second video stream.
+	for _, index := range execPlan.Thumbnails {
+		args = append(args, "-map", fmt.Sprintf("-0:%d", index))
+	}
 	args = append(args, trackMaps(execPlan)...)
 	args = append(args, "-map", "0:t?")
 

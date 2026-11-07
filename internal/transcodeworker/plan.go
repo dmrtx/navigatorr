@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -39,6 +40,9 @@ type SourceStream struct {
 	BitDepth    int    `json:"bit_depth,omitempty"`
 	PixelFormat string `json:"pixel_format,omitempty"`
 	Profile     string `json:"profile,omitempty"`
+	// FPS is a video stream's frame rate as mediainspect reads it (average
+	// first); it tells a preview-image track from programme video.
+	FPS float64 `json:"fps,omitempty"`
 	// Filename and MimeType come from the stream tags. Matroska cover art
 	// (an image attachment ffprobe exposes as an attached_pic video stream)
 	// carries both; they are reused when the cover is re-attached.
@@ -58,6 +62,26 @@ func (s SourceStream) AudioTrack() transcode.AudioTrack {
 // with disposition attached_pic=1) rather than programme video.
 func (s SourceStream) IsAttachedPicture() bool {
 	return strings.EqualFold(strings.TrimSpace(s.Kind), "video") && s.Disposition["attached_pic"] > 0
+}
+
+// splitProgrammeVideo sorts a source's video streams other than cover art into
+// the programme video and the preview-image tracks beside it, by the same rule
+// the server's report uses (mediainspect.MainVideoStreams).
+func splitProgrammeVideo(streams []SourceStream) (programme, thumbnails []SourceStream) {
+	for _, s := range streams {
+		if !strings.EqualFold(strings.TrimSpace(s.Kind), "video") || s.IsAttachedPicture() {
+			continue
+		}
+		if mediainspect.IsThumbnailTrack("video", s.Codec, s.FPS, s.Disposition) {
+			thumbnails = append(thumbnails, s)
+		} else {
+			programme = append(programme, s)
+		}
+	}
+	if len(programme) == 0 {
+		return thumbnails, nil
+	}
+	return programme, thumbnails
 }
 
 // SourceProbe is the full local structural/media probe result used for
@@ -110,6 +134,8 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
 			StartTime        string            `json:"start_time"`
+			AvgFrameRate     string            `json:"avg_frame_rate"`
+			RFrameRate       string            `json:"r_frame_rate"`
 		} `json:"streams"`
 		Chapters []struct {
 			Index int `json:"index"`
@@ -156,7 +182,12 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			bitrateKbps = transcode.SourceAudioKbps(mediainspect.ParseBitRate(st.BitRate, st.Tags), st.Tags, duration)
 		}
 		sampleRate, _ := strconv.Atoi(strings.TrimSpace(st.SampleRate))
+		fps := 0.0
+		if kind == "video" {
+			_, fps = mediainspect.ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
+		}
 		out = append(out, SourceStream{
+			FPS:        fps,
 			SampleRate: sampleRate,
 			Index:      st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
@@ -252,6 +283,10 @@ type ExecutionPlan struct {
 	// not cover art). `-map 0:t?` maps all of them ahead of any re-attached
 	// cover, so cover metadata indexes start after them.
 	SourceAttachments int `json:"source_attachments,omitempty"`
+	// Thumbnails are the source indexes of preview-image tracks (chapter
+	// thumbnails) that sit beside the programme video. The output leaves them
+	// out: they are unmapped, never encoded as a second video stream.
+	Thumbnails []int `json:"thumbnails,omitempty"`
 }
 
 // CoverArt returns the plan's cover-art actions in source order.
@@ -312,18 +347,18 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	if err := ValidatePlan(plan); err != nil {
 		return nil, err
 	}
+	programme, thumbnails := splitProgrammeVideo(streams)
 	if plan.X265 != nil {
-		n := 0
-		for _, s := range streams {
-			if s.Kind == "video" && !s.IsAttachedPicture() {
-				n++
-			}
-		}
-		if n != 1 {
+		// The two-pass passes map the first video stream, so a preview track
+		// beside the programme video keeps it out, as before.
+		if len(programme) != 1 || len(thumbnails) > 0 {
 			return nil, fmt.Errorf("two-pass x265 requires exactly one video stream")
 		}
 	}
 	ep := &ExecutionPlan{Plan: plan, DurationSec: duration}
+	for _, t := range thumbnails {
+		ep.Thumbnails = append(ep.Thumbnails, t.Index)
+	}
 	subtitleActions := map[int]transcode.SubtitleAction{}
 	for _, a := range plan.SubtitleActions {
 		subtitleActions[a.TypeIndex] = a
@@ -352,6 +387,9 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		}
 	}
 	for _, s := range streams {
+		if slices.Contains(ep.Thumbnails, s.Index) {
+			continue
+		}
 		if plan.Tracks != nil && (s.Kind == "audio" || s.Kind == "subtitle") && !plan.Tracks.Keeps(s.Kind, s.Index) {
 			if s.Kind == "subtitle" {
 				if _, planned := subtitleActions[s.TypeIndex]; planned {

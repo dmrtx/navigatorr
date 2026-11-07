@@ -177,6 +177,9 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !workerSupportsCoverArt(ctx, e.actionWorker(ec)) {
 		return StepResult{Status: StepFailed, Error: errCoverArtWorker + " before encoding"}, nil
 	}
+	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.ThumbnailTrackStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !workerSupportsThumbnailTracks(ctx, e.actionWorker(ec)) {
+		return StepResult{Status: StepFailed, Error: errThumbnailTrackWorker + " before encoding"}, nil
+	}
 	if plan.Compact != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if res, ok := capabilityReadDeferred(err); ok {
