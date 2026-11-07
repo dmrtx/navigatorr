@@ -2335,7 +2335,7 @@ function applyConversionGoal() {
   setProcessingMode(conversionGoal());
 }
 // Only a click counts as the user's choice; the form never overrides it.
-for (const name of ["conversion-video", "compact-hdr", "compact-height", "keep-commentary", "keep-channels"])
+for (const name of ["conversion-video", "compact-hdr", "compact-height"])
   document.querySelectorAll(`input[name="${name}"]`).forEach(input => input.addEventListener("change", () => {
     state.goalExplicit = true;
     if (name === "compact-height" && state.goalCarry?.inputs) delete state.goalCarry.inputs.max_height;
@@ -2343,14 +2343,12 @@ for (const name of ["conversion-video", "compact-hdr", "compact-height", "keep-c
     controls();
   }));
 // The form starts from the saved defaults until the user chooses.
-const conversionDefaults = {hdr: "sdr", max_height: 2160, encoder: "fast", drop_commentary: true, prefer_stereo: false};
+const conversionDefaults = {hdr: "sdr", max_height: 2160, encoder: "fast", drop_commentary: false, prefer_stereo: false};
 function applyConversionDefaults() {
   const d = conversionDefaults;
   setRadioValue("conversion-video", "compress");
   setKeepHDR("compact-hdr", d.hdr === "keep");
   setShrinkHeight("compact-height", d.max_height);
-  setRadioValue("keep-commentary", d.drop_commentary ? "drop" : "keep");
-  setRadioValue("keep-channels", d.prefer_stereo ? "stereo" : "all");
   $("allow-hardware").checked = d.encoder === "fast";
   applyConversionGoal();
 }
@@ -2364,7 +2362,7 @@ async function loadConversionDefaults() {
 }
 async function saveConversionDefaults() {
   const status = $("conversion-defaults-status");
-  const defaults = {hdr: radioValue("compact-hdr") === "keep" ? "keep" : "sdr", max_height: radioValue("compact-height") === "1080" ? 1080 : 2160, encoder: $("allow-hardware").checked ? "fast" : "small", drop_commentary: radioValue("keep-commentary") === "drop", prefer_stereo: radioValue("keep-channels") === "stereo"};
+  const defaults = {hdr: radioValue("compact-hdr") === "keep" ? "keep" : "sdr", max_height: radioValue("compact-height") === "1080" ? 1080 : 2160, encoder: $("allow-hardware").checked ? "fast" : "small", drop_commentary: false, prefer_stereo: false};
   try {
     const data = await api("preferences", {conversion_defaults: defaults}, {method: "PUT"});
     Object.assign(conversionDefaults, data?.conversion_defaults || defaults);
@@ -2384,11 +2382,6 @@ function carriedHeight() {
 function viaShrink() {
   const p = state.goalProfile;
   return processingMode() === "size" && !$("size-budget-kind").value && p?.status === "ready" && p.data.goals?.size?.via_shrink === true;
-}
-function savingFloor() {
-  const mode = processingMode();
-  if (mode === "audio_only" || $("size-budget-kind").value || !["size", "compact"].includes(mode)) return "";
-  return ` The result is kept only if it is at least ${mode === "compact" || viaShrink() ? 30 : 15}% smaller.`;
 }
 function setOptionRow(name, reasonId, reason, off = false) {
   document.querySelectorAll(`input[name="${name}"]`).forEach(r => { r.disabled = Boolean(reason) || off; });
@@ -2615,14 +2608,10 @@ function wireLanguageInput({input, add, note}, current, set) {
 const keepLanguages = {status: "idle", saved: [], draft: [], defaults: [], saving: false, request: 0};
 function applyKeepLanguages(data, adopt) {
   const k = keepLanguages, clean = adopt || sameLanguages(k.draft, k.saved);
-  const changed = k.status === "ready" && !sameLanguages(k.saved, data.languages);
   k.saved = [...data.languages];
   k.defaults = [...(data.default || [])];
   k.status = "ready";
   if (clean) k.draft = [...k.saved];
-  // The pre-checked tracks follow the saved list only while the form uses it;
-  // a job's own languages, or every track, are not affected by it.
-  if (changed && keepTracks.scope === "saved") { keepTracks.key = ""; refreshKeepTracks(); }
 }
 async function loadKeepLanguages() {
   const k = keepLanguages, auth = state.authRevision, request = ++k.request;
@@ -2755,59 +2744,56 @@ function replaceAutoValue(value) {
   return {replace_when_done: state.info?.allow_destructive !== false && (typeof value === "boolean" ? value : replaceAuto.value)};
 }
 
-// The goal form's choice for one job: the saved languages, this job's own list,
-// or every track. For one file the file's tracks are listed too, checked the
-// way the server's rules would keep them (the server answers, so the rules live
-// in one place); changing a box sends explicit stream lists instead.
+// The goal form's tracks: every track stays unless its box is unticked. One
+// file lists its own tracks; a batch of paths ticks each file's on a screen of
+// its own. Changed boxes send explicit stream lists.
 const keepGoals = ["size", "compact", "audio_only"];
-const keepTracks = {scope: "saved", languages: [], picks: null, path: "", key: "", status: "idle", failed: "", data: null, built: null, boxes: [], notice: "", error: "", seq: 0, abort: null, timer: 0};
+const keepTracks = {picks: null, path: "", key: "", status: "idle", data: null, built: null, boxes: [], error: "", seq: 0, abort: null, timer: 0};
 // Which file or files the choice is for; null while the goal keeps no tracks.
 function keepTrackTarget() {
   if ($("technical").checked || !keepGoals.includes(processingMode())) return null;
   const target = goalProbeTarget();
   return target ? {path: target.path, single: $("scope").value !== "batch"} : null;
 }
-function keepLanguageInputs() {
-  const kt = keepTracks;
-  return {
-    ...(kt.scope === "saved" ? {} : {keep_languages: [...kt.languages]}),
-    ...(radioValue("keep-commentary") === "drop" ? {drop_commentary: true} : {}),
-    ...(radioValue("keep-channels") === "stereo" ? {prefer_stereo: true} : {}),
-  };
+// One file's ticked boxes after a change, null while every track stays. The
+// last audio track stays ticked.
+function pickTrack(picks, data, kind, index, on) {
+  const every = name => new Set(data[name].map(track => track.index));
+  const next = picks ? {audio: new Set(picks.audio), subtitles: new Set(picks.subtitles)} : {audio: every("audio"), subtitles: every("subtitles")};
+  if (on) next[kind].add(index); else next[kind].delete(index);
+  if (kind === "audio" && !next.audio.size) next.audio.add(index);
+  return next.audio.size === data.audio.length && next.subtitles.size === data.subtitles.length ? null : next;
 }
-// The inputs the choice adds to a job. The saved list sends nothing; boxes that
-// were changed send both lists, so what is frozen is what was on screen.
-function keepTrackInputs(single, path) {
-  const kt = keepTracks, inputs = keepLanguageInputs();
-  if (!single || !kt.picks || kt.path !== path) return inputs;
+// A file's picks as a job takes them. A file without audio has none to keep:
+// the server takes the subtitles alone then, and refuses an empty audio list.
+function streamLists(picks, data) {
   const order = set => [...set].sort((a, b) => a - b);
-  // A file without audio has none to keep: the server takes the subtitles
-  // alone then, and refuses an empty audio list.
-  if (kt.data && !kt.data.audio.length) return {...inputs, keep_subtitle_streams: order(kt.picks.subtitles)};
-  if (!kt.picks.audio.size) throw new Error("Keep at least one audio track.");
-  return {...inputs, keep_audio_streams: order(kt.picks.audio), keep_subtitle_streams: order(kt.picks.subtitles)};
+  if (data && !data.audio.length) return {subtitles: order(picks.subtitles)};
+  if (!picks.audio.size) throw new Error("Keep at least one audio track.");
+  return {audio: order(picks.audio), subtitles: order(picks.subtitles)};
+}
+// The inputs the choice adds to a job: every language, less the tracks
+// unticked in the file or in each file of a batch of paths.
+function keepTrackInputs(single, path, paths) {
+  const kt = keepTracks, inputs = {keep_languages: []};
+  if (single) {
+    if (!kt.picks || kt.path !== path) return inputs;
+    const lists = streamLists(kt.picks, kt.data);
+    return {...inputs, ...(lists.audio ? {keep_audio_streams: lists.audio} : {}), keep_subtitle_streams: lists.subtitles};
+  }
+  const picks = {};
+  for (const file of paths || []) {
+    const entry = batchTracks.files.get(file);
+    if (entry?.picks) picks[file] = streamLists(entry.picks, entry.data);
+  }
+  return Object.keys(picks).length ? {...inputs, track_picks: picks} : inputs;
 }
 function resetKeepTracks() {
-  Object.assign(keepTracks, {scope: "saved", languages: [], picks: null, notice: "", key: ""});
+  Object.assign(keepTracks, {picks: null, key: ""});
+  batchTracks.files.clear();
 }
-// Opening a file again to pick tracks starts from the languages it was made with.
-function presetKeepLanguages(languages) {
-  Object.assign(keepTracks, {scope: "job", languages: [...languages], picks: null, notice: "", key: ""});
-}
-wireLanguageInput({input: "keep-job-input", add: "keep-job-add", note: "keep-job-note"}, keepLanguagesShown, languages => { keepTracks.languages = languages; keepTracks.scope = "job"; controls(); });
-// The languages a batch keeps: the saved ones until the first change here.
-function keepLanguagesShown() {
-  return keepTracks.scope === "job" ? keepTracks.languages : keepLanguages.saved;
-}
-function keepTracksQuery(path) {
-  const kt = keepTracks, params = new URLSearchParams({path});
-  if (kt.scope !== "saved") params.set("keep_languages", kt.languages.join(","));
-  if (radioValue("keep-commentary") === "drop") params.set("drop_commentary", "true");
-  if (radioValue("keep-channels") === "stereo") params.set("prefer_stereo", "true");
-  return params.toString();
-}
-// Called whenever the form changes. A new file or a new language list reads the
-// file again; the same ones do nothing.
+const keepTracksQuery = path => new URLSearchParams({path, keep_languages: ""}).toString();
+// Called whenever the form changes. A new file is read; the same one does nothing.
 function refreshKeepTracks() {
   const kt = keepTracks, target = keepTrackTarget(), file = target?.single ? target.path : "";
   const key = file ? keepTracksQuery(file) : "";
@@ -2818,20 +2804,15 @@ function refreshKeepTracks() {
   clearTimeout(kt.timer);
   kt.key = key;
   if (!file) {
-    Object.assign(kt, {status: "idle", failed: "", data: null, picks: null, path: "", notice: "", error: ""});
+    Object.assign(kt, {status: "idle", data: null, picks: null, path: "", error: ""});
     return;
   }
-  // A new file starts from the automatic choice. The same file with other
-  // languages does too: the boxes follow the languages again.
-  if (kt.path !== file) Object.assign(kt, {data: null, picks: null, path: file, notice: ""});
-  else if (kt.picks) Object.assign(kt, {picks: null, notice: "The boxes follow the languages again."});
-  kt.status = "loading";
-  kt.error = "";
+  Object.assign(kt, {data: null, picks: null, path: file, status: "loading", error: ""});
   scheduleKeepTracks();
 }
 // One file selection takes one of the server's two source slots at a time: the
-// goal's profile read goes first, and the tracks are read once it is done (or
-// at once when only the languages changed). A second tab keeps the other slot.
+// goal's profile read goes first, and the tracks are read once it is done. A
+// second tab keeps the other slot.
 function scheduleKeepTracks() {
   const kt = keepTracks;
   clearTimeout(kt.timer);
@@ -2849,12 +2830,12 @@ async function loadKeepTracks(key, seq) {
   try {
     data = await readSource(`source-tracks?${key}`, controller.signal, current);
   } catch (err) {
-    error = err?.status === 400 ? err.message : "Could not read this file's tracks. The job still follows the languages.";
+    error = err?.status === 400 ? err.message : "";
   }
   if (!current()) return;
   kt.abort = null;
   const ready = Boolean(data?.audio || data?.subtitles);
-  Object.assign(kt, {status: ready ? "ready" : "error", failed: ready ? "" : kt.path, data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. The job still follows the languages."});
+  Object.assign(kt, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : error || "Could not read this file's tracks. Every track is kept."});
   renderKeepTracks();
 }
 const trackCodecs = {eac3: "E-AC-3", ac3: "AC-3", truehd: "TrueHD", subrip: "SRT", ass: "ASS", ssa: "SSA", hdmv_pgs_subtitle: "PGS", dvd_subtitle: "VobSub", webvtt: "WebVTT", mov_text: "Text"};
@@ -2862,7 +2843,7 @@ const trackCodec = codec => trackCodecs[codec] || codecLabel(codec);
 function trackChannels(count) {
   return {1: "Mono", 2: "Stereo", 6: "5.1", 8: "7.1"}[count] || (count > 0 ? `${count} channels` : "");
 }
-const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has(track.index) : track.keep;
+const trackKept = (kind, track) => keepTracks.picks ? keepTracks.picks[kind].has(track.index) : true;
 // The stream preview: what each stream of one file weighs and what a goal's
 // audio mode makes of each audio track, from the sizes source-tracks reads off
 // the probe. Nothing is measured; the video's new size is the encode's.
@@ -3039,31 +3020,15 @@ function streamPreview(output, data, mode, kept) {
     output.append(node("p", `Audio weighs more than the video in this file (${bytes(t.audio)} against ${bytes(video)}).${audioCopied ? " This goal copies it, so most of the file stays as it is; removing tracks or Save space would shrink it." : ` After this goal it is about ${bytes(t.after)}.`}`, "stream-preview-warning"));
   }
 }
-function keepTracksCount(data) {
-  const kept = kind => data[kind].filter(track => trackKept(kind, track)).length;
-  const part = (kind, one, many) => data[kind].length ? `${kept(kind)} of ${data[kind].length} ${data[kind].length === 1 ? one : many}` : "";
-  const parts = [part("audio", "audio track", "audio tracks"), part("subtitles", "subtitle", "subtitles")].filter(Boolean);
-  return parts.length ? `Keeping ${parts.join(" and ")}.` : "";
+// "2 of 3": how many tracks of a kind a file keeps.
+function keptCount(data, kind, kept) {
+  return `${data[kind].filter(track => kept(kind, track)).length} of ${data[kind].length}`;
 }
-function toggleTrack(kind, index, on) {
-  const kt = keepTracks, data = kt.data;
-  if (!data) return;
-  const automatic = name => new Set(data[name].filter(track => track.keep).map(track => track.index));
-  const picks = kt.picks ||= {audio: automatic("audio"), subtitles: automatic("subtitles")};
-  if (on) picks[kind].add(index); else picks[kind].delete(index);
-  // A file keeps its audio, and boxes that match the automatic choice again are
-  // that choice, so nothing explicit is sent.
-  if (kind === "audio" && !picks.audio.size) picks.audio.add(index);
-  const same = name => picks[name].size === automatic(name).size && [...picks[name]].every(i => automatic(name).has(i));
-  if (same("audio") && same("subtitles")) kt.picks = null;
-  kt.notice = "";
-  renderKeepTracks();
-}
-function trackRow(kind, track) {
+function trackRow(kind, track, toggle) {
   const row = node("li", "", "track-row"), label = node("label", "", "track-label");
   const box = document.createElement("input");
   box.type = "checkbox";
-  box.addEventListener("change", () => toggleTrack(kind, track.index, box.checked));
+  box.addEventListener("change", () => toggle(kind, track.index, box.checked));
   const name = node("span", "", "track-text");
   name.append(node("strong", languageName(track.language), "track-name"));
   const facts = [trackCodec(track.codec), kind === "audio" ? trackChannels(track.channels) : "", track.title].filter(Boolean);
@@ -3080,21 +3045,24 @@ function trackRow(kind, track) {
   return {row, box, kind, track, plan};
 }
 // The boxes are built when a file is read and updated in place afterwards, so a
-// keyboard user toggling one never loses their place.
-function syncTrackBoxes() {
-  const loading = keepTracks.status === "loading";
-  const audioKept = keepTracks.boxes.filter(entry => entry.kind === "audio" && trackKept(entry.kind, entry.track)).length;
-  const mode = processingMode(), total = keepTracks.data?.size_bytes;
-  for (const entry of keepTracks.boxes) {
-    entry.box.checked = trackKept(entry.kind, entry.track);
-    // Boxes wait for the file to be read again; the last audio track cannot be unticked.
+// keyboard user toggling one never loses their place. The last kept audio track
+// cannot be unticked.
+function syncTrackRows(rows, kept, mode, total, loading = false) {
+  const audioKept = rows.filter(entry => entry.kind === "audio" && kept(entry.kind, entry.track)).length;
+  for (const entry of rows) {
+    entry.box.checked = kept(entry.kind, entry.track);
     entry.box.disabled = loading || (entry.kind === "audio" && entry.box.checked && audioKept <= 1);
     entry.plan.textContent = trackPlanText(entry.kind, entry.track, mode, entry.box.checked, total);
     entry.plan.hidden = !entry.plan.textContent;
   }
-  streamPreview($("keep-tracks-preview"), loading ? null : keepTracks.data, mode, trackKept);
+}
+function syncTrackBoxes() {
+  const loading = keepTracks.status === "loading";
+  const mode = processingMode(), data = loading ? null : keepTracks.data;
+  syncTrackRows(keepTracks.boxes, trackKept, mode, keepTracks.data?.size_bytes, loading);
+  $("keep-audio-count").textContent = data?.audio.length ? keptCount(data, "audio", trackKept) : "";
+  $("keep-subtitle-count").textContent = data?.subtitles.length ? keptCount(data, "subtitles", trackKept) : "";
   const profile = state.goalProfile?.status === "ready" ? state.goalProfile.data.profile : null;
-  const data = loading ? null : keepTracks.data;
   // A goal that skips the file has nothing to estimate.
   goalEstimate($("goal-estimate"), goalSkipWarning() ? null : data, mode, trackKept, {budget: sizeBudgetBytes("size-budget", data?.size_bytes), codec: data?.video_codec || profile?.video_codec,
     query: data ? goalEstimateQuery(keepTracks.path, viaShrink() ? "compact" : mode, trackKept, data, {height: viaShrink() ? 2160 : shrinkHeight("compact-height"), budgetPrefix: "size-budget"}) : "",
@@ -3104,24 +3072,19 @@ function renderKeepTracks() {
   const kt = keepTracks, target = keepTrackTarget();
   $("keep-tracks").hidden = !target;
   if (!target) return;
-  // One file ticks its own tracks; a batch, or a file whose tracks could not be read, edits the languages.
-  $("keep-job-languages").hidden = target.single && kt.failed !== kt.path;
-  $("keep-job-empty").hidden = keepLanguagesShown().length > 0;
-  renderLanguageChips($("keep-job-list"), keepLanguagesShown(), code => {
-    keepTracks.languages = keepLanguagesShown().filter(language => language !== code);
-    keepTracks.scope = "job";
-    controls();
-    $("keep-job-input").focus();
-  });
-  const data = target.single ? kt.data : null;
-  const saved = keepLanguages.status === "ready" ? keepLanguages.saved : null;
-  const shown = kt.scope === "job" ? kt.languages : saved;
-  const languagesSummary = shown?.length === 0 ? "Every language" : shown ? languageNames(shown) : "";
-  $("keep-tracks-summary").textContent = kt.picks ? "Tracks chosen by hand" : [languagesSummary, radioValue("keep-commentary") === "drop" ? "no commentary" : "", radioValue("keep-channels") === "stereo" ? "prefer 2.0" : ""].filter(Boolean).join(" · ");
   $("keep-tracks-file").hidden = !target.single;
-  if (!target.single) return;
+  $("batch-tracks-open").hidden = target.single || !batchTracksOffered();
+  if (!target.single) {
+    $("keep-tracks-summary").textContent = batchTracksSummary();
+    return;
+  }
+  const data = kt.data;
   if (data && kt.built !== data) {
-    const audio = data.audio.map(track => trackRow("audio", track)), subtitles = data.subtitles.map(track => trackRow("subtitles", track));
+    const toggle = (kind, index, on) => {
+      kt.picks = pickTrack(kt.picks, data, kind, index, on);
+      renderKeepTracks();
+    };
+    const audio = data.audio.map(track => trackRow("audio", track, toggle)), subtitles = data.subtitles.map(track => trackRow("subtitles", track, toggle));
     kt.built = data;
     kt.boxes = [...audio, ...subtitles];
     $("keep-audio-list").replaceChildren(...audio.map(entry => entry.row));
@@ -3138,14 +3101,111 @@ function renderKeepTracks() {
   syncTrackBoxes();
   $("keep-tracks-reset").hidden = !kt.picks;
   // First because a narrow summary is cut at its end.
-  if (data?.video_bytes && previewTotals(data, trackKept, "").audio > data.video_bytes) $("keep-tracks-summary").textContent = `Audio outweighs video · ${$("keep-tracks-summary").textContent}`;
-  $("keep-tracks-status").textContent = kt.status === "error" ? kt.error : kt.status === "loading" ? "Reading the file's tracks…"
-    : [data ? keepTracksCount(data) : "", kt.notice].filter(Boolean).join(" ");
+  const heavy = data?.video_bytes && previewTotals(data, trackKept, "").audio > data.video_bytes;
+  $("keep-tracks-summary").textContent = [heavy ? "Audio outweighs video" : "", kt.picks ? "Chosen by hand" : "Every track kept"].filter(Boolean).join(" · ");
+  const status = kt.status === "error" ? kt.error : kt.status === "loading" ? "Reading the file's tracks…" : "";
+  $("keep-tracks-status").textContent = status;
+  $("keep-tracks-status").hidden = !status;
 }
 $("keep-tracks-reset").addEventListener("click", () => {
-  Object.assign(keepTracks, {picks: null, notice: ""});
+  keepTracks.picks = null;
   renderKeepTracks();
 });
+
+// A batch of paths ticks each file's tracks on a screen of its own: each file
+// is read when opened, and a file never opened keeps every track.
+const batchTracks = {files: new Map(), seq: 0};
+const batchTracksOffered = () => $("service").value.startsWith("folder:");
+function batchTracksSummary() {
+  const picked = [...batchTracks.files.values()].filter(entry => entry.picks).length;
+  return !picked ? "Every track kept" : picked === 1 ? "Removing tracks in 1 file" : `Removing tracks in ${picked} files`;
+}
+function setBatchTracksStatus(text) {
+  $("batch-tracks-status").textContent = text;
+  $("batch-tracks-status").hidden = !text;
+}
+async function openBatchTracks() {
+  const seq = ++batchTracks.seq;
+  $("batch-tracks-list").replaceChildren();
+  setBatchTracksStatus("Listing the files…");
+  $("batch-tracks").showModal();
+  let paths;
+  try {
+    paths = state.folderSelected?.size ? [...state.folderSelected]
+      : (await api(`folder?${new URLSearchParams({path: state.folder, files: "1", recursive: $("recursive").checked ? "1" : "0"})}`))?.paths || [];
+  } catch (err) {
+    if (seq === batchTracks.seq) setBatchTracksStatus(err?.message || "Could not list the files.");
+    return;
+  }
+  if (seq !== batchTracks.seq) return;
+  setBatchTracksStatus(paths.length ? "" : "No videos found in this folder.");
+  $("batch-tracks-list").replaceChildren(...paths.map(batchTrackFile));
+}
+function batchTrackFile(path) {
+  const item = node("li", "", "batch-tracks-file"), details = document.createElement("details");
+  const summary = document.createElement("summary"), note = node("span", "", "metadata batch-tracks-note");
+  summary.append(node("span", path.split("/").pop(), "batch-tracks-name"), note);
+  const body = node("div", "", "batch-tracks-body");
+  details.append(summary, body);
+  item.append(details);
+  const render = () => renderBatchTrackFile(path, body, note);
+  details.addEventListener("toggle", () => details.open ? loadBatchTrackFile(path, render) : undefined);
+  render();
+  return item;
+}
+async function loadBatchTrackFile(path, render) {
+  const files = batchTracks.files, known = files.get(path);
+  if (known && known.status !== "error") return;
+  const entry = {status: "loading", data: null, error: "", picks: null, rows: null};
+  files.set(path, entry);
+  render();
+  let data = null;
+  try {
+    data = await readSource(`source-tracks?${keepTracksQuery(path)}`, undefined, () => files.get(path) === entry);
+  } catch (err) {
+    entry.error = err?.status === 400 ? err.message : "";
+  }
+  if (files.get(path) !== entry) return;
+  const ready = Boolean(data?.audio || data?.subtitles);
+  Object.assign(entry, {status: ready ? "ready" : "error", data: ready ? data : null, error: ready ? "" : entry.error || "Could not read this file's tracks."});
+  render();
+}
+function renderBatchTrackFile(path, body, note) {
+  const entry = batchTracks.files.get(path);
+  const kept = (kind, track) => entry.picks ? entry.picks[kind].has(track.index) : true;
+  note.textContent = entry?.picks ? `Audio ${keptCount(entry.data, "audio", kept)} · subtitles ${keptCount(entry.data, "subtitles", kept)}` : "";
+  if (entry?.status !== "ready") {
+    const parts = [node("p", entry?.status === "error" ? entry.error : "Reading the tracks…", "metadata")];
+    if (entry?.status === "error") {
+      const retry = node("button", "Try again", "quiet");
+      retry.type = "button";
+      retry.addEventListener("click", () => loadBatchTrackFile(path, () => renderBatchTrackFile(path, body, note)));
+      parts.push(retry);
+    }
+    body.replaceChildren(...parts);
+    return;
+  }
+  if (!entry.rows) {
+    const toggle = (kind, index, on) => {
+      entry.picks = pickTrack(entry.picks, entry.data, kind, index, on);
+      renderBatchTrackFile(path, body, note);
+      renderKeepTracks();
+    };
+    entry.rows = [...entry.data.audio.map(track => trackRow("audio", track, toggle)), ...entry.data.subtitles.map(track => trackRow("subtitles", track, toggle))];
+    const group = (kind, title) => {
+      const rows = entry.rows.filter(row => row.kind === kind);
+      if (!rows.length) return [];
+      const list = node("ul", "", "track-list");
+      list.append(...rows.map(row => row.row));
+      return [node("p", title, "track-group-title"), list];
+    };
+    body.replaceChildren(...group("audio", "Audio"), ...group("subtitles", "Subtitles"));
+  }
+  syncTrackRows(entry.rows, kept, processingMode(), entry.data.size_bytes);
+}
+$("batch-tracks-open").addEventListener("click", () => openBatchTracks());
+$("batch-tracks-close").addEventListener("click", () => $("batch-tracks").close());
+$("batch-tracks").addEventListener("close", () => { batchTracks.seq++; renderKeepTracks(); });
 
 $("technical").addEventListener("change", controls);
 $("allow-hardware").addEventListener("change", controls);
@@ -3182,7 +3242,7 @@ function renderCreationProfile() {
     else output.textContent = "Profile details unavailable. Reload profiles before submitting.";
   }
   const minimum = $("min-savings").value || state.info?.min_savings_percent;
-  $("creation-limits-note").textContent = `Minimum savings: ${minimum != null ? minimum + "%" : "server default"} · Originals stay in place until replacement is approved.`;
+  $("creation-limits-note").textContent = `Minimum savings: ${minimum != null ? minimum + "%" : "server default"}`;
 }
 function controls() {
   renderCreationProfile();
@@ -3200,8 +3260,6 @@ function controls() {
   refreshKeepTracks();
   renderKeepTracks();
   $("goal-overridden").hidden = !technical;
-  $("processing-policy").hidden = technical;
-  $("processing-policy").textContent = "Automatic encodes the whole file with fixed settings, then verifies the result." + savingFloor() + " Originals stay in place; replacing them requires separate approval." + (!state.fileMedia && !state.media ? " Content type is unclassified; a conservative general-video policy applies." : "");
   $("enqueue").textContent = technical ? (batch ? "Create candidates" : "Create candidate") : "Process";
   $("source-summary").textContent = sourceSummary();
   $("batch-options").hidden = !batch;
@@ -3261,8 +3319,6 @@ function controls() {
   $("recursive").closest("label").hidden = !folder || explicitSelection;
   $("promote-batch").closest("label").hidden =
     folder || $("service").value !== "sonarr";
-  $("profile-mode-note").hidden = $("profile").value !== "auto" || $("custom").checked;
-  $("profile-mode-note").textContent = "Automatic encodes the whole file with fixed settings for the objective and checks the result; originals are preserved until you approve.";
   $("custom-fields").hidden = !technical || !$("custom").checked;
   const vt = $("encoder").value === "hevc_videotoolbox";
   $("vt-fields").hidden = !vt;
@@ -3275,7 +3331,6 @@ function controls() {
   $("bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("max-bitrate").disabled = $("rate-mode").value !== "bitrate";
   $("preview").hidden = !technical || !batch;
-  $("audio-note").hidden = !["compact", "he_aac"].includes($("audio").value);
   const hasSource = batch
     ? Boolean(folder ? state.folder : state.media) &&
       (technical ? !$("selected-only").checked || selectedCount > 0 : selectedCount > 0)
@@ -3482,7 +3537,7 @@ async function buildAndSubmitJob(mode = "encode") {
     if (keepsHDR("compact-hdr")) inputs.save_space_keep_hdr = true;
     Object.assign(inputs, sizeBudgetInputs("size-budget"));
   }
-  if (simple && keepGoals.includes(goal)) Object.assign(inputs, keepTrackInputs(!batch, $("path").value.trim()));
+  if (simple && !batch && keepGoals.includes(goal)) Object.assign(inputs, keepTrackInputs(true, $("path").value.trim()));
   // Settings of an earlier job's goal that the form has no control for, while
   // it is still that file and that goal.
   const carry = state.goalCarry;
@@ -3515,6 +3570,7 @@ async function buildAndSubmitJob(mode = "encode") {
       }
       if (!simple && $("promote-batch").checked) inputs.promote_candidates = true;
     }
+    if (simple && keepGoals.includes(goal)) Object.assign(inputs, keepTrackInputs(false, "", inputs.paths));
     if (!simple && !explicitSelection && $("max-items").value) inputs.max_items = numeric("max-items");
     if (mode === "preview") inputs.dry_run = true;
   } else {
@@ -5524,9 +5580,6 @@ function applyGoalSettings(path, goal) {
     else setShrinkHeight("compact-height", goal.max_height ?? 1080);
   }
   if (goal.mode === "size") setKeepHDR("compact-hdr", goal.save_space_keep_hdr === true);
-  // The job's track rules, not the saved ones; a job from before them had none.
-  setRadioValue("keep-commentary", goal.drop_commentary === true ? "drop" : "keep");
-  setRadioValue("keep-channels", goal.prefer_stereo === true ? "stereo" : "all");
   state.goalCarry = {path, mode, inputs};
 }
 // Drops what applyGoalSettings carried, so a later ordinary pick of the same
@@ -5571,9 +5624,8 @@ function applyLibraryContext(context, goal) {
   state.fileMedia = {id, seriesType: goal?.is_anime ? "anime" : "", genres: []};
 }
 // openGoalForm opens the library's goal form for one file, closing the job
-// that asked for it. options.mode, options.goal, options.context and
-// options.languages start the form on what an earlier job used (its goal and
-// size limit, its library and its languages).
+// that asked for it. options.mode, options.goal and options.context start the
+// form on what an earlier job used (its goal and size limit, and its library).
 function openGoalForm(path, options = {}) {
   state.goalReturn = null;
   if ($("job-detail").open) $("job-detail").close();
@@ -5589,7 +5641,6 @@ function openGoalForm(path, options = {}) {
   }
   if (options.goal) applyGoalSettings(path, options.goal);
   applyLibraryContext(options.context, options.goal);
-  if (options.languages) presetKeepLanguages(options.languages);
   selectTab("library");
   setFileStep("configure");
   controls();
@@ -5838,7 +5889,7 @@ function jobControls(job, detail = false) {
   // with the one job only, so the queue rows never offer it. A job that was
   // skipped or not converted made no file to choose tracks for.
   if (detail && job.action_name === "transcode_media" && job.status === "completed" && job.candidate_ready && !job.replaced && !job.replacement_action_id && job.source_path && keepGoals.includes(job.mode) && keptUntagged(job.tracks))
-    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, goal: job.goal || {mode: job.mode}, context: job.replacement_context, languages: Array.isArray(job.tracks.languages) ? job.tracks.languages : undefined}));
+    add("Choose tracks", () => openGoalForm(job.source_path, {mode: job.mode, goal: job.goal || {mode: job.mode}, context: job.replacement_context}));
   // A job that ended without a result leaves its file where it was. Files
   // shows it there, with its status and the goal form, to try again from.
   // Every job offers it, whatever its state, so the source is one click away.
@@ -8380,7 +8431,7 @@ async function changeGoalFor(job) {
   }
   const goal = job.goal || (job.rerun?.mode ? {mode: job.rerun.mode, audio_only: job.rerun.audio_only} : null);
   const mode = goal?.mode || job.mode;
-  openGoalForm(job.source_path, {mode: goalNames[goalKeyOf(mode, goal?.audio_only === true)] ? mode : undefined, goal: goal || undefined, context: job.replacement_context, languages: Array.isArray(job.tracks?.languages) ? job.tracks.languages : undefined});
+  openGoalForm(job.source_path, {mode: goalNames[goalKeyOf(mode, goal?.audio_only === true)] ? mode : undefined, goal: goal || undefined, context: job.replacement_context});
   state.goalReturn = {path: job.source_path, from: job.id};
 }
 // Each setting tried, one row each: the numbers that decided it.

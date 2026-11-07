@@ -396,53 +396,26 @@
               <div id="keep-tracks" class="keep-tracks" hidden>
                 <div class="keep-tracks-head"><span class="keep-tracks-title">Audio and subtitles</span><span id="keep-tracks-summary" class="metadata"></span></div>
                 <div class="keep-tracks-body">
-                  <div id="keep-job-languages" class="goal-option" hidden>
-                    <ul id="keep-job-list" class="language-chips" aria-label="Languages to keep"></ul>
-                    <p id="keep-job-empty" class="metadata" hidden>Every language stays. Add one to limit them.</p>
-                    <div class="inline-form language-add">
-                      <input id="keep-job-input" list="language-options" aria-label="Add a language" aria-describedby="keep-job-note" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Add a language" />
-                      <button id="keep-job-add" type="button">Add</button>
-                    </div>
-                    <p id="keep-job-note" class="metadata" role="status"></p>
-                  </div>
-                  <p class="muted">Tracks in the file's original language and untagged tracks are always kept.</p>
-                  <div id="keep-commentary-row" class="goal-option">
-                    <span id="keep-commentary-label" class="goal-option-label">Commentary tracks</span>
-                    <div class="segmented" role="radiogroup" aria-labelledby="keep-commentary-label">
-                      <label><input type="radio" name="keep-commentary" value="drop" checked /><span>Remove</span></label>
-                      <label><input type="radio" name="keep-commentary" value="keep" /><span>Keep</span></label>
-                    </div>
-                  </div>
-                  <div class="goal-option">
-                    <span id="keep-channels-label" class="goal-option-label">Audio channels</span>
-                    <div class="segmented" role="radiogroup" aria-labelledby="keep-channels-label">
-                      <label><input type="radio" name="keep-channels" value="all" checked /><span>Keep all</span></label>
-                      <label><input type="radio" name="keep-channels" value="stereo" /><span>Prefer 2.0</span></label>
-                    </div>
-                    <p class="muted size-budget-help">Prefer 2.0 keeps a language's stereo track and removes its 5.1 and 7.1. A language without one keeps what it has.</p>
-                  </div>
-                  <div id="keep-tracks-file" class="goal-option" hidden>
-                    <p id="keep-tracks-status" class="metadata" role="status"></p>
-                    <div id="keep-tracks-preview" class="stream-preview" hidden></div>
-                    <fieldset id="keep-audio" class="track-group">
-                      <legend>Audio · keep at least one</legend>
+                  <div id="keep-tracks-file" class="keep-tracks-file" hidden>
+                    <p id="keep-tracks-status" class="metadata" role="status" hidden></p>
+                    <details id="keep-audio" class="track-group">
+                      <summary>Audio<span id="keep-audio-count" class="metadata"></span></summary>
                       <ul id="keep-audio-list" class="track-list"></ul>
-                    </fieldset>
-                    <fieldset id="keep-subtitles" class="track-group">
-                      <legend>Subtitles</legend>
+                    </details>
+                    <details id="keep-subtitles" class="track-group">
+                      <summary>Subtitles<span id="keep-subtitle-count" class="metadata"></span></summary>
                       <ul id="keep-subtitle-list" class="track-list"></ul>
-                    </fieldset>
-                    <button id="keep-tracks-reset" type="button" class="quiet">Back to the automatic choice</button>
+                    </details>
+                    <button id="keep-tracks-reset" type="button" class="quiet">Keep every track</button>
                   </div>
+                  <button id="batch-tracks-open" type="button" class="quiet" hidden>Choose tracks file by file</button>
                 </div>
               </div>
-              <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on below. Turn it off to process with this goal.</p>
+              <p id="goal-overridden" class="goal-overridden" role="status" hidden>Goal not used: a technical profile is on.</p>
               <label id="replace-auto-label" class="check replace-auto" hidden><input id="replace-auto" type="checkbox" />Replace automatically when done</label>
               <label id="queue-priority-label" class="check replace-auto"><input id="queue-priority" type="checkbox" />Run next, ahead of the queue</label>
               <div class="conversion-defaults"><button id="save-conversion-defaults" type="button" class="quiet">Save as default</button><span id="conversion-defaults-status" class="metadata" role="status"></span></div>
-              <p id="processing-policy" class="metadata">Automatic encodes the whole file with fixed settings and checks the result. Savings and quality must pass validation; a result is not guaranteed.</p>
               <div id="advanced-profiles" class="advanced-profiles">
-              <p class="metadata advanced-explain">Pick a specific profile, custom encoder settings or batch limits. While this is on, the goal above is not used: the profile chosen here decides the settings, and each file becomes a candidate you review before any original is replaced.</p>
               <label class="check technical-toggle"><input id="technical" type="checkbox" />Use a technical profile instead of the goal</label>
               <div id="legacy-controls" hidden>
               <label
@@ -492,7 +465,6 @@
               <label class="check"
                 ><input id="custom" type="checkbox" />Customize</label
               >
-              <p id="profile-mode-note" class="muted"></p>
               <div id="creation-profile-info" class="profile-info" hidden></div>
               <p id="creation-limits-note" class="metadata"></p>
               <div id="custom-fields" hidden>
@@ -566,10 +538,6 @@
                     <option value="compact">DTS / lossless → AAC</option>
                   </select></label
                 >
-                <p id="audio-note" class="muted" hidden>
-                  AAC is lossy. Keeps tracks, languages and channels; object
-                  audio metadata is lost.
-                </p>
               </div>
               <div class="size-guardrails">
                 <div class="field-grid">
@@ -592,9 +560,6 @@
                   ><input id="preserve-depth" type="checkbox" checked />Preserve
                   source bit depth</label
                 >
-                <p class="muted">
-                  Resolution is preserved.
-                </p>
               </div>
               </div>
               </div>
@@ -1072,7 +1037,6 @@
               </div>
             </div>
             <ul id="keep-languages-list" class="language-chips" aria-label="Languages to keep"></ul>
-            <p class="muted">Save space and Shrink to 1080p SDR drop audio and subtitle tracks in other languages. Tracks in the file's original language and untagged tracks are always kept.</p>
             <div class="submit-actions">
               <button id="keep-languages-apply" type="button" class="primary">Apply</button>
               <button id="keep-languages-reset" type="button" class="quiet">Reset to default</button>
@@ -1365,6 +1329,14 @@
         </details>
       </div>
       <div id="detail-controls" class="jd-actions" data-section="actions"></div>
+    </dialog>
+    <dialog id="batch-tracks" class="batch-tracks" aria-labelledby="batch-tracks-title">
+      <div class="dialog-heading">
+        <h2 id="batch-tracks-title">Tracks</h2>
+        <button id="batch-tracks-close" type="button" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <p id="batch-tracks-status" class="metadata" role="status" hidden></p>
+      <ul id="batch-tracks-list" class="batch-tracks-list"></ul>
     </dialog>
     <dialog id="file-review" aria-labelledby="file-review-title">
       <div class="dialog-heading">

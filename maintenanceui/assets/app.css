@@ -2768,7 +2768,6 @@ pre {
 .processing-goal:disabled .goal-card { background: var(--disabled); }
 .goal-overridden { margin: -.5rem 0 1rem; padding: .55rem .7rem; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
 .advanced-profiles { margin: 1rem 0; padding: .5rem .85rem; border: 1px solid var(--line); border-radius: 8px; }
-.advanced-explain { margin: 0 0 .25rem; }
 #recipe-dirty[data-dirty="true"] { font-weight: 600; }
 #settings-worker { margin-bottom: 1.25rem; }
 .profile-action-bar .action-control { width: auto; min-width: 90px; gap: .5rem; }
@@ -3077,10 +3076,21 @@ button.status-action:focus-visible { outline: 2px solid var(--forest); outline-o
 .keep-tracks .segmented label { white-space: nowrap; }
 .keep-tracks-body { display: grid; gap: .85rem; }
 .keep-tracks-body > p { margin: 0; }
-.track-group { margin: 0; padding: 0; border: 0; min-width: 0; }
+.keep-tracks-file { display: grid; gap: .35rem; }
+.keep-tracks-file > p { margin: 0; }
+/* Each kind of track stays folded until opened, so a file with many never makes the form scroll. */
+.track-group { min-width: 0; }
 .track-group[hidden] { display: none; }
-.track-group legend { padding: 0; margin-bottom: 2px; font-size: .78rem; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
-.track-list { max-height: 24rem; margin: 0; padding: 0; overflow-y: auto; list-style: none; }
+.track-group > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; cursor: pointer; font-weight: 600; }
+.track-group > summary .metadata { margin-left: auto; font-weight: 400; }
+.track-list { margin: 0; padding: 0; list-style: none; }
+.track-group-title { margin: .5rem 0 2px; font-size: .78rem; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
+.batch-tracks-list { margin: 0; padding: 0; list-style: none; }
+.batch-tracks-file { border-top: 1px solid var(--line); }
+.batch-tracks-file > details > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 44px; cursor: pointer; }
+.batch-tracks-name { min-width: 0; overflow-wrap: anywhere; }
+.batch-tracks-note { margin-left: auto; color: var(--warning); }
+.batch-tracks-body { padding: 0 0 .75rem; }
 .track-row + .track-row { border-top: 1px solid var(--line); }
 .track-label { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0; padding: 4px 0; font-size: 13px; cursor: pointer; }
 .track-label:has(input:disabled) { cursor: default; }
@@ -3500,7 +3510,9 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
   .target-editor {
     position: sticky;
     top: var(--stick-top);
-    max-height: calc(100dvh - var(--stick-top) - 12px);
+    /* Before the page scrolls the form starts 31px lower, below the panel's
+       margin, border and padding; it still ends on screen. */
+    max-height: calc(100dvh - var(--stick-top) - 31px - 12px);
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
