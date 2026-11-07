@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/resilience"
@@ -174,11 +173,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: "worker does not support compact audio; upgrade the worker before encoding"}, nil
 		}
 	}
-	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.CoverArtStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !workerSupportsCoverArt(ctx, e.actionWorker(ec)) {
-		return StepResult{Status: StepFailed, Error: errCoverArtWorker + " before encoding"}, nil
-	}
-	if origMap, _ := ec.State["original"].(map[string]any); len(mediainspect.ThumbnailTrackStreams(getStreamsList(origMap, "video"))) > 0 && !getBool(ec.State, "transcode_reconcile") && !workerSupportsThumbnailTracks(ctx, e.actionWorker(ec)) {
-		return StepResult{Status: StepFailed, Error: errThumbnailTrackWorker + " before encoding"}, nil
+	reconciling := getBool(ec.State, "transcode_reconcile")
+	if !reconciling {
+		if msg := e.sourceTrackWorkerError(ctx, ec); msg != "" {
+			return StepResult{Status: StepFailed, Error: msg + " before encoding"}, nil
+		}
 	}
 	if plan.Compact != nil && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
@@ -245,6 +244,15 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			default:
 				return StepResult{Status: StepFailed, Error: fmt.Sprintf("transcode reconcile unexpected status %q (fail closed)", st.Status)}, nil
 			}
+		}
+	}
+
+	// The gates above were skipped for a submit left uncertain, since the job
+	// may be on the worker already. Reaching here from that state means the
+	// worker lost it, and a new job needs them like a first one.
+	if reconciling {
+		if msg := e.sourceTrackWorkerError(ctx, ec); msg != "" {
+			return StepResult{Status: StepFailed, Error: msg + " before encoding"}, nil
 		}
 	}
 

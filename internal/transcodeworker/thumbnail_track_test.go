@@ -181,9 +181,18 @@ func previewTrackFixture(t *testing.T) (ctx context.Context, ffmpeg, dir, source
 	return ctx, ffmpeg, dir, source, probe
 }
 
+// previewTrackEncode is the outcome of runPreviewTrackEncode.
+type previewTrackEncode struct {
+	ctx                    context.Context
+	ffmpeg, ffprobe        string
+	dir, source, candidate string
+	srcProbe               SourceProbe
+	execPlan               *ExecutionPlan
+}
+
 // runPreviewTrackEncode runs the production encode path for plan on the fixture
 // and checks the candidate carries one video stream, not two.
-func runPreviewTrackEncode(t *testing.T, plan *transcode.Plan) {
+func runPreviewTrackEncode(t *testing.T, plan *transcode.Plan) previewTrackEncode {
 	t.Helper()
 	ctx, ffmpeg, dir, source, srcProbe := previewTrackFixture(t)
 	ffprobe, err := exec.LookPath("ffprobe")
@@ -215,6 +224,7 @@ func runPreviewTrackEncode(t *testing.T, plan *transcode.Plan) {
 	if countMainVideo(candProbe.Streams) != countMainVideo(srcProbe.Streams) {
 		t.Fatalf("programme video count changed: source %d, candidate %d", countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams))
 	}
+	return previewTrackEncode{ctx: ctx, ffmpeg: ffmpeg, ffprobe: ffprobe, dir: dir, source: source, candidate: candidate, srcProbe: srcProbe, execPlan: ep}
 }
 
 // TestPreviewTrackRealEncode runs the production encode path on a synthetic MP4
@@ -222,6 +232,32 @@ func runPreviewTrackEncode(t *testing.T, plan *transcode.Plan) {
 // output carries one video stream, not two.
 func TestPreviewTrackRealEncode(t *testing.T) {
 	runPreviewTrackEncode(t, coverArtPlan())
+}
+
+// The plan unmaps the preview track, so a candidate that still carries one
+// means the map did not take; the programme count does not see it, and the
+// candidate must not be published.
+func TestCandidateKeepingPreviewTrackFailsValidation(t *testing.T) {
+	enc := runPreviewTrackEncode(t, coverArtPlan())
+	w := NewWorker(&WorkerConfig{StateDir: enc.dir, FFmpeg: enc.ffmpeg, FFprobe: enc.ffprobe})
+	if _, err := w.validateEncodedCandidateFull(enc.ctx, enc.candidate, enc.execPlan, enc.srcProbe, 0); err != nil {
+		t.Fatalf("clean candidate rejected: %v", err)
+	}
+	kept := filepath.Join(enc.dir, "kept-preview.mkv")
+	if out, err := exec.CommandContext(enc.ctx, enc.ffmpeg, "-nostdin", "-v", "error", "-i", enc.candidate, "-i", enc.source,
+		"-map", "0", "-map", "1:v:1", "-c", "copy", kept).CombinedOutput(); err != nil {
+		t.Fatalf("kept-preview fixture: %v %s", err, out)
+	}
+	keptProbe, err := ProbeSourceDetails(enc.ctx, enc.ffprobe, kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, previews := splitProgrammeVideo(keptProbe.Streams); len(previews) != 1 || countMainVideo(keptProbe.Streams) != 1 {
+		t.Fatalf("fixture does not carry the preview track beside one programme video: %+v", keptProbe.Streams)
+	}
+	if _, err := w.validateEncodedCandidateFull(enc.ctx, kept, enc.execPlan, enc.srcProbe, 0); err == nil || !strings.Contains(err.Error(), "preview image track") {
+		t.Fatalf("accepted a candidate that kept the preview track: %v", err)
+	}
 }
 
 // The two-pass path analyses 0:V:0 and encodes with the same unmap, so a

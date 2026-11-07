@@ -128,6 +128,14 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if sv, cv := countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams); sv > 0 && cv != sv {
 		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv))
 	}
+	// The plan unmaps the source's preview tracks. One left in the candidate
+	// means the map did not take: a second video the programme count above
+	// does not see.
+	if len(execPlan.Thumbnails) > 0 {
+		if _, kept := splitProgrammeVideo(candProbe.Streams); len(kept) > 0 {
+			return attest, candidateInvalid(fmt.Errorf("%w: local candidate still carries %d preview image track(s) the plan leaves out (fail closed, never publish)", ErrSourceInvalid, len(kept)))
+		}
+	}
 	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
 		return attest, candidateInvalid(fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc))
 	}

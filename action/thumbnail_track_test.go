@@ -10,6 +10,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/jakenesler/navigatorr/transcode/recipe"
 )
 
@@ -86,6 +87,57 @@ func TestSubmitRefusesPreviewTrackForOldWorker(t *testing.T) {
 				t.Fatalf("status=%s error=%s", res.Status, res.Error)
 			}
 		})
+	}
+}
+
+// A submit left uncertain skips the capability gates, because the job may be on
+// the worker already. A worker that forgot the job (or dropped its retained
+// candidate) is sent a new one, which needs the same gates as a first submit.
+func TestResubmitAfterLostJobRefusesPreviewTrackForOldWorker(t *testing.T) {
+	for _, lost := range []struct {
+		name   string
+		status func(jobID string) (transcode.JobStatus, error)
+	}{
+		{"worker forgot the job", func(jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{}, &httpclient.HTTPError{Method: "GET", URL: "/v1/jobs/" + jobID, StatusCode: 404, Message: "not found"}
+		}},
+		{"retention ended", func(jobID string) (transcode.JobStatus, error) {
+			return transcode.JobStatus{ID: jobID, Status: transcode.StatusExpired}, nil
+		}},
+	} {
+		for _, tc := range []struct {
+			name       string
+			capability bool
+			wantSubmit bool
+		}{
+			{"old worker", false, false},
+			{"thumbnail-track worker", true, true},
+		} {
+			t.Run(lost.name+"/"+tc.name, func(t *testing.T) {
+				mock := &mockTranscodeExecutor{
+					capabilitiesFunc: func(context.Context) (transcode.WorkerCapabilities, error) {
+						return transcode.WorkerCapabilities{ProtocolVersion: transcode.WorkerProtocolVersion, ThumbnailTracks: tc.capability}, nil
+					},
+					statusFunc: func(_ context.Context, jobID string) (transcode.JobStatus, error) { return lost.status(jobID) },
+				}
+				e := NewEngine(EngineDeps{Transcode: mock})
+				ec := testReconcileEC("job-preview-track")
+				ec.State["job_id"] = "job-preview-track"
+				ec.State["transcode_reconcile"] = true
+				ec.State["resolved_path"] = "/media/movies/Movie/Movie.mp4"
+				ec.State["original"] = map[string]any{"video": previewTrackReport().Video}
+				res, err := e.stepTranscodeSubmit(context.Background(), ec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if submitted := atomic.LoadInt32(&mock.submitCalls) > 0; submitted != tc.wantSubmit {
+					t.Fatalf("submitted=%v status=%s error=%s", submitted, res.Status, res.Error)
+				}
+				if !tc.wantSubmit && (res.Status != StepFailed || !strings.Contains(res.Error, "preview image")) {
+					t.Fatalf("status=%s error=%s", res.Status, res.Error)
+				}
+			})
+		}
 	}
 }
 
