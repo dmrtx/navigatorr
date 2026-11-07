@@ -1121,6 +1121,12 @@ func (e *Engine) bindModeParent(ec *ExecutionContext) error {
 	if routed && ec.State["mode_policy"] != nil {
 		return nil
 	}
+	// Tracks picked by hand for this file go on top of whichever goal it runs.
+	if picks, ok := e.itemTrackPicks(inputs, getString(ec.Inputs, "batch_item_key")); ok {
+		if policy, err = withFilePicks(policy, picks); err != nil {
+			return fmt.Errorf("the tracks picked for this file are invalid: %w", err)
+		}
+	}
 	ec.State["mode_policy"] = policy
 	ec.State["policy_digest"] = getString(states, "policy_digest")
 	ec.State["mode"] = mode

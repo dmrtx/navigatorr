@@ -187,13 +187,27 @@ func (e *Engine) replacedSince(ctx context.Context, ec *ExecutionContext, path s
 	if res, ok := e.skipReplacedSource(ec, rec, "another conversion replaced this file after this job was queued"); ok {
 		return res, true
 	}
-	if ec.Inputs[inputKeepAudioStreams] == nil && ec.Inputs[inputKeepSubtitleStreams] == nil {
-		return StepResult{}, false
-	}
 	if e.deps.Store == nil {
 		return StepResult{}, false
 	}
-	if self, err := e.deps.Store.GetActionInstanceIfExists(ec.InstanceID); err == nil && self != nil {
+	// The picks were made when the job was queued; a batch's, when the batch was.
+	queued := ""
+	if ec.Inputs[inputKeepAudioStreams] != nil || ec.Inputs[inputKeepSubtitleStreams] != nil {
+		queued = ec.InstanceID
+	} else if parentID := getString(ec.Inputs, "parent_action_id"); parentID != "" {
+		if parent, err := e.deps.Store.GetActionInstanceIfExists(parentID); err == nil && parent != nil {
+			var inputs map[string]any
+			if json.Unmarshal([]byte(parent.InputsJSON), &inputs) == nil {
+				if _, ok := e.itemTrackPicks(inputs, getString(ec.Inputs, "batch_item_key")); ok {
+					queued = parentID
+				}
+			}
+		}
+	}
+	if queued == "" {
+		return StepResult{}, false
+	}
+	if self, err := e.deps.Store.GetActionInstanceIfExists(queued); err == nil && self != nil {
 		if admitted := parseStoreTime(self.CreatedAt); !admitted.IsZero() && fi.ModTime().After(admitted.Add(picksModifiedSlack)) {
 			ec.State["failure_classification"] = string(resilience.SourceChanged)
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("choosing the tracks to keep: the file was modified at %s, after this job was queued at %s, and the streams were picked for the file as it was then. They were not applied to the new file: choose the tracks again", fi.ModTime().UTC().Format(time.RFC3339), admitted.UTC().Format(time.RFC3339))}, true
