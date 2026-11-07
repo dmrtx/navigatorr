@@ -82,8 +82,7 @@ const segmentGroups = {
   "size-budget-limit": ["", "siblings", "fixed"],
   "reconfigure-engine": ["fast", "small"],
   "reconfigure-budget-limit": ["", "siblings", "fixed"],
-  "conversion-video": ["compress", "copy"],
-  "conversion-goal": ["", "x265_preserve", "quality"],
+  "conversion-video": ["copy", "compress", "x265_preserve", "quality"],
   "keep-commentary": ["drop", "keep"],
   "keep-channels": ["all", "stereo"],
   "compact-height": ["2160", "1080"],
@@ -92,7 +91,7 @@ const segmentGroups = {
   "reconfigure-hdr": ["sdr", "keep"],
 };
 // What the form's markup checks: the options a new form shows.
-const segmentDefaults = { "conversion-video": "compress", "conversion-goal": "", "keep-commentary": "drop", "keep-channels": "all", "compact-height": "2160", "compact-hdr": "sdr" };
+const segmentDefaults = { "conversion-video": "compress", "keep-commentary": "drop", "keep-channels": "all", "compact-height": "2160", "compact-hdr": "sdr" };
 function harness({ radios: withRadios = false, segments: withSegments = false } = {}) {
   const elements = new Map();
   let interval;
@@ -4431,13 +4430,11 @@ test("the process button says how many files it starts", () => {
   assert.equal(h.elements.get("enqueue").textContent, "Process file");
 });
 
-test("technical profiles live in a labelled Advanced section that keeps the goal visible", () => {
+test("technical profiles are one toggle in the form, below the goal, not folded away", () => {
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
-  const advanced = form.slice(form.indexOf('<details id="advanced-profiles"'), form.indexOf("</details>", form.indexOf('<details id="advanced-profiles"')));
-  assert.match(advanced, /<summary>.*Advanced: technical profiles/);
-  assert.match(advanced, /id="technical"/);
-  assert.match(advanced, /id="legacy-controls"/);
-  assert.match(advanced, /goal above is not used/);
+  assert.match(form, /<div id="advanced-profiles"[\s\S]*id="technical"[\s\S]*id="legacy-controls"/);
+  assert.match(form, /goal above is not used/);
+  assert.doesNotMatch(form, /<details/);
   assert.ok(form.indexOf('id="processing-goal"') < form.indexOf('id="advanced-profiles"'));
   assert.doesNotMatch(markup, /Technical tools and legacy profiles/);
 });
@@ -4449,19 +4446,12 @@ test("turning technical profiles on marks the goal as not used instead of hiding
   assert.equal(el("processing-goal").hidden, false);
   assert.equal(el("processing-goal").disabled, true);
   assert.equal(el("goal-overridden").hidden, false);
-  assert.equal(el("advanced-profiles").open, true);
   assert.equal(el("legacy-controls").hidden, false);
-  assert.equal(el("advanced-state").textContent, "On · goal not used");
   assert.equal(el("enqueue").textContent, "Create candidate");
-  // Collapsing the section is respected; the summary and goal note still say it is on.
-  h.run('$("advanced-profiles").open=false; controls();');
-  assert.equal(el("advanced-profiles").open, false);
-  assert.equal(el("goal-overridden").hidden, false);
   h.run('$("technical").checked=false; controls();');
   assert.equal(el("processing-goal").disabled, false);
   assert.equal(el("goal-overridden").hidden, true);
   assert.equal(el("legacy-controls").hidden, true);
-  assert.equal(el("advanced-state").textContent, "Off");
   assert.equal(el("enqueue").textContent, "Process file");
 });
 
@@ -4494,8 +4484,9 @@ test("Audio only is sent as the size goal with audio_only and no encoder or size
   // Its own options are greyed: the video is copied, so there is no encoder or limit to pick.
   const form = harness();
   form.run('processingMode=()=>"audio_only"; controls();');
-  assert.equal(form.elements.get("size-engine-reason").textContent, "The video is copied as it is.");
-  assert.equal(form.elements.get("size-budget-reason").textContent, "The video is copied as it is.");
+  assert.equal(form.elements.get("conversion-video-note").textContent, "The video is copied as it is.");
+  assert.equal(form.elements.get("size-engine-reason").hidden, true);
+  assert.equal(form.elements.get("size-budget-reason").hidden, true);
 });
 
 test("the media engine option belongs to the smaller files goal and starts on", () => {
@@ -4508,7 +4499,8 @@ test("the media engine option belongs to the smaller files goal and starts on", 
   const h = harness();
   const el = (id) => h.elements.get(id);
   h.run('processingMode=()=>"quality"; controls();');
-  assert.equal(el("size-engine-reason").hidden, false);
+  assert.equal(el("conversion-video-note").hidden, false, "said once, above the rows");
+  assert.equal(el("size-engine-reason").hidden, true);
   h.run('processingMode=()=>"size"; $("allow-hardware").checked=true; controls();');
   assert.equal(el("size-engine-reason").hidden, true);
   h.run('$("allow-hardware").checked=false; controls();');
@@ -5414,7 +5406,8 @@ test("the smaller files goal offers an optional size budget in both forms", () =
   const h = harness();
   const el = (id) => h.elements.get(id);
   h.run('processingMode=()=>"quality"; controls();');
-  assert.equal(el("size-budget-reason").hidden, false);
+  assert.equal(el("conversion-video-note").hidden, false, "said once, above the rows");
+  assert.equal(el("size-budget-reason").hidden, true);
   h.run('processingMode=()=>"size"; controls();');
   assert.equal(el("size-budget-reason").hidden, true);
   assert.equal(el("size-budget-percent-label").hidden, true);
@@ -5762,13 +5755,12 @@ function goalHarness() {
     h.segments.get(name).find((r) => r.value === value).listeners.get("change")();
   };
   const click = (goal) => {
-    if (goal === "quality" || goal === "x265_preserve") return pick("conversion-goal", goal);
-    h.segments.get("conversion-goal").forEach((r) => (r.checked = r.value === ""));
+    if (goal === "quality" || goal === "x265_preserve") return pick("conversion-video", goal);
     if (goal === "audio_only") return pick("conversion-video", "copy");
     h.segments.get("conversion-video").forEach((r) => (r.checked = r.value === "compress"));
     pick("compact-height", goal === "compact" ? "1080" : "2160");
   };
-  return { h, click, pick, line: () => h.elements.get("source-profile"), mode: () => h.run("processingMode()"), more: () => h.run('$("more-goals")') };
+  return { h, click, pick, line: () => h.elements.get("source-profile"), mode: () => h.run("processingMode()") };
 }
 
 // The goal harness with submissions captured.
@@ -5783,20 +5775,19 @@ function submissionHarnessGoal() {
     h.segments.get(name).find((r) => r.value === value).listeners.get("change")();
   };
   const click = (goal) => {
-    if (goal === "quality" || goal === "x265_preserve") return pick("conversion-goal", goal);
-    h.segments.get("conversion-goal").forEach((r) => (r.checked = r.value === ""));
+    if (goal === "quality" || goal === "x265_preserve") return pick("conversion-video", goal);
+    h.segments.get("conversion-video").forEach((r) => (r.checked = r.value === "compress"));
     pick("compact-height", goal === "compact" ? "1080" : "2160");
   };
   return { h, pick, click, sent };
 }
 
 test("the goal step starts from the saved defaults and shows the file", async () => {
-  const { h, line, mode, more } = goalHarness();
+  const { h, line, mode } = goalHarness();
   h.context.profile = goalProfileFixture();
   h.run("var calls = []; api = async (path) => { calls.push(path); return profile; };");
   h.run("controls()");
   assert.equal(h.run("state.goalProfile.status"), "loading");
-  assert.equal(more().open, false);
   assert.equal(line().hidden, true);
   await h.run('loadGoalProfile("/media/movie.mkv")');
   assert.equal(h.run("calls.join()"), "source-profile?path=%2Fmedia%2Fmovie.mkv");
@@ -5865,17 +5856,20 @@ test("Run next asks for one file to go first, once", async () => {
   assert.equal(h.run('$("queue-priority").checked'), false);
 });
 
-test("Run next is greyed for a batch, with the reason", () => {
+test("Run next asks for a whole batch to go first", async () => {
+  const { h, sent } = submissionHarnessGoal();
+  h.run('$("scope").value = "batch"; $("service").value = "folder:/media"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); $("queue-priority").checked = true');
+  await h.run("buildAndSubmitJob()");
+  assert.equal(sent.at(-1).queue_priority, true);
+  assert.equal(h.run('$("queue-priority").checked'), false, "the next batch does not inherit it");
+});
+
+test("Run next stays on offer for a batch", () => {
   const h = harness();
   const el = (id) => h.elements.get(id);
   h.run('$("queue-priority").checked = true; $("scope").value = "batch"; renderConversionOptions();');
-  assert.equal(el("queue-priority").disabled, true);
-  assert.equal(el("queue-priority").checked, false);
-  assert.equal(el("queue-priority-reason").hidden, false);
-  assert.equal(el("queue-priority-reason").textContent, "Only a single file can run next.");
-  h.run('$("scope").value = "file"; renderConversionOptions();');
-  assert.equal(el("queue-priority").disabled, false);
-  assert.equal(el("queue-priority-reason").hidden, true);
+  assert.equal(el("queue-priority").checked, true);
+  assert.notEqual(el("queue-priority").disabled, true);
 });
 
 test("reopening a job restores its track rules over the saved ones", () => {
@@ -5913,8 +5907,10 @@ test("options name the goal the server runs", () => {
   assert.equal(mode(), "size");
   click("x265_preserve");
   assert.equal(mode(), "x265_preserve");
-  assert.equal(h.elements.get("compact-hdr-reason").textContent, "Not used by the goal under More options.");
-  pick("conversion-goal", "");
+  assert.equal(h.elements.get("conversion-video-note").hidden, false);
+  assert.equal(h.segments.get("compact-hdr")[1].disabled, true);
+  assert.equal(h.elements.get("compact-hdr-reason").hidden, true, "said once, above the rows");
+  pick("conversion-video", "compress");
   assert.equal(mode(), "size");
   assert.equal(h.elements.get("compact-hdr-reason").hidden, true);
   assert.equal(h.segments.get("compact-hdr")[1].disabled, false);
@@ -5954,35 +5950,13 @@ test("a row that does not apply to the file stays, greyed, with the reason, and 
   assert.equal("max_height" in sent[2], false);
 });
 
-test("More options stays closed for the goals the options name", async () => {
-  const { h, click, mode, more } = goalHarness();
-  h.context.profile = goalProfileFixture();
-  h.run("api = async () => profile; controls()");
-  await h.run('loadGoalProfile("/media/movie.mkv")');
-  assert.equal(mode(), "size");
-  assert.equal(more().open, false);
-  click("compact");
-  assert.equal(more().open, false);
-});
-
-test("More options opens for a selected goal inside it", async () => {
-  const { h, click, more } = goalHarness();
-  h.run("api = async () => profile; controls()");
-  h.context.profile = goalProfileFixture();
-  await h.run('loadGoalProfile("/media/movie.mkv")');
-  assert.equal(more().open, false);
-  click("quality");
-  assert.equal(more().open, true);
-});
-
 test("a goal the user chose before the profile arrives is never overridden", async () => {
-  const { h, click, mode, more } = goalHarness();
+  const { h, click, mode } = goalHarness();
   const pending = deferred();
   h.context.pending = pending.promise;
   h.run("api = async () => pending; controls()");
   const load = h.run('loadGoalProfile("/media/movie.mkv")');
   click("quality");
-  assert.equal(more().open, true, "an explicit pick inside More options opens it");
   pending.resolve(goalProfileFixture());
   await load;
   assert.equal(mode(), "quality");
@@ -6023,14 +5997,13 @@ test("changing the file starts a new visit, so the defaults apply again", async 
 });
 
 test("a failed read leaves the goals usable with only a muted note", async () => {
-  const { h, mode, line, more } = goalHarness();
+  const { h, mode, line } = goalHarness();
   h.run('api = async () => { throw new Error("could not read this file"); }; controls();');
   await h.run('loadGoalProfile("/media/movie.mkv")');
   assert.equal(line().hidden, false);
   assert.equal(line().textContent, "Could not read this file");
   assert.equal(h.run("state.goalProfile.status"), "error");
   assert.equal(mode(), "size");
-  assert.equal(more().open, false, "the default goal is already in view");
   assert.equal(h.run("goalSkipWarning()"), "");
   // A malformed answer is treated the same way.
   h.run('api = async () => ({}); $("path").value = "/media/next.mkv"; controls();');
@@ -6147,7 +6120,6 @@ test("submitting a goal the server says will skip asks first, and says so plainl
   await h.run("submitJob()");
   assert.equal(reviews.at(-1), "submitted");
   // A goal that converts it submits without a question.
-  h.run('setRadioValue("conversion-goal", "")');
   click("compact");
   reviews.length = 0;
   await h.run("submitJob()");
@@ -6156,17 +6128,13 @@ test("submitting a goal the server says will skip asks first, and says so plainl
 
 test("goal names are the same in the form, the reconfigure dialog and job rows", () => {
   const form = markup.slice(markup.indexOf('<fieldset id="processing-goal"'), markup.indexOf("</fieldset>", markup.indexOf('<fieldset id="processing-goal"')));
-  const visible = form.slice(0, form.indexOf('<details id="more-goals"'));
-  const more = form.slice(form.indexOf('<details id="more-goals"'));
-  // Options, not goals to pick from: the goals are named only under More options.
-  assert.doesNotMatch(form, /goal-card|goal-title/);
-  for (const name of ["Video", "HDR and Dolby Vision", "Resolution", "Size limit", "Encoder"]) assert.ok(visible.includes(`class="goal-option-label">${name}<`), name);
-  assert.match(visible, /Convert to SDR[\s\S]*Keep HDR/);
-  assert.doesNotMatch(visible, /Keep Dolby Vision/);
-  assert.match(more, /<summary>More options<\/summary>/);
-  assert.match(more, /name="conversion-goal" value="" checked[\s\S]*Keep quality, convert to x265[\s\S]*Strict quality/);
-  assert.match(visible, /id="hardware-option"/);
-  assert.doesNotMatch(more, /id="hardware-option"/);
+  // Options, flat: nothing is folded away under another control.
+  assert.doesNotMatch(form, /goal-card|goal-title|more-goals/);
+  for (const name of ["Video", "HDR and Dolby Vision", "Resolution", "Size limit", "Encoder"]) assert.ok(form.includes(`class="goal-option-label">${name}<`), name);
+  assert.match(form, /Convert to SDR[\s\S]*Keep HDR/);
+  assert.doesNotMatch(form, /Keep Dolby Vision/);
+  assert.match(form, /name="conversion-video" value="copy"[\s\S]*value="compress" checked[\s\S]*value="x265_preserve"[\s\S]*value="quality"/);
+  assert.match(form, /id="hardware-option"/);
   // The reconfigure dialog shows the same goal cards; its hidden select carries the choice.
   const dialog = markup.match(/<fieldset id="reconfigure-mode-label"[\s\S]*?<\/fieldset>/)[0];
   for (const name of ["Save space", "Shrink to 1080p SDR", "Audio only", "Strict quality", "Keep quality, convert to x265"]) assert.ok(dialog.includes(`<strong class="goal-title">${name}</strong>`), name);
@@ -7448,7 +7416,7 @@ test("the picker lists the file's tracks, checked as the server's rules keep the
   assert.equal(el("keep-audio").hidden, false);
   assert.equal(el("keep-audio-list").children.length, 4);
   assert.equal(el("keep-subtitle-list").children.length, 3);
-  assert.equal(el("keep-tracks-summary").textContent, "Saved list: English, Japanese, Spanish");
+  assert.equal(el("keep-tracks-summary").textContent, "English, Japanese, Spanish");
   assert.equal(el("keep-tracks-status").textContent, "Keeping 3 of 4 audio tracks and 2 of 3 subtitles.");
   assert.equal(el("keep-tracks-reset").hidden, true);
   // Language, codec, channels and title read as one line; badges say what the track is.
@@ -7498,7 +7466,7 @@ test("one file's tracks show their size and what the goal makes of them, and aud
   assert.ok(preview.includes("Audio and track choices alone save about 6.30 GB, 63% of the file; the video encode saves on top of that."));
   assert.ok(preview.includes("Stronger audio (HE-AAC: stereo 64, 5.1 160 kbps) would save about 320.0 MB more. A size budget switches to it when the budget needs it."));
   assert.ok(preview.includes("Audio weighs more than the video in this file (6.58 GB against 3.00 GB). After this goal it is about 560.0 MB."));
-  assert.equal(el("keep-tracks-summary").textContent, "Audio outweighs video · Saved list: English, Japanese, Spanish");
+  assert.equal(el("keep-tracks-summary").textContent, "Audio outweighs video · English, Japanese, Spanish");
 
   // Under compact the stronger level is not offered; a goal that copies the audio says so.
   h.run('setProcessingMode("compact"); renderKeepTracks()');
@@ -7647,17 +7615,17 @@ test("a file always keeps at least one audio track", async () => {
   assert.throws(() => h.run('keepTrackInputs(true, "/media/movie.mkv")'), /Keep at least one audio track/);
 });
 
-test("this job's languages and every track change what the picker reads and sends", async () => {
+test("the languages and every track change what the picker reads and sends", async () => {
   const { h, el, open, boxes, inputs } = keepHarness();
   await open();
   h.run('toggleTrack("subtitles", 6, true)');
   // Editing this job's languages starts from the saved list and reads the file again.
-  h.run('setKeepScope("job")');
+  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
   assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
   assert.equal(h.run("keepTracks.picks"), null, "the boxes follow the languages again");
   assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=eng%2Cjpn%2Cspa");
-  assert.equal(el("keep-job-languages").hidden, false);
-  assert.equal(el("keep-tracks-summary").textContent, "This job: English, Japanese, Spanish");
+  assert.equal(el("keep-job-languages").hidden, true, "one file ticks its own tracks");
+  assert.equal(el("keep-tracks-summary").textContent, "English, Japanese, Spanish");
   assert.deepEqual(inputs(), { keep_languages: ["eng", "jpn", "spa"] });
   h.context.tracks = { ...keepFixture(), languages: ["eng", "fra", "jpn", "spa"] };
   h.context.tracks.audio[1].keep = true;
@@ -7672,22 +7640,22 @@ test("this job's languages and every track change what the picker reads and send
   el("keep-job-list").children.find((chip) => chip.children[0].textContent === "French").children[2].listeners.get("click")();
   assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
   // Every track: an empty list, which the server reads as no filtering.
-  h.run('setKeepScope("all")');
+  h.run('keepTracks.languages = []; keepTracks.scope = "job"; controls()');
   assert.equal(h.run("keepTracks.key"), "path=%2Fmedia%2Fmovie.mkv&keep_languages=");
   assert.deepEqual(inputs(), { keep_languages: [] });
   assert.equal(el("keep-tracks-summary").textContent, "Every language");
   assert.equal(el("keep-job-languages").hidden, true);
   // Back to the saved list sends nothing again.
-  h.run('setKeepScope("saved")');
+  h.run('keepTracks.scope = "saved"; controls()');
   assert.deepEqual(inputs(), {});
   // A batch has no track list but still takes the language choice.
-  h.run('setKeepScope("job"); toggleTrack("audio", 1, true)');
+  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls(); toggleTrack("audio", 1, true)');
   assert.deepEqual(inputs(false), { keep_languages: ["eng", "jpn", "spa"] });
 });
 
 test("a language list for a batch is chosen without reading any file's tracks", () => {
   const { h, el } = keepHarness();
-  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); setKeepScope("job"); renderKeepTracks();');
+  h.run('$("scope").value = "batch"; state.folderSelected = new Set(["/media/a.mkv", "/media/b.mkv"]); keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls(); renderKeepTracks();');
   assert.equal(el("keep-tracks").hidden, false);
   assert.equal(el("keep-tracks-file").hidden, true);
   assert.equal(h.run("queries.length"), 0);
@@ -7730,6 +7698,14 @@ test("a new file starts from the automatic choice, and a stale or failed read ca
   assert.equal(h.run("keepTracks.status"), "error");
   assert.deepEqual(plain(h.run("keepTrackInputs(true, '/media/third.mkv')")), {});
   assert.deepEqual(boxes("audio"), []);
+  // With no tracks to tick, the file edits the languages, and keeps them shown while it is read again.
+  assert.equal(el("keep-job-languages").hidden, false);
+  h.run('keepTracks.languages = ["eng"]; keepTracks.scope = "job"; controls()');
+  assert.equal(h.run("keepTracks.status"), "loading");
+  assert.equal(el("keep-job-languages").hidden, false);
+  // Another file starts over from its tracks.
+  h.run('$("path").value = "/media/fourth.mkv"; controls();');
+  assert.equal(el("keep-job-languages").hidden, true);
 });
 
 test("saving a different list in Settings refreshes the picker's pre-checked tracks", async () => {
@@ -7768,7 +7744,7 @@ test("submitting a single Save space or Shrink job sends the picker's choice, an
   assert.equal(sent[2].mode, "quality");
   assert.equal("keep_languages" in sent[2], false);
   // The shrink goal takes the same choice.
-  h.run('processingMode = () => "compact"; keepTracks.scope = "all"; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
+  h.run('processingMode = () => "compact"; keepTracks.scope = "job"; keepTracks.languages = []; $("path").value = "/media/one.mp4"; state.folderSelected = new Set(["/media/one.mp4"]); state.fileStep = "configure";');
   await h.run('buildAndSubmitJob("encode")');
   assert.equal(sent[3].mode, "compact");
   assert.deepEqual(sent[3].keep_languages, []);
@@ -7899,10 +7875,10 @@ test("Choose tracks is offered in the details of a finished file that kept untag
   assert.ok(labels({ ...job, mode: "compact" }, true).includes("Choose tracks"));
 });
 
-test("Choose tracks opens the goal form for the file with its goal and languages, and the track list open", async () => {
+test("Choose tracks opens the goal form for the file with its goal and languages", async () => {
   const h = harness({ radios: true });
   h.run('selectTab = (tab) => { state.tab = tab; }; setFileStep = (step) => { state.fileStep = step; }; keepLanguages.status = "ready"; keepLanguages.saved = ["eng", "jpn", "spa"]; controls = () => { renderKeepTracks(); };');
-  h.run('$("technical").checked = false; $("job-detail").open = true; $("keep-tracks").open = false;');
+  h.run('$("technical").checked = false; $("job-detail").open = true;');
   h.context.job = trackReportFixture({ mode: "compact" });
   const choose = h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks");
   await choose.listeners.get("click")();
@@ -7915,11 +7891,11 @@ test("Choose tracks opens the goal form for the file with its goal and languages
   assert.equal(h.run("state.fileStep"), "configure");
   assert.equal(h.run("keepTracks.scope"), "job");
   assert.deepEqual(plain(h.run("keepTracks.languages")), ["eng", "jpn", "spa"]);
-  assert.equal(h.elements.get("keep-tracks").open, true);
   // A job made with no language filter starts the form on every track.
   h.context.job = trackReportFixture({ tracks: { ...trackReportFixture().tracks, languages: [] } });
   await h.run('jobControls(job, true)').children.find((b) => b.textContent === "Choose tracks").listeners.get("click")();
-  assert.equal(h.run("keepTracks.scope"), "all");
+  assert.equal(h.run("keepTracks.scope"), "job");
+  assert.deepEqual(plain(h.run("keepTracks.languages")), []);
   // Opening a file the ordinary way takes no goal or languages with it.
   h.run('openGoalForm("/media/plain.mkv")');
   assert.equal(h.elements.get("path").value, "/media/plain.mkv");
@@ -7948,15 +7924,19 @@ test("the markup carries the languages editor and the picker inside the forms th
   assert.match(section, /original language and untagged tracks are always kept/i);
   assert.match(section, /id="keep-languages-note"[^>]*role="status"/);
   const form = markup.slice(markup.indexOf('<form id="job-form"'), markup.indexOf("</form>", markup.indexOf('<form id="job-form"')));
-  const picker = form.slice(form.indexOf('<details id="keep-tracks"'), form.indexOf("</details>", form.indexOf('<details id="keep-tracks"')));
+  const picker = form.slice(form.indexOf('<div id="keep-tracks"'), form.indexOf('<p id="goal-overridden"'));
   assert.ok(picker, "the picker is part of the goal step");
   for (const id of ["keep-tracks-summary", "keep-job-languages", "keep-job-list", "keep-job-input", "keep-job-add", "keep-job-note", "keep-tracks-file", "keep-tracks-status", "keep-audio", "keep-audio-list", "keep-subtitles", "keep-subtitle-list", "keep-tracks-reset"])
     assert.match(picker, new RegExp(`id="${id}"`), id);
-  assert.deepEqual([...picker.matchAll(/name="keep-scope" value="(\w+)"/g)].map((m) => m[1]), ["saved", "job", "all"]);
+  assert.doesNotMatch(picker, /keep-scope/);
+  assert.doesNotMatch(picker, /keep-all|Keep all tracks|Tick all/);
   assert.match(picker, /keep at least one/i);
+  // Every selection, one file or a batch, chooses what happens to commentary.
+  assert.match(picker, /<div id="keep-commentary-row" class="goal-option">/);
+  assert.doesNotMatch(source, /keep-commentary-row/);
   // The job form is a form: an editor inside it must not open another one.
   assert.doesNotMatch(picker, /<form\b/);
-  assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<details id="keep-tracks"'), "the choice follows the goal");
+  assert.ok(form.indexOf('<fieldset id="processing-goal"') < form.indexOf('<div id="keep-tracks"'), "the choice follows the goal");
   assert.match(css, /\.track-list\s*\{[^}]*overflow-y:\s*auto/);
 });
 
@@ -8143,7 +8123,7 @@ test("saving the list in Settings resets hand picks only where the form follows 
   await open();
   const changed = { languages: ["eng", "fra"], default: ["eng", "jpn", "spa"] };
   // This job's own languages do not depend on the saved list.
-  h.run('setKeepScope("job")');
+  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
   h.run('toggleTrack("audio", 4, false)');
   const key = h.run("keepTracks.key");
@@ -8153,14 +8133,14 @@ test("saving the list in Settings resets hand picks only where the form follows 
   assert.equal(h.run("keepTracks.key"), key);
   assert.deepEqual(plain(h.run("[...keepTracks.picks.audio]")), [1, 3]);
   // Every track neither.
-  h.run('setKeepScope("all")');
+  h.run('keepTracks.languages = []; keepTracks.scope = "job"; controls()');
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
   h.run('toggleTrack("audio", 4, false)');
   h.context.changed = { languages: ["eng"], default: [] };
   h.run("applyKeepLanguages(changed, true)");
   assert.notEqual(h.run("keepTracks.picks"), null);
   // The saved list does: the boxes follow it again.
-  h.run('setKeepScope("saved")');
+  h.run('keepTracks.scope = "saved"; controls()');
   await h.run("loadKeepTracks(keepTracks.key, keepTracks.seq)");
   h.run('toggleTrack("audio", 4, false)');
   assert.notEqual(h.run("keepTracks.picks"), null);
@@ -8184,7 +8164,7 @@ test("one file takes one source slot at a time: its tracks are read after its pr
   const profileTimer = h.context.timers.length;
   assert.equal(profileTimer, 1, "only the profile read is scheduled");
   // Changing the languages meanwhile does not start a second read.
-  h.run('setKeepScope("job")');
+  h.run('keepTracks.languages = [...keepLanguages.saved]; keepTracks.scope = "job"; controls()');
   assert.equal(h.context.timers.length, profileTimer);
   await h.run('loadGoalProfile("/media/movie.mkv")');
   assert.deepEqual(plain(h.run("reads")), ["source-profile"]);

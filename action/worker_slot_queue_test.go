@@ -235,6 +235,97 @@ func TestTranscodeQueuePriorityGoesFirst(t *testing.T) {
 	}
 }
 
+// A batch asked with queue_priority goes ahead of an older batch and a plain
+// file, and its files stay together.
+func TestTranscodeQueuePriorityBatchGoesFirst(t *testing.T) {
+	worker := newSlotWorker(1)
+	e, st, _, srv, root := setupBatchTestEnv(t, worker.executor(), 1)
+	defer st.Close()
+	defer srv.Close()
+	e.deps.Registry = nil
+	ctx := context.Background()
+
+	a1 := writeSparseMedia(t, root, "Batch A One.mkv")
+	a2 := writeSparseMedia(t, root, "Batch A Two.mkv")
+	plain := writeSparseMedia(t, root, "Plain One.mkv")
+	b1 := writeSparseMedia(t, root, "Batch B One.mkv")
+	b2 := writeSparseMedia(t, root, "Batch B Two.mkv")
+	batchA, err := e.Run(ctx, "transcode_batch", map[string]any{"paths": []string{a1, a2}, "profile": "general-hevc", "media_type": "movie", "dry_run": false})
+	if err != nil || batchA.Status != StatusWaitingExternal {
+		t.Fatalf("batch A: %+v %v", batchA, err)
+	}
+	queued, err := e.Run(ctx, "transcode_media", map[string]any{"path": plain, "profile": "general-hevc"})
+	if err != nil || queued.WaitingCondition != "worker_busy" {
+		t.Fatalf("a plain file should wait in the queue: %+v %v", queued, err)
+	}
+	batchB, err := e.Run(ctx, "transcode_batch", map[string]any{"paths": []string{b1, b2}, "profile": "general-hevc", "media_type": "movie", "dry_run": false, "queue_priority": true})
+	if err != nil {
+		t.Fatalf("batch B: %+v %v", batchB, err)
+	}
+	items, err := st.ListQueuedBatchItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.Priority != (it.BatchID == batchB.ID) {
+			t.Fatalf("only batch B runs next: %+v", it)
+		}
+	}
+
+	worker.finish(worker.acceptedSources()[0])
+	if _, err := e.Resume(ctx, batchA.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if it := batchItemByPath(t, e, st, batchA.ID, a2); it.Status != "queued" {
+		t.Fatalf("batch A went ahead of the batch asked first: %+v", it)
+	}
+	if res, err := e.Resume(ctx, queued.ID, "", nil); err != nil || res.WaitingCondition != "worker_busy" {
+		t.Fatalf("the plain file went ahead of the batch asked first: %+v %v", res, err)
+	}
+	if _, err := e.Resume(ctx, batchB.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := worker.acceptedSources(); len(got) != 2 || got[1] != mustResolve(t, e, b1) {
+		t.Fatalf("accepted %v", got)
+	}
+
+	// The batch does not hold back a file asked first after it.
+	urgent := writeSparseMedia(t, root, "Urgent One.mkv")
+	first, err := e.Run(ctx, "transcode_media", map[string]any{"path": urgent, "profile": "general-hevc", "queue_priority": true})
+	if err != nil || first.WaitingCondition != "worker_busy" {
+		t.Fatalf("a priority file still waits for the running job: %+v %v", first, err)
+	}
+	if pos := getInt(actionState(t, st, first.ID), workerSlotPositionKey); pos != 1 {
+		t.Fatalf("priority file behind the batch asked first: position %d, want 1", pos)
+	}
+	worker.finish(mustResolve(t, e, b1))
+	if _, err := e.Resume(ctx, batchB.ID, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if it := batchItemByPath(t, e, st, batchB.ID, b2); it.Status != "queued" {
+		t.Fatalf("the batch started its next file ahead of the priority file: %+v", it)
+	}
+	if res, err := e.Resume(ctx, first.ID, "", nil); err != nil || res.WaitingCondition != "transcode_complete" {
+		t.Fatalf("the priority file should take the free slot: %+v %v", res, err)
+	}
+	if got := worker.acceptedSources(); len(got) != 3 || got[2] != mustResolve(t, e, urgent) {
+		t.Fatalf("accepted %v", got)
+	}
+}
+
+func TestQueueRanksSortFilesThenBatchesThenTheRest(t *testing.T) {
+	early, late := time.Unix(100, 0), time.Unix(200, 0)
+	file := queueOrder(fileQueueRank(true), late, "a", 0)
+	batch := queueOrder(batchQueueRank(true), early, "b", 0)
+	plain := queueOrder(batchQueueRank(false), early, "c", 0)
+	if !(file < batch && batch < plain) {
+		t.Fatalf("order: %q %q %q", file, batch, plain)
+	}
+	if fileQueueRank(false) != queueRankPlain {
+		t.Fatalf("a plain file ranks %q", fileQueueRank(false))
+	}
+}
+
 // Regression: on reconciler polls a batch left its own not-yet-due slot
 // waiters alone and then started another queued file on every poll, so a
 // max_parallel_jobs=1 batch ended up with every file probed, hashed and

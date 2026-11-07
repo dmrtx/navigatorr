@@ -119,6 +119,10 @@ func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
 	seed("started", "transcode_complete", priority)
 	seed("plain", "worker_busy", `{"path":"/media/b.mkv"}`)
 	seed("held", "worker_drain", `{"path":"/media/c.mkv"}`)
+	if err := st.CreateActionInstance(store.ActionInstance{ID: "first-batch", ActionName: "transcode_batch", Status: store.ActionStatusWaitingExternal, InputsJSON: `{"queue_priority":true}`, OutputsJSON: "{}", StateJSON: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	seed("batch-child", "worker_busy", `{"path":"/media/d.mkv","parent_action_id":"first-batch"}`)
 	if err := st.CreateActionInstance(store.ActionInstance{ID: "no-room", ActionName: "transcode_media", Status: store.ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: "Transcoding media (queued); waiting for room on the worker to keep the candidate (free_disk)", InputsJSON: priority, OutputsJSON: "{}", StateJSON: `{"transcode_phase":"queued"}`}); err != nil {
 		t.Fatal(err)
 	}
@@ -126,11 +130,12 @@ func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
 		status   string
 		priority any
 	}{
-		"first":   {"queued", true},
-		"started": {"encoding", nil},
-		"plain":   {"queued", nil},
-		"held":    {"queued", nil},
-		"no-room": {"queued", true},
+		"first":       {"queued", true},
+		"started":     {"encoding", nil},
+		"plain":       {"queued", nil},
+		"held":        {"queued", nil},
+		"no-room":     {"queued", true},
+		"batch-child": {"queued", true},
 	} {
 		w := request(h, "GET", "/api/maintenance/operations?id="+id, "", true)
 		if w.Code != 200 {
@@ -167,13 +172,13 @@ func TestWaitingJobIsQueuedAndKeepsItsRunNext(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	found := 0
 	for _, job := range list.Jobs {
-		if job["id"] == "first" {
-			found = job["queue_priority"] == true
+		if (job["id"] == "first" || job["id"] == "batch-child") && job["queue_priority"] == true {
+			found++
 		}
 	}
-	if !found {
+	if found != 2 {
 		t.Fatalf("the list lost the Run next flag: %s", w.Body)
 	}
 }

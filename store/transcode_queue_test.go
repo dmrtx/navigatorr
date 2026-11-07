@@ -81,3 +81,26 @@ func TestActiveWorkerCountLeavesOutChildrenHeldBeforeSubmit(t *testing.T) {
 		t.Fatalf("counts %v, want node-a=2", counts)
 	}
 }
+
+func TestQueuedBatchItemsCarryTheBatchPriority(t *testing.T) {
+	s := openTest(t)
+	for id, inputs := range map[string]string{"first": `{"queue_priority":true}`, "plain": `{}`} {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_batch", Status: ActionStatusWaitingExternal, InputsJSON: inputs, StateJSON: `{}`}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.CreateTranscodeBatchItem(TranscodeBatchItem{BatchID: id, ItemKey: "one", FilePath: "/media/" + id, Status: "queued"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := s.ListQueuedBatchItems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, item := range items {
+		got[item.BatchID] = item.Priority
+	}
+	if len(got) != 2 || !got["first"] || got["plain"] {
+		t.Fatalf("priority by batch: %v", got)
+	}
+}

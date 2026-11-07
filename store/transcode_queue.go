@@ -6,6 +6,8 @@ type QueuedBatchItemRow struct {
 	BatchID        string
 	BatchCreatedAt string
 	ItemID         int64
+	// Priority is the batch's Run next: it goes ahead of the queue as a whole.
+	Priority bool
 }
 
 // ListQueuedBatchItems returns the queued items of the batches that can still
@@ -15,7 +17,8 @@ type QueuedBatchItemRow struct {
 func (s *Store) ListQueuedBatchItems() ([]QueuedBatchItemRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT i.batch_id, a.created_at, i.id
+	rows, err := s.db.Query(`SELECT i.batch_id, a.created_at, i.id,
+			CASE WHEN json_valid(a.inputs_json) AND json_extract(a.inputs_json, '$.queue_priority') IN (1, 'true') THEN 1 ELSE 0 END
 		FROM transcode_batch_items i JOIN action_instances a ON a.id = i.batch_id
 		WHERE i.status = 'queued'
 		AND a.action_name = 'transcode_batch'
@@ -31,9 +34,11 @@ func (s *Store) ListQueuedBatchItems() ([]QueuedBatchItemRow, error) {
 	var out []QueuedBatchItemRow
 	for rows.Next() {
 		var r QueuedBatchItemRow
-		if err := rows.Scan(&r.BatchID, &r.BatchCreatedAt, &r.ItemID); err != nil {
+		var priority int
+		if err := rows.Scan(&r.BatchID, &r.BatchCreatedAt, &r.ItemID, &priority); err != nil {
 			return nil, err
 		}
+		r.Priority = priority == 1
 		out = append(out, r)
 	}
 	return out, rows.Err()
