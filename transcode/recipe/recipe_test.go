@@ -338,3 +338,82 @@ func TestReviewedRollbackRejectsActivationDuringConfirmation(t *testing.T) {
 		t.Fatal("stale dialog changed newly activated bundle")
 	}
 }
+
+// The mode profiles ask to convert incompatible subtitles without naming a
+// fallback; an mp4 with mov_text must still resolve, and a source without one
+// must keep the plan it had (no fallback budget, same digest).
+func TestResolverImpliesSubtitleFallbackForConvertIncompatible(t *testing.T) {
+	s, err := Parse(EmbeddedBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := s.Bundle.Profiles["hevc-vt"]
+	override.Subtitles = SubtitleProfile{Mode: "preserve", ConvertIncompatible: true}
+	override.Resilience = ResilienceProfile{MaxAttempts: 1}
+	overrides := map[string]Profile{"hevc-vt": override}
+
+	p, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.SubtitleActions[0]; got.Operation != "transcode" || got.Codec != "subrip" {
+		t.Fatalf("mov_text action: %+v", got)
+	}
+	if p.Resilience.MaxFallbacks != 1 || len(p.AppliedFallbacks) != 1 {
+		t.Fatalf("fallback: max=%d applied=%v", p.Resilience.MaxFallbacks, p.AppliedFallbacks)
+	}
+
+	plain, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "subrip"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Resilience.MaxFallbacks != 0 || len(plain.AppliedFallbacks) != 0 {
+		t.Fatalf("copy-only plan changed: max=%d applied=%v", plain.Resilience.MaxFallbacks, plain.AppliedFallbacks)
+	}
+
+	// Several incompatible streams share the one conversion fallback.
+	multi, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}, {SourceStreamIndex: 3, TypeIndex: 1, Codec: "subrip"}, {SourceStreamIndex: 4, TypeIndex: 2, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multi.SubtitleActions) != 3 || multi.SubtitleActions[0].Operation != "transcode" || multi.SubtitleActions[1].Operation != "copy" || multi.SubtitleActions[2].Operation != "transcode" {
+		t.Fatalf("multi-stream actions: %+v", multi.SubtitleActions)
+	}
+	if multi.Resilience.MaxFallbacks != 1 || len(multi.AppliedFallbacks) != 1 {
+		t.Fatalf("multi-stream fallback: max=%d applied=%v", multi.Resilience.MaxFallbacks, multi.AppliedFallbacks)
+	}
+
+	// A fallback budget with no rules of its own still converts, keeping
+	// its budget.
+	budget := override
+	budget.Resilience.MaxFallbacks = 2
+	b, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": budget}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Resilience.MaxFallbacks != 2 || len(b.AppliedFallbacks) != 1 {
+		t.Fatalf("budgeted fallback: max=%d applied=%v", b.Resilience.MaxFallbacks, b.AppliedFallbacks)
+	}
+
+	// Rules of another kind, or the conversion rule with no budget, do not
+	// switch the conversion off.
+	for label, r := range map[string]ResilienceProfile{
+		"retry rule only":         {MaxAttempts: 2, TransientRetries: 1, RetryBackoffSeconds: []int{5}, MaxFallbacks: 1, Fallbacks: []FallbackRule{{When: "worker_busy", Action: "retry"}}},
+		"conversion rule, no max": {MaxAttempts: 1, Fallbacks: []FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}}},
+	} {
+		other := override
+		other.Resilience = r
+		p, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": other}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if p.SubtitleActions[0].Operation != "transcode" || p.Resilience.MaxFallbacks < 1 || len(p.AppliedFallbacks) != 1 {
+			t.Fatalf("%s: actions=%+v max=%d applied=%v", label, p.SubtitleActions, p.Resilience.MaxFallbacks, p.AppliedFallbacks)
+		}
+	}
+
+	override.Subtitles.ConvertIncompatible = false
+	if _, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": override}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}}); err == nil {
+		t.Fatal("a profile that does not convert must still fail closed on mov_text")
+	}
+}

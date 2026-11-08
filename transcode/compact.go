@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
 )
@@ -249,6 +250,11 @@ func NewCompactPlanForChain(chain string, d mediainspect.DynamicRange, v mediain
 		// silently reinterpret wide-gamut SDR.
 		if (d.Primaries != "" && d.Primaries != "bt709") || (d.Matrix != "" && d.Matrix != "bt709") {
 			return nil, errors.New("compact_sdr_requires_bt709")
+		}
+		// It also tags the output limited range without converting, so a
+		// full-range source would be published with its levels misread.
+		if (d.Range != "" && d.Range != "tv") || strings.HasPrefix(strings.ToLower(strings.TrimSpace(v.PixelFormat)), "yuvj") {
+			return nil, errors.New("compact_sdr_requires_limited_range")
 		}
 		if tw == v.Width && th == v.Height && d.Class == mediainspect.DynamicRangeSDR {
 			return nil, errors.New("compact_not_needed")
