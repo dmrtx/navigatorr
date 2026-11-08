@@ -100,6 +100,13 @@ func TestRealFinalValidationChecksChromaOfSourcesBeyond420(t *testing.T) {
 		t.Fatalf("good: %+v %v", e, err)
 	}
 	t.Logf("good chroma %+v", *e.ChromaPSNR)
+	if metric == "vmaf" {
+		for _, w := range e.Windows {
+			if w.Role == "grid" && (w.ChromaUDB == nil || w.ChromaVDB == nil || *w.ChromaUDB < chromaPSNRMinimumDB) {
+				t.Fatalf("grid window without its chroma: %+v", w)
+			}
+		}
+	}
 	if c := e.ChromaPSNR; c.MinimumDB != chromaPSNRMinimumDB || c.WorstUDB < chromaPSNRMinimumDB || c.WorstVDB < chromaPSNRMinimumDB {
 		t.Fatalf("good chroma %+v", c)
 	}
@@ -108,20 +115,23 @@ func TestRealFinalValidationChecksChromaOfSourcesBeyond420(t *testing.T) {
 	if err == nil || e.Verdict == "pass" || !slices.Contains(e.ReasonCodes, "quality_chroma_psnr_below_minimum") {
 		t.Fatalf("swapped: %+v %v", e, err)
 	}
-	if e.ChromaPSNR == nil || e.ChromaPSNR.WorstUDB >= chromaPSNRMinimumDB {
+	// Far under the 34 dB the ladder reads as broken colour, not compression.
+	if e.ChromaPSNR == nil || e.ChromaPSNR.WorstUDB >= 30 || e.ChromaPSNR.WorstVDB >= 30 {
 		t.Fatalf("swapped chroma %+v", e.ChromaPSNR)
 	}
 	if slices.ContainsFunc(e.ReasonCodes, func(c string) bool { return strings.HasPrefix(c, "quality_vmaf") }) {
 		t.Fatalf("swapped planes failed VMAF too: %v", e.ReasonCodes)
 	}
 
-	// Misplaced colour lands between a sound encode and swapped planes, so
-	// it holds the minimum where it is.
+	// Colour moved by four pixels on this sharp pattern fails as plainly as
+	// swapped planes do.
 	e, err = validate("shifted", "source444.mkv", "shifted.mkv")
 	if err == nil || !slices.Contains(e.ReasonCodes, "quality_chroma_psnr_below_minimum") {
 		t.Fatalf("shifted: %+v %v", e, err)
 	}
-	t.Logf("shifted chroma %+v", *e.ChromaPSNR)
+	if e.ChromaPSNR == nil || min(e.ChromaPSNR.WorstUDB, e.ChromaPSNR.WorstVDB) >= 30 {
+		t.Fatalf("shifted chroma %+v", e.ChromaPSNR)
+	}
 
 	e, err = validate("plain", "source420.mkv", "good420.mkv")
 	if err != nil || e.Verdict != "pass" || e.ChromaPSNR != nil {

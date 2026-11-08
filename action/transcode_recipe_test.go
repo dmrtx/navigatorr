@@ -448,14 +448,30 @@ func TestQualityLadderOnChroma(t *testing.T) {
 		t.Fatalf("summary %+v", f)
 	}
 
+	// Colour moved by a couple of pixels scores in the low 30s: also a fault.
 	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
 	planRecipe(t, c)
-	if res = advanceRung(t, c, chromaRung(95, 92, 33)); res.RewindTo != "submit_transcode" {
+	if res = advanceRung(t, c, chromaRung(95, 92, 33.9)); res.RewindTo != "" || QualityLadderOf(c.ec.State).Outcome != reasonQualityNotMet {
+		t.Fatalf("misplaced colour climbs: %+v", res)
+	}
+
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	if res = advanceRung(t, c, chromaRung(95, 92, 34)); res.RewindTo != "submit_transcode" {
 		t.Fatalf("near miss climbs: %+v", res)
 	}
-	res = advanceRung(t, c, chromaRung(95, 92, 33.2))
-	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || !strings.Contains(rec.Message, "chroma PSNR went from 33.0") {
-		t.Fatalf("flat chroma: %+v %+v", res, rec)
+	// Within a dB of the minimum the projection's margin keeps it going.
+	if res = advanceRung(t, c, chromaRung(95, 92, 34.1)); res.RewindTo != "submit_transcode" || QualityLadderOf(c.ec.State).Rung != 2 {
+		t.Fatalf("flat near miss: %+v", res)
+	}
+
+	// Colour that got worse from one rung to the next stops the ladder.
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, chromaRung(95, 92, 34.9))
+	res = advanceRung(t, c, chromaRung(95, 92, 34.2))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || !strings.Contains(rec.Message, "chroma PSNR got worse, from 34.9") {
+		t.Fatalf("worse chroma: %+v %+v", res, rec)
 	}
 }
 

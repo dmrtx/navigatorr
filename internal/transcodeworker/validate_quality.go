@@ -274,7 +274,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			r.ssim = &score
 		}
 		if runChroma && pos < grid {
-			u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath)
+			u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath, threads)
 			if err != nil {
 				return bad("quality_chroma_evidence_incomplete", fmt.Errorf("sample %d: %w", window.Index, err))
 			}
@@ -716,10 +716,6 @@ func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string
 	return strconv.ParseFloat(m[1], 64)
 }
 
-// probeFailure describes a probe that gave no usable video. The probe's own
-// error is wrapped, not formatted, so its typed class survives for the
-// classifier: the message carries file paths and ffprobe's stderr, and a
-// classifier that reads it can match a word in a path.
 // chromaPSNRMinimumDB is the lowest window U or V PSNR a candidate from a
 // source beyond 4:2:0 may have. On 4:4:4 10-bit film, sound x265 encodes at
 // CRF 22 to 28 scored 45 dB or more per window and no frame fell below 43 dB,
@@ -737,14 +733,16 @@ var chromaPSNRSummary = regexp.MustCompile(`(?m)^\[Parsed_psnr_[0-9]+ @ [^\]]+\]
 
 // windowChromaPSNR is the U and V PSNR of a window's candidate against its
 // reference, both converted to 4:2:0 at measurement precision and paired by
-// frame index exactly as for VMAF, so the source's extra chroma resolution is
+// frame index as for VMAF, so the source's extra chroma resolution is
 // subsampled the same way the encode's is and only a real difference counts.
-func windowChromaPSNR(ctx context.Context, ffmpegPath, candPath, refPath string) (u, v float64, err error) {
+// Every frame is measured, and threads is the window's share as for VMAF.
+func windowChromaPSNR(ctx context.Context, ffmpegPath, candPath, refPath string, threads int) (u, v float64, err error) {
 	inputs, err := quality.MetricPairInputs(1)
 	if err != nil {
 		return 0, 0, err
 	}
-	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-i", candPath, "-i", refPath, "-filter_complex", inputs + "psnr", "-f", "null", "-"})
+	t := strconv.Itoa(max(threads, 1))
+	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_complex_threads", t, "-filter_complex", inputs + "psnr", "-f", "null", "-"})
 	if err != nil {
 		return 0, 0, err
 	}
@@ -771,6 +769,10 @@ func parseChromaPSNR(output string) (u, v float64, err error) {
 	return planes[0], planes[1], nil
 }
 
+// probeFailure describes a probe that gave no usable video. The probe's own
+// error is wrapped, not formatted, so its typed class survives for the
+// classifier: the message carries file paths and ffprobe's stderr, and a
+// classifier that reads it can match a word in a path.
 func probeFailure(what string, err error, videoStreams int) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", what, err)

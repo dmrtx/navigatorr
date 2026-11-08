@@ -583,9 +583,11 @@ func qualityLadderTrendMessage(codec string, prevQ, lastQ, nextQ int, t *quality
 
 // chromaPSNRStructuralDB is the chroma PSNR under which a rung's colour is
 // taken as broken rather than compressed: sound encodes of 4:4:4 film scored
-// 45 dB or more and a synthetic pattern with far sharper colour 38 dB, while
-// swapped colour planes scored about 21 dB.
-const chromaPSNRStructuralDB = 30.0
+// 45 dB or more even at CRF 28 and a synthetic pattern with far sharper
+// colour 38 dB, while colour moved by two pixels scored 31 to 33 dB and
+// swapped planes about 21 dB. Only the last dB under the worker's minimum
+// reads as a near miss worth a better rung.
+const chromaPSNRStructuralDB = 34.0
 
 // A first rung that missed by little tries a setting in between. The whole-file
 // scores moved about 1.8 VMAF points per CRF step on the file that showed the

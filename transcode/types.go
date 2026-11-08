@@ -121,7 +121,8 @@ type FinalWindowScore struct {
 	VMAFP5          float64 `json:"vmaf_p5"`
 	VMAFMin         float64 `json:"vmaf_min"`
 	// ChromaUDB and ChromaVDB are the window's colour-plane PSNR, measured
-	// for a source beyond 4:2:0 on the grid windows only.
+	// for a source beyond 4:2:0 on the grid windows only. Windows are listed
+	// for VMAF runs; an SSIM-only run keeps just the evidence's worst values.
 	ChromaUDB *float64 `json:"chroma_u_db,omitempty"`
 	ChromaVDB *float64 `json:"chroma_v_db,omitempty"`
 }
