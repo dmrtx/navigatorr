@@ -157,6 +157,15 @@ type FinalQualityEvidence struct {
 	CompactChain  *CompactChainEvidence  `json:"compact_chain,omitempty"`
 	CompactOutput *CompactOutputEvidence `json:"compact_output,omitempty"`
 	VideoCopy     *VideoCopyEvidence     `json:"video_copy,omitempty"`
+	ChromaPSNR    *ChromaPSNREvidence    `json:"chroma_psnr,omitempty"`
+}
+
+// ChromaPSNREvidence is the colour-plane check of a candidate whose source is
+// beyond 4:2:0: the lowest window U and V PSNR and the minimum each must reach.
+type ChromaPSNREvidence struct {
+	MinimumDB float64 `json:"minimum_db"`
+	WorstUDB  float64 `json:"worst_u_db"`
+	WorstVDB  float64 `json:"worst_v_db"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.

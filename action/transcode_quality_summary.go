@@ -161,6 +161,8 @@ func describeQualityFailure(code string, m QualityNumbers, l *QualityLimits) str
 		return fmt.Sprintf("CAMBI mean %s is above the maximum %s", value(m.CAMBIMean), value(l.CAMBIMean))
 	case "quality_cambi_peak_above_maximum":
 		return fmt.Sprintf("CAMBI peak %s is above the maximum %s", value(m.CAMBIPeak), value(l.CAMBIPeak))
+	case "quality_chroma_psnr_below_minimum":
+		return "the colour planes differ from the source more than a sound encode's do (chroma PSNR below the minimum)"
 	}
 	return code
 }
