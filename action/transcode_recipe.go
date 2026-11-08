@@ -537,6 +537,8 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 			t.Metric, before, now, limit, t.Maximum = "CAMBI mean", p.CAMBIMean, m.CAMBIMean, l.CAMBIMean, true
 		case "quality_cambi_peak_above_maximum":
 			t.Metric, before, now, limit, t.Maximum = "CAMBI peak", p.CAMBIPeak, m.CAMBIPeak, l.CAMBIPeak, true
+		case "quality_chroma_psnr_below_minimum":
+			t.Metric, before, now, limit = "chroma PSNR", p.ChromaPSNR, m.ChromaPSNR, l.ChromaPSNR
 		default:
 			continue
 		}
@@ -578,6 +580,12 @@ func qualityLadderTrendMessage(codec string, prevQ, lastQ, nextQ int, t *quality
 	}
 	return fmt.Sprintf("%s went from %.1f at %s to %.1f at %s, which points to about %.1f at %s, %s", t.Metric, t.Previous, recipeRungName(codec, prevQ), t.Last, recipeRungShort(codec, lastQ), t.Projected, recipeRungShort(codec, nextQ), short)
 }
+
+// chromaPSNRStructuralDB is the chroma PSNR under which a rung's colour is
+// taken as broken rather than compressed: sound encodes of 4:4:4 film scored
+// 45 dB or more and a synthetic pattern with far sharper colour 38 dB, while
+// swapped colour planes scored about 21 dB.
+const chromaPSNRStructuralDB = 30.0
 
 // A first rung that missed by little tries a setting in between. The whole-file
 // scores moved about 1.8 VMAF points per CRF step on the file that showed the
@@ -724,6 +732,12 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		if rec.Rung+1 < len(rec.Values) {
 			msg = fmt.Sprintf("%s missed this goal's quality limits, and the worker reported no scores to go on. No candidate is offered; original preserved.", was)
 		}
+		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
+	}
+	// Colour this far off is a fault in the pipeline, not a lack of bits: no
+	// setting of a sound encode scores near it, so no better rung is tried.
+	if f := tried.Final; f != nil && slices.Contains(f.FailedChecks, "quality_chroma_psnr_below_minimum") && f.Measured.ChromaPSNR != nil && *f.Measured.ChromaPSNR < chromaPSNRStructuralDB {
+		msg := fmt.Sprintf("%s came out with chroma PSNR %.1f dB, far below what any sound encode scores: the colour planes are misplaced or mixed up, which a better setting would not fix. No candidate is offered; original preserved.", was, *f.Measured.ChromaPSNR)
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
 	}
 	// Each rung is a whole-file encode. When the last two frozen rungs' scores

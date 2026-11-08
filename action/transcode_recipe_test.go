@@ -421,6 +421,44 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 	}
 }
 
+func chromaRung(vmaf, p5, chroma float64) transcode.JobStatus {
+	st := failedRung(vmaf, p5)
+	st.QualityEvidence.ReasonCodes = []string{"quality_chroma_psnr_below_minimum"}
+	st.QualityEvidence.ChromaPSNR = &transcode.ChromaPSNREvidence{MinimumDB: 35, WorstUDB: chroma + 1, WorstVDB: chroma}
+	return st
+}
+
+// Colour far below any sound encode's ends the ladder at once; colour just
+// short of the minimum climbs, and stops when its trend would still miss.
+func TestQualityLadderOnChroma(t *testing.T) {
+	c := newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	res := advanceRung(t, c, chromaRung(95, 92, 21))
+	rec := QualityLadderOf(c.ec.State)
+	if res.RewindTo != "" || !getBool(c.ec.State, "skip_transcode") || rec.Outcome != reasonQualityNotMet || len(rec.Tried) != 1 {
+		t.Fatalf("structural chroma: %+v %+v", res, rec)
+	}
+	for _, want := range []string{"chroma PSNR 21.0 dB", "original preserved"} {
+		if !strings.Contains(rec.Message, want) {
+			t.Fatalf("message %q lacks %q", rec.Message, want)
+		}
+	}
+	f := rec.Tried[0].Final
+	if f == nil || f.Measured.ChromaPSNR == nil || *f.Measured.ChromaPSNR != 21 || f.Limits == nil || f.Limits.ChromaPSNR == nil || *f.Limits.ChromaPSNR != 35 || !strings.Contains(f.Failures[0], "chroma PSNR 21.0 dB is below the minimum 35.0 dB") {
+		t.Fatalf("summary %+v", f)
+	}
+
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	if res = advanceRung(t, c, chromaRung(95, 92, 33)); res.RewindTo != "submit_transcode" {
+		t.Fatalf("near miss climbs: %+v", res)
+	}
+	res = advanceRung(t, c, chromaRung(95, 92, 33.2))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || !strings.Contains(rec.Message, "chroma PSNR went from 33.0") {
+		t.Fatalf("flat chroma: %+v %+v", res, rec)
+	}
+}
+
 func TestQualityLadderNeedsItsEncoder(t *testing.T) {
 	c := newRecipeCase(t, map[string]any{"mode": "quality"}, func(caps *transcode.WorkerCapabilities) {
 		encoders := map[string]bool{}

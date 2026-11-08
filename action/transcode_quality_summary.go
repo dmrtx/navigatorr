@@ -52,6 +52,9 @@ type QualityNumbers struct {
 	CAMBIMean       *float64 `json:"cambi_mean,omitempty"`
 	CAMBIPeak       *float64 `json:"cambi_peak,omitempty"`
 	SSIMMean        *float64 `json:"ssim_mean,omitempty"`
+	// ChromaPSNR is the lowest window U or V PSNR, in dB, of a source beyond
+	// 4:2:0 (transcode.ChromaPSNREvidence).
+	ChromaPSNR *float64 `json:"chroma_psnr,omitempty"`
 }
 
 // QualityLimits are the thresholds the numbers were held to.
@@ -64,6 +67,7 @@ type QualityLimits struct {
 	MaxFramesBelow     *int     `json:"max_frames_below_threshold,omitempty"`
 	CAMBIMean          *float64 `json:"cambi_mean_maximum,omitempty"`
 	CAMBIPeak          *float64 `json:"cambi_peak_maximum,omitempty"`
+	ChromaPSNR         *float64 `json:"chroma_psnr_minimum,omitempty"`
 }
 
 // FinalQualitySummary is the full-file validation result in a form small
@@ -120,8 +124,20 @@ func summarizeFinalQuality(ev *transcode.FinalQualityEvidence, limits *QualityLi
 		return nil
 	}
 	s := &FinalQualitySummary{Verdict: ev.Verdict, FailedChecks: append([]string(nil), ev.ReasonCodes...), Measured: qualityNumbersOf(ev.VMAF, ev.CAMBI, ev.SSIMMean), Limits: limits}
+	// The worker holds colour to its own minimum, which the evidence carries:
+	// it is not one of the goal's limits.
+	if c := ev.ChromaPSNR; c != nil {
+		worst, minimum := min(c.WorstUDB, c.WorstVDB), c.MinimumDB
+		s.Measured.ChromaPSNR = &worst
+		l := QualityLimits{}
+		if limits != nil {
+			l = *limits
+		}
+		l.ChromaPSNR = &minimum
+		s.Limits = &l
+	}
 	for _, code := range ev.ReasonCodes {
-		s.Failures = append(s.Failures, describeQualityFailure(code, s.Measured, limits))
+		s.Failures = append(s.Failures, describeQualityFailure(code, s.Measured, s.Limits))
 	}
 	return s
 }
@@ -162,7 +178,7 @@ func describeQualityFailure(code string, m QualityNumbers, l *QualityLimits) str
 	case "quality_cambi_peak_above_maximum":
 		return fmt.Sprintf("CAMBI peak %s is above the maximum %s", value(m.CAMBIPeak), value(l.CAMBIPeak))
 	case "quality_chroma_psnr_below_minimum":
-		return "the colour planes differ from the source more than a sound encode's do (chroma PSNR below the minimum)"
+		return fmt.Sprintf("chroma PSNR %s dB is below the minimum %s dB: the colour differs from the source more than a sound encode's does", value(m.ChromaPSNR), value(l.ChromaPSNR))
 	}
 	return code
 }

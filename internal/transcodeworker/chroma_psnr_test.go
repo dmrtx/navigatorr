@@ -13,12 +13,27 @@ import (
 )
 
 func TestParseChromaPSNR(t *testing.T) {
-	u, v, err := parseChromaPSNR("[Parsed_psnr_4 @ 0x1] PSNR y:47.36 u:49.41 v:inf average:48.01 min:46.9 max:inf\n")
-	if err != nil || u != 49.41 || v != 100 {
-		t.Fatalf("u=%v v=%v err=%v", u, v, err)
+	for name, tc := range map[string]struct {
+		out  string
+		u, v float64
+	}{
+		"v inf":             {"[Parsed_psnr_4 @ 0x1] PSNR y:47.36 u:49.41 v:inf average:48.01 min:46.9 max:inf\n", 49.41, 100},
+		"both inf":          {"[Parsed_psnr_0 @ 0xab] PSNR y:inf u:inf v:inf average:inf min:inf max:inf\n", 100, 100},
+		"integers":          {"[Parsed_psnr_12 @ 0x1] PSNR y:40 u:41 v:42 average:41 min:40 max:42\n", 41, 42},
+		"above 100":         {"[Parsed_psnr_1 @ 0x1] PSNR y:101.5 u:104.25 v:120 average:110 min:100 max:120\n", 104.25, 120},
+		"noise first":       {"Input #0, matroska ...\nframe=  48 fps=0.0 q=-0.0 size=N/A\n[Parsed_psnr_2 @ 0x1] PSNR y:47 u:46.5 v:45.5 average:46 min:45 max:48\n", 46.5, 45.5},
+		"last wins":         {"[Parsed_psnr_2 @ 0x1] PSNR y:1 u:1 v:1 average:1 min:1 max:1\n[Parsed_psnr_2 @ 0x1] PSNR y:47 u:46.5 v:45.5 average:46 min:45 max:48\n", 46.5, 45.5},
+		"lookalike ignored": {"title : PSNR y:1 u:1 v:1 \n[Parsed_psnr_2 @ 0x1] PSNR y:47 u:46.5 v:45.5 average:46 min:45 max:48\n", 46.5, 45.5},
+	} {
+		u, v, err := parseChromaPSNR(tc.out)
+		if err != nil || u != tc.u || v != tc.v {
+			t.Errorf("%s: u=%v v=%v err=%v", name, u, v, err)
+		}
 	}
-	if _, _, err := parseChromaPSNR("[Parsed_psnr_4 @ 0x1] PSNR average:48.01\n"); err == nil {
-		t.Fatal("summary without planes accepted")
+	for _, out := range []string{"[Parsed_psnr_4 @ 0x1] PSNR average:48.01\n", "metadata: PSNR y:1 u:2 v:3 \n", ""} {
+		if _, _, err := parseChromaPSNR(out); err == nil {
+			t.Errorf("accepted %q", out)
+		}
 	}
 }
 
@@ -42,8 +57,16 @@ func TestRealFinalValidationChecksChromaOfSourcesBeyond420(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !caps.Encoders["libx265"] || caps.Quality == nil || !caps.Quality.Models["v1_1080p_3h"].Available {
-		t.Skip("executable VMAF v1/libx265 path unavailable")
+	if !caps.Encoders["libx265"] {
+		t.Skip("libx265 unavailable")
+	}
+	// Chroma is checked whatever the luma metric; VMAF is used where its
+	// model is, SSIM elsewhere.
+	metric := "ssim"
+	quality := transcode.BenchmarkQualityConfig{SSIM: &transcode.BenchmarkQualityThresholds{Minimum: 0.9}, FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}
+	if caps.Quality != nil && caps.Quality.Models["v1_1080p_3h"].Available {
+		metric = "vmaf"
+		quality = transcode.BenchmarkQualityConfig{VMAF: &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", WorstWindowSeconds: 0.25}, FinalValidation: quality.FinalValidation}
 	}
 	path := func(name string) string { return filepath.Join(dir, name) }
 	// Both colour planes moved 4 pixels left, luma untouched.
@@ -62,13 +85,10 @@ func TestRealFinalValidationChecksChromaOfSourcesBeyond420(t *testing.T) {
 		}
 	}
 	plan := &transcode.Plan{PixelFormat: "yuv420p", QualityValidation: &transcode.QualityValidationPlan{
-		Metric:                 "vmaf",
+		Metric:                 metric,
 		Samples:                transcode.PlanFinalValidationWindows(3, 0.5, 1, 2, 2),
 		BenchmarkRequestDigest: "sha256:" + strings.Repeat("3", 64),
-		Quality: transcode.BenchmarkQualityConfig{
-			VMAF:            &transcode.BenchmarkQualityThresholds{Model: "v1_1080p_3h", WorstWindowSeconds: 0.25},
-			FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"},
-		},
+		Quality:                quality,
 	}}
 	validate := func(name, source, candidate string) (*transcode.FinalQualityEvidence, error) {
 		w := NewWorker(&WorkerConfig{StateDir: path("state-" + name), AllowedRoots: []string{dir}, FFmpeg: ffmpeg, FFprobe: ffprobe, MaxParallelJobs: 1})

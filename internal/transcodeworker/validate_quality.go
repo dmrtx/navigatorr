@@ -408,7 +408,11 @@ func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []final
 	}
 	for i, r := range results[:grid] {
 		if r.vmaf != nil && r.code == "" {
-			windows = append(windows, finalWindowScore(q.Samples[i], "grid", r.vmaf))
+			score := finalWindowScore(q.Samples[i], "grid", r.vmaf)
+			if r.chroma != nil {
+				score.ChromaUDB, score.ChromaVDB = &r.chroma[0], &r.chroma[1]
+			}
+			windows = append(windows, score)
 		}
 	}
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
@@ -727,7 +731,9 @@ func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string
 // smeared colour, which nothing else measures.
 const chromaPSNRMinimumDB = 35.0
 
-var chromaPSNRSummary = regexp.MustCompile(`PSNR y:\S+ u:(inf|[0-9]+(?:\.[0-9]+)?) v:(inf|[0-9]+(?:\.[0-9]+)?)`)
+// chromaPSNRSummary is the psnr filter's closing summary line, which ffmpeg
+// logs under the filter's own instance name.
+var chromaPSNRSummary = regexp.MustCompile(`(?m)^\[Parsed_psnr_[0-9]+ @ [^\]]+\] PSNR y:\S+ u:(inf|[0-9]+(?:\.[0-9]+)?) v:(inf|[0-9]+(?:\.[0-9]+)?) `)
 
 // windowChromaPSNR is the U and V PSNR of a window's candidate against its
 // reference, both converted to 4:2:0 at measurement precision and paired by
@@ -746,10 +752,12 @@ func windowChromaPSNR(ctx context.Context, ffmpegPath, candPath, refPath string)
 }
 
 func parseChromaPSNR(output string) (u, v float64, err error) {
-	m := chromaPSNRSummary.FindStringSubmatch(output)
-	if m == nil {
+	all := chromaPSNRSummary.FindAllStringSubmatch(output, -1)
+	if len(all) == 0 {
 		return 0, 0, fmt.Errorf("chroma PSNR missing from ffmpeg output")
 	}
+	// The summary closes the run; anything that looks like one earlier is not it.
+	m := all[len(all)-1]
 	planes := [2]float64{}
 	for i, s := range m[1:] {
 		if s == "inf" {
