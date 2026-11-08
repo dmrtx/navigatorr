@@ -22,6 +22,7 @@ func TestExplainTranscodeCompletedOutcomes(t *testing.T) {
 		{"legacy growth", "size_growth_exceeded", "size_rejected", true, true},
 		{"no winner", "no_suitable_candidate", "no_suitable_candidate", true, true},
 		{"already encoded", "already_target_codec", "no_changes", true, true},
+		{"unsupported source", "unsupported_source", "no_changes", true, true},
 		{"unknown skip", "future_reason", "no_changes", true, true},
 		{"accepted", "", "candidate_ready", false, true},
 		{"missing acceptance evidence", "", "completed", false, false},
@@ -41,6 +42,9 @@ func TestExplainTranscodeCompletedOutcomes(t *testing.T) {
 				explanation := ExplainTranscode(res)
 				if explanation == nil || explanation.Outcome != tc.outcome || strings.Contains(explanation.Message, "Automatic testing") {
 					t.Fatalf("stateOnly=%v: %+v", stateOnly, explanation)
+				}
+				if tc.reason == "unsupported_source" && !strings.Contains(explanation.Message, "cannot encode this source") {
+					t.Fatalf("unsupported source left to the generic skip: %+v", explanation)
 				}
 			}
 		})

@@ -146,6 +146,11 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 		s.Message = explanation.Message
 		s.NextStep = "Keep the original, or explicitly choose another processing goal. Technical profiles are optional; quality requirements are never relaxed automatically."
 		s.UserNextStep = "Keep the original, or choose another goal. Quality requirements are never lowered automatically."
+	} else if explanation != nil && res.Status == action.StatusCompleted && explanation.Outcome == "no_changes" {
+		// A finished job that made nothing says why, not the step it planned.
+		s.Outcome, s.Message = explanation.Outcome, explanation.Message
+		s.NextStep = "Nothing to monitor: no candidate was made and the original is unchanged."
+		s.UserNextStep = "Nothing to do: the original is kept."
 	}
 	benchmarkField(res, "plan_note", &s.PlanNote)
 	if s.PlanNote != "" {

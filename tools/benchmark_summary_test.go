@@ -174,3 +174,19 @@ func TestCompactBenchmarkDescribesTheSizeBudgetLadder(t *testing.T) {
 		t.Fatalf("failed ladder %+v", s)
 	}
 }
+
+// A finished job that made no file says why, not the step it had planned.
+func TestCompactBenchmarkReplacesThePlannedStepWhenNothingWasMade(t *testing.T) {
+	policy := action.ModePolicySnapshot{Version: action.ModePolicyV4, Mode: "size", Recipe: &action.ModeRecipe{Kind: "quality_ladder", VideoCodec: "libx265"}}
+	res := &action.ActionResult{ActionName: "transcode_media", Status: action.StatusRunning, Inputs: map[string]any{"mode": "size"},
+		State: map[string]any{"mode_policy": policy}}
+	if s := compactBenchmark(res); s.Outcome != "recipe" || !strings.Contains(s.Message, "Encoding the whole file") {
+		t.Fatalf("a running recipe lost its step: %+v", s)
+	}
+	res.Status = action.StatusCompleted
+	res.State["reason_code"], res.State["skip_transcode"] = "unsupported_source", true
+	s := compactBenchmark(res)
+	if s.Outcome != "no_changes" || strings.Contains(s.Message, "Encoding") || !strings.Contains(s.Message, "cannot encode this source") || !strings.Contains(s.UserNextStep, "original is kept") {
+		t.Fatalf("a finished skip still reads as encoding: %+v", s)
+	}
+}
