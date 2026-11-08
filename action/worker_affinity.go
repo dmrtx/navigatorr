@@ -152,6 +152,11 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	if !actionUsesWorker(ec.ActionName) || assignedWorker(ec.State) != "" || !e.workersConfigured() {
 		return StepResult{}, false
 	}
+	// A conversion its early check skipped sends no work: its remaining steps
+	// only record the skip.
+	if earlySkipped(ec.State) {
+		return StepResult{}, false
+	}
 	// A job from before workers had names stays on the worker that has it.
 	if holdsWorkerJob(ec.State) {
 		return e.recordAssignedWorker(ctx, ec, e.legacyWorker())

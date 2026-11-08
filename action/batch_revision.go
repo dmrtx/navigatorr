@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -68,6 +69,63 @@ func BatchItemSourceDamaged(item store.TranscodeBatchItem) bool {
 func SourceDamaged(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found") && !strings.Contains(msg, "candidate")
+}
+
+// permanentSourceRejections are failures that come from what the file is,
+// checked against the goal it was given: its picture, colour range or tracks.
+// Running the same goal on the same file fails the same way, so Retry is
+// refused and a new goal is chosen instead. The worker also reports passing
+// failures under quality_source_class_unsupported (a source it could not
+// classify, a compact plan that no longer matches the file), so only the
+// measurement-class verdicts under that code are listed, never the code
+// alone. Measurement and environment failures are not here.
+var permanentSourceRejections = []string{
+	"source/candidate measurement class is unsupported",
+	"quality_source_class_unsupported: native sdr 8/10-bit",
+	"compact_sdr_requires_limited_range",
+	"compact_sdr_requires_bt709",
+	"hdr_single_video_stream_required",
+	"hdr_requires_10bit_420",
+	"hdr_requires_limited_range",
+	"hdr_requires_bt2020nc_matrix",
+	"hdr_requires_bt2020_primaries",
+	"unsupported subtitle codec",
+	"has unsupported codec",
+	"has unsupported mimetype",
+	"unsupported_source",
+}
+
+// PermanentSourceRejection reports a failure message of a conversion that
+// rejects its file for its goal, and the code it matched. The conversion's
+// own source path and file name are left out first, and a code counts only as
+// a word of its own, so a file named after one does not.
+func PermanentSourceRejection(msg string, inputs, state map[string]any) (string, bool) {
+	msg = strings.ToLower(msg)
+	for _, path := range []string{getString(inputs, "path"), getString(state, "resolved_path")} {
+		if path = strings.ToLower(strings.TrimSpace(path)); path != "" {
+			msg = strings.ReplaceAll(msg, path, " ")
+			msg = strings.ReplaceAll(msg, filepath.Base(path), " ")
+		}
+	}
+	for _, code := range permanentSourceRejections {
+		for from := 0; ; {
+			i := strings.Index(msg[from:], code)
+			if i < 0 {
+				break
+			}
+			i += from
+			if j := i + len(code); (i == 0 || !rejectionWordByte(msg[i-1])) && (j == len(msg) || !rejectionWordByte(msg[j])) {
+				return code, true
+			}
+			from = i + 1
+		}
+	}
+	return "", false
+}
+
+// rejectionWordByte is a byte that joins a code to a longer word or a path.
+func rejectionWordByte(b byte) bool {
+	return b == '_' || b == '/' || b == '.' || b == '-' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {

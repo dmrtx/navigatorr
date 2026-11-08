@@ -43,6 +43,16 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	// profile_config and its x265 settings, is judged before the hash and the
 	// probe. Admission ran the same checks; this repeats them for requests
 	// stored before they existed.
+	early := isEarlyPreflight(ctx)
+	if !early {
+		// A skip the early check decided is not decided again without the
+		// worker it never needed.
+		if earlySkipped(ec.State) {
+			outputs, _ := ec.State[earlySkipOutputsKey].(map[string]any)
+			return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+		}
+		delete(ec.State, earlyPreflightKey)
+	}
 	req, err := e.validateTranscodeRequest(ec.ActionName, withoutSaveSpaceRequest(ec.Inputs))
 	if err != nil {
 		return StepResult{Status: StepFailed, Error: err.Error()}, nil
@@ -79,9 +89,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		return StepResult{Status: StepFailed, Error: "transcode executor is disabled or not configured in navigatorr"}, nil
 	}
 
-	ec.State["work_progress"] = map[string]any{"phase": "probing_source", "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
-	if err := e.persistExecutionState(ctx, ec); err != nil {
-		return StepResult{Status: StepFailed, Error: err.Error()}, nil
+	if !early {
+		ec.State["work_progress"] = map[string]any{"phase": "probing_source", "updated_at": time.Now().UTC().Format(time.RFC3339Nano)}
+		if err := e.persistExecutionState(ctx, ec); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
+		}
 	}
 	probeStarted := e.now()
 	rep, err := e.inspectSourceForPreflight(ctx, ec, cleanPath)
@@ -252,7 +264,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 
 	profile := strings.TrimSpace(getString(ec.Inputs, "profile"))
 	ephemeralProfile, ephemeralDigest, hasProfileConfig := req.ProfileConfig, req.ProfileDigest, req.HasProfileConfig
-	gateRep := coverArtGateReport(&rep, func() bool { return workerSupportsCoverArt(ctx, e.actionWorker(ec)) })
+	gateRep := coverArtGateReport(&rep, func() bool { return early || workerSupportsCoverArt(ctx, e.actionWorker(ec)) })
 	var compactPlan *transcode.CompactPlan
 	if modeSnapshot != nil {
 		if saveSpaceTakesHDR(ec.Inputs) && isSourceHDRorDV(gateRep) {
@@ -264,9 +276,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if modeSnapshot.Size != nil && modeSnapshot.Size.AudioOnly {
 			reason = audioOnlySourceReason(gateRep)
 		} else {
-			hfrSupported, err := (&hfrQualitySupport{e: e, worker: e.actionWorker(ec)}).forSource(ctx, gateRep)
-			if err != nil {
-				return hfrCapabilityLookupResult(err), nil
+			hfrSupported := early
+			if !early {
+				if hfrSupported, err = (&hfrQualitySupport{e: e, worker: e.actionWorker(ec)}).forSource(ctx, gateRep); err != nil {
+					return hfrCapabilityLookupResult(err), nil
+				}
 			}
 			reason = modeSourceReason(modeSnapshot.Mode, gateRep, hfrSupported)
 		}
@@ -384,7 +398,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		}
 	}
 	if modeSnapshot != nil {
-		if video := rep.MainVideo(); modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10 && !modeSnapshot.Size.AudioOnly && len(video) > 0 && video[0].BitDepth == 8 {
+		if video := rep.MainVideo(); !early && modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10 && !modeSnapshot.Size.AudioOnly && len(video) > 0 && video[0].BitDepth == 8 {
 			caps, err := e.actionWorker(ec).Capabilities(ctx)
 			if err != nil {
 				return workerCapabilityLookupResult(err, "size Main10"), nil
@@ -431,6 +445,11 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		ec.State["optimization_policy"] = recipeProfile.Optimization
 	}
 
+	// The early check has found nothing wrong with the file for its goal; the
+	// baseline and the plan are made by the real preflight, on its worker.
+	if early {
+		return StepResult{Status: StepCompleted}, nil
+	}
 	// Every path from here submits worker work, so it needs the baseline.
 	if res := hashSource(); res != nil {
 		return *res, nil

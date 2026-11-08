@@ -513,6 +513,11 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
 	}
+	if inst.ActionName == "transcode_media" {
+		if code, ok := PermanentSourceRejection(storedFailureText(inst.ErrorJSON), ec.Inputs, ec.State); ok {
+			return nil, fmt.Errorf("retry blocked for %s: this file cannot be encoded with this goal and would fail the same way; choose a goal for it instead", code)
+		}
+	}
 	// A damaged file fails the same way every time; it is replaced first. A
 	// worker's report of it is read again here, after the checks that would
 	// refuse the retry anyway (the read can take minutes), because the same
@@ -1030,7 +1035,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		start := time.Now()
 		res, waiting := e.ensureWorkerAssigned(ctx, ec)
 		var err error
-		if !waiting {
+		if waiting && step.Name == "preflight" {
+			// A file its goal can never take is not left waiting for a worker:
+			// the early check ends it now, or the action keeps waiting.
+			if early, decided := e.earlyPreflight(ctx, ec); decided {
+				res = early
+			}
+		} else if !waiting {
 			res, err = step.Run(ctx, ec)
 		}
 		inst.InputsJSON = toJSON(ec.Inputs)
