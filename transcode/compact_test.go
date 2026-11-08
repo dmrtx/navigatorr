@@ -95,6 +95,16 @@ func TestNewCompactPlan(t *testing.T) {
 	if _, err := NewCompactPlan(wide, uhd(), 1080); err == nil || err.Error() != "compact_sdr_requires_bt709" {
 		t.Fatalf("wide-gamut SDR must be rejected, got %v", err)
 	}
+	full := sdr
+	full.Range = "pc"
+	if _, err := NewCompactPlan(full, uhd(), 1080); err == nil || err.Error() != "compact_sdr_requires_limited_range" {
+		t.Fatalf("full-range SDR must be rejected, got %v", err)
+	}
+	jpeg := uhd()
+	jpeg.PixelFormat = "yuvj420p"
+	if _, err := NewCompactPlan(sdr, jpeg, 1080); err == nil || err.Error() != "compact_sdr_requires_limited_range" {
+		t.Fatalf("yuvj SDR must be rejected, got %v", err)
+	}
 	anamorphic := uhd()
 	anamorphic.SampleAspect = "4:3"
 	if _, err := NewCompactPlan(hdr10, anamorphic, 1080); err == nil || err.Error() != "compact_requires_square_pixels" {

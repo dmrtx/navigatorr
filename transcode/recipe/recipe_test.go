@@ -395,6 +395,23 @@ func TestResolverImpliesSubtitleFallbackForConvertIncompatible(t *testing.T) {
 		t.Fatalf("budgeted fallback: max=%d applied=%v", b.Resilience.MaxFallbacks, b.AppliedFallbacks)
 	}
 
+	// Rules of another kind, or the conversion rule with no budget, do not
+	// switch the conversion off.
+	for label, r := range map[string]ResilienceProfile{
+		"retry rule only":         {MaxAttempts: 2, TransientRetries: 1, RetryBackoffSeconds: []int{5}, MaxFallbacks: 1, Fallbacks: []FallbackRule{{When: "worker_busy", Action: "retry"}}},
+		"conversion rule, no max": {MaxAttempts: 1, Fallbacks: []FallbackRule{{When: "container_subtitle_incompatible", Action: "apply_container_conversion"}}},
+	} {
+		other := override
+		other.Resilience = r
+		p, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": other}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		if p.SubtitleActions[0].Operation != "transcode" || p.Resilience.MaxFallbacks < 1 || len(p.AppliedFallbacks) != 1 {
+			t.Fatalf("%s: actions=%+v max=%d applied=%v", label, p.SubtitleActions, p.Resilience.MaxFallbacks, p.AppliedFallbacks)
+		}
+	}
+
 	override.Subtitles.ConvertIncompatible = false
 	if _, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": override}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}}); err == nil {
 		t.Fatal("a profile that does not convert must still fail closed on mov_text")

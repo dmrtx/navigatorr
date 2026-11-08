@@ -31,22 +31,12 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	if !ok {
 		return nil, fmt.Errorf("profile %q references missing container policy %q", name, container)
 	}
-	fallbackAllowed := false
-	for _, f := range p.Resilience.Fallbacks {
-		if f.When == "container_subtitle_incompatible" && f.Action == "apply_container_conversion" {
-			fallbackAllowed = true
-		}
-	}
-	maxFallbacks := p.Resilience.MaxFallbacks
-	// A profile that asks to convert incompatible subtitles and names no
-	// fallbacks of its own (the mode profiles, local profiles before PR #16)
-	// gets the one conversion fallback, as config.profileToRecipe gives YAML
-	// profiles. It only reaches the plan when a stream needs it, so plans
+	// A profile that asks to convert incompatible subtitles gets the one
+	// conversion fallback even when it names no such rule or budget (the mode
+	// profiles, local profiles before PR #16), as config.profileToRecipe gives
+	// YAML profiles. It only reaches the plan when a stream needs it, so plans
 	// without such a stream keep their digest.
-	implied := p.Subtitles.ConvertIncompatible && len(p.Resilience.Fallbacks) == 0
-	if implied {
-		fallbackAllowed = true
-	}
+	maxFallbacks := p.Resilience.MaxFallbacks
 	copySet := map[string]bool{}
 	for _, v := range c.SubtitleCopy {
 		copySet[normalizeCodec(v)] = true
@@ -64,15 +54,12 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 			continue
 		}
 		conv, exists := c.SubtitleConversions[codec]
-		if !exists || !p.Subtitles.ConvertIncompatible || !fallbackAllowed {
+		if !exists || !p.Subtitles.ConvertIncompatible {
 			return nil, fmt.Errorf("unsupported subtitle codec %q in stream %d for container %s: no recipe-authorized safe conversion (fail closed)", codec, sub.SourceStreamIndex, container)
 		}
 		if !usedFallback {
-			if implied && maxFallbacks < 1 {
-				maxFallbacks = 1
-			}
 			if maxFallbacks < 1 {
-				return nil, fmt.Errorf("profile %q disallows fallbacks required to preserve subtitle codec %q", name, codec)
+				maxFallbacks = 1
 			}
 			applied = append(applied, "container_subtitle_incompatible:apply_container_conversion")
 			usedFallback = true

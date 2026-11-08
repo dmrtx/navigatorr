@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
 
@@ -117,6 +118,17 @@ func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 // exactly as a 4:2:0 one, and its chroma is subsampled the way every encode
 // already subsamples it. The candidate itself must still be 4:2:0
 // (isSupportedSourceChroma).
+// sourceChromaAdmitted is isMeasurableSourceChroma for a plan: a source
+// beyond 4:2:0 is admitted only when the plan pins a 4:2:0 output pixel
+// format, since an encode without -pix_fmt would keep the source's chroma
+// and its candidate would fail validation after the whole encode.
+func sourceChromaAdmitted(plan *transcode.Plan, pixFmt string, bitDepth int) bool {
+	if isSupportedSourceChroma(pixFmt, bitDepth) {
+		return true
+	}
+	return plan != nil && norm(plan.PixelFormat) != "" && isMeasurableSourceChroma(pixFmt, bitDepth)
+}
+
 func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {
 	if isSupportedSourceChroma(pixFmt, bitDepth) {
 		return true
