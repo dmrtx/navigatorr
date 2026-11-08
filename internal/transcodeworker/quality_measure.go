@@ -126,7 +126,11 @@ func sourceChromaAdmitted(plan *transcode.Plan, pixFmt string, bitDepth int) boo
 	if isSupportedSourceChroma(pixFmt, bitDepth) {
 		return true
 	}
-	return plan != nil && norm(plan.PixelFormat) != "" && isMeasurableSourceChroma(pixFmt, bitDepth)
+	if plan == nil {
+		return false
+	}
+	out := norm(plan.PixelFormat)
+	return (isSupportedSourceChroma(out, 8) || isSupportedSourceChroma(out, 10)) && isMeasurableSourceChroma(pixFmt, bitDepth)
 }
 
 func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {

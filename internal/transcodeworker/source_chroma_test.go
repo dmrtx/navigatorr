@@ -81,6 +81,12 @@ func TestSourceChromaAdmittedNeedsPinnedPixelFormat(t *testing.T) {
 			t.Errorf("unpinned %s/%d: got %v", c.pixFmt, c.depth, got)
 		}
 	}
+	if !sourceChromaAdmitted(&transcode.Plan{PixelFormat: "p010le"}, "yuv444p10le", 10) {
+		t.Error("p010le plan refused 4:4:4 10-bit")
+	}
+	if sourceChromaAdmitted(&transcode.Plan{PixelFormat: "yuv422p"}, "yuv422p", 8) {
+		t.Error("a 4:2:2 output admitted a 4:2:2 source")
+	}
 	if sourceChromaAdmitted(nil, "yuv422p", 8) {
 		t.Error("nil plan admitted 4:2:2")
 	}
