@@ -11,10 +11,21 @@ import (
 	"time"
 )
 
+// tempDir is t.TempDir with symlinks resolved: macOS temp dirs live under /var, a symlink to
+// /private/var, which the symlink guards reject.
+func tempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func testResolver(t *testing.T) (*Resolver, string, string) {
 	t.Helper()
-	root := t.TempDir()
-	outside := t.TempDir()
+	root := tempDir(t)
+	outside := tempDir(t)
 	r, err := NewResolver([]string{root}, []string{root})
 	if err != nil {
 		t.Fatalf("resolver: %v", err)
@@ -343,7 +354,7 @@ func TestMoveRefusesRootThatLostItsMount(t *testing.T) {
 }
 
 func TestMoveNeverCreatesAMissingRoot(t *testing.T) {
-	root, gone := t.TempDir(), filepath.Join(t.TempDir(), "nas")
+	root, gone := tempDir(t), filepath.Join(tempDir(t), "nas")
 	r, err := NewResolver([]string{root}, []string{root, gone})
 	if err != nil {
 		t.Fatal(err)

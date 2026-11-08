@@ -72,6 +72,9 @@ func realModePipelineFixture(t *testing.T, depth int) {
 			samples := []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 0.5}}
 			start := time.Now()
 			plan := &transcode.Plan{Mode: mode, PolicyDigest: "sha256:" + strings.Repeat("0", 64), SizePolicy: &transcode.SizePolicy{MinSavingsPercent: saving}, Container: "mkv", VideoCodec: "libx265", Quality: 10, Preset: "medium", ExpectedBitDepth: depth, AudioMode: "copy", SubtitleMode: "preserve", PreserveMetadata: true, PreserveChapters: true, PreserveAttachments: true, RecipeVersion: "synthetic-mode-policy-v1", RecipeDigest: "sha256:" + strings.Repeat("0", 64), Resilience: transcode.ResiliencePlan{MaxAttempts: 1}, QualityValidation: &transcode.QualityValidationPlan{Metric: "vmaf", Samples: samples, Quality: policy, BenchmarkRequestDigest: "sha256:" + strings.Repeat("1", 64)}}
+			if depth == 10 {
+				plan.VideoProfile, plan.PixelFormat = "main10", "p010le"
+			}
 			plan.PlanDigest, _ = transcode.DigestPlan(plan)
 			candidate := filepath.Join(dir, mode, "candidate.mkv")
 			job := &JobRecord{ID: "real-" + mode, Status: "running", Source: source, SourceSHA256: sourceSHA, Candidate: candidate, Plan: plan, CreatedAt: time.Now().UTC(), StartedAt: time.Now().UTC(), ExecutionSpecDigest: pr5Digest, StagingState: string(StagingStateNotRequired), FinalizationState: string(FinalizationStateNotRequired), LocalCandidatePath: candidate, EffectiveInputPath: source}

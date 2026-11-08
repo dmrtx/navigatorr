@@ -22,7 +22,11 @@ import (
 // owns one file, over a library of a tracked movie with a stray folder.
 func fsManageServer(t *testing.T, allowDestructive, radarrFails bool) (*server.MCPServer, string) {
 	t.Helper()
-	root := t.TempDir()
+	// macOS temp dirs live under /var, a symlink to /private/var, which the symlink guard rejects.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	old := time.Now().Add(-48 * time.Hour)
 	for _, f := range []string{
 		"Movies/Film (1997)/Film (1997).mkv",
