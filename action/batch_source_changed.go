@@ -39,16 +39,13 @@ func sourceChangedSincePlanned(planned, current int64) bool {
 // batchItemSourceChanged reports whether the item's file changed since the
 // batch planned it, with the reason to show when it did. Only an item that has
 // no encode yet is judged: a child already started has judged its file in its
-// own preflight, and an item the user asked to encode again (new settings)
-// asks for the file as it is now.
-func (e *Engine) batchItemSourceChanged(ec *ExecutionContext, item store.TranscodeBatchItem) (string, bool) {
+// own preflight. An item the user asked to encode again (new settings) is
+// judged like any other: the batch only takes new settings for the originals
+// it planned and has not replaced, so the planned size is still the one to
+// compare with, and a file another request converted in between is not one to
+// encode again.
+func (e *Engine) batchItemSourceChanged(item store.TranscodeBatchItem) (string, bool) {
 	if item.ChildActionID != "" || item.SourceBytes <= 0 {
-		return "", false
-	}
-	// A plain read: stateObject would add the key to a state the batch's
-	// parallel items share.
-	generations, _ := ec.State["batch_item_generations"].(map[string]any)
-	if getInt(generations, item.ItemKey) > 0 {
 		return "", false
 	}
 	current := e.boundedFileSize(item.FilePath)
