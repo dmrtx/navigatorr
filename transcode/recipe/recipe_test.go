@@ -338,3 +338,38 @@ func TestReviewedRollbackRejectsActivationDuringConfirmation(t *testing.T) {
 		t.Fatal("stale dialog changed newly activated bundle")
 	}
 }
+
+// The mode profiles ask to convert incompatible subtitles without naming a
+// fallback; an mp4 with mov_text must still resolve, and a source without one
+// must keep the plan it had (no fallback budget, same digest).
+func TestResolverImpliesSubtitleFallbackForConvertIncompatible(t *testing.T) {
+	s, _ := Parse(EmbeddedBytes())
+	override := s.Bundle.Profiles["hevc-vt"]
+	override.Subtitles = SubtitleProfile{Mode: "preserve", ConvertIncompatible: true}
+	override.Resilience = ResilienceProfile{MaxAttempts: 1}
+	overrides := map[string]Profile{"hevc-vt": override}
+
+	p, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.SubtitleActions[0]; got.Operation != "transcode" || got.Codec != "subrip" {
+		t.Fatalf("mov_text action: %+v", got)
+	}
+	if p.Resilience.MaxFallbacks != 1 || len(p.AppliedFallbacks) != 1 {
+		t.Fatalf("fallback: max=%d applied=%v", p.Resilience.MaxFallbacks, p.AppliedFallbacks)
+	}
+
+	plain, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "subrip"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Resilience.MaxFallbacks != 0 || len(plain.AppliedFallbacks) != 0 {
+		t.Fatalf("copy-only plan changed: max=%d applied=%v", plain.Resilience.MaxFallbacks, plain.AppliedFallbacks)
+	}
+
+	override.Subtitles.ConvertIncompatible = false
+	if _, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": override}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}}); err == nil {
+		t.Fatal("a profile that does not convert must still fail closed on mov_text")
+	}
+}

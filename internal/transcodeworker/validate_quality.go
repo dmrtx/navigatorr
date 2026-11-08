@@ -98,7 +98,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		if err := plan.Compact.MatchSource(dr, sourceVideo); err != nil {
 			return fail("quality_source_class_unsupported", err)
 		}
-		if (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || (candidateVideo.BitDepth != 8 && candidateVideo.BitDepth != 10) || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+		if (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || (candidateVideo.BitDepth != 8 && candidateVideo.BitDepth != 10) || !isMeasurableSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported"))
 		}
 		e.CompactOutput = validateCompactOutput(ctx, w.ffprobePath, candidate, &candidateRep, plan.Compact)
@@ -118,7 +118,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 	} else if plan.Mode != "" {
 		sourceVideo, candidateVideo := sourceVideoStreams[0], candidateVideoStreams[0]
-		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != modeCandidateBitDepth(plan, sourceVideo.BitDepth) || !isSupportedSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
+		if mediainspect.IsHDRorDolbyVisionReport(&sourceRep) || mediainspect.IsHDRorDolbyVisionReport(&candidateRep) || (sourceVideo.BitDepth != 8 && sourceVideo.BitDepth != 10) || candidateVideo.BitDepth != modeCandidateBitDepth(plan, sourceVideo.BitDepth) || !isMeasurableSourceChroma(sourceVideo.PixelFormat, sourceVideo.BitDepth) || !isSupportedSourceChroma(candidateVideo.PixelFormat, candidateVideo.BitDepth) {
 			return fail("quality_source_class_unsupported", fmt.Errorf("source/candidate measurement class is unsupported or changed"))
 		}
 	}
@@ -734,8 +734,8 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 		}
 		return nil
 	}
-	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || (plan.Compact == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !isSupportedSourceChroma(v.PixelFormat, v.BitDepth) {
-		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
+	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || (plan.Compact == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !isMeasurableSourceChroma(v.PixelFormat, v.BitDepth) {
+		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0, 4:2:2 or 4:4:4 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
 	}
 	q := plan.QualityValidation
 	if q == nil || q.Quality.VMAF == nil || q.Quality.VMAF.Model == "" || (q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim") {

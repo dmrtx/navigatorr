@@ -108,6 +108,34 @@ func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 	return false
 }
 
+// isMeasurableSourceChroma reports whether a source can be encoded and
+// measured. Every encode writes 4:2:0 (yuv420p or p010le), and both metric
+// inputs are converted to yuv420p10le before libvmaf, whose features (and
+// CAMBI) read luma only; a 4:2:2 or 4:4:4 source is therefore measured
+// exactly as a 4:2:0 one, and its chroma is subsampled the way every encode
+// already subsamples it. yuvj420p is 4:2:0 at full range, which the same
+// conversion carries. The candidate itself must still be plain 4:2:0
+// (isSupportedSourceChroma).
+func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {
+	if isSupportedSourceChroma(pixFmt, bitDepth) {
+		return true
+	}
+	p := strings.ToLower(strings.TrimSpace(pixFmt))
+	switch bitDepth {
+	case 8:
+		switch p {
+		case "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p":
+			return true
+		}
+	case 10:
+		switch p {
+		case "yuv422p10le", "yuv444p10le":
+			return true
+		}
+	}
+	return false
+}
+
 // tailBuffer retains up to maxBytes of trailing output.
 // It is thread-safe and preserves the end of process stdout/stderr diagnostics
 // where summary lines and final aggregate statistics are printed.
