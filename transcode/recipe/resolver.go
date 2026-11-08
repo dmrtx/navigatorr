@@ -43,7 +43,7 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 	// gets the one conversion fallback, as config.profileToRecipe gives YAML
 	// profiles. It only reaches the plan when a stream needs it, so plans
 	// without such a stream keep their digest.
-	implied := p.Subtitles.ConvertIncompatible && len(p.Resilience.Fallbacks) == 0 && p.Resilience.MaxFallbacks == 0
+	implied := p.Subtitles.ConvertIncompatible && len(p.Resilience.Fallbacks) == 0
 	if implied {
 		fallbackAllowed = true
 	}
@@ -68,7 +68,7 @@ func Resolve(s *Snapshot, profileName string, overrides map[string]Profile, subt
 			return nil, fmt.Errorf("unsupported subtitle codec %q in stream %d for container %s: no recipe-authorized safe conversion (fail closed)", codec, sub.SourceStreamIndex, container)
 		}
 		if !usedFallback {
-			if implied {
+			if implied && maxFallbacks < 1 {
 				maxFallbacks = 1
 			}
 			if maxFallbacks < 1 {

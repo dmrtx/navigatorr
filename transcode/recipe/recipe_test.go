@@ -343,7 +343,10 @@ func TestReviewedRollbackRejectsActivationDuringConfirmation(t *testing.T) {
 // fallback; an mp4 with mov_text must still resolve, and a source without one
 // must keep the plan it had (no fallback budget, same digest).
 func TestResolverImpliesSubtitleFallbackForConvertIncompatible(t *testing.T) {
-	s, _ := Parse(EmbeddedBytes())
+	s, err := Parse(EmbeddedBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
 	override := s.Bundle.Profiles["hevc-vt"]
 	override.Subtitles = SubtitleProfile{Mode: "preserve", ConvertIncompatible: true}
 	override.Resilience = ResilienceProfile{MaxAttempts: 1}
@@ -366,6 +369,30 @@ func TestResolverImpliesSubtitleFallbackForConvertIncompatible(t *testing.T) {
 	}
 	if plain.Resilience.MaxFallbacks != 0 || len(plain.AppliedFallbacks) != 0 {
 		t.Fatalf("copy-only plan changed: max=%d applied=%v", plain.Resilience.MaxFallbacks, plain.AppliedFallbacks)
+	}
+
+	// Several incompatible streams share the one conversion fallback.
+	multi, err := Resolve(s, "hevc-vt", overrides, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}, {SourceStreamIndex: 3, TypeIndex: 1, Codec: "subrip"}, {SourceStreamIndex: 4, TypeIndex: 2, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(multi.SubtitleActions) != 3 || multi.SubtitleActions[0].Operation != "transcode" || multi.SubtitleActions[1].Operation != "copy" || multi.SubtitleActions[2].Operation != "transcode" {
+		t.Fatalf("multi-stream actions: %+v", multi.SubtitleActions)
+	}
+	if multi.Resilience.MaxFallbacks != 1 || len(multi.AppliedFallbacks) != 1 {
+		t.Fatalf("multi-stream fallback: max=%d applied=%v", multi.Resilience.MaxFallbacks, multi.AppliedFallbacks)
+	}
+
+	// A fallback budget with no rules of its own still converts, keeping
+	// its budget.
+	budget := override
+	budget.Resilience.MaxFallbacks = 2
+	b, err := Resolve(s, "hevc-vt", map[string]Profile{"hevc-vt": budget}, []SourceSubtitle{{SourceStreamIndex: 2, TypeIndex: 0, Codec: "mov_text"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Resilience.MaxFallbacks != 2 || len(b.AppliedFallbacks) != 1 {
+		t.Fatalf("budgeted fallback: max=%d applied=%v", b.Resilience.MaxFallbacks, b.AppliedFallbacks)
 	}
 
 	override.Subtitles.ConvertIncompatible = false

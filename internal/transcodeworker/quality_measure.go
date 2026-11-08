@@ -86,14 +86,16 @@ func sampleFrameBounds(startSec, durationSec, fps float64) (from, to float64) {
 	return (first - 0.5) / fps, (first + frames - 0.5) / fps
 }
 
-// isSupportedSourceChroma returns true if the source pixel format has safe 4:2:0 chroma subsampling.
-// Full-range yuvj420p is deferred until Phase 5 range-normalized metric pipeline support to avoid
-// implicit full-to-limited range conversion discrepancies during VideoToolbox candidate comparison.
+// isSupportedSourceChroma returns true if the pixel format has safe 4:2:0
+// chroma subsampling. yuvj420p is 4:2:0 at full range: an encode of a
+// full-range source keeps that range (libx265 and VideoToolbox alike), so
+// its candidate reports yuvj420p, and the metric graph's format conversion
+// reads both inputs by their own range.
 func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 	p := strings.ToLower(strings.TrimSpace(pixFmt))
 	if bitDepth == 8 {
 		switch p {
-		case "yuv420p", "nv12":
+		case "yuv420p", "yuvj420p", "nv12":
 			return true
 		}
 		return false
@@ -113,8 +115,7 @@ func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 // inputs are converted to yuv420p10le before libvmaf, whose features (and
 // CAMBI) read luma only; a 4:2:2 or 4:4:4 source is therefore measured
 // exactly as a 4:2:0 one, and its chroma is subsampled the way every encode
-// already subsamples it. yuvj420p is 4:2:0 at full range, which the same
-// conversion carries. The candidate itself must still be plain 4:2:0
+// already subsamples it. The candidate itself must still be 4:2:0
 // (isSupportedSourceChroma).
 func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {
 	if isSupportedSourceChroma(pixFmt, bitDepth) {
@@ -124,7 +125,7 @@ func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {
 	switch bitDepth {
 	case 8:
 		switch p {
-		case "yuvj420p", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p":
+		case "yuv422p", "yuvj422p", "yuv444p", "yuvj444p":
 			return true
 		}
 	case 10:

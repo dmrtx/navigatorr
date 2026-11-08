@@ -300,7 +300,7 @@ func pixelFormatCompatible(expected, actual string, expectedBitDepth int) error 
 	families := map[string]string{
 		"p010le": "10", "yuv420p10le": "10",
 		"p012le": "12", "yuv420p12le": "12",
-		"nv12": "8", "yuv420p": "8",
+		"nv12": "8", "yuv420p": "8", "yuvj420p": "8",
 	}
 	fe, eok := families[exp]
 	fa, aok := families[act]
