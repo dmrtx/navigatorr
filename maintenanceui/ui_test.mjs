@@ -6557,6 +6557,9 @@ test("only a job that left no file and replaced nothing keeps its original, and 
   assert.equal(h.run("statusClass(queuePresentation(plain).status)"), "neutral");
   // Another job already replaced the file: its original is gone, not kept.
   assert.equal(status({ reason_code: "source_replaced" }), "Already replaced");
+  h.context.replacedElsewhere = notConvertedJob({ reason_code: "source_replaced", benchmark: { outcome: "no_changes", message: "Nothing to do: another conversion already replaced this file after this job was queued. The replacement is in place and was not touched." } });
+  assert.doesNotMatch(h.run("queuePresentation(replacedElsewhere).summary"), /original kept/i);
+  assert.equal(h.run("statusClass(queuePresentation(replacedElsewhere).status)"), "neutral");
   // Without a reason the list and the conversion page say the same.
   h.context.bare = notConvertedJob({ reason_code: undefined });
   assert.equal(h.run("queuePresentation(bare).status"), "Original kept");

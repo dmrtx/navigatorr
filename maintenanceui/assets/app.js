@@ -5988,7 +5988,8 @@ function notConvertedReason(job) {
       const cut = clause > room.length / 2 ? clause : room.lastIndexOf(" ");
       sentence = `${room.slice(0, cut > 0 ? cut : room.length)}…`;
     }
-    return /original (?:preserved|kept)/i.test(sentence) ? sentence : sentence + suffix;
+    // A file another job replaced has no original left to keep.
+    return /original (?:preserved|kept)/i.test(sentence) || job.reason_code === "source_replaced" ? sentence : sentence + suffix;
   }
   return shortJobReason(job.reason_code) || "No converted file was made; original kept";
 }
