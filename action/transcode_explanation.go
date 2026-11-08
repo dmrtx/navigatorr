@@ -207,6 +207,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == reasonSourceReplaced:
 		e.Outcome = "no_changes"
 		e.Message = "Nothing to do: another conversion already replaced this file after this job was queued. The replacement is in place and was not touched."
+	case reason == "unsupported_source":
+		e.Outcome = "no_changes"
+		e.Message = "This goal cannot encode this source: it needs one main video stream of 8 or 10 bits at a frame rate the quality checks can measure. Original preserved."
 	case reason == "already_target_codec":
 		e.Outcome = "no_changes"
 		e.Message = "The source already uses the target codec. Original preserved."

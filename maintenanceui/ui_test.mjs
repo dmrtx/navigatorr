@@ -3557,7 +3557,7 @@ test("cleanup completion uses the confirmed command receipt when browser and ser
 test("an omitted video shows its reason and another-profile action instead of conversion progress", async () => {
   const h=harness();
   h.context.job={id:'omitted',number:580,action_name:'transcode_batch',status:'completed',can_archive:true,batch:{title:'The Peripheral',total:1,skip:1,outcome:'no_changes'},batch_files:{context:'The Peripheral · Season 1',file_count:1,files:[{display_label:'The Peripheral - S01E04'}],reasons:[{count:1,reason:'shared VMAF/CAMBI calibration supports 8-bit SDR video below 45 fps; original preserved'}]}};
-  assert.equal(h.run('queuePresentation(job).status'),'Not converted');
+  assert.equal(h.run('queuePresentation(job).status'),'No changes');
   assert.equal(h.run('batchProgress(job)'),null);
   assert.equal(h.run('jobControls(job).children[0].textContent'),'Try another profile');
   h.run('api=async()=>({jobs:[job],total:1,has_more:false});renderSavings=()=>{};');
@@ -4109,9 +4109,9 @@ test("file details offer goal changes and keep-original decisions without duplic
   const labels=h.run('jobControls({id:"child",action_name:"transcode_media",status:"waiting_decision",reason_code:"search_budget_exhausted",mode:"size",parent_action_id:"batch",parent_item_key:"one",waiting_options:[{decision:"cancel"}]}).children.map(b=>b.textContent)');
   assert.ok(labels.includes("Keep original"));assert.ok(labels.includes("Change goal"));assert.ok(!labels.includes("Cancel"));
   const skipped=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"quality_not_met",candidate_ready:false})');
-  assert.equal(skipped.status,"Not converted");assert.match(skipped.summary,/quality target; original kept/);
+  assert.equal(skipped.status,"Original kept");assert.match(skipped.summary,/quality target; original kept/);
   const unsupported=h.run('queuePresentation({action_name:"transcode_media",status:"completed",reason_code:"unsupported_source",candidate_ready:false})');
-  assert.equal(unsupported.status,"Not converted");assert.match(unsupported.summary,/does not support this source format yet/);
+  assert.equal(unsupported.status,"Original kept");assert.match(unsupported.summary,/does not support this source format yet/);
 });
 
 test("replacement from a batch row rechecks the exact candidate and ignores stale or unrelated files",async()=>{
@@ -6485,11 +6485,11 @@ function notConvertedJob(extra = {}) {
   });
 }
 
-test("a size-rejected file is Not converted, says why and shows no savings", async () => {
+test("a size-rejected file keeps its original, says why and shows no savings", async () => {
   const h = harness();
   h.context.job = notConvertedJob();
   const row = h.run("queuePresentation(job)");
-  assert.equal(row.status, "Not converted");
+  assert.equal(row.status, "Original kept");
   assert.match(row.summary, /1\.14 GB/);
   assert.match(row.summary, /1\.00 GB budget/);
   assert.match(row.summary, /original kept/i);
@@ -6501,7 +6501,7 @@ test("a size-rejected file is Not converted, says why and shows no savings", asy
   const detail = await openDetail(notConvertedJob());
   const summary = detail.elements.get("detail-summary");
   const text = allTextOf(summary);
-  assert.match(allTextOf(detail.elements.get("detail-status")), /No smaller file/);
+  assert.match(allTextOf(detail.elements.get("detail-status")), /Original kept/);
   assert.deepEqual(nodesWithClass(summary, "cv-failure-text").map((n) => n.textContent), [h.run("notConvertedReason(job)")]);
   assert.match(allTextOf(nodesWithClass(summary, "cv-hero")[0]), /2\.79 GB original · untouched/);
   const technical = allTextOf(nodesWithClass(summary, "technical-reason")[0]);
@@ -6516,12 +6516,12 @@ test("a reason code the UI has never heard of still reads as a sentence", () => 
   const h = harness();
   h.context.noMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: undefined });
   const bare = h.run("queuePresentation(noMessage)");
-  assert.equal(bare.status, "Not converted");
+  assert.equal(bare.status, "Original kept");
   assert.match(bare.summary, /Future new reason/);
   assert.doesNotMatch(bare.summary, /future_new_reason|estimated savings/);
   h.context.withMessage = notConvertedJob({ reason_code: "future_new_reason", benchmark: { outcome: "future_outcome", message: "The worker could not read this file's frame rate. Original preserved." } });
   const said = h.run("queuePresentation(withMessage)");
-  assert.equal(said.status, "Not converted");
+  assert.equal(said.status, "Original kept");
   assert.match(said.summary, /The worker could not read this file's frame rate; original kept/);
   // Neither an empty job reason nor an empty message drops the sentence.
   h.context.nothing = notConvertedJob({ reason_code: undefined, benchmark: undefined });
@@ -6544,11 +6544,26 @@ test("a long reason is trimmed at a boundary, keeps its numbers and the original
   assert.match(reason("The file needs approx. 5.00 GB for this goal. Raise the budget."), /approx\. 5\.00 GB for this goal; original kept/);
 });
 
-test("only a job that left no file and replaced nothing is Not converted", () => {
+test("only a job that left no file and replaced nothing keeps its original, and a too-compact one says so", () => {
   const h = harness();
   const status = (patch) => { h.context.probe = notConvertedJob(patch); return h.run("queuePresentation(probe).status"); };
-  assert.equal(status({}), "Not converted");
-  assert.equal(status({ reason_code: "quality_not_met" }), "Not converted");
+  assert.equal(status({}), "Original kept");
+  assert.equal(status({ reason_code: "quality_not_met" }), "Original kept");
+  for (const reason_code of ["insufficient_savings", "size_growth", "size_growth_exceeded", "audio_compaction_insufficient"])
+    assert.equal(status({ reason_code }), "Already compact");
+  h.context.compact = notConvertedJob({ reason_code: "insufficient_savings" });
+  assert.equal(h.run("statusClass(queuePresentation(compact).status)"), "neutral");
+  h.context.plain = notConvertedJob();
+  assert.equal(h.run("statusClass(queuePresentation(plain).status)"), "neutral");
+  // Another job already replaced the file: its original is gone, not kept.
+  assert.equal(status({ reason_code: "source_replaced" }), "Already replaced");
+  h.context.replacedElsewhere = notConvertedJob({ reason_code: "source_replaced", benchmark: { outcome: "no_changes", message: "Nothing to do: another conversion already replaced this file after this job was queued. The replacement is in place and was not touched." } });
+  assert.doesNotMatch(h.run("queuePresentation(replacedElsewhere).summary"), /original kept/i);
+  assert.equal(h.run("statusClass(queuePresentation(replacedElsewhere).status)"), "neutral");
+  // Without a reason the list and the conversion page say the same.
+  h.context.bare = notConvertedJob({ reason_code: undefined });
+  assert.equal(h.run("queuePresentation(bare).status"), "Original kept");
+  assert.match(allTextOf(h.run("conversionChip(bare)")), /Original kept/);
   assert.equal(status({ candidate_ready: true }), "Candidate ready");
   assert.equal(status({ replaced: true }), "Replaced");
   assert.equal(status({ replacement_action_id: "replacement" }), "Completed");
@@ -6565,7 +6580,7 @@ test("only a job that left no file and replaced nothing is Not converted", () =>
   assert.equal(h.run("statusClass(queuePresentation(declinedJob).status)"), "neutral");
   assert.equal(status({ status: "cancelled" }), "Cancelled");
   assert.equal(status({ action_name: "promote_transcode_candidate" }), "Completed");
-  // A job with a retired candidate is not Not converted, but keeps its reason in the details.
+  // A job with a retired candidate is not "Original kept", but keeps its reason in the details.
   h.context.retired = notConvertedJob({ benchmark: undefined, reason_code: "quality_not_met", candidate_cleanup: { reason: "superseded", outcome: "removed", bytes_freed: 0 } });
   assert.match(h.run("jobOutcomeText(retired)"), /quality target; original kept/);
 });

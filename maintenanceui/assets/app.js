@@ -5959,10 +5959,17 @@ function savingsPolicyFailure(value) {
 // A conversion that finished and left nothing to review, replace or undo: no
 // candidate file, no replacement, no retired candidate. This is a fact about
 // the job, not a list of reason codes, so a reason the UI has never seen still
-// reads as "Not converted" instead of a green "Completed".
+// reads as "Original kept" instead of a green "Completed".
 function notConverted(job) {
   return job.action_name === "transcode_media" && job.status === "completed" && !job.candidate_ready &&
     !job.replaced && !job.replacement_action_id && !job.candidate_cleanup && job.savings?.realized_saved_bytes == null;
+}
+// A source too compact to gain from this goal is a result, not a failure: the
+// row says so in neutral words instead of reading like an error.
+const alreadyCompactReasons = ["insufficient_savings", "size_growth", "size_growth_exceeded", "audio_compaction_insufficient"];
+function notConvertedLabel(job) {
+  if (job.reason_code === "source_replaced") return "Already replaced";
+  return alreadyCompactReasons.includes(job.reason_code) ? "Already compact" : "Original kept";
 }
 // Why a not-converted job left its original alone: the server's own sentence
 // (the numbers are in it), else the curated line for its code, else the code
@@ -5981,7 +5988,8 @@ function notConvertedReason(job) {
       const cut = clause > room.length / 2 ? clause : room.lastIndexOf(" ");
       sentence = `${room.slice(0, cut > 0 ? cut : room.length)}…`;
     }
-    return /original (?:preserved|kept)/i.test(sentence) ? sentence : sentence + suffix;
+    // A file another job replaced has no original left to keep.
+    return /original (?:preserved|kept)/i.test(sentence) || job.reason_code === "source_replaced" ? sentence : sentence + suffix;
   }
   return shortJobReason(job.reason_code) || "No converted file was made; original kept";
 }
@@ -6023,7 +6031,7 @@ function queuePresentation(job) {
     needs_decision: "Needs decision",
     partial: "Partial",
     needs_review: "Needs review",
-    no_changes: "Not converted",
+    no_changes: "No changes",
     rejected: "Rejected",
     candidates_ready: "Candidates ready",
     promoted: "Replaced",
@@ -6043,7 +6051,7 @@ function queuePresentation(job) {
     (job.replaced && job.status === "completed"));
   // Nothing was made, so there are no savings to report.
   const leftNoFile = notConverted(job);
-  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? "Not converted" : job.status === "waiting_decision" && job.paused === true ? "Paused" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.failed_replacements > 0 && !operationIsActive(job.status) ? "Partly replaced" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
+  const status = job.replacement?.approved && operationIsActive(job.status) ? "Replacing" : leftNoFile ? notConvertedLabel(job) : job.status === "waiting_decision" && job.paused === true ? "Paused" : job.status === "waiting_decision" && job.reason_code === "search_budget_exhausted" ? "Needs attention" : job.status === "failed" && !rejectedCandidate(job) && !declinedReplacement(job) && !savingsPolicyFailure(job.error) ? "Failed" : job.failed_replacements > 0 && !operationIsActive(job.status) ? "Partly replaced" : job.replaced_files > 0 && job.remaining_candidates > 0 ? "Candidates ready" : replacementComplete
     ? "Replaced"
     : rejectedCandidate(job) ? "Rejected" : declinedReplacement(job) ? "Kept original" : savingsPolicyFailure(job.error) ? "Minimum savings not met" : outcomes[batch?.outcome] ||
       (job.candidate_ready && !job.replacement_action_id
@@ -8418,7 +8426,8 @@ function conversionStatusOf(job) {
 function conversionChip(job) {
   const status = conversionStatusOf(job);
   if (job.resolved_by && status === "failed") return statusBadge("Resolved", "neutral");
-  return statusBadge(job.queue_priority ? `${conversionLabels[status]} · Run next` : conversionLabels[status], conversionTones[status]);
+  const label = status === "no_result" ? notConvertedLabel(job) : conversionLabels[status];
+  return statusBadge(job.queue_priority ? `${label} · Run next` : label, conversionTones[status]);
 }
 const percentOf = (part, whole) => whole > 0 ? Math.max(0, Math.min(100, part / whole * 100)) : 0;
 function conversionSizes(job) {
