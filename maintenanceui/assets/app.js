@@ -5968,6 +5968,7 @@ function notConverted(job) {
 // row says so in neutral words instead of reading like an error.
 const alreadyCompactReasons = ["insufficient_savings", "size_growth", "size_growth_exceeded", "audio_compaction_insufficient"];
 function notConvertedLabel(job) {
+  if (job.reason_code === "source_replaced") return "Already replaced";
   return alreadyCompactReasons.includes(job.reason_code) ? "Already compact" : "Original kept";
 }
 // Why a not-converted job left its original alone: the server's own sentence
@@ -8424,7 +8425,7 @@ function conversionStatusOf(job) {
 function conversionChip(job) {
   const status = conversionStatusOf(job);
   if (job.resolved_by && status === "failed") return statusBadge("Resolved", "neutral");
-  const label = status === "no_result" && job.reason_code ? notConvertedLabel(job) : conversionLabels[status];
+  const label = status === "no_result" ? notConvertedLabel(job) : conversionLabels[status];
   return statusBadge(job.queue_priority ? `${label} · Run next` : label, conversionTones[status]);
 }
 const percentOf = (part, whole) => whole > 0 ? Math.max(0, Math.min(100, part / whole * 100)) : 0;

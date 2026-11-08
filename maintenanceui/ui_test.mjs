@@ -6553,6 +6553,14 @@ test("only a job that left no file and replaced nothing keeps its original, and 
     assert.equal(status({ reason_code }), "Already compact");
   h.context.compact = notConvertedJob({ reason_code: "insufficient_savings" });
   assert.equal(h.run("statusClass(queuePresentation(compact).status)"), "neutral");
+  h.context.plain = notConvertedJob();
+  assert.equal(h.run("statusClass(queuePresentation(plain).status)"), "neutral");
+  // Another job already replaced the file: its original is gone, not kept.
+  assert.equal(status({ reason_code: "source_replaced" }), "Already replaced");
+  // Without a reason the list and the conversion page say the same.
+  h.context.bare = notConvertedJob({ reason_code: undefined });
+  assert.equal(h.run("queuePresentation(bare).status"), "Original kept");
+  assert.match(allTextOf(h.run("conversionChip(bare)")), /Original kept/);
   assert.equal(status({ candidate_ready: true }), "Candidate ready");
   assert.equal(status({ replaced: true }), "Replaced");
   assert.equal(status({ replacement_action_id: "replacement" }), "Completed");

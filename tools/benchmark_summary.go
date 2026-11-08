@@ -149,8 +149,8 @@ func compactBenchmark(res *action.ActionResult) *benchmarkSummary {
 	} else if explanation != nil && res.Status == action.StatusCompleted && explanation.Outcome == "no_changes" {
 		// A finished job that made nothing says why, not the step it planned.
 		s.Outcome, s.Message = explanation.Outcome, explanation.Message
-		s.NextStep = "Nothing to monitor: no candidate was made and the original is unchanged."
-		s.UserNextStep = "Nothing to do: the original is kept."
+		s.NextStep = "Nothing to monitor: this job made no candidate and changed no file."
+		s.UserNextStep = "Nothing to do: this job changed no file."
 	}
 	benchmarkField(res, "plan_note", &s.PlanNote)
 	if s.PlanNote != "" {

@@ -186,7 +186,12 @@ func TestCompactBenchmarkReplacesThePlannedStepWhenNothingWasMade(t *testing.T) 
 	res.Status = action.StatusCompleted
 	res.State["reason_code"], res.State["skip_transcode"] = "unsupported_source", true
 	s := compactBenchmark(res)
-	if s.Outcome != "no_changes" || strings.Contains(s.Message, "Encoding") || !strings.Contains(s.Message, "cannot encode this source") || !strings.Contains(s.UserNextStep, "original is kept") {
+	if s.Outcome != "no_changes" || strings.Contains(s.Message, "Encoding") || !strings.Contains(s.Message, "cannot encode this source") || !strings.Contains(s.UserNextStep, "changed no file") {
 		t.Fatalf("a finished skip still reads as encoding: %+v", s)
+	}
+	// A file another job already replaced is not called the original.
+	res.State["reason_code"] = "source_replaced"
+	if s := compactBenchmark(res); s.Outcome != "no_changes" || !strings.Contains(s.Message, "already replaced") || strings.Contains(s.NextStep+s.UserNextStep, "original") {
+		t.Fatalf("a replaced file read as the kept original: %+v", s)
 	}
 }
