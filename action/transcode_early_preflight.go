@@ -38,24 +38,56 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 	if err != nil {
 		return StepResult{}, false
 	}
-	ec.State[earlyPreflightKey] = true
 	res, err := e.stepTranscodePreflight(withEarlyPreflight(ctx), check)
-	switch {
-	case err != nil || ctx.Err() != nil:
+	if err != nil || ctx.Err() != nil {
+		// Interrupted: the next poll checks again.
 		return StepResult{}, false
+	}
+	switch {
 	case res.Status == StepFailed && earlyRejection(res.Error):
+		// The failure is the action's; a retry checks again.
+		delete(ec.State, earlyPreflightKey)
 		return res, true
-	case res.Status == StepCompleted && getBool(check.State, "skip_transcode"):
-		for k := range ec.State {
-			delete(ec.State, k)
-		}
-		for k, v := range check.State {
-			ec.State[k] = v
-		}
+	case res.Status == StepCompleted && getBool(check.State, "skip_transcode") && earlySkipReasons[getString(check.State, "reason_code")]:
+		// The goal may have rewritten the request (Save space routes HDR to
+		// compact), so the skip keeps the inputs it was decided with.
+		replaceMap(ec.Inputs, check.Inputs)
+		replaceMap(ec.State, check.State)
 		ec.State[earlyPreflightKey] = true
+		ec.State[earlySkipOutputsKey] = res.Outputs
 		return res, true
 	}
+	ec.State[earlyPreflightKey] = true
 	return StepResult{}, false
+}
+
+// earlySkipReasons are the skips no worker changes: the file's dynamic range
+// or video shape against its goal. A skip for a measurement the check could
+// not make (compact frame evidence) or for a worker capability (HFR quality)
+// is left to the real preflight.
+var earlySkipReasons = map[string]bool{
+	"hdr_requires_compact":             true,
+	"hdr_single_video_stream_required": true,
+	"unsupported_source":               true,
+}
+
+// earlySkipOutputsKey keeps the outputs of a skip the early check decided,
+// for a preflight step that runs again before the action moves on.
+const earlySkipOutputsKey = "early_skip_outputs"
+
+// earlySkipped is a conversion its early check skipped: it sends no work, so
+// it needs no worker, and its preflight only repeats the skip.
+func earlySkipped(state map[string]any) bool {
+	return getBool(state, "skip_transcode") && getBool(state, earlyPreflightKey) && state[earlySkipOutputsKey] != nil && !holdsWorkerJob(state)
+}
+
+func replaceMap(dst, src map[string]any) {
+	for k := range dst {
+		delete(dst, k)
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
 }
 
 // earlyRejection is a preflight failure that comes from the file and its goal

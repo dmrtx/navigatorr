@@ -45,6 +45,12 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	// stored before they existed.
 	early := isEarlyPreflight(ctx)
 	if !early {
+		// A skip the early check decided is not decided again without the
+		// worker it never needed.
+		if earlySkipped(ec.State) {
+			outputs, _ := ec.State[earlySkipOutputsKey].(map[string]any)
+			return StepResult{Status: StepCompleted, Outputs: outputs}, nil
+		}
 		delete(ec.State, earlyPreflightKey)
 	}
 	req, err := e.validateTranscodeRequest(ec.ActionName, withoutSaveSpaceRequest(ec.Inputs))

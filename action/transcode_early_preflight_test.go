@@ -102,3 +102,42 @@ func TestEarlyRejectionLeavesPassingFailuresWaiting(t *testing.T) {
 		t.Error("a recipe rejection is not decided early")
 	}
 }
+
+// Through the engine, with every worker slot taken: a file its goal can never
+// take ends at once, a file its goal skips finishes without a worker, and an
+// ordinary file keeps waiting for one.
+func TestAFullQueueStillEndsWhatNoWorkerCanTake(t *testing.T) {
+	for _, tc := range []struct {
+		name, probe, mode string
+		want              string
+	}{
+		{"unconvertible subtitle", unconvertibleSubtitleProbeJSON, "size", StatusFailed},
+		{"HDR its goal skips", hdr10ProbeJSON, "quality", StatusCompleted},
+		{"ordinary file", ordinaryProbeJSON, "size", StatusWaitingExternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockTranscodeExecutor{}
+			e, _, media, _ := setupProbeTestEnv(t, mock, tc.probe)
+			worker := &slotReportingExecutor{mockTranscodeExecutor: mock, slots: sharedSlots(1)}
+			set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "m1", Executor: worker, MaxParallelJobs: 1, Podcast: true}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.deps.Workers = set
+			if _, _, waiting := assignNew(t, e, "holder", "transcode_media"); waiting {
+				t.Fatal("the holder got no slot")
+			}
+
+			res, err := e.Run(context.Background(), "transcode_media", map[string]any{"path": media, "mode": tc.mode})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Status != tc.want {
+				t.Fatalf("status %s, want %s: %+v", res.Status, tc.want, res)
+			}
+			if n := atomic.LoadInt32(&mock.submitCalls); n != 0 {
+				t.Fatalf("submitted %d jobs with every slot taken", n)
+			}
+		})
+	}
+}

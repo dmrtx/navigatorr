@@ -14,7 +14,7 @@ import (
 func TestRetryRefusesAPermanentSourceRejection(t *testing.T) {
 	e, st, media, _ := setupProbeTestEnv(t, &mockTranscodeExecutor{}, standard8BitProbeJSON)
 	for id, failure := range map[string]string{
-		"chroma":   `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence required"}`,
+		"chroma":   `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: native SDR 8/10-bit 4:2:0, 4:2:2 or 4:4:4 evidence at a measurable frame rate"}`,
 		"subtitle": `{"error":"resolving transcode profile \"x\": unsupported subtitle codec \"dvb_teletext\" in stream 4 for container mkv: no recipe-authorized safe conversion (fail closed)"}`,
 		"range":    `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: compact plan: compact_sdr_requires_limited_range"}`,
 	} {
@@ -32,7 +32,8 @@ func TestRetryRefusesAPermanentSourceRejection(t *testing.T) {
 
 func TestPermanentSourceRejectionLeavesPassingFailuresAlone(t *testing.T) {
 	for _, msg := range []string{
-		"quality_source_class_unsupported: native SDR",
+		"quality_source_class_unsupported: native SDR 8/10-bit 4:2:0, 4:2:2 or 4:4:4 evidence",
+		"Transcode failed (worker_setup_failed): quality_source_class_unsupported: source/candidate measurement class is unsupported",
 		"UNSUPPORTED SUBTITLE CODEC \"x\"",
 		"cover art stream 3 has unsupported mimetype \"image/gif\" (fail closed)",
 		"hdr_single_video_stream_required",
@@ -43,6 +44,10 @@ func TestPermanentSourceRejectionLeavesPassingFailuresAlone(t *testing.T) {
 	}
 	for _, msg := range []string{
 		"compact plan does not match source",
+		"Transcode failed (worker_setup_failed): quality_source_class_unsupported: compact plan does not match source: range changed",
+		"Transcode failed (worker_setup_failed): quality_source_class_unsupported: ffprobe timed out",
+		"failed to probe original media /media/unsupported_source.mkv (fail closed): timeout",
+		"failed to probe original media /media/hdr_requires_limited_range/a.mkv (fail closed): timeout",
 		"compact_frame_evidence_unavailable",
 		"quality_vmaf_unavailable",
 		"hfr_quality_unavailable",

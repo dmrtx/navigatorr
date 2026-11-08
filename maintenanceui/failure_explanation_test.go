@@ -80,7 +80,7 @@ func TestFailedJobViewBlocksRetryOfAPermanentRejection(t *testing.T) {
 	s, h := testUI(t)
 	st := s.engine.Deps().Store
 	for id, failure := range map[string]string{
-		"chroma":   `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence required"}`,
+		"chroma":   `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: native SDR 8/10-bit 4:2:0, 4:2:2 or 4:4:4 evidence at a measurable frame rate"}`,
 		"subtitle": `{"error":"resolving transcode profile \"x\": unsupported subtitle codec \"dvb_teletext\" in stream 4 for container mkv: no recipe-authorized safe conversion (fail closed)"}`,
 	} {
 		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", Status: "failed", InputsJSON: mustJSON(t, map[string]any{"path": "/media/a.mkv", "mode": "size"}), OutputsJSON: "{}", StateJSON: "{}", ErrorJSON: failure}); err != nil {

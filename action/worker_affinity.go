@@ -154,7 +154,7 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	}
 	// A conversion its early check skipped sends no work: its remaining steps
 	// only record the skip.
-	if getBool(ec.State, "skip_transcode") && getBool(ec.State, earlyPreflightKey) && getString(ec.State, "job_id") == "" {
+	if earlySkipped(ec.State) {
 		return StepResult{}, false
 	}
 	// A job from before workers had names stays on the worker that has it.

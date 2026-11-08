@@ -73,11 +73,14 @@ func SourceDamaged(msg string) bool {
 // permanentSourceRejections are failures that come from what the file is,
 // checked against the goal it was given: its picture, colour range or tracks.
 // Running the same goal on the same file fails the same way, so Retry is
-// refused and a new goal is chosen instead. Failures of a measurement or of
-// the environment (quality_*_unavailable, a compact plan that no longer
-// matches the source) are not here: they can pass on another run.
+// refused and a new goal is chosen instead. The worker also reports passing
+// failures under quality_source_class_unsupported (a source it could not
+// classify, a compact plan that no longer matches the file), so only the
+// measurement-class verdicts under that code are listed, never the code
+// alone. Measurement and environment failures are not here.
 var permanentSourceRejections = []string{
-	"quality_source_class_unsupported",
+	"source/candidate measurement class is unsupported",
+	"quality_source_class_unsupported: native sdr 8/10-bit",
 	"compact_sdr_requires_limited_range",
 	"compact_sdr_requires_bt709",
 	"hdr_single_video_stream_required",
@@ -92,15 +95,29 @@ var permanentSourceRejections = []string{
 }
 
 // PermanentSourceRejection reports a failure message that rejects the file
-// for its goal, and the code it matched.
+// for its goal, and the code it matched. A code counts only as a word of its
+// own, so a path or file name that happens to contain one does not.
 func PermanentSourceRejection(msg string) (string, bool) {
 	msg = strings.ToLower(msg)
 	for _, code := range permanentSourceRejections {
-		if strings.Contains(msg, code) {
-			return code, true
+		for from := 0; ; {
+			i := strings.Index(msg[from:], code)
+			if i < 0 {
+				break
+			}
+			i += from
+			if j := i + len(code); (i == 0 || !rejectionWordByte(msg[i-1])) && (j == len(msg) || !rejectionWordByte(msg[j])) {
+				return code, true
+			}
+			from = i + 1
 		}
 	}
 	return "", false
+}
+
+// rejectionWordByte is a byte that joins a code to a longer word or a path.
+func rejectionWordByte(b byte) bool {
+	return b == '_' || b == '/' || b == '.' || b == '-' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9'
 }
 
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
