@@ -73,3 +73,25 @@ func TestFailedJobViewBlocksAUselessRetry(t *testing.T) {
 		t.Fatalf("child view %v", child)
 	}
 }
+
+// A file rejected for its goal is a useless Retry too, whether the worker or
+// the plan step rejected it: the view offers a new goal instead.
+func TestFailedJobViewBlocksRetryOfAPermanentRejection(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	for id, failure := range map[string]string{
+		"chroma":   `{"error":"Transcode failed (worker_setup_failed): quality_source_class_unsupported: native SDR 8/10-bit 4:2:0 evidence required"}`,
+		"subtitle": `{"error":"resolving transcode profile \"x\": unsupported subtitle codec \"dvb_teletext\" in stream 4 for container mkv: no recipe-authorized safe conversion (fail closed)"}`,
+	} {
+		if err := st.CreateActionInstance(store.ActionInstance{ID: id, ActionName: "transcode_media", Status: "failed", InputsJSON: mustJSON(t, map[string]any{"path": "/media/a.mkv", "mode": "size"}), OutputsJSON: "{}", StateJSON: "{}", ErrorJSON: failure}); err != nil {
+			t.Fatal(err)
+		}
+		view := rerunJobView(t, h, id)
+		if view["retry_blocked"] == nil || view["next_steps"] == nil {
+			t.Fatalf("%s view %v", id, view)
+		}
+		if happened, _ := operationMap(view["explanation"])["happened"].(string); !strings.Contains(happened, "can't be encoded with this goal") {
+			t.Fatalf("%s explanation %q", id, happened)
+		}
+	}
+}

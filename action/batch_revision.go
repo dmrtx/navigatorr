@@ -70,6 +70,39 @@ func SourceDamaged(msg string) bool {
 	return strings.Contains(msg, string(resilience.FFmpegInputCorrupt)+":") || strings.Contains(msg, "moov atom not found") && !strings.Contains(msg, "candidate")
 }
 
+// permanentSourceRejections are failures that come from what the file is,
+// checked against the goal it was given: its picture, colour range or tracks.
+// Running the same goal on the same file fails the same way, so Retry is
+// refused and a new goal is chosen instead. Failures of a measurement or of
+// the environment (quality_*_unavailable, a compact plan that no longer
+// matches the source) are not here: they can pass on another run.
+var permanentSourceRejections = []string{
+	"quality_source_class_unsupported",
+	"compact_sdr_requires_limited_range",
+	"compact_sdr_requires_bt709",
+	"hdr_single_video_stream_required",
+	"hdr_requires_10bit_420",
+	"hdr_requires_limited_range",
+	"hdr_requires_bt2020nc_matrix",
+	"hdr_requires_bt2020_primaries",
+	"unsupported subtitle codec",
+	"has unsupported codec",
+	"has unsupported mimetype",
+	"unsupported_source",
+}
+
+// PermanentSourceRejection reports a failure message that rejects the file
+// for its goal, and the code it matched.
+func PermanentSourceRejection(msg string) (string, bool) {
+	msg = strings.ToLower(msg)
+	for _, code := range permanentSourceRejections {
+		if strings.Contains(msg, code) {
+			return code, true
+		}
+	}
+	return "", false
+}
+
 func batchChildKey(ec *ExecutionContext, item store.TranscodeBatchItem) string {
 	key := fmt.Sprintf("batch-%s-%s", ec.InstanceID, item.ItemKey)
 	if generation := getInt(stateObject(ec.State, "batch_item_generations"), item.ItemKey); generation > 0 {

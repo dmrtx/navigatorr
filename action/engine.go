@@ -513,6 +513,11 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		cleanup, _ := ec.State[candidateCleanupKey].(map[string]any)
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
 	}
+	if inst.ActionName == "transcode_media" {
+		if code, ok := PermanentSourceRejection(storedFailureText(inst.ErrorJSON)); ok {
+			return nil, fmt.Errorf("retry blocked for %s: this file cannot be encoded with this goal and would fail the same way; choose a goal for it instead", code)
+		}
+	}
 	// A damaged file fails the same way every time; it is replaced first. A
 	// worker's report of it is read again here, after the checks that would
 	// refuse the retry anyway (the read can take minutes), because the same
