@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -94,11 +95,11 @@ func TestEarlyRejectionLeavesPassingFailuresWaiting(t *testing.T) {
 		"path \"/m/a.mkv\" is outside allowed read roots: x",
 		"waiting for worker capabilities",
 	} {
-		if earlyRejection(msg) {
+		if earlyRejection(msg, &ExecutionContext{}) {
 			t.Errorf("decided early: %q", msg)
 		}
 	}
-	if !earlyRejection(`resolving transcode profile "mode-size": unsupported subtitle codec "x"`) {
+	if !earlyRejection(`resolving transcode profile "mode-size": unsupported subtitle codec "x"`, &ExecutionContext{}) {
 		t.Error("a recipe rejection is not decided early")
 	}
 }
@@ -139,5 +140,47 @@ func TestAFullQueueStillEndsWhatNoWorkerCanTake(t *testing.T) {
 				t.Fatalf("submitted %d jobs with every slot taken", n)
 			}
 		})
+	}
+}
+
+// A check that failed for a reason that can pass, such as a share that was
+// down, is not done: the next poll checks again and can still decide.
+func TestEarlyPreflightChecksAgainAfterAPassingFailure(t *testing.T) {
+	e, _, media, _ := setupProbeTestEnv(t, &mockTranscodeExecutor{}, unconvertibleSubtitleProbeJSON)
+	ec := earlyCheckEC(t, e, "sub", map[string]any{"path": media, "mode": "size"})
+	away := media + ".away"
+	if err := os.Rename(media, away); err != nil {
+		t.Fatal(err)
+	}
+	if _, decided := e.earlyPreflight(context.Background(), ec); decided || getBool(ec.State, earlyPreflightKey) {
+		t.Fatalf("a missing file was decided or marked: %v", ec.State)
+	}
+	if err := os.Rename(away, media); err != nil {
+		t.Fatal(err)
+	}
+	if res, decided := e.earlyPreflight(context.Background(), ec); !decided || res.Status != StepFailed {
+		t.Fatalf("the file back in place was not checked again: decided=%v %+v", decided, res)
+	}
+}
+
+// A conversion skipped early whose preflight step runs again, as after a
+// restart before it moved on, repeats the skip without reading the file.
+func TestAnEarlySkipSurvivesItsPreflightRunningAgain(t *testing.T) {
+	e, _, media, _ := setupProbeTestEnv(t, &mockTranscodeExecutor{}, hdr10ProbeJSON)
+	ec := earlyCheckEC(t, e, "hdr", map[string]any{"path": media, "mode": "quality"})
+	early, decided := e.earlyPreflight(context.Background(), ec)
+	if !decided || early.Status != StepCompleted {
+		t.Fatalf("not skipped early: %+v", early)
+	}
+	if err := e.persistExecutionState(context.Background(), ec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(media); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := parseExecutionContextMust(t, e, "hdr")
+	res, err := e.stepTranscodePreflight(context.Background(), reloaded)
+	if err != nil || res.Status != StepCompleted || !getBool(reloaded.State, "skip_transcode") || getString(res.Outputs, "reason_code") != getString(early.Outputs, "reason_code") {
+		t.Fatalf("the skip was not repeated: %v %+v state=%v", err, res, reloaded.State)
 	}
 }

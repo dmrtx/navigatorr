@@ -29,7 +29,8 @@ func isEarlyPreflight(ctx context.Context) bool {
 // only find what no worker would change. It decides the action only then:
 // a deterministic rejection fails it, and a file its goal skips is skipped
 // now. Anything else, including a probe that failed and could pass later,
-// leaves the action waiting for the real preflight on its worker.
+// leaves the action waiting for the real preflight on its worker; a failure
+// that could pass later is checked again on the next poll.
 func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
 	if ec.ActionName != "transcode_media" || getBool(ec.State, earlyPreflightKey) {
 		return StepResult{}, false
@@ -44,10 +45,17 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 		return StepResult{}, false
 	}
 	switch {
-	case res.Status == StepFailed && earlyRejection(res.Error):
-		// The failure is the action's; a retry checks again.
+	case res.Status == StepFailed && earlyRejection(res.Error, check):
+		// The failure is the action's, recorded as the real preflight records
+		// it; a retry checks again.
+		replaceMap(ec.Inputs, check.Inputs)
+		replaceMap(ec.State, check.State)
 		delete(ec.State, earlyPreflightKey)
 		return res, true
+	case res.Status == StepFailed:
+		// A probe that timed out or a share that was down can pass on the next
+		// poll, which checks again.
+		return StepResult{}, false
 	case res.Status == StepCompleted && getBool(check.State, "skip_transcode") && earlySkipReasons[getString(check.State, "reason_code")]:
 		// The goal may have rewritten the request (Save space routes HDR to
 		// compact), so the skip keeps the inputs it was decided with.
@@ -92,8 +100,8 @@ func replaceMap(dst, src map[string]any) {
 
 // earlyRejection is a preflight failure that comes from the file and its goal
 // alone: a rejected source class or a recipe that cannot be resolved for it.
-func earlyRejection(msg string) bool {
-	if _, ok := PermanentSourceRejection(msg); ok {
+func earlyRejection(msg string, ec *ExecutionContext) bool {
+	if _, ok := PermanentSourceRejection(msg, ec.Inputs, ec.State); ok {
 		return true
 	}
 	return strings.HasPrefix(msg, "resolving transcode profile ") || strings.HasPrefix(msg, "resolving ephemeral profile_config: ")

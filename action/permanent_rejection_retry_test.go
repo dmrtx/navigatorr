@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestPermanentSourceRejectionLeavesPassingFailuresAlone(t *testing.T) {
 		"cover art stream 3 has unsupported mimetype \"image/gif\" (fail closed)",
 		"hdr_single_video_stream_required",
 	} {
-		if _, ok := PermanentSourceRejection(msg); !ok {
+		if _, ok := PermanentSourceRejection(msg, nil, nil); !ok {
 			t.Errorf("not permanent: %q", msg)
 		}
 	}
@@ -54,8 +55,26 @@ func TestPermanentSourceRejectionLeavesPassingFailuresAlone(t *testing.T) {
 		"Transcode failed (worker_setup_failed): copying source: connection reset",
 		"Transcode failed (ffmpeg_input_corrupt): ffmpeg_input_corrupt: packet scan failed",
 	} {
-		if code, ok := PermanentSourceRejection(msg); ok {
+		if code, ok := PermanentSourceRejection(msg, nil, nil); ok {
 			t.Errorf("%q matched %s", msg, code)
+		}
+	}
+	// A file named after a code, between brackets or spaces, does not make
+	// its timeout permanent, wherever the path shows up.
+	for _, name := range []string{"/media/Show [unsupported_source].mkv", "/media/Movie (unsupported subtitle codec) x.mkv"} {
+		inputs := map[string]any{"path": name}
+		state := map[string]any{"resolved_path": "/mnt/nas" + name}
+		for _, msg := range []string{
+			"failed to probe original media " + name + " (fail closed): timeout",
+			"Transcode failed (worker_setup_failed): copying /mnt/nas" + name + ": connection reset",
+			"Transcode failed (worker_setup_failed): reading /scratch/job-1/" + filepath.Base(name) + ": timeout",
+		} {
+			if code, ok := PermanentSourceRejection(msg, inputs, state); ok {
+				t.Errorf("%q matched %s", msg, code)
+			}
+		}
+		if _, ok := PermanentSourceRejection("resolving: unsupported subtitle codec \"x\" for "+name, inputs, state); !ok {
+			t.Errorf("a real rejection of %s was missed", name)
 		}
 	}
 }

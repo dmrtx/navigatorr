@@ -102,7 +102,7 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 		e.Happened = fmt.Sprintf("The file itself is damaged: %s.", why)
 		e.Learned = []string{"Every run of this file fails the same way. Replace it, for example by downloading it again, then choose a goal for the new file."}
 		return e, "This file is damaged; running it again fails the same way.", []nextStep{{ID: "tracks", Label: "Choose a goal", Detail: "Once the file is replaced, start a goal for the new one."}}
-	case permanentRejection(text):
+	case permanentRejection(r, text):
 		e.Happened = "This file can't be encoded with this goal: its picture, colour range or tracks are not ones this goal supports."
 		e.Learned = []string{"Running it again fails the same way. Choosing a goal for the file as it is now checks it against the current rules, and a goal that cannot take it says so before anything is encoded."}
 		return e, "This file can't be encoded with this goal; running it again fails the same way.", []nextStep{chooseGoal}
@@ -161,7 +161,7 @@ func explainFailure(r operationRecord) (e resultExplanation, blocked string, ste
 	return e, "", nil
 }
 
-func permanentRejection(text string) bool {
-	_, ok := action.PermanentSourceRejection(text)
+func permanentRejection(r operationRecord, text string) bool {
+	_, ok := action.PermanentSourceRejection(text, r.inputs, r.state)
 	return ok
 }

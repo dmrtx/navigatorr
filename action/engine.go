@@ -514,7 +514,7 @@ func (e *Engine) retry(ctx context.Context, instanceID string, guard func(*store
 		return nil, fmt.Errorf("this attempt's candidate was removed after it was %s; start a new transcode instead", getString(cleanup, "reason"))
 	}
 	if inst.ActionName == "transcode_media" {
-		if code, ok := PermanentSourceRejection(storedFailureText(inst.ErrorJSON)); ok {
+		if code, ok := PermanentSourceRejection(storedFailureText(inst.ErrorJSON), ec.Inputs, ec.State); ok {
 			return nil, fmt.Errorf("retry blocked for %s: this file cannot be encoded with this goal and would fail the same way; choose a goal for it instead", code)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -94,11 +95,18 @@ var permanentSourceRejections = []string{
 	"unsupported_source",
 }
 
-// PermanentSourceRejection reports a failure message that rejects the file
-// for its goal, and the code it matched. A code counts only as a word of its
-// own, so a path or file name that happens to contain one does not.
-func PermanentSourceRejection(msg string) (string, bool) {
+// PermanentSourceRejection reports a failure message of a conversion that
+// rejects its file for its goal, and the code it matched. The conversion's
+// own source path and file name are left out first, and a code counts only as
+// a word of its own, so a file named after one does not.
+func PermanentSourceRejection(msg string, inputs, state map[string]any) (string, bool) {
 	msg = strings.ToLower(msg)
+	for _, path := range []string{getString(inputs, "path"), getString(state, "resolved_path")} {
+		if path = strings.ToLower(strings.TrimSpace(path)); path != "" {
+			msg = strings.ReplaceAll(msg, path, " ")
+			msg = strings.ReplaceAll(msg, filepath.Base(path), " ")
+		}
+	}
 	for _, code := range permanentSourceRejections {
 		for from := 0; ; {
 			i := strings.Index(msg[from:], code)
