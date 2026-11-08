@@ -28,10 +28,20 @@ var submittedStat = os.Stat
 // does not answer within submittedStatTimeout gives 0, and the job is listed
 // without a size until its preflight records one.
 func (e *Engine) submittedSourceBytes(name string, inputs map[string]any) int64 {
-	if name != "transcode_media" || e.deps.Fs == nil {
+	if name != "transcode_media" {
 		return 0
 	}
-	raw := strings.TrimSpace(getString(inputs, "path"))
+	return e.boundedFileSize(getString(inputs, "path"))
+}
+
+// boundedFileSize is the size of the regular file at raw (a path inside the
+// read roots), or 0 when it cannot say: no resolver, a file it cannot stat,
+// or a stat that does not answer within submittedStatTimeout.
+func (e *Engine) boundedFileSize(raw string) int64 {
+	if e.deps.Fs == nil {
+		return 0
+	}
+	raw = strings.TrimSpace(raw)
 	// Buffered: a stat that answers after the timeout must not leak a goroutine
 	// blocked on the send.
 	done := make(chan int64, 1)
