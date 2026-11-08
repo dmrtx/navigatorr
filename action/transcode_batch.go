@@ -1229,7 +1229,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 	}
 
 	// The file may have been converted or replaced since the batch planned it.
-	if reason, changed := e.batchItemSourceChanged(ec, *item); changed {
+	if reason, changed := e.batchItemSourceChanged(*item); changed {
 		item.Status, item.Decision = "skip", "skip"
 		item.Reasons = append(item.Reasons, reason)
 		_ = e.deps.Store.UpdateTranscodeBatchItem(*item)
