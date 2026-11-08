@@ -120,6 +120,11 @@ type FinalWindowScore struct {
 	VMAFMean        float64 `json:"vmaf_mean"`
 	VMAFP5          float64 `json:"vmaf_p5"`
 	VMAFMin         float64 `json:"vmaf_min"`
+	// ChromaUDB and ChromaVDB are the window's colour-plane PSNR, measured
+	// for a source beyond 4:2:0 on the grid windows only. Windows are listed
+	// for VMAF runs; an SSIM-only run keeps just the evidence's worst values.
+	ChromaUDB *float64 `json:"chroma_u_db,omitempty"`
+	ChromaVDB *float64 `json:"chroma_v_db,omitempty"`
 }
 
 type QualityValidationPlan struct {
@@ -157,6 +162,15 @@ type FinalQualityEvidence struct {
 	CompactChain  *CompactChainEvidence  `json:"compact_chain,omitempty"`
 	CompactOutput *CompactOutputEvidence `json:"compact_output,omitempty"`
 	VideoCopy     *VideoCopyEvidence     `json:"video_copy,omitempty"`
+	ChromaPSNR    *ChromaPSNREvidence    `json:"chroma_psnr,omitempty"`
+}
+
+// ChromaPSNREvidence is the colour-plane check of a candidate whose source is
+// beyond 4:2:0: the lowest window U and V PSNR and the minimum each must reach.
+type ChromaPSNREvidence struct {
+	MinimumDB float64 `json:"minimum_db"`
+	WorstUDB  float64 `json:"worst_u_db"`
+	WorstVDB  float64 `json:"worst_v_db"`
 }
 
 // Video encoder identifiers accepted by the worker and recipe engine.

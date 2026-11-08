@@ -123,6 +123,9 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 	}
 	e.SourceBitDepth = sourceVideoStreams[0].BitDepth
+	// VMAF and CAMBI read luma only, so a source beyond 4:2:0, whose chroma
+	// the encode subsamples, also has its colour planes checked.
+	runChroma := !isSupportedSourceChroma(sourceVideoStreams[0].PixelFormat, sourceVideoStreams[0].BitDepth)
 	e.CandidateBitDepth = candidateVideoStreams[0].BitDepth
 	if sourceVideoStreams[0].FPS <= 0 || !isFiniteQuality(sourceVideoStreams[0].FPS) {
 		return fail("quality_final_source_timing_unavailable", fmt.Errorf("source FPS unavailable"))
@@ -270,6 +273,13 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			}
 			r.ssim = &score
 		}
+		if runChroma && pos < grid {
+			u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath, threads)
+			if err != nil {
+				return bad("quality_chroma_evidence_incomplete", fmt.Errorf("sample %d: %w", window.Index, err))
+			}
+			r.chroma = &[2]float64{u, v}
+		}
 		return r
 	}
 	results, failed, err := runFinalWindows(ctx, len(windows), concurrency, measure)
@@ -289,7 +299,15 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	var vmafSamples []quality.VMAFStats
 	var cambiSamples []quality.CAMBIStats
 	var ssimScores []float64
+	var chroma *transcode.ChromaPSNREvidence
+	if runChroma {
+		chroma = &transcode.ChromaPSNREvidence{MinimumDB: chromaPSNRMinimumDB, WorstUDB: math.Inf(1), WorstVDB: math.Inf(1)}
+	}
 	for _, r := range results {
+		if r.chroma != nil {
+			chroma.WorstUDB = math.Min(chroma.WorstUDB, r.chroma[0])
+			chroma.WorstVDB = math.Min(chroma.WorstVDB, r.chroma[1])
+		}
 		if r.vmaf != nil {
 			vmafSamples = append(vmafSamples, *r.vmaf)
 		}
@@ -355,6 +373,15 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			e.ReasonCodes = append(e.ReasonCodes, "quality_ssim_mean_below_minimum")
 		}
 	}
+	if chroma != nil {
+		if math.IsInf(chroma.WorstUDB, 1) || math.IsInf(chroma.WorstVDB, 1) {
+			return fail("quality_chroma_evidence_incomplete", fmt.Errorf("no window measured its colour planes"))
+		}
+		e.ChromaPSNR = chroma
+		if chroma.WorstUDB < chroma.MinimumDB || chroma.WorstVDB < chroma.MinimumDB {
+			e.ReasonCodes = append(e.ReasonCodes, "quality_chroma_psnr_below_minimum")
+		}
+	}
 	if len(e.ReasonCodes) > 0 {
 		return e, fmt.Errorf("final perceptual quality rejected: %v", e.ReasonCodes)
 	}
@@ -381,7 +408,11 @@ func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []final
 	}
 	for i, r := range results[:grid] {
 		if r.vmaf != nil && r.code == "" {
-			windows = append(windows, finalWindowScore(q.Samples[i], "grid", r.vmaf))
+			score := finalWindowScore(q.Samples[i], "grid", r.vmaf)
+			if r.chroma != nil {
+				score.ChromaUDB, score.ChromaVDB = &r.chroma[0], &r.chroma[1]
+			}
+			windows = append(windows, score)
 		}
 	}
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
@@ -402,8 +433,10 @@ type finalWindowResult struct {
 	vmaf  *quality.VMAFStats
 	cambi *quality.CAMBIStats
 	ssim  *float64
-	code  string
-	err   error
+	// chroma is the window's U and V PSNR (runChroma).
+	chroma *[2]float64
+	code   string
+	err    error
 }
 
 // minMetricThreadsPerPass is the fewest libvmaf threads a concurrent metric
@@ -681,6 +714,59 @@ func leadingFramesPSNR(ctx context.Context, ffmpegPath, candPath, refPath string
 		return 100, nil
 	}
 	return strconv.ParseFloat(m[1], 64)
+}
+
+// chromaPSNRMinimumDB is the lowest window U or V PSNR a candidate from a
+// source beyond 4:2:0 may have. On 4:4:4 10-bit film, sound x265 encodes at
+// CRF 22 to 28 scored 45 dB or more per window and no frame fell below 43 dB,
+// while colour planes moved by two pixels scored 31 to 33 dB and swapped
+// planes about 21 dB. A synthetic test pattern, whose colour edges are far
+// sharper than film's, still scored 38 dB once encoded soundly, so the
+// minimum sits below that. A wrong matrix or range barely moves chroma PSNR
+// (and moves luma, which VMAF reads): this catches misplaced, swapped or
+// smeared colour, which nothing else measures.
+const chromaPSNRMinimumDB = 35.0
+
+// chromaPSNRSummary is the psnr filter's closing summary line, which ffmpeg
+// logs under the filter's own instance name.
+var chromaPSNRSummary = regexp.MustCompile(`(?m)^\[Parsed_psnr_[0-9]+ @ [^\]]+\] PSNR y:\S+ u:(inf|[0-9]+(?:\.[0-9]+)?) v:(inf|[0-9]+(?:\.[0-9]+)?) `)
+
+// windowChromaPSNR is the U and V PSNR of a window's candidate against its
+// reference, both converted to 4:2:0 at measurement precision and paired by
+// frame index as for VMAF, so the source's extra chroma resolution is
+// subsampled the same way the encode's is and only a real difference counts.
+// Every frame is measured, and threads is the window's share as for VMAF.
+func windowChromaPSNR(ctx context.Context, ffmpegPath, candPath, refPath string, threads int) (u, v float64, err error) {
+	inputs, err := quality.MetricPairInputs(1)
+	if err != nil {
+		return 0, 0, err
+	}
+	t := strconv.Itoa(max(threads, 1))
+	output, err := runQualityCommand(ctx, ffmpegPath, []string{"-nostdin", "-nostats", "-threads", t, "-i", candPath, "-threads", t, "-i", refPath, "-filter_complex_threads", t, "-filter_complex", inputs + "psnr", "-f", "null", "-"})
+	if err != nil {
+		return 0, 0, err
+	}
+	return parseChromaPSNR(string(output))
+}
+
+func parseChromaPSNR(output string) (u, v float64, err error) {
+	all := chromaPSNRSummary.FindAllStringSubmatch(output, -1)
+	if len(all) == 0 {
+		return 0, 0, fmt.Errorf("chroma PSNR missing from ffmpeg output")
+	}
+	// The summary closes the run; anything that looks like one earlier is not it.
+	m := all[len(all)-1]
+	planes := [2]float64{}
+	for i, s := range m[1:] {
+		if s == "inf" {
+			planes[i] = 100
+			continue
+		}
+		if planes[i], err = strconv.ParseFloat(s, 64); err != nil {
+			return 0, 0, err
+		}
+	}
+	return planes[0], planes[1], nil
 }
 
 // probeFailure describes a probe that gave no usable video. The probe's own
