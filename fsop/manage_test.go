@@ -261,7 +261,7 @@ func TestPathsOverlapResolvesRelativePaths(t *testing.T) {
 func TestRemoveBlocksClaimsNamedThroughASymlink(t *testing.T) {
 	r, root := removeFixture(t)
 	// The library manager sees the same folder through a link.
-	viaLink := filepath.Join(t.TempDir(), "media")
+	viaLink := filepath.Join(tempDir(t), "media")
 	if err := os.Symlink(root, viaLink); err != nil {
 		t.Skip("no symlinks here")
 	}

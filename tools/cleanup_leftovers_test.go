@@ -49,7 +49,11 @@ func leftoverQbit(t *testing.T, root string, fail bool) *qbit.Client {
 
 func leftoverServer(t *testing.T, allowDestructive, qbFails bool) (*server.MCPServer, string, *store.Store) {
 	t.Helper()
-	root := t.TempDir()
+	// macOS temp dirs live under /var, a symlink to /private/var, which the symlink guard rejects.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{AllowDestructive: allowDestructive}
 	cfg.Media.AllowedReadRoots = []string{root}
 	cfg.Media.AllowedWriteRoots = []string{root}

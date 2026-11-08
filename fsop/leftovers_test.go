@@ -217,7 +217,7 @@ func TestScanLeftoversLimitAndBudget(t *testing.T) {
 }
 
 func TestKeepAndOwnedFollowSymlinks(t *testing.T) {
-	base := t.TempDir()
+	base := tempDir(t)
 	pool := filepath.Join(base, "pool", "downloads")
 	os.MkdirAll(filepath.Join(pool, "movies"), 0o755)
 	link := filepath.Join(base, "dl")
@@ -264,7 +264,7 @@ func TestRemoveLeftoverRefusesProtectedAncestors(t *testing.T) {
 }
 
 func TestRemoveLeftoverKeepsAFolderHoldingARoot(t *testing.T) {
-	base := t.TempDir()
+	base := tempDir(t)
 	inner := filepath.Join(base, "incoming", "new")
 	os.MkdirAll(inner, 0o755)
 	ageDirs(t, base, 48*time.Hour)
@@ -305,7 +305,7 @@ func TestRemoveLeftoverDetectsAFolderSwappedForASymlink(t *testing.T) {
 }
 
 func TestWriteRootOfPicksTheLongestRoot(t *testing.T) {
-	base := t.TempDir()
+	base := tempDir(t)
 	inner := filepath.Join(base, ".dl")
 	os.MkdirAll(filepath.Join(inner, "Old"), 0o755)
 	ageDirs(t, base, 48*time.Hour)
