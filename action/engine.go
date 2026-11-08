@@ -1035,7 +1035,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		start := time.Now()
 		res, waiting := e.ensureWorkerAssigned(ctx, ec)
 		var err error
-		if !waiting {
+		if waiting && step.Name == "preflight" {
+			// A file its goal can never take is not left waiting for a worker:
+			// the early check ends it now, or the action keeps waiting.
+			if early, decided := e.earlyPreflight(ctx, ec); decided {
+				res = early
+			}
+		} else if !waiting {
 			res, err = step.Run(ctx, ec)
 		}
 		inst.InputsJSON = toJSON(ec.Inputs)
