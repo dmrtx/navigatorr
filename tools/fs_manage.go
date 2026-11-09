@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -48,7 +49,7 @@ func registerFsManageTools(s *server.MCPServer, d *Deps, registry *arrservice.Re
 
 	s.AddTool(
 		mcp.NewTool("fs_copy",
-			mcp.WithDescription("Copy ONE file (a backup before importing a replacement) from allowed_read_roots to allowed_write_roots and prove it with SHA-256. The source is hashed while it is copied to a hidden temporary name next to the destination, the copy is flushed and read back, and it is put in place only when size and hash match and the source did not change; missing destination folders are created. The source is never modified. Returns status (copied, already_present or replaced), bytes, source_sha256, destination_sha256 (equal on success), created_dirs and, for a replace, replaced_sha256. Idempotent: a destination that already holds the same bytes is left untouched and reported as already_present, so a retry is safe. A destination with other content is never overwritten on its own: the call fails with status destination_differs and both hashes, writing nothing. To replace it, call again with replace_sha256 set to that destination_sha256, confirm=true and allow_destructive; the replace is atomic and refused if the destination changed meanwhile. Paths are resolved (symlinks included) and must stay inside the roots. Refuses folders, a destination that is the source itself or a hard link of it, an allowed root, a share that is not mounted and a destination without room for the file. Large files take a while; the call honours client cancellation."),
+			mcp.WithDescription("Copy ONE file (a backup before importing a replacement) from allowed_read_roots to allowed_write_roots and prove it with SHA-256. The source is hashed while it is copied to a hidden temporary name next to the destination, the copy is flushed and read back, and it is put in place only when size and hash match and the source did not change; missing destination folders are created. The source is never modified. Returns status (copied, already_present or replaced), bytes, source_sha256, destination_sha256 (equal on success), created_dirs and, for a replace, replaced_sha256. Idempotent: a destination that already holds the same bytes is left untouched and reported as already_present, so a retry is safe. A destination with other content is never overwritten on its own: the call fails with status destination_differs and both hashes, writing nothing. To replace it, call again with replace_sha256 set to that destination_sha256, confirm=true and allow_destructive; the replace is atomic, refused if the destination changed meanwhile, and held to what fs_remove allows (nothing Radarr/Sonarr track or qBittorrent owns, no hidden/system names, nothing changed in the last 5 minutes). Paths are resolved (symlinks included) and must stay inside the roots. Refuses folders, a destination that is the source itself or a hard link of it, an allowed root, a share that is not mounted and a destination without room for the file. Large files take a while; the call honours client cancellation."),
 			mcp.WithString("source", mcp.Required(), mcp.Description("File to copy (inside allowed_read_roots)")),
 			mcp.WithString("destination", mcp.Required(), mcp.Description("Destination file path (inside allowed_write_roots), including the file name")),
 			mcp.WithString("replace_sha256", mcp.Description("Only to overwrite: the destination_sha256 a destination_differs answer reported. Needs confirm=true")),
@@ -67,6 +68,14 @@ func registerFsManageTools(s *server.MCPServer, d *Deps, registry *arrservice.Re
 				}
 				if !allowDestructive {
 					return toolErr("replacing a file is disabled. Set allow_destructive: true in config.yaml to enable; nothing was written"), nil
+				}
+				// A replace destroys the old file, so it is held to what
+				// fs_remove allows: nothing Radarr/Sonarr track, qBittorrent
+				// owns, hidden/system names or anything changed just now.
+				if blocked, err := replaceBlocked(ctx, d.Fs, registry, qb, dst); err != nil {
+					return toolErr("cannot tell what still depends on the destination, so nothing was written: %v", err), nil
+				} else if len(blocked) > 0 {
+					return toolErr("the destination cannot be replaced: %s; nothing was written", strings.Join(blocked, "; ")), nil
 				}
 			}
 			res, err := d.Fs.Copy(ctx, src, dst, replace)
@@ -160,6 +169,28 @@ func registerFsManageTools(s *server.MCPServer, d *Deps, registry *arrservice.Re
 			return toolJSON(res), nil
 		},
 	)
+}
+
+// replaceBlocked returns why an existing destination may not be replaced: the
+// reasons fs_remove would give for removing it (with the minimum age). A
+// destination that does not resolve or does not exist is left to Copy.
+func replaceBlocked(ctx context.Context, fs *fsop.Resolver, registry *arrservice.Registry, qb *qbit.Client, dst string) ([]string, error) {
+	real, err := fs.ResolveWrite(dst)
+	if err != nil {
+		return nil, nil
+	}
+	if _, err := os.Lstat(real); err != nil {
+		return nil, nil
+	}
+	policy, err := removePolicy(ctx, registry, qb, real, fsop.MinRemoveAge)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := fs.PlanRemove(real, false, policy)
+	if err != nil {
+		return nil, nil
+	}
+	return plan.Blocked, nil
 }
 
 // removePolicy gathers what depends on the files at real: the download

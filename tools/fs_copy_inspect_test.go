@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
@@ -79,6 +80,8 @@ func TestFsCopyToolReplacesWhenConfirmed(t *testing.T) {
 	dst := filepath.Join(root, "Backups", "Film (1997).mkv")
 	os.MkdirAll(filepath.Dir(dst), 0o755)
 	os.WriteFile(dst, []byte("older"), 0o644)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(dst, old, old)
 
 	res := callTool(t, s, "fs_copy", map[string]any{"source": src, "destination": dst, "replace_sha256": strings.ToUpper(shaOf("older")), "confirm": "true"})
 	if res.IsError {
@@ -183,5 +186,41 @@ func TestInspectMediaToolNotesAFailedCount(t *testing.T) {
 	text := resultText(t, res)
 	if res.IsError || !strings.Contains(text, "subtitle events were not counted") || !strings.Contains(text, `"audio_tracks"`) {
 		t.Errorf("failed count = %s", text)
+	}
+}
+
+// A replace destroys the old file, so it is refused wherever fs_remove would
+// refuse to remove it.
+func TestFsCopyToolReplaceHeldToWhatRemoveAllows(t *testing.T) {
+	s, root := fsManageServer(t, true, false)
+	other := filepath.Join(root, "Backups", "other.mkv")
+	os.MkdirAll(filepath.Dir(other), 0o755)
+	os.WriteFile(other, []byte("other bytes"), 0o644)
+	fresh := filepath.Join(root, "Backups", "fresh.mkv")
+	os.WriteFile(fresh, []byte("just written"), 0o644)
+
+	for name, tc := range map[string]struct{ dst, content string }{
+		"a file Radarr tracks":    {filepath.Join(root, "Movies", "Film (1997)", "Film (1997).mkv"), "data"},
+		"a file qBittorrent owns": {filepath.Join(root, "Downloads", "Seeding", "seed.mkv"), "data"},
+		"a file changed just now": {fresh, "just written"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			res := callTool(t, s, "fs_copy", map[string]any{"source": other, "destination": tc.dst, "replace_sha256": shaOf(tc.content), "confirm": "true"})
+			if !res.IsError || !strings.Contains(resultText(t, res), "cannot be replaced") {
+				t.Fatalf("replace of %s = %s", name, resultText(t, res))
+			}
+			if b, _ := os.ReadFile(tc.dst); string(b) != tc.content {
+				t.Errorf("destination = %q", b)
+			}
+		})
+	}
+
+	// When Radarr cannot be read, nothing is guessed.
+	s, root = fsManageServer(t, true, true)
+	other = filepath.Join(root, "Movies", "Film (1997)", "Stray", "big.mkv")
+	dst := filepath.Join(root, "Movies", "Film (1997)", "Stray", "big.en.srt")
+	res := callTool(t, s, "fs_copy", map[string]any{"source": other, "destination": dst, "replace_sha256": shaOf("data"), "confirm": "true"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "cannot tell") {
+		t.Errorf("replace with Radarr down = %s", resultText(t, res))
 	}
 }

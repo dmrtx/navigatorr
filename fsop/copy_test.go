@@ -277,3 +277,32 @@ func TestCopyAlreadyPresentRefusesASourceThatChanged(t *testing.T) {
 	}
 	noTempLeft(t, root)
 }
+
+func TestCopyAlreadyPresentRefusesADestinationThatChanged(t *testing.T) {
+	r, root, src, dst := copyFixture(t)
+	if _, err := r.Copy(context.Background(), src, dst, ""); err != nil {
+		t.Fatal(err)
+	}
+	afterCompareHook = func() { os.WriteFile(dst, []byte("someone else wrote this"), 0o644) }
+	defer func() { afterCompareHook = nil }()
+	res, err := r.Copy(context.Background(), src, dst, "")
+	if err == nil || !strings.Contains(err.Error(), "destination") || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("err = %v, status %q; want a changed destination refused", err, res.Status)
+	}
+	noTempLeft(t, root)
+}
+
+func TestCopyReplaceRefusesASourceThatChangesWhileTheDestinationIsChecked(t *testing.T) {
+	r, root, src, dst := copyFixture(t)
+	os.MkdirAll(filepath.Dir(dst), 0o755)
+	os.WriteFile(dst, []byte("an older backup"), 0o644)
+	afterConfirmHook = func() { os.WriteFile(src, []byte("original film bytes, edited"), 0o640) }
+	defer func() { afterConfirmHook = nil }()
+	if _, err := r.Copy(context.Background(), src, dst, sha("an older backup")); err == nil || !strings.Contains(err.Error(), "nothing was replaced") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := readFile(t, dst); got != "an older backup" {
+		t.Errorf("destination = %q, want it untouched", got)
+	}
+	noTempLeft(t, root)
+}

@@ -53,8 +53,9 @@ func (e *DestinationDiffersError) Error() string {
 var spaceFn = SpaceOf
 
 // afterCompareHook runs after an existing destination and the source are
-// hashed; tests use it to change a file in that window.
-var afterCompareHook func()
+// hashed, and afterConfirmHook after a destination confirmed for replacement
+// is hashed again; tests use them to change a file in those windows.
+var afterCompareHook, afterConfirmHook func()
 
 // Copy copies the file source (inside the read roots) to destination (inside
 // the write roots) and proves it: the source is hashed while it is copied to
@@ -64,8 +65,8 @@ var afterCompareHook func()
 // destination are created as Move does.
 //
 // It is idempotent: a destination that already holds the same bytes is left
-// alone and reported as already present (the source is re-checked after both
-// hashes). A destination with other content is never replaced unless replaceSHA256 names exactly that content (the
+// alone and reported as already present (both files are re-checked after
+// both hashes). A destination with other content is never replaced unless replaceSHA256 names exactly that content (the
 // destination_sha256 a DestinationDiffersError reported); the replace is an
 // atomic rename, refused unless the destination is still the same file and
 // hashes to the confirmed content right before it. Another writer that
@@ -124,6 +125,10 @@ func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 
 		if now, err := os.Stat(src); err != nil || !sameFileState(si, now) {
 			return res, fmt.Errorf("source %q changed while it was compared with the destination; nothing was written", source)
 		}
+		// So must the destination, or its hash is not what is there now.
+		if now, err := os.Lstat(dst); err != nil || !now.Mode().IsRegular() || !sameFileState(di, now) {
+			return res, fmt.Errorf("destination %q changed while it was compared with the source; nothing was written", destination)
+		}
 		if srcN == dstN && srcSum == dstSum {
 			res.Status, res.Bytes, res.SourceSHA256, res.DestinationSHA256 = CopyAlreadyPresent, srcN, srcSum, dstSum
 			return res, nil
@@ -179,6 +184,12 @@ func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 
 			c.discard()
 			return fail(fmt.Errorf("destination %q changed while the copy was made (%v); nothing was replaced", destination, err))
 		}
+		// Hashing the destination takes a while: the copy must still be of
+		// the source as it is.
+		if !c.sourceUnchanged() {
+			c.discard()
+			return fail(fmt.Errorf("source %q changed while the destination was checked; nothing was replaced", source))
+		}
 		if err := os.Rename(c.tmp, dst); err != nil {
 			c.discard()
 			return fail(fmt.Errorf("replacing the destination: %w", err))
@@ -218,6 +229,9 @@ func confirmedStill(ctx context.Context, dst string, existing os.FileInfo, sum s
 	}
 	if got != sum {
 		return errors.New("content differs from the confirmed hash")
+	}
+	if afterConfirmHook != nil {
+		afterConfirmHook()
 	}
 	if now, err = os.Lstat(dst); err != nil || !sameFileState(existing, now) {
 		return errors.New("not the same file")

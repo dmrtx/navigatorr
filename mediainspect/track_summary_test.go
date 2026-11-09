@@ -266,3 +266,15 @@ func TestInspectFileSummaryIgnoresACoverStoredFirst(t *testing.T) {
 		t.Errorf("summary = %s %s %dx%d %+v", rep.VideoCodec, rep.Resolution, rep.Width, rep.Height, rep.Video)
 	}
 }
+
+func TestForcedByTitle(t *testing.T) {
+	for title, want := range map[string]bool{
+		"Forced": true, "English (Forced)": true, "Forzados": true, "Français forcés": true,
+		"English (Non-Forced)": false, "Not forced": false, "Unforced": false, "Spanish (no forzados)": false,
+		"English": false, "Full": false, "": false,
+	} {
+		if got := forcedByTitle(title); got != want {
+			t.Errorf("forcedByTitle(%q) = %v, want %v", title, got, want)
+		}
+	}
+}

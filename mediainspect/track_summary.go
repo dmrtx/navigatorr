@@ -86,8 +86,16 @@ func IsCommentaryTitle(title string) bool { return commentaryTitle.MatchString(t
 
 var (
 	forcedTitle = regexp.MustCompile(`(?i)\bforced\b|forzad|forc[eé]s?\b`)
-	sdhTitle    = regexp.MustCompile(`(?i)\bsdh\b|\bcc\b|hearing[ -]?impaired|sordos`)
+	// notForced is a title that names a full track by denying it is forced
+	// ("Non-Forced", "Not forced", "Unforced", "No forzados").
+	notForced = regexp.MustCompile(`(?i)\b(non|not|un|no)[ -]?(forced|forzad)`)
+	sdhTitle  = regexp.MustCompile(`(?i)\bsdh\b|\bcc\b|hearing[ -]?impaired|sordos`)
 )
+
+// forcedByTitle reports a title naming a forced-only track.
+func forcedByTitle(title string) bool {
+	return forcedTitle.MatchString(title) && !notForced.MatchString(title)
+}
 
 // fillTrackSummary adds the per-track details of det to the summary report,
 // keeping the historical summary fields (codec, height class, languages).
@@ -132,7 +140,7 @@ func fillTrackSummary(rep *Report, det *DetailedReport) {
 			Format:   subtitleFormat(s.Codec),
 			Title:    s.Title,
 			Default:  s.Disposition["default"] > 0,
-			Forced:   s.Disposition["forced"] > 0 || forcedTitle.MatchString(s.Title),
+			Forced:   s.Disposition["forced"] > 0 || forcedByTitle(s.Title),
 			SDH:      s.Disposition["hearing_impaired"] > 0 || sdhTitle.MatchString(s.Title),
 		}
 		if n := containerEventCount(s, det.nbFrames[s.Index]); n > 0 {
