@@ -52,6 +52,10 @@ func (e *DestinationDiffersError) Error() string {
 // spaceFn reports a filesystem's space; tests replace it.
 var spaceFn = SpaceOf
 
+// afterCompareHook runs after an existing destination and the source are
+// hashed; tests use it to change a file in that window.
+var afterCompareHook func()
+
 // Copy copies the file source (inside the read roots) to destination (inside
 // the write roots) and proves it: the source is hashed while it is copied to
 // a hidden temporary name next to the destination, the copy is flushed and
@@ -60,10 +64,13 @@ var spaceFn = SpaceOf
 // destination are created as Move does.
 //
 // It is idempotent: a destination that already holds the same bytes is left
-// alone and reported as already present. A destination with other content
-// is never replaced unless replaceSHA256 names exactly that content (the
-// destination_sha256 a DestinationDiffersError reported); the replace is
-// atomic and refused if the destination changed since it was hashed.
+// alone and reported as already present (the source is re-checked after both
+// hashes). A destination with other content is never replaced unless replaceSHA256 names exactly that content (the
+// destination_sha256 a DestinationDiffersError reported); the replace is an
+// atomic rename, refused unless the destination is still the same file and
+// hashes to the confirmed content right before it. Another writer that
+// changes the destination in the instant between that check and the rename
+// is not detected: POSIX has no compare-and-swap rename.
 // Only regular files are copied; the source is never modified.
 func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 string) (CopyResult, error) {
 	res := CopyResult{Source: source, Destination: destination}
@@ -108,6 +115,14 @@ func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 
 		dstSum, dstN, err := hashPath(ctx, dst)
 		if err != nil {
 			return res, fmt.Errorf("hashing the destination: %w", err)
+		}
+		if afterCompareHook != nil {
+			afterCompareHook()
+		}
+		// The source must still be the file that was hashed: a retry must
+		// never report a stale backup as present.
+		if now, err := os.Stat(src); err != nil || !sameFileState(si, now) {
+			return res, fmt.Errorf("source %q changed while it was compared with the destination; nothing was written", source)
 		}
 		if srcN == dstN && srcSum == dstSum {
 			res.Status, res.Bytes, res.SourceSHA256, res.DestinationSHA256 = CopyAlreadyPresent, srcN, srcSum, dstSum
@@ -157,11 +172,12 @@ func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 
 	}
 	if existing != nil {
 		// Replace only the content that was confirmed: the destination must
-		// not have changed while the copy was made.
-		now, err := os.Lstat(dst)
-		if err != nil || !now.Mode().IsRegular() || now.Size() != existing.Size() || !now.ModTime().Equal(existing.ModTime()) {
+		// still be the same file, unchanged, and hash to the confirmed
+		// content right before the rename (a rewrite that kept its size and
+		// time is caught by the hash, a file swapped in by its identity).
+		if err := confirmedStill(ctx, dst, existing, res.ReplacedSHA256); err != nil {
 			c.discard()
-			return fail(fmt.Errorf("destination %q changed while the copy was made; nothing was replaced", destination))
+			return fail(fmt.Errorf("destination %q changed while the copy was made (%v); nothing was replaced", destination, err))
 		}
 		if err := os.Rename(c.tmp, dst); err != nil {
 			c.discard()
@@ -184,4 +200,27 @@ func (r *Resolver) Copy(ctx context.Context, source, destination, replaceSHA256 
 		return res, fmt.Errorf("the copy is in place but its folder could not be flushed: %w", err)
 	}
 	return res, nil
+}
+
+// confirmedStill checks that dst is still the file confirmed for replacement:
+// the same regular file, size and time, holding the confirmed SHA-256.
+func confirmedStill(ctx context.Context, dst string, existing os.FileInfo, sum string) error {
+	now, err := os.Lstat(dst)
+	if err != nil {
+		return err
+	}
+	if !now.Mode().IsRegular() || !sameFileState(existing, now) {
+		return errors.New("not the same file")
+	}
+	got, _, err := hashPath(ctx, dst)
+	if err != nil {
+		return err
+	}
+	if got != sum {
+		return errors.New("content differs from the confirmed hash")
+	}
+	if now, err = os.Lstat(dst); err != nil || !sameFileState(existing, now) {
+		return errors.New("not the same file")
+	}
+	return nil
 }

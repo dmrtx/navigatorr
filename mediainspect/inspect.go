@@ -45,13 +45,13 @@ type Report struct {
 	Probed            bool     `json:"probed"`
 
 	// The fields below come from the same ffprobe run and are empty when the
-	// file was not probed. Width and Height are the programme video's real
-	// size (Resolution is only a height class); BitRate is the container's
+	// file was not probed (IsHDR is then absent, not false: unknown is not
+	// SDR). Width and Height are the programme video's real size (Resolution is only a height class); BitRate is the container's
 	// overall bitrate in bits per second.
 	Width          int             `json:"width,omitempty"`
 	Height         int             `json:"height,omitempty"`
 	BitRate        int64           `json:"bit_rate,omitempty"`
-	IsHDR          bool            `json:"is_hdr"`
+	IsHDR          *bool           `json:"is_hdr,omitempty"`
 	Video          *VideoTrack     `json:"video,omitempty"`
 	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
 	SubtitleTracks []SubtitleTrack `json:"subtitle_tracks,omitempty"`

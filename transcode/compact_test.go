@@ -1,6 +1,8 @@
 package transcode
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -253,5 +255,44 @@ func TestCompactPlansFrozenUnderTheBoxRuleStillMatch(t *testing.T) {
 	unmarked.KeepSourceSize = false
 	if err := unmarked.Validate(); err == nil {
 		t.Error("a kept wide size without the mark was accepted")
+	}
+
+	// A queued SDR plan that only shrank a wide source to the box: new plans
+	// call it compact_not_needed, but the frozen one still validates and
+	// matches, so its job runs as it was planned.
+	sdr := mediainspect.DynamicRange{Class: mediainspect.DynamicRangeSDR, Primaries: "bt709", Matrix: "bt709"}
+	wide := mediainspect.DetailedStream{Kind: "video", Width: 2560, Height: 1080}
+	frozen, err := newCompactPlan(CompactChainVersion, sdr, wide, 1080, true)
+	if err != nil || frozen.KeepSourceSize || frozen.TargetWidth != 1920 || frozen.TargetHeight != 810 {
+		t.Fatalf("box-rule SDR plan = %+v, %v", frozen, err)
+	}
+	if err := frozen.Validate(); err != nil {
+		t.Errorf("queued SDR plan invalid: %v", err)
+	}
+	if err := frozen.MatchSource(sdr, wide); err != nil {
+		t.Errorf("queued SDR plan no longer matches its source: %v", err)
+	}
+}
+
+// Plans that the box rule already sizes serialize exactly as before the mark
+// existed, so the digests of queued jobs and of new unmarked plans are stable.
+func TestCompactUnmarkedPlanJSONIsUnchanged(t *testing.T) {
+	d, v := wideHDR10()
+	queued := &CompactPlan{ChainVersion: CompactChainVersion, SourceClass: d.Class, SourceSignal: mediainspect.SignalPQ, SourceWidth: 4096, SourceHeight: 1716, MaxHeight: 2160, TargetWidth: 3840, TargetHeight: 1608,
+		ToneMap: &CompactToneMap{Method: CompactToneMapPQ, SourcePeakNits: 1000, TargetPeakNits: CompactTargetPeakNits}}
+	b, _ := json.Marshal(queued)
+	if strings.Contains(string(b), "keep_source_size") {
+		t.Errorf("unmarked plan JSON carries the mark: %s", b)
+	}
+	var back CompactPlan
+	if err := json.Unmarshal(b, &back); err != nil || !back.Equal(queued) || back.MatchSource(d, v) != nil {
+		t.Errorf("round trip: %+v %v", back, err)
+	}
+	p, _ := NewCompactPlan(d, v, 2160)
+	if b, _ := json.Marshal(p); !strings.Contains(string(b), `"keep_source_size":true`) {
+		t.Errorf("marked plan JSON: %s", b)
+	}
+	if !p.Clone().Equal(p) {
+		t.Error("clone of a marked plan is not equal")
 	}
 }

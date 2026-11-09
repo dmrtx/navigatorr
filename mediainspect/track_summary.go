@@ -103,7 +103,8 @@ func fillTrackSummary(rep *Report, det *DetailedReport) {
 		rep.BitDepth = v.BitDepth
 		rep.Width, rep.Height = v.Width, v.Height
 		rep.Video = videoTrack(v)
-		rep.IsHDR = rep.Video.IsHDR
+		hdr := rep.Video.IsHDR
+		rep.IsHDR = &hdr
 	}
 	for _, a := range det.Audio {
 		rep.AudioLanguages = appendNorm(rep.AudioLanguages, a.Language)

@@ -84,8 +84,8 @@ func TestInspectFileReportsTracksColourAndSize(t *testing.T) {
 	if v == nil || v.Index != 0 || v.ColorTransfer != "smpte2084" || v.ColorPrimaries != "bt2020" || v.ColorSpace != "bt2020nc" || v.BitDepth != 10 || v.BitRate != 21000000 {
 		t.Fatalf("video = %+v", v)
 	}
-	if !rep.IsHDR || !v.IsHDR || !reflect.DeepEqual(v.HDRFormats, []string{"dolby_vision", "hdr10"}) || v.DolbyVisionProfile != 8 {
-		t.Errorf("HDR = %v %v %v profile %d", rep.IsHDR, v.IsHDR, v.HDRFormats, v.DolbyVisionProfile)
+	if rep.IsHDR == nil || !*rep.IsHDR || !v.IsHDR || !reflect.DeepEqual(v.HDRFormats, []string{"dolby_vision", "hdr10"}) || v.DolbyVisionProfile != 8 {
+		t.Errorf("HDR = %v %v %v profile %d", rep.IsHDR != nil && *rep.IsHDR, v.IsHDR, v.HDRFormats, v.DolbyVisionProfile)
 	}
 
 	wantAudio := []AudioTrack{
@@ -151,8 +151,8 @@ func TestInspectFileSDRAndHLG(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rep.IsHDR != tc.hdr || !reflect.DeepEqual(rep.Video.HDRFormats, tc.formats) {
-				t.Errorf("is_hdr=%v formats=%v, want %v %v", rep.IsHDR, rep.Video.HDRFormats, tc.hdr, tc.formats)
+			if rep.IsHDR == nil || *rep.IsHDR != tc.hdr || !reflect.DeepEqual(rep.Video.HDRFormats, tc.formats) {
+				t.Errorf("is_hdr=%v formats=%v, want %v %v", rep.IsHDR != nil && *rep.IsHDR, rep.Video.HDRFormats, tc.hdr, tc.formats)
 			}
 		})
 	}
@@ -183,7 +183,7 @@ func TestInspectFileWithoutFFprobeLeavesDetailEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Probed || rep.Video != nil || rep.AudioTracks != nil || rep.SubtitleTracks != nil || rep.IsHDR || rep.Width != 0 {
+	if rep.Probed || rep.Video != nil || rep.AudioTracks != nil || rep.SubtitleTracks != nil || rep.IsHDR != nil || rep.Width != 0 {
 		t.Errorf("unprobed report carries detail: %+v", rep)
 	}
 }
@@ -242,5 +242,27 @@ func TestAudioLayoutName(t *testing.T) {
 		if got := AudioLayoutName(tc.layout, tc.channels); got != tc.want {
 			t.Errorf("AudioLayoutName(%q, %d) = %q, want %q", tc.layout, tc.channels, got, tc.want)
 		}
+	}
+}
+
+// A cover stored before the film: the summary describes the film. Before the
+// detail fields it took the first video stream, which reported the cover's
+// mjpeg codec and height class.
+func TestInspectFileSummaryIgnoresACoverStoredFirst(t *testing.T) {
+	dir := t.TempDir()
+	media := filepath.Join(dir, "cover-first.mkv")
+	if err := os.WriteFile(media, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ffprobe := createMockFFprobe(t, dir, `{"streams":[
+ {"index":0,"codec_type":"video","codec_name":"mjpeg","width":600,"height":900,"disposition":{"attached_pic":1},"tags":{"filename":"cover.jpg"}},
+ {"index":1,"codec_type":"video","codec_name":"h264","pix_fmt":"yuv420p","width":1280,"height":720}],
+ "format":{"format_name":"matroska,webm","duration":"60"}}`)
+	rep, err := InspectFile(context.Background(), ffprobe, media)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.VideoCodec != "h264" || rep.Resolution != "720p" || rep.Width != 1280 || rep.Video == nil || rep.Video.Index != 1 {
+		t.Errorf("summary = %s %s %dx%d %+v", rep.VideoCodec, rep.Resolution, rep.Width, rep.Height, rep.Video)
 	}
 }

@@ -443,7 +443,14 @@ type verifiedCopy struct {
 // when the copy started.
 func (c *verifiedCopy) sourceUnchanged() bool {
 	now, err := os.Stat(c.src)
-	return err == nil && now.Size() == c.before.Size() && now.ModTime().Equal(c.before.ModTime())
+	return err == nil && sameFileState(c.before, now)
+}
+
+// sameFileState reports the same file (inode) with the same size and
+// modification time: a file replaced by another one, even of equal size and
+// time, is not the same.
+func sameFileState(before, now os.FileInfo) bool {
+	return now != nil && os.SameFile(before, now) && now.Size() == before.Size() && now.ModTime().Equal(before.ModTime())
 }
 
 // discard removes the temporary copy.

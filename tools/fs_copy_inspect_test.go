@@ -143,7 +143,7 @@ func TestInspectMediaToolReportsTrackDetail(t *testing.T) {
 		Width       int    `json:"width"`
 		Height      int    `json:"height"`
 		BitRate     int64  `json:"bit_rate"`
-		IsHDR       bool   `json:"is_hdr"`
+		IsHDR       *bool  `json:"is_hdr"`
 		AudioTracks []struct {
 			Language   string `json:"language"`
 			Layout     string `json:"layout"`
@@ -157,7 +157,7 @@ func TestInspectMediaToolReportsTrackDetail(t *testing.T) {
 		} `json:"subtitle_tracks"`
 	}
 	decode(t, resultText(t, res), &rep)
-	if rep.Resolution != "720p" || rep.Width != 1920 || rep.Height != 800 || rep.BitRate != 5000000 || rep.IsHDR {
+	if rep.Resolution != "720p" || rep.Width != 1920 || rep.Height != 800 || rep.BitRate != 5000000 || rep.IsHDR == nil || *rep.IsHDR {
 		t.Errorf("report = %s", resultText(t, res))
 	}
 	if len(rep.AudioTracks) != 2 || rep.AudioTracks[0].Layout != "5.1" || !rep.AudioTracks[0].Default || rep.AudioTracks[1].Layout != "2.0" || !rep.AudioTracks[1].Commentary || rep.AudioTracks[1].BitRate != 128000 {

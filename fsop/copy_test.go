@@ -225,3 +225,55 @@ func TestCopyRefusesWhenTheDestinationHasNoRoom(t *testing.T) {
 		t.Error("folders were left for a copy that did not fit")
 	}
 }
+
+func TestCopyReplaceRefusesADestinationSwappedForAnEqualLookingFile(t *testing.T) {
+	for name, change := range map[string]func(dst string, at time.Time){
+		// Another file of the same size and time put in its place.
+		"swapped": func(dst string, at time.Time) {
+			other := dst + ".other"
+			os.WriteFile(other, []byte("an olden backup"), 0o644)
+			os.Chtimes(other, at, at)
+			os.Rename(other, dst)
+		},
+		// The same file rewritten in place, its size and time restored.
+		"rewritten": func(dst string, at time.Time) {
+			os.WriteFile(dst, []byte("an olden backup"), 0o644)
+			os.Chtimes(dst, at, at)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, root, src, dst := copyFixture(t)
+			os.MkdirAll(filepath.Dir(dst), 0o755)
+			os.WriteFile(dst, []byte("an older backup"), 0o644)
+			at := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+			os.Chtimes(dst, at, at)
+			afterVerifyHook = func() { change(dst, at) }
+			defer func() { afterVerifyHook = nil }()
+
+			_, err := r.Copy(context.Background(), src, dst, sha("an older backup"))
+			if err == nil || !strings.Contains(err.Error(), "nothing was replaced") {
+				t.Fatalf("err = %v", err)
+			}
+			if got := readFile(t, dst); got != "an olden backup" {
+				t.Errorf("an unconfirmed destination was replaced: %q", got)
+			}
+			noTempLeft(t, root)
+		})
+	}
+}
+
+func TestCopyAlreadyPresentRefusesASourceThatChanged(t *testing.T) {
+	r, root, src, dst := copyFixture(t)
+	if _, err := r.Copy(context.Background(), src, dst, ""); err != nil {
+		t.Fatal(err)
+	}
+	afterCompareHook = func() { os.WriteFile(src, []byte("original film bytes, edited"), 0o640) }
+	defer func() { afterCompareHook = nil }()
+	if _, err := r.Copy(context.Background(), src, dst, ""); err == nil || !strings.Contains(err.Error(), "source") || !strings.Contains(err.Error(), "changed") {
+		t.Fatalf("err = %v, want a changed source refused", err)
+	}
+	if got := readFile(t, dst); got != "original film bytes" {
+		t.Errorf("destination = %q", got)
+	}
+	noTempLeft(t, root)
+}
