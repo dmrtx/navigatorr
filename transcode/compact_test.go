@@ -19,6 +19,12 @@ func TestCompactTargetSize(t *testing.T) {
 		{1280, 720, 1080, 1280, 720},
 		{3840, 2160, 720, 1280, 720},
 		{3840, 2160, 1440, 2560, 1440},
+		// A source no taller than the limit keeps its size, however wide.
+		{4096, 1716, 2160, 4096, 1716},
+		{4096, 2160, 2160, 4096, 2160},
+		{2560, 1080, 1080, 2560, 1080},
+		{1998, 1080, 1080, 1998, 1080},
+		{1440, 1080, 1080, 1440, 1080},
 	}
 	for _, c := range cases {
 		tw, th, err := CompactTargetSize(c.w, c.h, c.max)
@@ -171,5 +177,81 @@ func TestCompactPlanValidateEqualMatch(t *testing.T) {
 	}
 	if nilPlan.MatchSource(d, uhd()) == nil {
 		t.Fatal("missing plan accepted")
+	}
+}
+
+// wideHDR10 is a 2.39:1 DCI 4K HDR10 source, wider than the 16:9 box of 2160.
+func wideHDR10() (mediainspect.DynamicRange, mediainspect.DetailedStream) {
+	d := mediainspect.DynamicRange{Class: mediainspect.DynamicRangeHDR10, Primaries: "bt2020", Matrix: "bt2020nc", MasteringDisplay: compactMD("10000000/10000"), ContentLightLevel: &mediainspect.ContentLightLevelMetadata{MaxCLL: 1000, MaxFALL: 400}}
+	return d, mediainspect.DetailedStream{Kind: "video", Width: 4096, Height: 1716, SampleAspect: "1:1"}
+}
+
+func TestCompactKeepsTheSizeOfASourceNoTallerThanTheLimit(t *testing.T) {
+	d, v := wideHDR10()
+	p, err := NewCompactPlan(d, v, 2160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same width and height, tone mapped to SDR BT.709 with no HDR output.
+	if p.TargetWidth != 4096 || p.TargetHeight != 1716 || !p.KeepSourceSize || p.KeepsHDR() || p.HDR != nil || p.ToneMap == nil || p.ToneMap.Method != CompactToneMapPQ {
+		t.Fatalf("plan = %+v", p)
+	}
+	if err := p.MatchSource(d, v); err != nil {
+		t.Fatalf("a new plan does not match its source: %v", err)
+	}
+
+	// A 16:9 4K HDR source at 2160 is the same under both rules: kept, not
+	// marked, still tone mapped.
+	uhdPlan, err := NewCompactPlan(d, uhd(), 2160)
+	if err != nil || uhdPlan.TargetWidth != 3840 || uhdPlan.TargetHeight != 2160 || uhdPlan.KeepSourceSize || uhdPlan.ToneMap == nil {
+		t.Fatalf("uhd plan = %+v %v", uhdPlan, err)
+	}
+
+	// A taller source is still fitted in the 16:9 box, unmarked.
+	if p, err := NewCompactPlan(d, v, 1080); err != nil || p.TargetWidth != 1920 || p.TargetHeight != 804 || p.KeepSourceSize {
+		t.Fatalf("taller source plan = %+v %v", p, err)
+	}
+
+	// An SDR source that keeps its size has nothing left to do.
+	sdr := mediainspect.DynamicRange{Class: mediainspect.DynamicRangeSDR, Primaries: "bt709", Matrix: "bt709"}
+	for _, s := range []mediainspect.DetailedStream{{Kind: "video", Width: 2560, Height: 1080}, {Kind: "video", Width: 3840, Height: 2160}} {
+		if _, err := NewCompactPlan(sdr, s, 1080); s.Height <= 1080 && (err == nil || err.Error() != "compact_not_needed") {
+			t.Errorf("%dx%d SDR at 1080: %v, want compact_not_needed", s.Width, s.Height, err)
+		}
+	}
+}
+
+func TestCompactPlansFrozenUnderTheBoxRuleStillMatch(t *testing.T) {
+	d, v := wideHDR10()
+	// A queued plan frozen before the rule: shrunk to the 16:9 box, unmarked.
+	queued := &CompactPlan{ChainVersion: CompactChainVersion, SourceClass: d.Class, SourceSignal: mediainspect.SignalPQ, SourceWidth: 4096, SourceHeight: 1716, MaxHeight: 2160, TargetWidth: 3840, TargetHeight: 1608,
+		ToneMap: &CompactToneMap{Method: CompactToneMapPQ, SourcePeakNits: 1000, TargetPeakNits: CompactTargetPeakNits}}
+	if err := queued.Validate(); err != nil {
+		t.Fatalf("queued plan invalid: %v", err)
+	}
+	if err := queued.MatchSource(d, v); err != nil {
+		t.Fatalf("queued plan no longer matches its source: %v", err)
+	}
+	// The new plan differs from it, so it cannot be mistaken for it.
+	p, _ := NewCompactPlan(d, v, 2160)
+	if p.Equal(queued) {
+		t.Fatal("new and queued plans compare equal")
+	}
+
+	// The mark is only valid where the rules differ, and with the source size.
+	marked := queued.Clone()
+	marked.KeepSourceSize = true
+	if err := marked.Validate(); err == nil {
+		t.Error("a marked plan shrunk to the box was accepted")
+	}
+	uhdPlan, _ := NewCompactPlan(d, uhd(), 2160)
+	uhdPlan.KeepSourceSize = true
+	if err := uhdPlan.Validate(); err == nil {
+		t.Error("a mark on a 16:9 source was accepted")
+	}
+	unmarked := p.Clone()
+	unmarked.KeepSourceSize = false
+	if err := unmarked.Validate(); err == nil {
+		t.Error("a kept wide size without the mark was accepted")
 	}
 }

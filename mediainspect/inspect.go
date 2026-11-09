@@ -43,6 +43,18 @@ type Report struct {
 	SizeBytes         int64    `json:"size_bytes,omitempty"`
 	DangerousFiles    []string `json:"dangerous_files,omitempty"`
 	Probed            bool     `json:"probed"`
+
+	// The fields below come from the same ffprobe run and are empty when the
+	// file was not probed. Width and Height are the programme video's real
+	// size (Resolution is only a height class); BitRate is the container's
+	// overall bitrate in bits per second.
+	Width          int             `json:"width,omitempty"`
+	Height         int             `json:"height,omitempty"`
+	BitRate        int64           `json:"bit_rate,omitempty"`
+	IsHDR          bool            `json:"is_hdr"`
+	Video          *VideoTrack     `json:"video,omitempty"`
+	AudioTracks    []AudioTrack    `json:"audio_tracks,omitempty"`
+	SubtitleTracks []SubtitleTrack `json:"subtitle_tracks,omitempty"`
 }
 
 // InspectFile runs ffprobe against path and summarizes the streams.
@@ -76,53 +88,17 @@ func InspectFile(ctx context.Context, ffprobePath, path string) (Report, error) 
 	if err != nil {
 		return rep, nil // unreadable file: heuristics above still stand
 	}
-	out := res.stdout
-	var probe struct {
-		Streams []struct {
-			CodecType        string            `json:"codec_type"`
-			CodecName        string            `json:"codec_name"`
-			Profile          string            `json:"profile"`
-			PixFmt           string            `json:"pix_fmt"`
-			Width            int               `json:"width"`
-			Height           int               `json:"height"`
-			BitsPerRawSample any               `json:"bits_per_raw_sample"`
-			Tags             map[string]string `json:"tags"`
-			Duration         string            `json:"duration"`
-		} `json:"streams"`
-		Format struct {
-			FormatName string `json:"format_name"`
-			Duration   string `json:"duration"`
-			Size       string `json:"size"`
-		} `json:"format"`
-	}
-	if err := json.Unmarshal(out, &probe); err != nil {
+	var det DetailedReport
+	if err := decodeDetailed(&det, res.stdout); err != nil {
 		return rep, nil
 	}
 	rep.Probed = true
-	if probe.Format.FormatName != "" {
-		rep.Container = strings.Split(probe.Format.FormatName, ",")[0]
+	if det.Container != "" {
+		rep.Container = det.Container
 	}
-	rep.DurationSec = ParseDuration(probe.Format.Duration)
-	for _, st := range probe.Streams {
-		lang := ""
-		for k, v := range st.Tags {
-			if strings.EqualFold(k, "language") {
-				lang = mediafile.NormalizeLang(v)
-			}
-		}
-		switch st.CodecType {
-		case "video":
-			if rep.VideoCodec == "" {
-				rep.VideoCodec = st.CodecName
-				rep.Resolution = resolutionName(st.Height)
-				rep.BitDepth = ParseBitDepth(st.BitsPerRawSample, st.PixFmt, st.Profile)
-			}
-		case "audio":
-			rep.AudioLanguages = appendNorm(rep.AudioLanguages, lang)
-		case "subtitle":
-			rep.SubtitleLanguages = appendNorm(rep.SubtitleLanguages, lang)
-		}
-	}
+	rep.DurationSec = det.DurationSec
+	rep.BitRate = det.BitRate
+	fillTrackSummary(&rep, &det)
 	return rep, nil
 }
 
@@ -216,6 +192,9 @@ type DetailedReport struct {
 	// ProbeFailure is why the file was not inspected (Probed is false). It is
 	// the same *ProbeError InspectDetailed returns and is never serialized.
 	ProbeFailure *ProbeError `json:"-"`
+	// nbFrames is each stream's nb_frames as ffprobe stated it, by stream
+	// index, for the subtitle event counts of the summary report.
+	nbFrames map[int]int64
 }
 
 // codecTag keeps the container fourcc, dropping ffprobe's "[0][0][0][0]"
@@ -354,8 +333,18 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 		rep.ProbeFailure, _ = AsProbeError(err)
 		return rep, err
 	}
-	out := res.stdout
+	if err := decodeDetailed(&rep, res.stdout); err != nil {
+		pe := res.badOutput(err)
+		rep.ProbeFailure = pe
+		return rep, pe
+	}
 
+	return rep, nil
+}
+
+// decodeDetailed fills rep from one ffprobe -show_format -show_streams JSON
+// document (chapters optional). It only fails on output that is not that JSON.
+func decodeDetailed(rep *DetailedReport, out []byte) error {
 	var probe struct {
 		Streams []struct {
 			Index            int               `json:"index"`
@@ -382,6 +371,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			SideDataList     []json.RawMessage `json:"side_data_list"`
 			Tags             map[string]string `json:"tags"`
 			Disposition      map[string]int    `json:"disposition"`
+			NbFrames         string            `json:"nb_frames"`
 		} `json:"streams"`
 		Format struct {
 			FormatName string            `json:"format_name"`
@@ -394,9 +384,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 	}
 
 	if err := json.Unmarshal(out, &probe); err != nil {
-		pe := res.badOutput(err)
-		rep.ProbeFailure = pe
-		return rep, pe
+		return err
 	}
 
 	rep.Probed = true
@@ -468,6 +456,13 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 			}
 		}
 
+		if n, err := strconv.ParseInt(strings.TrimSpace(st.NbFrames), 10, 64); err == nil && n > 0 {
+			if rep.nbFrames == nil {
+				rep.nbFrames = map[int]int64{}
+			}
+			rep.nbFrames[st.Index] = n
+		}
+
 		switch st.CodecType {
 		case "video":
 			ds.BitDepth = ParseBitDepth(st.BitsPerRawSample, st.PixFmt, st.Profile)
@@ -493,7 +488,7 @@ func InspectDetailed(ctx context.Context, ffprobePath, path string) (DetailedRep
 		}
 	}
 
-	return rep, nil
+	return nil
 }
 
 // ParseDuration parses a duration string in seconds and returns a non-negative finite float64.

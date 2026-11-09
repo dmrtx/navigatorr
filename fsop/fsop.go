@@ -428,73 +428,104 @@ func tempName(dst string) string {
 	return filepath.Join(filepath.Dir(dst), ".nav-mv-"+hex.EncodeToString(b[:]))
 }
 
-// copyVerifiedMove is the cross-filesystem move of one regular file.
-func (r *Resolver) copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, error) {
+// verifiedCopy is a regular file copied to a hidden temporary name next to
+// its destination and read back: tmp holds exactly bytes whose SHA-256 is sum.
+type verifiedCopy struct {
+	src, tmp string
+	bytes    int64
+	sum      string
+	// readBack is the SHA-256 of tmp read back from disk; it equals sum.
+	readBack string
+	before   os.FileInfo
+}
+
+// sourceUnchanged reports the source still has the size and time it had
+// when the copy started.
+func (c *verifiedCopy) sourceUnchanged() bool {
+	now, err := os.Stat(c.src)
+	return err == nil && now.Size() == c.before.Size() && now.ModTime().Equal(c.before.ModTime())
+}
+
+// discard removes the temporary copy.
+func (c *verifiedCopy) discard() { os.Remove(c.tmp) }
+
+// copyVerified copies the regular file src to a temporary name next to dst,
+// hashing it on the way, flushes it, and reads it back from disk to compare
+// size and SHA-256. On any failure the temporary file is gone.
+func copyVerified(ctx context.Context, src, dst, notRegular string) (*verifiedCopy, error) {
 	before, err := os.Stat(src)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	if !before.Mode().IsRegular() {
-		return 0, "", fmt.Errorf("%q is on another filesystem than the destination and only files can be copied across (move it in smaller steps)", filepath.Base(src))
+		return nil, errors.New(notRegular)
 	}
 	in, err := os.Open(src)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
 	defer in.Close()
-	tmp := tempName(dst)
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	c := &verifiedCopy{src: src, tmp: tempName(dst), before: before}
+	out, err := os.OpenFile(c.tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
-	keep := false
+	ok := false
 	defer func() {
 		out.Close()
-		if !keep {
-			os.Remove(tmp)
+		if !ok {
+			c.discard()
 		}
 	}()
 	h := sha256.New()
 	n, err := copyCtx(ctx, io.MultiWriter(out, h), in)
 	if err != nil {
-		return 0, "", err
+		return nil, err
 	}
-	want := hex.EncodeToString(h.Sum(nil))
+	c.bytes, c.sum = n, hex.EncodeToString(h.Sum(nil))
 	if err := out.Sync(); err != nil {
-		return 0, "", fmt.Errorf("flushing the copy: %w", err)
+		return nil, fmt.Errorf("flushing the copy: %w", err)
 	}
 	if err := out.Close(); err != nil {
-		return 0, "", fmt.Errorf("closing the copy: %w", err)
+		return nil, fmt.Errorf("closing the copy: %w", err)
 	}
-	unchanged := func() bool {
-		now, err := os.Stat(src)
-		return err == nil && now.Size() == before.Size() && now.ModTime().Equal(before.ModTime())
-	}
-	if n != before.Size() || !unchanged() {
-		return 0, "", fmt.Errorf("the source changed while it was copied")
+	if n != before.Size() || !c.sourceUnchanged() {
+		return nil, fmt.Errorf("the source changed while it was copied")
 	}
 	// Read the copy back from disk and compare.
-	got, gn, err := hashPath(ctx, tmp)
+	got, gn, err := hashPath(ctx, c.tmp)
 	if err != nil {
-		return 0, "", fmt.Errorf("reading the copy back: %w", err)
+		return nil, fmt.Errorf("reading the copy back: %w", err)
 	}
-	if gn != n || got != want {
-		return 0, "", fmt.Errorf("the copy does not match the original (%d of %d bytes)", gn, n)
+	if gn != n || got != c.sum {
+		return nil, fmt.Errorf("the copy does not match the original (%d of %d bytes)", gn, n)
 	}
+	c.readBack = got
 	if afterVerifyHook != nil {
 		afterVerifyHook()
 	}
 	// The read-back can take minutes on a big file: check the source again
 	// before the copy is put in place.
-	if !unchanged() {
-		return 0, "", fmt.Errorf("the source changed while the copy was verified")
+	if !c.sourceUnchanged() {
+		return nil, fmt.Errorf("the source changed while the copy was verified")
 	}
-	_ = os.Chmod(tmp, before.Mode().Perm())
-	_ = os.Chtimes(tmp, before.ModTime(), before.ModTime())
-	if err := r.place(tmp, dst); err != nil {
+	_ = os.Chmod(c.tmp, before.Mode().Perm())
+	_ = os.Chtimes(c.tmp, before.ModTime(), before.ModTime())
+	ok = true
+	return c, nil
+}
+
+// copyVerifiedMove is the cross-filesystem move of one regular file.
+func (r *Resolver) copyVerifiedMove(ctx context.Context, src, dst string) (int64, string, error) {
+	c, err := copyVerified(ctx, src, dst, fmt.Sprintf("%q is on another filesystem than the destination and only files can be copied across (move it in smaller steps)", filepath.Base(src)))
+	if err != nil {
 		return 0, "", err
 	}
-	keep = true
+	if err := r.place(c.tmp, dst); err != nil {
+		c.discard()
+		return 0, "", err
+	}
+	n, want := c.bytes, c.sum
 	// From here the copy is the verified one: it is never deleted again.
 	both := func(why string, err error) error {
 		return &copiedError{bytes: n, sum: want, msg: fmt.Sprintf("copied and verified to %q, but %s (%v): both files exist, nothing was lost", dst, why, err)}
@@ -502,7 +533,7 @@ func (r *Resolver) copyVerifiedMove(ctx context.Context, src, dst string) (int64
 	if err := syncDir(filepath.Dir(dst)); err != nil {
 		return n, want, both("the destination folder could not be flushed", err)
 	}
-	if !unchanged() {
+	if !c.sourceUnchanged() {
 		return n, want, both("the source changed while the copy was verified, so it was kept", errors.New("source modified"))
 	}
 	if err := removeSourceFn(src); err != nil {

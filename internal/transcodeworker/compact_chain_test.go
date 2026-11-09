@@ -190,6 +190,16 @@ func TestCompactVideoFilter(t *testing.T) {
 	if got, err := compactVideoFilter(dv, ""); err != nil || got != "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"+sideData {
 		t.Fatalf("no-resize SDR chain %q %v", got, err)
 	}
+	// A wide HDR source no taller than the limit keeps its size: the scale
+	// step only converts colour at 4096x1716, then tone maps to SDR BT.709.
+	wide, err := transcode.NewCompactPlan(mediainspect.DynamicRange{Class: mediainspect.DynamicRangeHDR10, Primaries: "bt2020", Matrix: "bt2020nc"},
+		mediainspect.DetailedStream{Kind: "video", Width: 4096, Height: 1716, SampleAspect: "1:1"}, 2160)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := compactVideoFilter(wide, "L"); err != nil || got != "setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc:range=tv,scale=w=4096:h=1716:in_color_matrix=bt2020:in_range=tv:out_range=pc:flags=lanczos+accurate_rnd+full_chroma_int,format=gbrpf32le,lut3d=file=L:interp=tetrahedral"+tail {
+		t.Fatalf("wide HDR chain %q %v", got, err)
+	}
 	if _, err := compactVideoFilter(nil, ""); err == nil {
 		t.Fatal("nil plan accepted")
 	}

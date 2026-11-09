@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/jakenesler/navigatorr/mediainspect"
 )
 
 // Track selection by language for the size and compact goals.
@@ -268,13 +270,9 @@ func SelectTracks(p *TrackPolicy, tracks []TrackInfo) (*TrackSelection, error) {
 	return &TrackSelection{KeepAudio: nonNil(keepAudio), KeepSubtitles: nonNil(keepSubs)}, nil
 }
 
-// commentaryTitle matches a track title naming a commentary, in the languages
-// titles usually come in.
-var commentaryTitle = regexp.MustCompile(`(?i)comment|comentari|kommentar`)
-
 // IsCommentary reports a commentary track, by its disposition or its title.
 func (t TrackInfo) IsCommentary() bool {
-	return t.Disposition["comment"] > 0 || commentaryTitle.MatchString(t.Title)
+	return t.Disposition["comment"] > 0 || mediainspect.IsCommentaryTitle(t.Title)
 }
 
 // describedTitle matches a track title naming an audio description.
