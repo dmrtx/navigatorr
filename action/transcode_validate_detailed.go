@@ -382,6 +382,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		result["conversions"] = c
 	}
 	addTrackReport(result, ec.State)
+	addVideoSizes(result, origMap, plan, outVideo[0].Width, outVideo[0].Height)
 	bitDepthStatus := "not_requested"
 	if plan.ExpectedBitDepth > 0 {
 		bitDepthStatus = "ok"

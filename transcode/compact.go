@@ -41,8 +41,9 @@ const CompactHLGDisplayPeakNits = 1000
 // CompactDefaultMaxHeight is the default output height limit (1080p).
 const CompactDefaultMaxHeight = 1080
 
-// CompactMaxHeights are the selectable output height limits. The output fits
-// inside a 16:9 box of that height without upscaling.
+// CompactMaxHeights are the selectable output height limits. A source no
+// taller than the limit keeps its exact width and height; a taller one is
+// fitted inside the 16:9 box of the limit. Nothing is ever upscaled.
 var CompactMaxHeights = []int{720, 1080, 1440, 2160}
 
 // HDR signalling written by every keep-HDR compact encode, besides the
@@ -73,14 +74,19 @@ type CompactPlan struct {
 	// SourceSignal is the transfer of the decoded picture: sdr, pq or hlg.
 	// A Dolby Vision source is decoded from its base layer; the RPU and any
 	// enhancement layer are not applied and are not carried to the output.
-	SourceSignal       string          `json:"source_signal" yaml:"source_signal"`
-	DolbyVisionProfile int             `json:"dolby_vision_profile,omitempty" yaml:"dolby_vision_profile,omitempty"`
-	SourceWidth        int             `json:"source_width" yaml:"source_width"`
-	SourceHeight       int             `json:"source_height" yaml:"source_height"`
-	MaxHeight          int             `json:"max_height" yaml:"max_height"`
-	TargetWidth        int             `json:"target_width" yaml:"target_width"`
-	TargetHeight       int             `json:"target_height" yaml:"target_height"`
-	ToneMap            *CompactToneMap `json:"tone_map,omitempty" yaml:"tone_map,omitempty"`
+	SourceSignal       string `json:"source_signal" yaml:"source_signal"`
+	DolbyVisionProfile int    `json:"dolby_vision_profile,omitempty" yaml:"dolby_vision_profile,omitempty"`
+	SourceWidth        int    `json:"source_width" yaml:"source_width"`
+	SourceHeight       int    `json:"source_height" yaml:"source_height"`
+	MaxHeight          int    `json:"max_height" yaml:"max_height"`
+	TargetWidth        int    `json:"target_width" yaml:"target_width"`
+	TargetHeight       int    `json:"target_height" yaml:"target_height"`
+	// KeepSourceSize marks a plan that keeps the size of a source no taller
+	// than MaxHeight but wider than its 16:9 box, which plans frozen before
+	// this rule shrank to the box. It is set only where the two rules differ,
+	// so every other plan, and every plan already queued, is unchanged.
+	KeepSourceSize bool            `json:"keep_source_size,omitempty" yaml:"keep_source_size,omitempty"`
+	ToneMap        *CompactToneMap `json:"tone_map,omitempty" yaml:"tone_map,omitempty"`
 	// HDR is the output signalling of a keep-HDR plan (CompactHDRChainVersion)
 	// and is absent from every SDR plan.
 	HDR *CompactHDROutput `json:"hdr,omitempty" yaml:"hdr,omitempty"`
@@ -155,9 +161,26 @@ func ValidCompactMaxHeight(h int) bool {
 	return false
 }
 
-// CompactTargetSize fits w×h inside the 16:9 box of maxHeight, preserving the
-// aspect ratio with even dimensions and never upscaling.
+// CompactTargetSize is the output size of a w×h source under maxHeight. A
+// source no taller than maxHeight keeps its exact size, however wide (a
+// 2.39:1 4096×1716 film stays 4096×1716 at 2160): it is neither upscaled nor
+// downscaled. A taller source is fitted inside the 16:9 box of maxHeight,
+// preserving the aspect ratio with even dimensions.
 func CompactTargetSize(w, h, maxHeight int) (int, int, error) {
+	tw, th, err := compactBoxSize(w, h, maxHeight)
+	if err != nil {
+		return 0, 0, err
+	}
+	if h <= maxHeight {
+		return w, h, nil
+	}
+	return tw, th, nil
+}
+
+// compactBoxSize fits w×h inside the 16:9 box of maxHeight without
+// upscaling. It was the whole sizing rule until sources no taller than the
+// limit kept their size, and plans frozen under it carry no KeepSourceSize.
+func compactBoxSize(w, h, maxHeight int) (int, int, error) {
 	if w <= 0 || h <= 0 || w > 16384 || h > 16384 {
 		return 0, 0, errors.New("compact_source_dimensions_invalid")
 	}
@@ -179,6 +202,21 @@ func CompactTargetSize(w, h, maxHeight int) (int, int, error) {
 		return maxW, even(h*maxW, w), nil
 	}
 	return even(w*maxHeight, h), maxHeight, nil
+}
+
+// compactPlanSize is the target size of a plan and whether it needs the
+// KeepSourceSize mark. boxOnly derives it as plans frozen before that rule
+// were derived.
+func compactPlanSize(w, h, maxHeight int, boxOnly bool) (int, int, bool, error) {
+	bw, bh, err := compactBoxSize(w, h, maxHeight)
+	if err != nil || boxOnly {
+		return bw, bh, false, err
+	}
+	tw, th, err := CompactTargetSize(w, h, maxHeight)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return tw, th, tw != bw || th != bh, nil
 }
 
 // compactSourcePeak picks the luminance the PQ tone map treats as the source
@@ -214,6 +252,10 @@ func ValidCompactChain(chain string) bool {
 // NewCompactPlanForChain derives the compact plan of a chain version from a
 // classified source.
 func NewCompactPlanForChain(chain string, d mediainspect.DynamicRange, v mediainspect.DetailedStream, maxHeight int) (*CompactPlan, error) {
+	return newCompactPlan(chain, d, v, maxHeight, false)
+}
+
+func newCompactPlan(chain string, d mediainspect.DynamicRange, v mediainspect.DetailedStream, maxHeight int, boxOnly bool) (*CompactPlan, error) {
 	if !ValidCompactChain(chain) {
 		return nil, errors.New("unsupported compact chain")
 	}
@@ -232,11 +274,11 @@ func NewCompactPlanForChain(chain string, d mediainspect.DynamicRange, v mediain
 	default:
 		return nil, errors.New("compact_requires_square_pixels")
 	}
-	tw, th, err := CompactTargetSize(v.Width, v.Height, maxHeight)
+	tw, th, keep, err := compactPlanSize(v.Width, v.Height, maxHeight, boxOnly)
 	if err != nil {
 		return nil, err
 	}
-	p := &CompactPlan{ChainVersion: chain, SourceClass: d.Class, SourceSignal: signal, SourceWidth: v.Width, SourceHeight: v.Height, MaxHeight: maxHeight, TargetWidth: tw, TargetHeight: th}
+	p := &CompactPlan{ChainVersion: chain, SourceClass: d.Class, SourceSignal: signal, SourceWidth: v.Width, SourceHeight: v.Height, MaxHeight: maxHeight, TargetWidth: tw, TargetHeight: th, KeepSourceSize: keep}
 	if d.Class == mediainspect.DynamicRangeDolbyVision && d.DolbyVision != nil {
 		p.DolbyVisionProfile = d.DolbyVision.Profile
 	}
@@ -298,9 +340,12 @@ func (p *CompactPlan) Validate() error {
 	if !ValidCompactChain(p.ChainVersion) || p.SourceClass == "" {
 		return errors.New("unsupported compact chain")
 	}
-	tw, th, err := CompactTargetSize(p.SourceWidth, p.SourceHeight, p.MaxHeight)
+	tw, th, keep, err := compactPlanSize(p.SourceWidth, p.SourceHeight, p.MaxHeight, !p.KeepSourceSize)
 	if err != nil {
 		return err
+	}
+	if p.KeepSourceSize && !keep {
+		return errors.New("compact plan keeps a source size the 16:9 box already gives")
 	}
 	if p.TargetWidth != tw || p.TargetHeight != th {
 		return errors.New("compact target size does not match source and max height")
@@ -412,12 +457,13 @@ func (p *CompactPlan) Equal(o *CompactPlan) bool {
 }
 
 // MatchSource fails closed unless the frozen plan is exactly the plan the
-// source derives today.
+// source derives today. A plan without KeepSourceSize is derived under the
+// 16:9 box alone, as it was when frozen, so a queued job is never re-sized.
 func (p *CompactPlan) MatchSource(d mediainspect.DynamicRange, v mediainspect.DetailedStream) error {
 	if p == nil {
 		return errors.New("compact plan missing")
 	}
-	want, err := NewCompactPlanForChain(p.ChainVersion, d, v, p.MaxHeight)
+	want, err := newCompactPlan(p.ChainVersion, d, v, p.MaxHeight, !p.KeepSourceSize)
 	if err != nil {
 		return err
 	}

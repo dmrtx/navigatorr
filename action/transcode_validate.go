@@ -237,6 +237,7 @@ func (e *Engine) stepTranscodeValidate(ctx context.Context, ec *ExecutionContext
 		result["conversions"] = c
 	}
 	addTrackReport(result, ec.State)
+	addVideoSizes(result, origMap, plan, 0, 0)
 	bitDepthStatus := "not_requested"
 	if plan.ExpectedBitDepth > 0 {
 		bitDepthStatus = "ok"

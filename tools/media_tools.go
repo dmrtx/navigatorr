@@ -19,13 +19,14 @@ func registerMediaTools(s *server.MCPServer, d *Deps, registry *arrservice.Regis
 	// inspect_media — real-file inspection with *arr fallback.
 	s.AddTool(
 		mcp.NewTool("inspect_media",
-			mcp.WithDescription("Inspect a real media file: container, video codec, resolution, bit depth, audio/subtitle languages, duration, size, embedded and sidecar subtitles, dangerous names. Give path for a filesystem inspection (ffprobe when available), or service+file_id to resolve the path via Sonarr/Radarr and inspect it, falling back to the service mediaInfo when the file is not reachable."),
+			mcp.WithDescription("Inspect a real media file (read-only). Summary fields: container, video_codec, resolution (a height class such as 720p), bit_depth, audio_languages, subtitle_languages, duration_sec, size_bytes, sidecar subtitles, dangerous names. From the same ffprobe run: width and height (the programme video's real size), bit_rate (overall, bits per second), is_hdr, video {codec, profile, width, height, pixel_format, bit_depth, fps, bit_rate, color_range, color_space, color_primaries, color_transfer, is_hdr, hdr_formats (dolby_vision, hdr10, pq10, hlg; HDR10+ is per-frame and not detected here), dolby_vision_profile}, audio_tracks [{index, language, codec, profile, channels, layout (1.0, 2.0, 5.1, 7.1), channel_layout, bit_rate, title, default, commentary, original}] and subtitle_tracks [{index, language, codec, format (text or bitmap), title, default, forced, sdh, events, events_source}]. events is the subtitle packet count the container states (Matroska statistics tags, MP4 frame count), so a track with far fewer events than its language peers is probably incomplete (a bitmap track has about two packets per line shown); it is absent when the container states none, and count_subtitle_events=true counts them by reading the whole file. Give path for a filesystem inspection (ffprobe when available), or service+file_id to resolve the path via Sonarr/Radarr and inspect it, falling back to the service mediaInfo when the file is not reachable. Without ffprobe, or when it fails, probed is false and only the name, size and sidecar fields are filled."),
 			mcp.WithString("path", mcp.Description("Filesystem path inside allowed_read_roots")),
 			mcp.WithString("service", mcp.Description("sonarr or radarr (used with file_id)")),
 			mcp.WithString("file_id", mcp.Description("Episode file id (sonarr /episodefile/{id}) or movie file id (radarr /moviefile/{id})")),
 			mcp.WithString("media_type", mcp.Description("series, anime or movie (for the inspection record)")),
 			mcp.WithString("media_id", mcp.Description("Series/movie id (for the inspection record)")),
 			mcp.WithString("record", mcp.Description("true to persist the inspection as a media check")),
+			mcp.WithString("count_subtitle_events", mcp.Description("true to count every subtitle track's events by reading the whole file (no decoding; minutes for a large file on the NAS). Default false: only the counts the container states")),
 		),
 		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := req.GetArguments()
@@ -61,6 +62,15 @@ func registerMediaTools(s *server.MCPServer, d *Deps, registry *arrservice.Regis
 			if err != nil {
 				return toolErr("%v", err), nil
 			}
+			var countNote string
+			if argBool(args, "count_subtitle_events", false) && len(rep.SubtitleTracks) > 0 {
+				counts, cerr := mediainspect.CountSubtitlePackets(ctx, d.Ffprobe, real)
+				if cerr != nil {
+					countNote = "subtitle events were not counted: " + cerr.Error()
+				} else {
+					rep.ApplySubtitleCounts(counts)
+				}
+			}
 			if argBool(args, "record", false) {
 				mediaType := argString(args, "media_type", "")
 				mediaID := argString(args, "media_id", "")
@@ -74,6 +84,12 @@ func registerMediaTools(s *server.MCPServer, d *Deps, registry *arrservice.Regis
 						DurationSec:    &rep.DurationSec, SizeBytes: &rep.SizeBytes,
 					})
 				}
+			}
+			if countNote != "" {
+				return toolJSON(struct {
+					mediainspect.Report
+					Note string `json:"note"`
+				}{rep, countNote}), nil
 			}
 			return toolJSON(rep), nil
 		},

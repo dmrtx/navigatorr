@@ -237,6 +237,7 @@ To verify the active setting:
 | `inspect_media` | `media.allowed_read_roots` | — | — | No |
 | `fs_stat` / `fs_list` / `fs_hash` | `media.allowed_read_roots` | — | — | No |
 | `fs_safe_move` | `media.allowed_read_roots` (source) | `media.allowed_write_roots` (destination) | — | No |
+| `fs_copy` | `media.allowed_read_roots` (source) | `media.allowed_write_roots` (destination) | — | No (replacing a different destination: `confirm=true` + **YES**) |
 | `fs_safe_delete` | — | `media.allowed_write_roots` | Job in `replacing` | **YES** |
 | `cleanup_download_leftovers` (list) | `media.allowed_read_roots` | — | — | No |
 | `cleanup_download_leftovers` (remove_*) | `media.allowed_read_roots` | `media.allowed_write_roots` | — | **YES** |

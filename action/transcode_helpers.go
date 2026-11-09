@@ -203,3 +203,36 @@ func getOptimizationPolicy(v any) *recipe.OptimizationPolicy {
 func isSourceHDRorDV(rep *mediainspect.DetailedReport) bool {
 	return mediainspect.IsHDRorDolbyVisionReport(rep)
 }
+
+// addVideoSizes reports the source and candidate width and height. Only a
+// compact plan changes the size; it keeps a source no taller than its
+// max_height as it is. candidateW and candidateH are the probed output, or
+// zero where the candidate is not re-probed (its expected size is reported).
+func addVideoSizes(result map[string]any, origMap map[string]any, plan *transcode.Plan, candidateW, candidateH int) {
+	var sw, sh int
+	if main := mediainspect.MainVideoStreams(getStreamsList(origMap, "video")); len(main) > 0 {
+		sw, sh = main[0].Width, main[0].Height
+	}
+	var c *transcode.CompactPlan
+	if plan != nil {
+		c = plan.Compact
+	}
+	if c != nil {
+		sw, sh = c.SourceWidth, c.SourceHeight
+	}
+	if candidateW <= 0 || candidateH <= 0 {
+		candidateW, candidateH = sw, sh
+		if c != nil {
+			candidateW, candidateH = c.TargetWidth, c.TargetHeight
+		}
+	}
+	if sw > 0 && sh > 0 {
+		result["source_width"], result["source_height"] = sw, sh
+	}
+	if candidateW > 0 && candidateH > 0 {
+		result["candidate_width"], result["candidate_height"] = candidateW, candidateH
+	}
+	if c != nil {
+		result["resized"] = c.TargetWidth != c.SourceWidth || c.TargetHeight != c.SourceHeight
+	}
+}
