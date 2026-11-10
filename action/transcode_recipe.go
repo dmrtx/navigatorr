@@ -56,7 +56,7 @@ const (
 // better), VideoToolbox values constant quality (higher is better).
 var (
 	recipeSizeVTValues   = []int{60, 65, 70}
-	recipeSizeX265Values = []int{22, 19, 16}
+	recipeSizeX265Values = []int{24, 22, 19}
 	recipeQualityValues  = []int{20, 17, 14}
 	recipePreserveValues = []int{24, 21, 18}
 	recipeCompactValues  = []int{18, 16, 14}
@@ -365,7 +365,7 @@ func (e *Engine) qualityLadderPlan(ec *ExecutionContext, snapshot *ModePolicySna
 		sp.MaxCandidateBytes = 0
 		p.SizePolicy = &sp
 	}
-	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *request.Quality, BenchmarkRequestDigest: digest}
+	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, GateFreshSamples: freshWindowsGated(ec, freshWindows), Quality: *request.Quality, BenchmarkRequestDigest: digest}
 	p.PlanDigest = ""
 	d, err := transcode.DigestPlan(&p)
 	if err != nil {
@@ -511,13 +511,27 @@ func (t qualityLadderTrend) improved() bool {
 // last rung to a projection 0.1 points short of the p5 floor.
 const ladderProjectionMargin = 1.0
 
+// qualityLadderStepScale is how many of the last step's setting distance the
+// next step covers: (lastQ to nextQ) over (prevQ to lastQ). Equally spaced
+// rungs (22/19/16, 20/17/14, 24/21/18, 18/16/14, VideoToolbox 60/65/70) give
+// 1; x265 24/22/19 gives 1.5 from CRF 22 to 19. Rungs that do not move in one
+// direction, or repeat a setting, fall back to 1, the unscaled line.
+func qualityLadderStepScale(prevQ, lastQ, nextQ int) float64 {
+	before, after := lastQ-prevQ, nextQ-lastQ
+	if before == 0 || after == 0 || (before > 0) != (after > 0) {
+		return 1
+	}
+	return float64(after) / float64(before)
+}
+
 // qualityLadderProjectedMiss extrapolates each check the last rung failed
-// along a straight line through the last two rungs, one rung step further. It
+// along a straight line through the last two rungs, to the next rung's
+// setting: the last step's change scaled by qualityLadderStepScale. It
 // returns the first check that would still miss its limit on the next rung,
 // or one that did not improve at all, and nil when every check it can
 // project would reach its limit. Only checks with a numeric limit and scores
 // on both rungs are projected; with nothing to go on the ladder goes on.
-func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderTrend {
+func qualityLadderProjectedMiss(prev, last *FinalQualitySummary, prevQ, lastQ, nextQ int) *qualityLadderTrend {
 	if prev == nil || last == nil || last.Limits == nil {
 		return nil
 	}
@@ -547,7 +561,7 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 		}
 		seen[t.Metric] = true
 		t.Previous, t.Last, t.Limit = *before, *now, *limit
-		t.Projected = t.Last + (t.Last - t.Previous)
+		t.Projected = t.Last + (t.Last-t.Previous)*qualityLadderStepScale(prevQ, lastQ, nextQ)
 		// The projection is a straight line through two scores, not a
 		// measurement: a trend that lands within ladderProjectionMargin of
 		// the limit still gets its encode, flat or not. A hair more absorbs
@@ -565,8 +579,8 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 }
 
 // qualityLadderTrendMessage says where a check was heading when the ladder
-// stopped before nextQ: "VMAF p5 went from 80.7 at x265 CRF 22 to 82.2 at
-// CRF 19, which points to about 83.7 at CRF 16, short of the minimum 84.0".
+// stopped before nextQ: "VMAF p5 went from 79.7 at x265 CRF 24 to 80.7 at
+// CRF 22, which points to about 82.2 at CRF 19, short of the minimum 84.0".
 func qualityLadderTrendMessage(codec string, prevQ, lastQ, nextQ int, t *qualityLadderTrend) string {
 	short := fmt.Sprintf("short of the minimum %.1f", t.Limit)
 	if t.Maximum {
@@ -601,7 +615,7 @@ const (
 // qualityLadderShortfall is how many VMAF points the rung's worst failed check
 // fell short of its limit. It reports false when a failed check is not scored
 // in VMAF points or has no score to go on: nothing then says how close it was.
-func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.FinalWindowScore) (float64, bool) {
+func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.FinalWindowScore, gated bool) (float64, bool) {
 	if final == nil || final.Limits == nil || len(final.FailedChecks) == 0 {
 		return 0, false
 	}
@@ -618,7 +632,7 @@ func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.Fina
 			now, limit = m.VMAFWorstWindow, l.VMAFWorstWindow
 		case "quality_vmaf_sample_below_minimum":
 			// Each scored window is held to the mean's limit.
-			now, limit = lowestGridWindowMean(windows), l.VMAFMean
+			now, limit = lowestVerdictWindowMean(windows, gated), l.VMAFMean
 		default:
 			return 0, false
 		}
@@ -630,12 +644,13 @@ func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.Fina
 	return worst, true
 }
 
-// lowestGridWindowMean is the lowest mean of the windows that decide the
-// verdict, nil without any.
-func lowestGridWindowMean(windows []transcode.FinalWindowScore) *float64 {
+// lowestVerdictWindowMean is the lowest mean of the windows that decide the
+// verdict, nil without any: the grid's, and the fresh windows' too when the
+// plan gated them (see verdictWindow).
+func lowestVerdictWindowMean(windows []transcode.FinalWindowScore, gated bool) *float64 {
 	var lowest *float64
 	for _, w := range windows {
-		if w.Role == "grid" && (lowest == nil || w.VMAFMean < *lowest) {
+		if verdictWindow(w, gated) && (lowest == nil || w.VMAFMean < *lowest) {
 			mean := w.VMAFMean
 			lowest = &mean
 		}
@@ -643,15 +658,27 @@ func lowestGridWindowMean(windows []transcode.FinalWindowScore) *float64 {
 	return lowest
 }
 
+// verdictWindow reports whether a final window decided the verdict: a grid
+// window always, a fresh one only on a plan that gated fresh windows.
+func verdictWindow(w transcode.FinalWindowScore, gated bool) bool {
+	return w.Role == "grid" || gated && w.Role == transcode.WindowRoleFresh
+}
+
+// planGatesFreshSamples reports whether a plan's final validation judged its
+// fresh windows with the grid (transcode.QualityValidationPlan.GateFreshSamples).
+func planGatesFreshSamples(p *transcode.Plan) bool {
+	return p != nil && p.QualityValidation != nil && p.QualityValidation.GateFreshSamples
+}
+
 // qualityLadderWithInsertedRung is the record's values with the setting a
 // narrow miss on the first rung adds after it, and false when none fits: the
 // ladder is not a size goal's x265 or is past its first rung, the miss is not
 // narrow, or the next frozen rung is as close as the shortfall calls for.
-func qualityLadderWithInsertedRung(mode string, rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore) ([]int, bool) {
+func qualityLadderWithInsertedRung(mode string, rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore, gated bool) ([]int, bool) {
 	if !ladderAddsRungs(mode, rec.VideoCodec) || rec.Rung != 0 || len(rec.Values) < 2 {
 		return nil, false
 	}
-	shortfall, ok := qualityLadderShortfall(final, windows)
+	shortfall, ok := qualityLadderShortfall(final, windows, gated)
 	if !ok {
 		return nil, false
 	}
@@ -750,14 +777,14 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		prevQ, lastQ, nextQ := r.QualityValues[last-1], r.QualityValues[last], rec.Values[rec.Rung+1]
 		n := len(rec.Tried)
 		if i := slices.IndexFunc(rec.Tried, func(t QualityLadderRung) bool { return t.Quality == prevQ }); i >= 0 && rec.Tried[n-1].Quality == lastQ {
-			if trend := qualityLadderProjectedMiss(rec.Tried[i].Final, rec.Tried[n-1].Final); trend != nil {
+			if trend := qualityLadderProjectedMiss(rec.Tried[i].Final, rec.Tried[n-1].Final, prevQ, lastQ, nextQ); trend != nil {
 				msg := fmt.Sprintf("Each step tried missed this goal's quality limits: %s. The ladder stops before %s because the trend shows it would not reach them: %s. No candidate is offered; original preserved.",
 					qualityLadderTriedWords(rec), recipeRungShort(rec.VideoCodec, nextQ), qualityLadderTrendMessage(rec.VideoCodec, prevQ, lastQ, nextQ, trend))
 				return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true
 			}
 		}
 	}
-	values, added := qualityLadderWithInsertedRung(snapshot.Mode, rec, tried.Final, st.QualityEvidence.Windows)
+	values, added := qualityLadderWithInsertedRung(snapshot.Mode, rec, tried.Final, st.QualityEvidence.Windows, planGatesFreshSamples(plan))
 	if !added {
 		values = rec.Values
 	}
@@ -884,18 +911,19 @@ func passQualityLadder(ec *ExecutionContext, candidateBytes int64) *QualityLadde
 		scores = fmt.Sprintf(" (VMAF %.1f, p5 %.1f)", *rec.Final.Measured.VMAFMean, *rec.Final.Measured.VMAFP5)
 	}
 	rec.Outcome = QualityLadderPassed
-	rec.Message = fmt.Sprintf("%s passed this goal's quality limits%s%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scoredWindowsWords(evidence.Windows), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
+	rec.Message = fmt.Sprintf("%s passed this goal's quality limits%s%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scoredWindowsWords(evidence.Windows, planGatesFreshSamples(getPlan(ec.State["plan"]))), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
 	ec.State[qualityLadderKey] = rec
 	return rec
 }
 
 // scoredWindowsWords says what the verdict was measured on: the whole file is
-// encoded, but only the grid windows are scored and decide it ("on 5 windows,
-// 50 seconds in all"). Fresh windows only report and are not counted.
-func scoredWindowsWords(windows []transcode.FinalWindowScore) string {
+// encoded, but only the windows that decide it are scored ("on 5 windows, 50
+// seconds in all"): the grid, and the fresh windows of a gated plan. Fresh
+// windows of an ungated plan only report and are not counted.
+func scoredWindowsWords(windows []transcode.FinalWindowScore, gated bool) string {
 	n, seconds := 0, 0.0
 	for _, w := range windows {
-		if w.Role == "grid" {
+		if verdictWindow(w, gated) {
 			n, seconds = n+1, seconds+w.DurationSeconds
 		}
 	}

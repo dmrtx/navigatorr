@@ -170,8 +170,11 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		return fail("quality_final_candidate_probe_failed", err)
 	}
 	// The grid windows decide the verdict. Fresh windows (rules from the
-	// plan's own verification) were never part of the grid; they are
-	// measured after the grid, reported separately, and never gate the result.
+	// plan's own verification) were never part of the grid; they are measured
+	// after it and reported separately. A plan that gates them
+	// (GateFreshSamples) holds them to everything a grid window is held to;
+	// otherwise they only report, and one that cannot be measured is listed
+	// rather than failing (see measureFreshWindows).
 	grid := len(q.Samples)
 	windows := append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...)
 	concurrency := w.finalValidationConcurrency(len(windows))
@@ -273,7 +276,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			}
 			r.ssim = &score
 		}
-		if runChroma && pos < grid {
+		if runChroma && (pos < grid || q.GateFreshSamples) {
 			u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath, threads)
 			if err != nil {
 				return bad("quality_chroma_evidence_incomplete", fmt.Errorf("sample %d: %w", window.Index, err))
@@ -282,19 +285,33 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		}
 		return r
 	}
-	results, failed, err := runFinalWindows(ctx, len(windows), concurrency, measure)
+	results, failed, err := runFinalWindows(ctx, len(windows), concurrency, measureFreshWindows(q, measure))
 	if err != nil {
 		return e, err
 	}
-	if failed >= 0 && failed < grid {
+	// Only a verdict window fails here: an ungated fresh window's failure was
+	// turned into a report by measureFreshWindows.
+	if failed >= 0 {
 		return fail(results[failed].code, results[failed].err)
 	}
-	results, scores, freshVMAF := splitFinalWindowResults(q, results, failed)
+	results, scores, freshVMAF, unmeasured := splitFinalWindowResults(q, results)
 	e.Windows = scores
+	e.FreshUnmeasured = unmeasured
 	if len(freshVMAF) > 0 {
 		if combined, err := quality.CombineVMAF(freshVMAF); err == nil {
 			e.FreshVMAF = &combined
 		}
+	}
+	return judgeFinalWindows(e, q, results, runVMAF, runCAMBI, runSSIM, runChroma)
+}
+
+// judgeFinalWindows pools the verdict windows' measurements (the grid, and the
+// fresh windows of a plan that gates them) and checks them against the plan's
+// limits, filling e. Every window in results was measured.
+func judgeFinalWindows(e *transcode.FinalQualityEvidence, q *transcode.QualityValidationPlan, results []finalWindowResult, runVMAF, runCAMBI, runSSIM, runChroma bool) (*transcode.FinalQualityEvidence, error) {
+	fail := func(code string, cause error) (*transcode.FinalQualityEvidence, error) {
+		e.ReasonCodes = append(e.ReasonCodes, code)
+		return e, fmt.Errorf("%s: %w", code, cause)
 	}
 	var vmafSamples []quality.VMAFStats
 	var cambiSamples []quality.CAMBIStats
@@ -389,34 +406,62 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	return e, nil
 }
 
-// splitFinalWindowResults separates the grid's results, which decide the
-// verdict, from the fresh windows' (measured after the grid and reported
-// beside it). A fresh window that could not be measured is dropped, never a
-// failure, and the fresh windows that were measured stay: failed is the lowest
-// failing window, already known to lie beyond the grid. It returns the grid results, every measured window's scores in
-// time order and the fresh windows' VMAF statistics.
-func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []finalWindowResult, failed int) ([]finalWindowResult, []transcode.FinalWindowScore, []quality.VMAFStats) {
+// measureFreshWindows wraps a window measurement for runFinalWindows. A grid
+// window, or a fresh window of a plan that gates them, keeps its failure, which
+// fails final validation as the lowest failing window. An ungated fresh window
+// that cannot be measured is marked unmeasured instead: it does not stop the
+// windows after it, and splitFinalWindowResults reports it with its reason.
+func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(context.Context, int) finalWindowResult) func(context.Context, int) finalWindowResult {
 	grid := len(q.Samples)
-	fresh := results[grid:]
+	return func(ctx context.Context, pos int) finalWindowResult {
+		r := measure(ctx, pos)
+		if pos >= grid && !q.GateFreshSamples && r.code != "" {
+			return finalWindowResult{unmeasured: r.code}
+		}
+		return r
+	}
+}
+
+// splitFinalWindowResults separates the results that decide the verdict (the
+// grid's, and the fresh windows' when the plan gates them) from the report.
+// Every window was measured or, for an ungated fresh window, marked
+// unmeasured. It returns the verdict results, every measured window's scores
+// in time order, the fresh windows' VMAF statistics and the ungated fresh
+// windows that could not be measured.
+func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []finalWindowResult) ([]finalWindowResult, []transcode.FinalWindowScore, []quality.VMAFStats, []transcode.UnmeasuredWindow) {
+	grid := len(q.Samples)
 	var windows []transcode.FinalWindowScore
 	var freshVMAF []quality.VMAFStats
-	for i, r := range fresh {
-		if r.vmaf != nil && r.code == "" {
+	var unmeasured []transcode.UnmeasuredWindow
+	for i, r := range results {
+		role, window := transcode.WindowRoleFresh, transcode.BenchmarkSampleWindow{}
+		if i < grid {
+			role, window = "grid", q.Samples[i]
+		} else {
+			window = q.FreshSamples[i-grid]
+		}
+		if r.unmeasured != "" {
+			unmeasured = append(unmeasured, transcode.UnmeasuredWindow{StartSeconds: window.StartSeconds, DurationSeconds: window.DurationSeconds, ReasonCode: r.unmeasured})
+			continue
+		}
+		if r.vmaf == nil {
+			continue
+		}
+		if i >= grid {
 			freshVMAF = append(freshVMAF, *r.vmaf)
-			windows = append(windows, finalWindowScore(q.FreshSamples[i], "fresh", r.vmaf))
 		}
-	}
-	for i, r := range results[:grid] {
-		if r.vmaf != nil && r.code == "" {
-			score := finalWindowScore(q.Samples[i], "grid", r.vmaf)
-			if r.chroma != nil {
-				score.ChromaUDB, score.ChromaVDB = &r.chroma[0], &r.chroma[1]
-			}
-			windows = append(windows, score)
+		score := finalWindowScore(window, role, r.vmaf)
+		if r.chroma != nil {
+			score.ChromaUDB, score.ChromaVDB = &r.chroma[0], &r.chroma[1]
 		}
+		windows = append(windows, score)
 	}
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
-	return results[:grid], windows, freshVMAF
+	verdict := results[:grid]
+	if q.GateFreshSamples {
+		verdict = results
+	}
+	return verdict, windows, freshVMAF, unmeasured
 }
 
 // finalWindowScore is one measured window's VMAF scores for the report.
@@ -437,6 +482,9 @@ type finalWindowResult struct {
 	chroma *[2]float64
 	code   string
 	err    error
+	// unmeasured is the reason code of an ungated fresh window that could not
+	// be measured (measureFreshWindows); such a result carries nothing else.
+	unmeasured string
 }
 
 // minMetricThreadsPerPass is the fewest libvmaf threads a concurrent metric

@@ -112,7 +112,10 @@ type SizePolicy struct {
 }
 
 // FinalWindowScore is one final validation window's VMAF measurement. Role is
-// "grid" for the windows that decide the verdict and "fresh" for the others.
+// "grid" for the planned grid windows and "fresh" for the out-of-sample ones
+// (QualityValidationPlan.FreshSamples). The grid always decides the verdict;
+// fresh windows decide it too only when the plan gates them
+// (QualityValidationPlan.GateFreshSamples).
 type FinalWindowScore struct {
 	StartSeconds    float64 `json:"start_seconds"`
 	DurationSeconds float64 `json:"duration_seconds"`
@@ -131,11 +134,20 @@ type QualityValidationPlan struct {
 	Metric  string                  `json:"metric" yaml:"metric"`
 	Samples []BenchmarkSampleWindow `json:"samples" yaml:"samples"`
 	// FreshSamples are windows no search window covered. They are measured
-	// after the grid and reported apart; they never decide the verdict. Workers
-	// without the automatic_grid_verification capability reject the field.
-	FreshSamples           []BenchmarkSampleWindow `json:"fresh_samples,omitempty" yaml:"fresh_samples,omitempty"`
-	Quality                BenchmarkQualityConfig  `json:"quality" yaml:"quality"`
-	BenchmarkRequestDigest string                  `json:"benchmark_request_digest" yaml:"benchmark_request_digest"`
+	// after the grid and reported apart. Workers without the
+	// automatic_grid_verification capability reject the field.
+	FreshSamples []BenchmarkSampleWindow `json:"fresh_samples,omitempty" yaml:"fresh_samples,omitempty"`
+	// GateFreshSamples makes the fresh windows decide the verdict with the
+	// grid: they are pooled into the VMAF, CAMBI and SSIM statistics the limits
+	// are checked on, each is held to the per-window minimum, and one that
+	// cannot be measured fails validation like a grid window. Without it (every
+	// plan frozen before the field existed, whose digest it leaves unchanged)
+	// fresh windows only report, and one that cannot be measured is listed in
+	// FinalQualityEvidence.FreshUnmeasured. Workers without the
+	// fresh_sample_gate capability reject the field.
+	GateFreshSamples       bool                   `json:"gate_fresh_samples,omitempty" yaml:"gate_fresh_samples,omitempty"`
+	Quality                BenchmarkQualityConfig `json:"quality" yaml:"quality"`
+	BenchmarkRequestDigest string                 `json:"benchmark_request_digest" yaml:"benchmark_request_digest"`
 }
 
 type FinalQualityEvidence struct {
@@ -154,15 +166,28 @@ type FinalQualityEvidence struct {
 	// time order, so a result can be compared window by window with the search
 	// samples that predicted it. A failed run lists the windows it measured.
 	Windows []FinalWindowScore `json:"windows,omitempty"`
-	// FreshVMAF pools the fresh windows (see QualityValidationPlan.FreshSamples),
-	// which only report: they never decide the verdict.
-	FreshVMAF     *quality.VMAFStats     `json:"fresh_vmaf,omitempty"`
-	CAMBI         *quality.CAMBIStats    `json:"cambi,omitempty"`
-	SSIMMean      *float64               `json:"ssim_mean,omitempty"`
-	CompactChain  *CompactChainEvidence  `json:"compact_chain,omitempty"`
-	CompactOutput *CompactOutputEvidence `json:"compact_output,omitempty"`
-	VideoCopy     *VideoCopyEvidence     `json:"video_copy,omitempty"`
-	ChromaPSNR    *ChromaPSNREvidence    `json:"chroma_psnr,omitempty"`
+	// FreshVMAF pools the fresh windows (see QualityValidationPlan.FreshSamples)
+	// on their own. Whether they also decide the verdict, and so are pooled
+	// into VMAF too, is the plan's GateFreshSamples.
+	FreshVMAF *quality.VMAFStats `json:"fresh_vmaf,omitempty"`
+	// FreshUnmeasured lists the fresh windows of an ungated plan that could not
+	// be measured, with the reason a grid window would have failed on. A gated
+	// plan fails instead, so this is empty for it.
+	FreshUnmeasured []UnmeasuredWindow     `json:"fresh_unmeasured,omitempty"`
+	CAMBI           *quality.CAMBIStats    `json:"cambi,omitempty"`
+	SSIMMean        *float64               `json:"ssim_mean,omitempty"`
+	CompactChain    *CompactChainEvidence  `json:"compact_chain,omitempty"`
+	CompactOutput   *CompactOutputEvidence `json:"compact_output,omitempty"`
+	VideoCopy       *VideoCopyEvidence     `json:"video_copy,omitempty"`
+	ChromaPSNR      *ChromaPSNREvidence    `json:"chroma_psnr,omitempty"`
+}
+
+// UnmeasuredWindow is a final validation window that could not be measured
+// and the reason code a verdict window would have failed with.
+type UnmeasuredWindow struct {
+	StartSeconds    float64 `json:"start_seconds"`
+	DurationSeconds float64 `json:"duration_seconds"`
+	ReasonCode      string  `json:"reason_code"`
 }
 
 // ChromaPSNREvidence is the colour-plane check of a candidate whose source is

@@ -13,6 +13,7 @@ import (
 // the default of a size goal without a budget: compact_lossless audio.
 func preLevelSizePolicy(t *testing.T, p ModePolicySnapshot) ModePolicySnapshot {
 	t.Helper()
+	p = preFreshGatePolicy(p)
 	p.Profile.Audio.Mode = transcode.AudioModeCompactLossless
 	if err := digestModePolicy(&p); err != nil {
 		t.Fatal(err)
@@ -25,6 +26,7 @@ func preLevelSizePolicy(t *testing.T, p ModePolicySnapshot) ModePolicySnapshot {
 // budget.
 func objectCopySizePolicy(t *testing.T, p ModePolicySnapshot) ModePolicySnapshot {
 	t.Helper()
+	p = preFreshGatePolicy(p)
 	if p.Profile.Audio.Mode == transcode.AudioModeSizeAACBed {
 		p.Profile.Audio.Mode = transcode.AudioModeSizeAAC
 	}
@@ -96,16 +98,18 @@ func TestSizeGoalAudioLevelDigests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Digest != "sha256:c12b3cef75a61457581478f248e774e906163c9a2a27140920d07d56a52c6999" {
+	// Gating the fresh final windows moved it from sha256:2978b270...515c,
+	// which goals frozen before the gate keep.
+	if p.Digest != "sha256:7b3e3bf5ace2e00b42298b88e0b449dd10cdb86fdde18687e91d618dc6b81ec2" {
 		t.Fatalf("level 1 size snapshot digest changed: %s", p.Digest)
 	}
 	// Goals frozen at level 1 before the bed pair carry, and re-hash to, this.
-	if old := objectCopySizePolicy(t, p); old.Digest != "sha256:805faf3a437219494d0ad06caacf5ed8e0a7e7ce5c128aec1a6d5ee774b41b89" {
+	if old := objectCopySizePolicy(t, p); old.Digest != "sha256:35afd2257e56dd11179aef431a8e9b6af6066b940f72a5a0c25758c5e8ceaa63" {
 		t.Fatalf("object-copy level 1 size snapshot digest changed: %s", old.Digest)
 	}
 	// The digest snapshots frozen before carry (and still re-hash to): see
 	// TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack.
-	if old := preLevelSizePolicy(t, p); old.Digest != "sha256:4fd41a1c54c6224707e0639f01c01acc0d14673f8ff2bc260b6e3f2ad9ec0192" {
+	if old := preLevelSizePolicy(t, p); old.Digest != "sha256:0528c26b86a62a2b24af6617033cbeedb24d5fc47ccc3aeb5c22b47a3afe41d9" {
 		t.Fatalf("pre-level size snapshot digest changed: %s", old.Digest)
 	}
 }

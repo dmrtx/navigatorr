@@ -21,8 +21,8 @@ fails too, no candidate is offered and the original is preserved.
 
 | Goal | Encoder | Rungs (most compressed first) | VMAF minimums: mean / p5 / worst 5 s window |
 |---|---|---|---|
-| size | VideoToolbox, then x265 on a worker without it | VideoToolbox `-q:v` 60, 65, 70; x265 CRF 22, 19, 16 | 88 / 84 / 85 |
-| size, `allow_hardware=false` | x265 | CRF 22, 19, 16 | 88 / 84 / 85 |
+| size | VideoToolbox, then x265 on a worker without it | VideoToolbox `-q:v` 60, 65, 70; x265 CRF 24, 22, 19 | 88 / 84 / 85 |
+| size, `allow_hardware=false` | x265 | CRF 24, 22, 19 | 88 / 84 / 85 |
 | size with a budget | see "Size budget" | VideoToolbox `-q:v` 65, 58, 50, then average bitrate; or one two-pass x265 encode | floor 70 / 60 / 65 |
 | quality | x265 | CRF 20, 17, 14 | 95 / 93 / 92 |
 | x265_preserve | x265 | CRF 24, 21, 18 | 95 / 93 / 92 |
@@ -64,7 +64,13 @@ CAMBI banding (mean at most 6, peak at most 16), measured on
 deterministic source windows of at most 10 seconds against the original (see
 [PERCEPTUAL_QUALITY_VALIDATION.md](PERCEPTUAL_QUALITY_VALIDATION.md)). Size
 goals measure one window per 600 s of source (5 to 12 windows) plus up to two
-fresh windows that are reported but do not decide the verdict. Other goals, and
+fresh windows. A size goal frozen with `gate_final_fresh_windows` (every one
+frozen since that rule) judges the fresh windows with the grid, so a fresh
+window that misses a limit, or cannot be measured, fails the rung; such a goal
+only runs on a worker that reports `fresh_sample_gate` and stops before
+encoding otherwise. A goal frozen before the rule keeps its digest and its
+report-only fresh windows; one of those that cannot be measured is listed as
+unmeasured rather than dropped. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the

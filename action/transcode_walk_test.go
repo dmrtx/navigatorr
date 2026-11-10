@@ -21,7 +21,8 @@ func rehashPolicy(p ModePolicySnapshot) ModePolicySnapshot {
 
 // preWalkPolicy is a size v3 snapshot as it was frozen before the quality walk:
 // CRF 16/18/20 for quality at medium and then slow, no refinement, banding
-// measured with VMAF, and the operation budget in the snapshot.
+// measured with VMAF, the operation budget in the snapshot, and (like every
+// snapshot then) report-only fresh windows.
 func preWalkPolicy(p ModePolicySnapshot) ModePolicySnapshot {
 	size := *p.Size
 	size.FallbackQualityValues = []int{16, 18, 20}
@@ -35,7 +36,7 @@ func preWalkPolicy(p ModePolicySnapshot) ModePolicySnapshot {
 	}
 	p.Size = &size
 	p.OperationBudgetSeconds = modeOperationBudgetSeconds
-	return rehashPolicy(p)
+	return preFreshGatePolicy(p)
 }
 
 func TestAllowSlowPresetInput(t *testing.T) {

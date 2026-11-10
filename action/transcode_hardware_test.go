@@ -68,8 +68,10 @@ func TestSizePolicyHardwareDefaultsOnAndFreezes(t *testing.T) {
 	// TestMarginEraSnapshotsKeepTheirDigestAndMargin). The x265 quality walk
 	// gave the digest below; snapshots frozen without the margins but before
 	// it re-hash to sha256:1f903e42...1903 (see
-	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
-	if hw.Digest != "sha256:ac41a174311afba39ec13ba20d9df6cfab95555097805812a4e4e571159180b4" {
+	// TestPreWalkSnapshotsKeepTheirDigestAndSearch). Gating the fresh final
+	// windows gave the digest below; snapshots frozen before it re-hash to
+	// sha256:ac41a174...80b4 (see TestSnapshotsBeforeFreshGateKeepTheirDigest).
+	if hw.Digest != "sha256:86544135e717be739f6af81b5b730627f5532e226a8e83ddbfbd4cee872d2c42" {
 		t.Fatalf("size snapshot with the media engine on changed digest: %s", hw.Digest)
 	}
 	// The frozen snapshot round-trips through storage and re-verifies.

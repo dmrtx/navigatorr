@@ -61,8 +61,8 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 		workerV string
 	}{
 		"size with the media engine": {map[string]any{"mode": "size"}, RecipeQualityLadder, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}, transcode.ModePolicyV5},
-		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}, transcode.ModePolicyV5},
-		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}, transcode.ModePolicyV5},
+		"size without it":            {map[string]any{"mode": "size", "allow_hardware": false}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 22, 19}, transcode.ModePolicyV5},
+		"size, slow preset":          {map[string]any{"mode": "size", "allow_hardware": false, "allow_slow_preset": true}, RecipeQualityLadder, transcode.VideoCodecLibX265, "slow", []int{24, 22, 19}, transcode.ModePolicyV5},
 		"quality":                    {map[string]any{"mode": "quality"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}, ModePolicyVersion},
 		"x265_preserve":              {map[string]any{"mode": "x265_preserve"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}, ModePolicyVersion},
 		"compact":                    {map[string]any{"mode": "compact"}, RecipeQualityLadder, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}, transcode.ModePolicyV8},
@@ -81,7 +81,7 @@ func TestModePolicyV4FreezesOneRecipePerGoal(t *testing.T) {
 			// Only the VideoToolbox ladder carries a fallback: the x265 size
 			// ladder a worker without VideoToolbox runs instead.
 			if f := r.Fallback; (r.Kind == RecipeQualityLadder && r.VideoCodec == transcode.VideoCodecHEVCVideoToolbox) != (f != nil) ||
-				f != nil && (f.Kind != RecipeQualityLadder || f.VideoCodec != transcode.VideoCodecLibX265 || f.Preset != "medium" || !slices.Equal(f.QualityValues, []int{22, 19, 16}) || f.Fallback != nil) {
+				f != nil && (f.Kind != RecipeQualityLadder || f.VideoCodec != transcode.VideoCodecLibX265 || f.Preset != "medium" || !slices.Equal(f.QualityValues, []int{24, 22, 19}) || f.Fallback != nil) {
 				t.Fatalf("fallback %+v", r.Fallback)
 			}
 			// A stored (JSON round-tripped) snapshot verifies with its recipe.
@@ -215,8 +215,8 @@ func TestQualityLadderRecipes(t *testing.T) {
 		"quality":            {map[string]any{"mode": "quality"}, transcode.VideoCodecLibX265, "medium", []int{20, 17, 14}},
 		"x265_preserve":      {map[string]any{"mode": "x265_preserve"}, transcode.VideoCodecLibX265, "medium", []int{24, 21, 18}},
 		"compact":            {map[string]any{"mode": "compact"}, transcode.VideoCodecLibX265, "medium", []int{18, 16, 14}},
-		"size, x265":         {map[string]any{"allow_hardware": false}, transcode.VideoCodecLibX265, "medium", []int{22, 19, 16}},
-		"size, x265 slow":    {map[string]any{"allow_hardware": false, "allow_slow_preset": true}, transcode.VideoCodecLibX265, "slow", []int{22, 19, 16}},
+		"size, x265":         {map[string]any{"allow_hardware": false}, transcode.VideoCodecLibX265, "medium", []int{24, 22, 19}},
+		"size, x265 slow":    {map[string]any{"allow_hardware": false, "allow_slow_preset": true}, transcode.VideoCodecLibX265, "slow", []int{24, 22, 19}},
 		"size, VideoToolbox": {nil, transcode.VideoCodecHEVCVideoToolbox, "", []int{60, 65, 70}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -375,7 +375,9 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 		"no limits":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), &FinalQualitySummary{Verdict: "fail", FailedChecks: p5, Measured: QualityNumbers{VMAFP5: f(80)}}, "", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := qualityLadderProjectedMiss(tc.prev, tc.last)
+			// Equally spaced rungs: the projection is one more step of the
+			// same change, as it was before it scaled by the setting distance.
+			got := qualityLadderProjectedMiss(tc.prev, tc.last, 22, 19, 16)
 			if tc.metric == "" {
 				if got != nil {
 					t.Fatalf("stopped on %+v", got)
@@ -384,6 +386,59 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 			}
 			if got == nil || got.Metric != tc.metric || got.Projected < tc.projected-1e-6 || got.Projected > tc.projected+1e-6 {
 				t.Fatalf("got %+v, want %s projected to %.1f", got, tc.metric, tc.projected)
+			}
+		})
+	}
+}
+
+// The projection covers the next rung's setting distance: the last step's
+// change scaled by how much further the next rung is. Equally spaced ladders
+// project as they always did.
+func TestQualityLadderProjectionScalesByRungDistance(t *testing.T) {
+	for _, tc := range []struct {
+		prevQ, lastQ, nextQ int
+		scale               float64
+	}{
+		{24, 22, 19, 1.5},
+		{22, 19, 16, 1}, {20, 17, 14, 1}, {24, 21, 18, 1}, {18, 16, 14, 1}, {60, 65, 70, 1},
+		// Nothing to scale by: the unscaled line.
+		{22, 22, 19, 1}, {24, 22, 22, 1}, {22, 19, 21, 1},
+	} {
+		if got := qualityLadderStepScale(tc.prevQ, tc.lastQ, tc.nextQ); got != tc.scale {
+			t.Errorf("%d/%d/%d: scale %v, want %v", tc.prevQ, tc.lastQ, tc.nextQ, got, tc.scale)
+		}
+	}
+	f := func(v float64) *float64 { return &v }
+	limits := &QualityLimits{VMAFP5: f(84), CAMBIPeak: f(16)}
+	rung := func(code string, n QualityNumbers) *FinalQualitySummary {
+		return &FinalQualitySummary{Verdict: "fail", FailedChecks: []string{code}, Measured: n, Limits: limits}
+	}
+	p5 := "quality_vmaf_p5_below_minimum"
+	for name, tc := range map[string]struct {
+		prev, last          *FinalQualitySummary
+		prevQ, lastQ, nextQ int
+		projected           float64 // 0: the ladder goes on
+	}{
+		// 80.9+1.9*1.5 = 83.75 reaches the margin; 80.9+1.9 = 82.8 would not.
+		"24/22/19, scaled reaches": {rung(p5, QualityNumbers{VMAFP5: f(79.0)}), rung(p5, QualityNumbers{VMAFP5: f(80.9)}), 24, 22, 19, 0},
+		// 80.7+1.0*1.5 = 82.2 is still more than a point short.
+		"24/22/19, still short": {rung(p5, QualityNumbers{VMAFP5: f(79.7)}), rung(p5, QualityNumbers{VMAFP5: f(80.7)}), 24, 22, 19, 82.2},
+		// A ladder spaced evenly keeps the old projection: 82.8 stops it.
+		"22/19/16, unchanged": {rung(p5, QualityNumbers{VMAFP5: f(79.0)}), rung(p5, QualityNumbers{VMAFP5: f(80.9)}), 22, 19, 16, 82.8},
+		// CAMBI falls toward its maximum: 22 then 20 points to 17 at 1.5x.
+		"24/22/19, CAMBI scaled over": {rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(22)}), rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(20)}), 24, 22, 19, 0},
+		"22/19/16, CAMBI over":        {rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(22)}), rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(20)}), 22, 19, 16, 18},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := qualityLadderProjectedMiss(tc.prev, tc.last, tc.prevQ, tc.lastQ, tc.nextQ)
+			if tc.projected == 0 {
+				if got != nil {
+					t.Fatalf("stopped on %+v", got)
+				}
+				return
+			}
+			if got == nil || got.Projected < tc.projected-1e-6 || got.Projected > tc.projected+1e-6 {
+				t.Fatalf("got %+v, want projected %.2f", got, tc.projected)
 			}
 		})
 	}
@@ -400,7 +455,7 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 	if res.RewindTo != "" || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != reasonQualityNotMet || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || len(rec.Tried) != 2 {
 		t.Fatalf("trend stop: %+v %+v", res, rec)
 	}
-	for _, want := range []string{"x265 CRF 22 (VMAF p5 79.7 is below the minimum 84.0)", "x265 CRF 19 (VMAF p5 80.7", "stops before CRF 16", "VMAF p5 went from 79.7 at x265 CRF 22 to 80.7 at CRF 19", "about 81.7 at CRF 16", "minimum 84.0", "original preserved"} {
+	for _, want := range []string{"x265 CRF 24 (VMAF p5 79.7 is below the minimum 84.0)", "x265 CRF 22 (VMAF p5 80.7", "stops before CRF 19", "VMAF p5 went from 79.7 at x265 CRF 24 to 80.7 at CRF 22", "about 82.2 at CRF 19", "minimum 84.0", "original preserved"} {
 		if !strings.Contains(rec.Message, want) {
 			t.Fatalf("message %q lacks %q", rec.Message, want)
 		}
@@ -410,13 +465,24 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 		t.Fatalf("explanation %+v", e)
 	}
 
+	// p5 79.0 then 80.9 is 1.9 points over two CRF steps; the next rung is
+	// three steps on, so it points to 83.75, within the margin, and CRF 19 is
+	// encoded. One more step of the same change (82.8) would have stopped it.
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(90, 79.0))
+	res = advanceRung(t, c, failedRung(90, 80.9))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || getPlan(c.ec.State["plan"]).Quality != 19 {
+		t.Fatalf("scaled trend on course: %+v %+v", res, rec)
+	}
+
 	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
 	planRecipe(t, c)
 	// p5 74.7 then 79.3 points to 83.9, 0.1 short of the floor;
-	// that is within the projection's margin, so CRF 16 is measured.
+	// that is within the projection's margin, so CRF 19 is measured.
 	advanceRung(t, c, failedRung(90, 74.7))
 	res = advanceRung(t, c, failedRung(90, 79.3))
-	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || rec.Outcome != QualityLadderEncoding || getPlan(c.ec.State["plan"]).Quality != 16 {
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || rec.Outcome != QualityLadderEncoding || getPlan(c.ec.State["plan"]).Quality != 19 {
 		t.Fatalf("trend on course: %+v %+v", res, rec)
 	}
 }
@@ -851,13 +917,13 @@ func TestVideoToolboxLadderFallsBackToX265(t *testing.T) {
 	planRecipe(t, c)
 	rec := QualityLadderOf(c.ec.State)
 	plan := getPlan(c.ec.State["plan"])
-	if rec == nil || rec.VideoCodec != transcode.VideoCodecLibX265 || rec.Preset != "medium" || !slices.Equal(rec.Values, []int{22, 19, 16}) || rec.Choice == nil || rec.Choice.Reason != SizeBudgetChoiceWorkerUnsupported || rec.Choice.VideoCodec != transcode.VideoCodecLibX265 {
+	if rec == nil || rec.VideoCodec != transcode.VideoCodecLibX265 || rec.Preset != "medium" || !slices.Equal(rec.Values, []int{24, 22, 19}) || rec.Choice == nil || rec.Choice.Reason != SizeBudgetChoiceWorkerUnsupported || rec.Choice.VideoCodec != transcode.VideoCodecLibX265 {
 		t.Fatalf("record %+v", rec)
 	}
 	if !strings.HasPrefix(rec.Message, rec.Choice.Message) || !strings.Contains(rec.Choice.Message, "cannot encode with VideoToolbox") {
 		t.Fatalf("message %q", rec.Message)
 	}
-	if plan.VideoCodec != transcode.VideoCodecLibX265 || plan.Quality != 22 || plan.Preset != "medium" || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+	if plan.VideoCodec != transcode.VideoCodecLibX265 || plan.Quality != 24 || plan.Preset != "medium" || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatalf("first rung %+v", plan)
 	}
 	// The record's choice is what makes the x265 plan the frozen one.
@@ -866,7 +932,7 @@ func TestVideoToolboxLadderFallsBackToX265(t *testing.T) {
 	if qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, &unchosen) {
 		t.Fatal("an x265 rung matched the VideoToolbox recipe without the recorded choice")
 	}
-	for rung, q := range []int{19, 16} {
+	for rung, q := range []int{22, 19} {
 		advanceRung(t, c, failedRung(85, float64(80+7*rung)))
 		rec = QualityLadderOf(c.ec.State)
 		if next := getPlan(c.ec.State["plan"]); rec.Rung != rung+1 || next.Quality != q || next.VideoCodec != transcode.VideoCodecLibX265 || !qualityLadderPlanMatches(c.snapshot, c.ec.State, next, rec) {
@@ -948,21 +1014,27 @@ func optimizingProfileConfig() map[string]any {
 	return profile
 }
 
-// The pass message counts only the grid windows that decided the verdict.
+// The pass message counts only the windows that decided the verdict: the grid,
+// and the fresh windows only of a plan that gated them.
 func TestScoredWindowsWords(t *testing.T) {
 	grid := func(d float64) transcode.FinalWindowScore {
 		return transcode.FinalWindowScore{DurationSeconds: d, Role: "grid"}
 	}
 	fresh := transcode.FinalWindowScore{DurationSeconds: 10, Role: "fresh"}
-	for want, windows := range map[string][]transcode.FinalWindowScore{
-		" on windows sampled across the file":  nil,
-		" on windows sampled across the file ": {fresh},
-		" on 1 window of 10 seconds":           {grid(10), fresh},
-		" on 3 windows, 25 seconds in all":     {grid(10), grid(10), fresh, grid(4.6)},
+	for _, tc := range []struct {
+		windows        []transcode.FinalWindowScore
+		ungated, gated string
+	}{
+		{nil, " on windows sampled across the file", " on windows sampled across the file"},
+		{[]transcode.FinalWindowScore{fresh}, " on windows sampled across the file", " on 1 window of 10 seconds"},
+		{[]transcode.FinalWindowScore{grid(10), fresh}, " on 1 window of 10 seconds", " on 2 windows, 20 seconds in all"},
+		{[]transcode.FinalWindowScore{grid(10), grid(10), fresh, grid(4.6)}, " on 3 windows, 25 seconds in all", " on 4 windows, 35 seconds in all"},
 	} {
-		// A trailing space only keeps the map keys apart.
-		if got := scoredWindowsWords(windows); got != strings.TrimRight(want, " ") {
-			t.Fatalf("%v: got %q, want %q", windows, got, strings.TrimRight(want, " "))
+		if got := scoredWindowsWords(tc.windows, false); got != tc.ungated {
+			t.Fatalf("ungated %v: got %q, want %q", tc.windows, got, tc.ungated)
+		}
+		if got := scoredWindowsWords(tc.windows, true); got != tc.gated {
+			t.Fatalf("gated %v: got %q, want %q", tc.windows, got, tc.gated)
 		}
 	}
 }

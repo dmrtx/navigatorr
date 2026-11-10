@@ -53,8 +53,10 @@ func TestSizeModePolicyV3Snapshot(t *testing.T) {
 	// refinement rungs, banding measured after VMAF, no operation budget) gave
 	// the digest below; snapshots frozen without the margin but before it
 	// re-hash to sha256:5ca0b1d8...0976 (see
-	// TestPreWalkSnapshotsKeepTheirDigestAndSearch).
-	if p.Digest != "sha256:cb53779c2cbdfe1d2f3ef41b16a2c986ddac436f8b19f4801cb4cd4e830b825c" {
+	// TestPreWalkSnapshotsKeepTheirDigestAndSearch). Gating the fresh final
+	// windows gave the digest below; snapshots frozen before it re-hash to
+	// sha256:cb53779c...825c (see TestSnapshotsBeforeFreshGateKeepTheirDigest).
+	if p.Digest != "sha256:f910e03e43ad042631b944110ca35181958d24c0171269014c10b0334bc527c5" {
 		t.Fatalf("size v3 snapshot digest changed: %s", p.Digest)
 	}
 	// The quality floor is v2's, unchanged: VMAF mean 88, p5 84, worst 5 s

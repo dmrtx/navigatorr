@@ -146,6 +146,20 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 			return StepResult{Status: StepFailed, Error: errTrackSelectionWorker + " before encoding"}, nil
 		}
 	}
+	// A worker that does not know the gate refuses the plan; one that ignored
+	// it would pass candidates the fresh windows fail.
+	if q := plan.QualityValidation; q != nil && q.GateFreshSamples && !getBool(ec.State, "transcode_reconcile") {
+		caps, err := e.actionWorker(ec).Capabilities(ctx)
+		if res, ok := capabilityReadDeferred(err); ok {
+			return res, nil
+		}
+		if err != nil {
+			return StepResult{Status: StepFailed, Error: fmt.Sprintf("checking fresh window gate capability: %v", err)}, nil
+		}
+		if !caps.FreshSampleGate {
+			return StepResult{Status: StepFailed, Error: errFreshSampleGateWorker + " before encoding"}, nil
+		}
+	}
 	if transcode.IsSizeAudioOnlyPlan(plan) && !getBool(ec.State, "transcode_reconcile") {
 		caps, err := e.actionWorker(ec).Capabilities(ctx)
 		if res, ok := capabilityReadDeferred(err); ok {

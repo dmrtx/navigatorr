@@ -152,6 +152,12 @@ type WorkerCapabilities struct {
 	// it submits one. Like TrackSelection, it is not part of the pinned
 	// capability fingerprint.
 	CompactKeepHDR bool `json:"compact_keep_hdr,omitempty"`
+	// FreshSampleGate reports a worker that runs final validation plans with
+	// gate_fresh_samples: the fresh windows decide the verdict with the grid.
+	// Older workers refuse the field, so the coordinator checks this before it
+	// submits one. Like TrackSelection, it is not part of the pinned capability
+	// fingerprint.
+	FreshSampleGate bool `json:"fresh_sample_gate,omitempty"`
 	// SearchBudgetExtension reports a worker that accepts search_extension on
 	// mode benchmarks: the search budget stretches while work keeps finishing,
 	// up to a hard cap. Older workers reject the field.
@@ -166,7 +172,7 @@ type WorkerCapabilities struct {
 	// candidates on every window of the final validation grid (five to twelve
 	// sample windows, holdout_windows "final_grid"), keeps verifying until one
 	// passes or none is eligible (verify_until_exhausted), and measures the
-	// fresh final validation windows apart from the verdict. Older workers
+	// fresh final validation windows (gated only with FreshSampleGate). Older workers
 	// reject those fields, so the server sends them only to workers that
 	// advertise this.
 	AutomaticGridVerification bool `json:"automatic_grid_verification,omitempty"`

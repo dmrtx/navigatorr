@@ -248,9 +248,14 @@ type AutomaticSearchRules struct {
 	// limit ends it earlier, and the result says so. Absent keeps two attempts.
 	VerifyUntilExhausted bool `json:"verify_until_exhausted,omitempty"`
 	// FinalFreshWindows is how many windows no search window covers final
-	// validation also measures, reported apart and never deciding its verdict.
-	// It is read by the server when it plans final validation.
+	// validation also measures, reported apart. It is read by the server when
+	// it plans final validation.
 	FinalFreshWindows int `json:"final_fresh_windows,omitempty"`
+	// GateFinalFreshWindows makes those fresh windows decide final
+	// validation's verdict with the grid (QualityValidationPlan.GateFreshSamples).
+	// Absent, as in every policy frozen before it existed (whose digest it
+	// leaves unchanged), they only report. Read by the server only.
+	GateFinalFreshWindows bool `json:"gate_final_fresh_windows,omitempty"`
 	// QualityWalk measures the libx265 rungs of the quality fallback after the
 	// family's highest-quality rung, one at a time, most compressed first. The
 	// walk stops at the first rung that is not a quality failure (a lower CRF
@@ -282,6 +287,9 @@ func (r *AutomaticSearchRules) Validate() error {
 	}
 	if r.FinalFreshWindows < 0 || r.FinalFreshWindows > MaxFinalFreshWindows {
 		return fmt.Errorf("automatic search final_fresh_windows must be in [0,%d]", MaxFinalFreshWindows)
+	}
+	if r.GateFinalFreshWindows && r.FinalFreshWindows == 0 {
+		return errors.New("automatic search gate_final_fresh_windows needs final_fresh_windows")
 	}
 	if len(r.QualityFallbackPresets) > 3 {
 		return errors.New("automatic search allows at most three quality fallback presets")
