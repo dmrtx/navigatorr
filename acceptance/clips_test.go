@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/internal/transcodeworker"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -200,15 +201,21 @@ func (k *kase) compareTracks(src, cand string, plan *transcode.Plan, orig, got p
 	k.require(len(gotAudio) == len(keptAudio), "candidate has %d audio streams, the plan keeps %d", len(gotAudio), len(keptAudio))
 	k.require(len(gotSubs) == len(keptSubs), "candidate has %d subtitle streams, the plan keeps %d", len(gotSubs), len(keptSubs))
 
-	// Audio: language and title always; the dispositions of tracks that were
-	// copied (the same codec in the candidate as in the source).
+	// Audio: language always; the title and dispositions of tracks that were
+	// copied (the same codec in the candidate as in the source). A converted
+	// track's title is the worker's rename of a title that names the source
+	// format ("Japanese 5.1 FLAC" becomes "Japanese AAC 5.1"), and the source
+	// title otherwise.
 	for i, a := range keptAudio {
 		b := gotAudio[i]
 		k.require(lang(a) == lang(b), "audio %d (source stream %d) language %q became %q", i, a.Index, lang(a), lang(b))
-		k.require(a.Tags["title"] == b.Tags["title"], "audio %d (source stream %d) title %q became %q", i, a.Index, a.Tags["title"], b.Tags["title"])
 		if a.CodecName == b.CodecName {
+			k.require(a.Tags["title"] == b.Tags["title"], "copied audio %d (source stream %d) title %q became %q", i, a.Index, a.Tags["title"], b.Tags["title"])
 			k.require(sameDisposition(a.Disposition, b.Disposition), "copied audio %d (source stream %d) dispositions %v became %v", i, a.Index, a.Disposition, b.Disposition)
+			continue
 		}
+		want := transcodeworker.ConvertedAudioTitle(a.Tags["title"], a.ChannelLayout, a.Channels)
+		k.require(b.Tags["title"] == want, "converted audio %d (source stream %d) title %q became %q, the conversion names it %q", i, a.Index, a.Tags["title"], b.Tags["title"], want)
 	}
 
 	// Subtitles: a copied track (the plan's action says copy) keeps language,
@@ -235,11 +242,13 @@ func (k *kase) compareTracks(src, cand string, plan *transcode.Plan, orig, got p
 	sc, gc := k.s.chapters(k.T, src), k.s.chapters(k.T, cand)
 	k.require(sc == gc, "candidate has %d chapters, the source %d", gc, sc)
 
-	// Video: every source picture is encoded, so the packet counts are equal.
-	// (The worker tolerates a stream copy that drops leading non-key packets;
-	// an encode passes them all through, and this suite exposes no tolerance.)
+	// Video: every picture the source decodes to is encoded, so the candidate
+	// has the source's packets less those its first picture group shows no
+	// picture for (an open group's leading pictures in a clip cut with a
+	// stream copy). No other tolerance.
 	sv, gv := k.s.videoFrames(k.T, src), k.s.videoFrames(k.T, cand)
-	k.require(sv == gv, "candidate video has %d packets, the source %d", gv, sv)
+	dropped := k.s.headDropped(k.T, src)
+	k.require(gv == sv-dropped, "candidate video has %d packets, the source %d of which %d decode to no picture", gv, sv, dropped)
 }
 
 // attachmentSet is the attachments as a sorted multiset of (filename,
@@ -257,6 +266,11 @@ func attachmentSet(p probeInfo) string {
 func (s *suite) streamPackets(t *testing.T, path string, index int) int {
 	t.Helper()
 	out := s.run(t, s.ffprobe, "-v", "error", "-count_packets", "-select_streams", strconv.Itoa(index), "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", path)
+	if strings.TrimSpace(out) == "N/A" {
+		// ffprobe's count for a stream with no packets: a clip's signs
+		// track can have no line in the stretch it was cut from.
+		return 0
+	}
 	n, err := strconv.Atoi(strings.TrimSpace(out))
 	if err != nil {
 		t.Fatalf("counting packets of stream %d of %s: %q", index, filepath.Base(path), out)

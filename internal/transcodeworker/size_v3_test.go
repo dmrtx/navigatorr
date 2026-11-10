@@ -142,7 +142,7 @@ func TestSizeV3RealEncodeMain10WithPCM(t *testing.T) {
 		t.Fatalf("converted title %q", audio[0].Title)
 	}
 	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
-	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err != nil {
 		t.Fatalf("pre-publish validation: %v", err)
 	}
 	info, err := os.Stat(candidate)

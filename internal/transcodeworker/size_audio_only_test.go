@@ -145,7 +145,7 @@ func TestSizeAudioOnlyRealCopyWithLosslessAudio(t *testing.T) {
 		audio[1].Codec != "aac" || audio[1].Channels != 2 || audio[1].Language != "spa" || audio[2].Codec != "ac3" || audio[2].Language != "jpn" {
 		t.Fatalf("audio policy mismatch: %+v", audio)
 	}
-	attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0)
+	attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0)
 	if err != nil {
 		t.Fatalf("pre-publish validation: %v", err)
 	}

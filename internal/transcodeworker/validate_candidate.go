@@ -117,91 +117,112 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	}
 	srcVideo, candVideo := firstMainVideo(srcProbe.Streams), firstMainVideo(candProbe.Streams)
 	if candVideo == nil {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate contains no video streams (fail closed, never publish)", ErrSourceInvalid))
+		return attest, checkInvalid("video", fmt.Errorf("%w: local candidate contains no video streams (fail closed, never publish)", ErrContentNotPreserved))
 	}
 	if strings.TrimSpace(candVideo.Codec) == "" {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video stream has empty codec (fail closed, never publish)", ErrSourceInvalid))
+		return attest, checkInvalid("video", fmt.Errorf("%w: local candidate video stream has empty codec (fail closed, never publish)", ErrContentNotPreserved))
 	}
 	// Video count must be preserved (exactly one video stream in practice).
 	// Cover art (attached pictures) is counted separately so a cover cannot
 	// stand in for programme video or vanish unnoticed.
 	if sv, cv := countMainVideo(srcProbe.Streams), countMainVideo(candProbe.Streams); sv > 0 && cv != sv {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cv, sv))
+		return attest, checkInvalid("video", fmt.Errorf("%w: local candidate video count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, cv, sv))
 	}
 	// The plan unmaps the source's preview tracks. One left in the candidate
 	// means the map did not take: a second video the programme count above
 	// does not see.
 	if len(execPlan.Thumbnails) > 0 {
 		if _, kept := splitProgrammeVideo(candProbe.Streams); len(kept) > 0 {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate still carries %d preview image track(s) the plan leaves out (fail closed, never publish)", ErrSourceInvalid, len(kept)))
+			return attest, checkInvalid("preview tracks", fmt.Errorf("%w: local candidate still carries %d preview image track(s) the plan leaves out (fail closed, never publish)", ErrContentNotPreserved, len(kept)))
 		}
 	}
 	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrSourceInvalid, cc, sc))
+		return attest, checkInvalid("cover art", fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, cc, sc))
 	}
 	// Codec: the candidate must actually be the requested target codec.
 	if expected := expectedWorkerVideoCodec(execPlan.Plan.VideoCodec); expected != "" {
 		if got := norm(candVideo.Codec); !codecMatches(expected, got) {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate video codec %q does not match expected %q (fail closed, never publish)", ErrSourceInvalid, candVideo.Codec, expected))
+			return attest, checkInvalid("video", fmt.Errorf("%w: local candidate video codec %q does not match expected %q (fail closed, never publish)", ErrContentNotPreserved, candVideo.Codec, expected))
 		}
 	}
 	// Expected bit depth is a hard invariant.
 	if execPlan.Plan.ExpectedBitDepth > 0 && candVideo.BitDepth > 0 && candVideo.BitDepth != execPlan.Plan.ExpectedBitDepth {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate bit depth %d != expected %d (fail closed, never publish)", ErrSourceInvalid, candVideo.BitDepth, execPlan.Plan.ExpectedBitDepth))
+		return attest, checkInvalid("video", fmt.Errorf("%w: local candidate bit depth %d != expected %d (fail closed, never publish)", ErrContentNotPreserved, candVideo.BitDepth, execPlan.Plan.ExpectedBitDepth))
 	}
 	if err := pixelFormatCompatible(execPlan.Plan.PixelFormat, candVideo.PixelFormat, execPlan.Plan.ExpectedBitDepth); err != nil {
-		return attest, err
+		return attest, failedCheck("video", err)
 	}
 	// Compact plans resize to their frozen target; everything else preserves
 	// the source resolution.
 	if c := execPlan.Plan.Compact; c != nil {
 		if candVideo.Width != c.TargetWidth || candVideo.Height != c.TargetHeight || srcVideo == nil || srcVideo.Width != c.SourceWidth || srcVideo.Height != c.SourceHeight {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight))
+			return attest, checkInvalid("video", fmt.Errorf("%w: local candidate resolution %dx%d != compact target %dx%d (fail closed, never publish)", ErrContentNotPreserved, candVideo.Width, candVideo.Height, c.TargetWidth, c.TargetHeight))
 		}
 	} else if srcVideo != nil && srcVideo.Width > 0 && srcVideo.Height > 0 && candVideo.Width > 0 && candVideo.Height > 0 {
 		if srcVideo.Width != candVideo.Width || srcVideo.Height != candVideo.Height {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrSourceInvalid, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height))
+			return attest, checkInvalid("video", fmt.Errorf("%w: local candidate resolution %dx%d != source %dx%d (fail closed, never publish)", ErrContentNotPreserved, candVideo.Width, candVideo.Height, srcVideo.Width, srcVideo.Height))
 		}
 	}
 	if err := validateAudioPreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
-		return attest, err
-	}
-	if w.measuresAudioPackets(execPlan.Plan, srcProbe) {
-		if err := w.validateAudioPackets(ctx, execPlan.Plan, srcProbe.Path, localCandidate, srcProbe, candProbe); err != nil {
-			return attest, err
-		}
+		return attest, failedCheck("audio tracks", err)
 	}
 	if err := validateSubtitlePreservation(execPlan.Plan, srcProbe.Streams, candProbe.Streams); err != nil {
-		return attest, err
+		return attest, failedCheck("subtitle tracks", err)
 	}
-	if err := w.validateSubtitlePackets(ctx, execPlan.Plan, srcProbe, localCandidate, candProbe); err != nil {
-		return attest, err
+	// The candidate's packets are read in one pass for every kind the
+	// source's were measured for before the encode; the source is not read
+	// again.
+	measured := packetScanRequest{video: -1}
+	if srcProbe.videoScan != nil {
+		measured.video = 0
 	}
-	// The container's duration is its longest stream's: only the video's
-	// own frames show a video that stops early.
-	if err := w.validateVideoCompleteness(ctx, srcProbe, localCandidate, candVideo); err != nil {
-		return attest, err
+	if srcProbe.audioSpans != nil {
+		measured.audio = map[int]bool{}
+	}
+	if srcProbe.subtitlePackets != nil {
+		measured.subtitles = map[int]bool{}
+	}
+	if req := candidateScanFor(measured, candProbe.Streams, candVideo); req.any() {
+		candScan, err := w.packetsForJob(ctx, localCandidate, req)
+		if err != nil {
+			return attest, fmt.Errorf("candidate packet validation: %w", err)
+		}
+		if err := validateAudioPackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.audio)); err != nil {
+			return attest, failedCheck("audio packets", err)
+		}
+		if err := validateSubtitlePackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.subtitles)); err != nil {
+			return attest, failedCheck("subtitle events", err)
+		}
+		// The container's duration is its longest stream's: only the
+		// video's own frames show a video that stops early.
+		if req.video >= 0 {
+			if err := validateVideoCompleteness(srcProbe, candScan.video); err != nil {
+				return attest, failedCheck("video completeness", err)
+			}
+		}
 	}
 	// Attachment preservation policy: the same files, not just as many.
 	if execPlan.Plan.PreserveAttachments {
-		sa, ca := countStreams(srcProbe.Streams, "attachment"), countStreams(candProbe.Streams, "attachment")
-		if sa > 0 && ca != sa {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate attachment count %d != source %d (fail closed, never publish)", ErrSourceInvalid, ca, sa))
+		var covers []StreamAction
+		for _, s := range execPlan.Streams {
+			if s.Kind == "cover" {
+				covers = append(covers, s)
+			}
 		}
-		if err := attachmentsPreserved(srcProbe.Streams, candProbe.Streams); err != nil {
-			return attest, err
+		if err := attachmentsPreserved(covers, srcProbe.Streams, candProbe.Streams); err != nil {
+			return attest, failedCheck("attachments", err)
 		}
 	}
 	// Chapter preservation policy (only when the probe could count chapters).
 	if execPlan.Plan.PreserveChapters && srcProbe.Chapters > 0 && candProbe.Chapters != srcProbe.Chapters {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate chapter count %d != source %d (fail closed, never publish)", ErrSourceInvalid, candProbe.Chapters, srcProbe.Chapters))
+		return attest, checkInvalid("chapters", fmt.Errorf("%w: local candidate chapter count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, candProbe.Chapters, srcProbe.Chapters))
 	}
 	// Duration sanity mirrors the historical coordinator tolerance (3s absolute
 	// and 2% relative). A diverged duration is never published.
 	if srcProbe.DurationSec > 0 && candProbe.DurationSec > 0 {
 		d := math.Abs(candProbe.DurationSec - srcProbe.DurationSec)
 		if d > 3 && (d/srcProbe.DurationSec) > 0.02 {
-			return attest, candidateInvalid(fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrSourceInvalid, candProbe.DurationSec, srcProbe.DurationSec, d))
+			return attest, checkInvalid("duration", fmt.Errorf("%w: local candidate duration %.1fs diverges from source %.1fs (diff %.1fs, fail closed, never publish)", ErrContentNotPreserved, candProbe.DurationSec, srcProbe.DurationSec, d))
 		}
 	}
 	// Within a job run this is a strict stat-fingerprint check against the
@@ -212,7 +233,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		return attest, candidateHashFailure(err)
 	}
 	if verifiedSHA != sha {
-		return attest, candidateInvalid(fmt.Errorf("%w: local candidate changed during validation; never publish", ErrSourceInvalid))
+		return attest, candidateInvalid(fmt.Errorf("%w: local candidate changed during validation; never publish", ErrContentNotPreserved))
 	}
 	attest = CandidateAttestation{
 		SizeBytes:   info.Size(),
@@ -286,15 +307,39 @@ func expectedWorkerVideoCodec(codec string) string {
 	}
 }
 
+// copiedCodecMatches holds a copied track's codec, as the probe names it, to
+// the source track's: exactly, for a copy keeps the bitstream (a substring
+// test let an E-AC-3 track pass for AC-3).
+func copiedCodecMatches(source, got string) bool {
+	return source == "" || (got != "" && norm(source) == norm(got))
+}
+
+// encodedCodecNames maps the encoder or plan names a converted track is asked
+// for to the codec the probe reports for its output.
+var encodedCodecNames = map[string]string{
+	"hevc_videotoolbox": "hevc", "libx265": "hevc", "x265": "hevc", "h265": "hevc",
+	"h264_videotoolbox": "h264", "libx264": "h264", "x264": "h264", "avc": "h264", "avc1": "h264",
+	"aac_at": "aac", "libfdk_aac": "aac",
+	"libopus": "opus",
+	"srt":     "subrip",
+}
+
+// codecMatches holds a converted track's codec, as the probe names it, to the
+// encoder or plan name it was asked for (libx265 → hevc, aac_at → aac,
+// libopus → opus). A name with no mapping keeps the comparison it always had:
+// either name contains the other.
 func codecMatches(expected, got string) bool {
+	expected, got = norm(expected), norm(got)
 	if expected == "" {
 		return true
 	}
 	if got == "" {
 		return false
 	}
-	// Exact: a substring test let an E-AC-3 track pass for AC-3.
-	return got == expected
+	if probe, ok := encodedCodecNames[expected]; ok {
+		return got == probe
+	}
+	return strings.Contains(got, expected) || strings.Contains(expected, got)
 }
 
 // pixelFormatCompatible verifies the candidate's pixel format is compatible
@@ -319,13 +364,17 @@ func pixelFormatCompatible(expected, actual string, expectedBitDepth int) error 
 	if eok && aok && fe == fa {
 		return nil
 	}
-	return candidateInvalid(fmt.Errorf("%w: local candidate pixel format %q is incompatible with requested %q (fail closed, never publish)", ErrSourceInvalid, actual, expected))
+	return candidateInvalid(fmt.Errorf("%w: local candidate pixel format %q is incompatible with requested %q (fail closed, never publish)", ErrContentNotPreserved, actual, expected))
 }
 
 func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) error {
 	srcAudio, candAudio := plannedStreams(plan, src, "audio"), streamsOfKind(cand, "audio")
 	if len(candAudio) != len(srcAudio) {
-		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != %s %d (fail closed, never publish)", ErrSourceInvalid, len(candAudio), plannedLabel(plan), len(srcAudio)))
+		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != %s %d (fail closed, never publish)", ErrContentNotPreserved, len(candAudio), plannedLabel(plan), len(srcAudio)))
+	}
+	planned := make([]map[string]int, len(srcAudio))
+	for i, s := range srcAudio {
+		planned[i] = s.Disposition
 	}
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
@@ -337,34 +386,35 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		// A size level's AAC-LC track is checked too: the profile is half of
 		// what tells a level 1 track from a level 2 one.
 		if transcode.IsAudioLevelMode(plan.AudioMode) && target != "copy" && !out.HEAAC && !strings.EqualFold(b.Profile, "LC") {
-			return candidateInvalid(fmt.Errorf("%w: local candidate audio stream %d is %q, expected AAC-LC (fail closed, never publish)", ErrSourceInvalid, i, b.Profile))
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio stream %d is %q, expected AAC-LC (fail closed, never publish)", ErrContentNotPreserved, i, b.Profile))
 		}
 		// Only an AAC conversion can remap the layout. A copied track keeps
 		// its bitstream, and Matroska reports no layout for PCM, so a copy
 		// from MOV/MP4/AVI legitimately comes back as "".
 		checkLayout := target != "copy"
+		matches := codecMatches(target, b.Codec)
 		if target == "copy" {
-			target = norm(a.Codec)
+			target, matches = norm(a.Codec), copiedCodecMatches(a.Codec, b.Codec)
 		}
-		if !codecMatches(target, norm(b.Codec)) {
-			return candidateInvalid(fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrSourceInvalid, b.Codec, i, target))
+		if !matches {
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrContentNotPreserved, b.Codec, i, target))
 		}
 		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
-			return candidateInvalid(fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Language, i, a.Language))
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrContentNotPreserved, b.Language, i, a.Language))
 		}
 		if a.Channels > 0 && a.Channels != b.Channels {
-			return candidateInvalid(fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrSourceInvalid, b.Channels, i, a.Channels))
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio channels %d at stream %d != source %d (fail closed, never publish)", ErrContentNotPreserved, b.Channels, i, a.Channels))
 		}
 		if checkLayout && !transcode.SameAudioLayout(a.Layout, b.Layout) {
-			return candidateInvalid(fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrSourceInvalid, b.Layout, i, a.Layout))
+			return candidateInvalid(fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrContentNotPreserved, b.Layout, i, a.Layout))
 		}
-		if d := transcode.DispositionChange(a.Disposition, b.Disposition, false); d != "" {
-			return candidateInvalid(fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrSourceInvalid, d, i))
+		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultAudio(i, a.Disposition, planned)); d != "" {
+			return checkInvalid("audio disposition", fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
 		}
 		// A copied track keeps its name; a converted one may be renamed
 		// (convertedAudioTitle), which the encode alone decides.
 		if out.Codec == "copy" && a.Title != b.Title {
-			return candidateInvalid(fmt.Errorf("%w: copied audio stream %d is named %q, the source track %q (fail closed, never publish)", ErrSourceInvalid, i, b.Title, a.Title))
+			return checkInvalid("audio title", fmt.Errorf("%w: copied audio stream %d is named %q, the source track %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, a.Title))
 		}
 	}
 	return nil
@@ -373,7 +423,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream) error {
 	srcSubs, candSubs := plannedStreams(plan, src, "subtitle"), streamsOfKind(cand, "subtitle")
 	if len(candSubs) != len(srcSubs) {
-		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != %s %d (fail closed, never publish)", ErrSourceInvalid, len(candSubs), plannedLabel(plan), len(srcSubs)))
+		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != %s %d (fail closed, never publish)", ErrContentNotPreserved, len(candSubs), plannedLabel(plan), len(srcSubs)))
 	}
 	planned := make([]map[string]int, len(srcSubs))
 	for i, s := range srcSubs {
@@ -385,37 +435,37 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 		if !ok {
 			// The build step rejects a subtitle without an action; a
 			// candidate that has one anyway was not made by this plan.
-			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has no planned action (fail closed, never publish)", ErrSourceInvalid, i))
+			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has no planned action (fail closed, never publish)", ErrContentNotPreserved, i))
 		}
 		copied := false
 		switch norm(act.Operation) {
 		case "copy":
 			copied = true
-			if !codecMatches(norm(a.Codec), norm(b.Codec)) {
-				return candidateInvalid(fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, a.Codec, b.Codec))
+			if !copiedCodecMatches(a.Codec, b.Codec) {
+				return candidateInvalid(fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrContentNotPreserved, i, a.Codec, b.Codec))
 			}
 		case "transcode":
-			if !codecMatches(norm(act.Codec), norm(b.Codec)) {
-				return candidateInvalid(fmt.Errorf("%w: converted subtitle codec mismatch at stream %d: expected=%s candidate=%s (fail closed, never publish)", ErrSourceInvalid, i, act.Codec, b.Codec))
+			if !codecMatches(act.Codec, b.Codec) {
+				return candidateInvalid(fmt.Errorf("%w: converted subtitle codec mismatch at stream %d: expected=%s candidate=%s (fail closed, never publish)", ErrContentNotPreserved, i, act.Codec, b.Codec))
 			}
 		default:
-			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has an unknown planned action %q (fail closed, never publish)", ErrSourceInvalid, i, act.Operation))
+			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has an unknown planned action %q (fail closed, never publish)", ErrContentNotPreserved, i, act.Operation))
 		}
 		// A language the source names is kept; "und" is the absence of one,
 		// which the muxer writes as no tag.
 		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
-			return candidateInvalid(fmt.Errorf("%w: subtitle language mismatch at stream %d: source=%q candidate=%q (fail closed, never publish)", ErrSourceInvalid, i, a.Language, b.Language))
+			return candidateInvalid(fmt.Errorf("%w: subtitle language mismatch at stream %d: source=%q candidate=%q (fail closed, never publish)", ErrContentNotPreserved, i, a.Language, b.Language))
 		}
 		if copied {
 			// A copied track is the source's: every flag, and its name.
-			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultSubtitle(i, planned)); d != "" {
-				return candidateInvalid(fmt.Errorf("%w: subtitle disposition %s changed at stream %d (fail closed, never publish)", ErrSourceInvalid, d, i))
+			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefault(i, planned)); d != "" {
+				return checkInvalid("subtitle disposition", fmt.Errorf("%w: subtitle disposition %s changed at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
 			}
 			if a.Title != b.Title {
-				return candidateInvalid(fmt.Errorf("%w: copied subtitle stream %d is named %q, the source track %q (fail closed, never publish)", ErrSourceInvalid, i, b.Title, a.Title))
+				return checkInvalid("subtitle title", fmt.Errorf("%w: copied subtitle stream %d is named %q, the source track %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, a.Title))
 			}
 		} else if d := transcode.LostDisposition(a.Disposition, b.Disposition, transcode.MatroskaDispositions); d != "" {
-			return candidateInvalid(fmt.Errorf("%w: %s subtitle disposition lost at stream %d (fail closed, never publish)", ErrSourceInvalid, d, i))
+			return checkInvalid("subtitle disposition", fmt.Errorf("%w: %s subtitle disposition lost at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
 		}
 	}
 	return nil

@@ -184,7 +184,16 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		bad := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause}
 		}
-		if window.StartSeconds < 0 || window.DurationSeconds <= 0 || window.StartSeconds+window.DurationSeconds > timeline+0.05 {
+		// A fresh window the source has no pictures for (past its end, or an
+		// extract of it that comes back empty) has nothing to hold the
+		// candidate to: it is unmeasured, never a refusal (noSource).
+		sourceless := func(code string, cause error) finalWindowResult {
+			return finalWindowResult{code: code, err: cause, noSource: pos >= grid}
+		}
+		if end := window.StartSeconds + window.DurationSeconds; window.StartSeconds < 0 || window.DurationSeconds <= 0 || end > sourceRep.DurationSec+0.05 {
+			return sourceless("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
+		} else if end > timeline+0.05 {
+			// The source has pictures there and the candidate does not.
 			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
 		}
 		// Each window owns a directory, removed as soon as it is measured,
@@ -211,6 +220,9 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 				args = withReferenceChain(args, compactCandidateChain)
 			}
 			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
+				if item.out == refPath {
+					return sourceless("quality_final_sample_extract_failed", err)
+				}
 				return bad("quality_final_sample_extract_failed", err)
 			}
 		}
@@ -219,7 +231,7 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
 		refPTS, err := probeSamplePTS(ctx, w.ffprobePath, refPath)
 		if err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
+			return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
 		}
 		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
 		if err != nil {
@@ -289,8 +301,8 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil {
 		return e, err
 	}
-	// Only a verdict window fails here: an ungated fresh window's failure was
-	// turned into a report by measureFreshWindows.
+	// Only a verdict window fails here: a fresh window measureFreshWindows
+	// marked unmeasured is reported, not failed.
 	if failed >= 0 {
 		return fail(results[failed].code, results[failed].err)
 	}
@@ -412,13 +424,20 @@ func judgeFinalWindows(e *transcode.FinalQualityEvidence, q *transcode.QualityVa
 // that cannot be measured is marked unmeasured instead: it does not stop the
 // windows after it, and splitFinalWindowResults reports it with its reason.
 // Its scores never decide the verdict, but the candidate's pictures there
-// do: a window whose pictures could not be cut out of the encode or do not
-// line up with the source's (freshWindowContentCodes) fails like a grid one.
+// do: a window whose candidate pictures do not line up with the source's
+// (freshWindowContentCodes) fails like a grid one. Fresh windows come from the
+// plan's verification, not from the grid the source was checked against
+// before the encode, so one the source has no pictures for (noSource) is
+// unmeasured whether or not the plan gates them: it says nothing about the
+// candidate, and refusing on it would throw the encode away.
 func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(context.Context, int) finalWindowResult) func(context.Context, int) finalWindowResult {
 	grid := len(q.Samples)
 	return func(ctx context.Context, pos int) finalWindowResult {
 		r := measure(ctx, pos)
-		if pos >= grid && !q.GateFreshSamples && r.code != "" && !freshWindowContentCodes[r.code] {
+		if pos < grid || r.code == "" {
+			return r
+		}
+		if r.noSource || (!q.GateFreshSamples && !freshWindowContentCodes[r.code]) {
 			return finalWindowResult{unmeasured: r.code}
 		}
 		return r
@@ -426,14 +445,16 @@ func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(contex
 }
 
 // freshWindowContentCodes are the window failures that say the candidate's
-// pictures are missing or out of place, not that a score could not be taken.
+// pictures are out of place, not that a score could not be taken. A
+// misalignment counts only once the source's extract is known good: a source
+// side failure is noSource.
 var freshWindowContentCodes = map[string]bool{
-	"quality_final_sample_misaligned":     true,
-	"quality_final_sample_extract_failed": true,
+	"quality_final_sample_misaligned": true,
 }
 
 // splitFinalWindowResults separates the results that decide the verdict (the
-// grid's, and the fresh windows' when the plan gates them) from the report.
+// grid's, and the measured fresh windows' when the plan gates them) from the
+// report.
 // Every window was measured or, for an ungated fresh window, marked
 // unmeasured. It returns the verdict results, every measured window's scores
 // in time order, the fresh windows' VMAF statistics and the ungated fresh
@@ -467,9 +488,13 @@ func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []final
 		windows = append(windows, score)
 	}
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
-	verdict := results[:grid]
+	verdict := results[:grid:grid]
 	if q.GateFreshSamples {
-		verdict = results
+		for _, r := range results[grid:] {
+			if r.unmeasured == "" {
+				verdict = append(verdict, r)
+			}
+		}
 	}
 	return verdict, windows, freshVMAF, unmeasured
 }
@@ -492,9 +517,12 @@ type finalWindowResult struct {
 	chroma *[2]float64
 	code   string
 	err    error
-	// unmeasured is the reason code of an ungated fresh window that could not
-	// be measured (measureFreshWindows); such a result carries nothing else.
+	// unmeasured is the reason code of a fresh window that could not be
+	// measured (measureFreshWindows); such a result carries nothing else.
 	unmeasured string
+	// noSource marks a fresh window's failure on the source's side: no
+	// source pictures there to compare the candidate with.
+	noSource bool
 }
 
 // minMetricThreadsPerPass is the fewest libvmaf threads a concurrent metric

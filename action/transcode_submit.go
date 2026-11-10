@@ -804,8 +804,14 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 				if st.ReasonCode == "size_growth_exceeded" {
 					ec.State["reason_code"] = "size_growth"
 				}
+				if detail := preservationFailureDetail(st.Error); st.ReasonCode == "preservation_not_met" && detail != "" {
+					ec.State[preservationFailureKey] = detail
+				}
 				out := transcodeWorkerMetadataOutputs(ec, st)
 				out["skipped"], out["reason_code"] = true, getString(ec.State, "reason_code")
+				if detail := getString(ec.State, preservationFailureKey); detail != "" {
+					out[preservationFailureKey] = detail
+				}
 				if st.ReasonCode == reasonQualityNotMet && st.QualityEvidence != nil && sizeBudgetActive(ec.State) {
 					out[sizeBudgetKey] = failSizeBudget(ec, st.QualityEvidence)
 				}

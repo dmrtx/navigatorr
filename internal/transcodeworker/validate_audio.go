@@ -10,11 +10,13 @@ import (
 )
 
 // audioPacketSpan is one audio stream's measured packets, as
-// mediainspect.MeasureAudioPackets measures them.
+// mediainspect.AudioPacketAccumulator measures them.
 type audioPacketSpan struct {
 	start, end float64
 	bytes      int64
 	packets    int64
+	// discarded counts the packets the container marks to be dropped.
+	discarded int64
 }
 
 // needsAudioPacketValidation reports whether the plan re-encodes audio, so
@@ -69,22 +71,19 @@ func audioPacketSpans(ctx context.Context, ffprobe, path string) (map[int]audioP
 	}
 	out := make(map[int]audioPacketSpan, len(measured))
 	for index, s := range measured {
-		out[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes, packets: s.Packets}
+		out[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes, packets: s.Packets, discarded: s.Discarded}
 	}
 	return out, nil
 }
 
-func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan, source, candidate string, src, dst SourceProbe) error {
+// validateAudioPackets holds each kept audio track's packets, as scanned with
+// the candidate's other tracks (b), to the source's, measured before the
+// encode. The source is never read again after the encode: without that
+// measure (a test that injects the probe only) nothing is compared.
+func validateAudioPackets(plan *transcode.Plan, src, dst SourceProbe, b map[int]audioPacketSpan) error {
 	a := src.audioSpans
-	if a == nil {
-		var err error
-		if a, err = w.audioPacketSpansForJob(ctx, source); err != nil {
-			return fmt.Errorf("source audio validation: %w", err)
-		}
-	}
-	b, err := w.audioPacketSpansForJob(ctx, candidate)
-	if err != nil {
-		return fmt.Errorf("candidate audio validation: %w", err)
+	if a == nil || b == nil {
+		return nil
 	}
 	sv, cv := firstMainVideo(src.Streams), firstMainVideo(dst.Streams)
 	if sv == nil || cv == nil || sv.StartTime == nil || cv.StartTime == nil {
@@ -100,11 +99,16 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 		if !xok || !yok {
 			return fmt.Errorf("audio stream %d has no measurable packets", i)
 		}
-		// Allow AAC priming/frame rounding; preserve existing source A/V offset.
-		if math.Abs((x.start-*sv.StartTime)-(y.start-*cv.StartTime)) > 0.25 || math.Abs((x.end-x.start)-(y.end-y.start)) > 0.25 {
+		codec, kbps := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
+		// Allow AAC priming/frame rounding; preserve existing source A/V
+		// offset. A copied track's offset is not compared: its packets keep
+		// their timestamps, and where the output's timeline starts (a
+		// transport stream's video and audio start apart) is the muxer's
+		// doing. Its packets are counted instead (copiedAudioPackets).
+		offset := math.Abs((x.start - *sv.StartTime) - (y.start - *cv.StartTime))
+		if (codec != "copy" && offset > 0.25) || math.Abs((x.end-x.start)-(y.end-y.start)) > 0.25 {
 			return fmt.Errorf("audio stream %d duration or A/V offset changed (fail closed, never publish)", i)
 		}
-		codec, kbps := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
 		if err := copiedAudioPackets(i, codec, x, y); err != nil {
 			return err
 		}
@@ -120,11 +124,13 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 }
 
 // copiedAudioPackets holds a copied track to the source's packet count. A copy
-// carries every packet of the source track unchanged; one with fewer lost
-// sound, however close its first and last packets stay to the source's.
+// carries every packet of the source track unchanged, but for those the
+// source's container marks to be discarded (an edit list trimming the start),
+// which the copy may leave out. One with fewer lost sound, however close its
+// first and last packets stay to the source's.
 func copiedAudioPackets(i int, codec string, src, cand audioPacketSpan) error {
-	if codec != "copy" || src.packets == cand.packets {
+	if codec != "copy" || (cand.packets <= src.packets && cand.packets >= src.packets-src.discarded) {
 		return nil
 	}
-	return candidateInvalid(fmt.Errorf("%w: copied audio stream %d has %d packets, the source track %d; sound was lost in the copy (fail closed, never publish)", ErrSourceInvalid, i, cand.packets, src.packets))
+	return candidateInvalid(fmt.Errorf("%w: copied audio stream %d has %d packets, the source track %d; sound was lost or added in the copy (fail closed, never publish)", ErrContentNotPreserved, i, cand.packets, src.packets))
 }

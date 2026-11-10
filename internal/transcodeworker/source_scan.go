@@ -35,11 +35,27 @@ type sourceVideoScan struct {
 	// (an edit list that starts the video later), which no decoder shows.
 	// LastFrame is the duration of the picture that ends the video.
 	LeadingNonKey, Discarded int
-	sawKey                   bool
-	LastFrame                float64
+	// leadDiscarded counts the packets that are both: a packet a decoder
+	// skips for two reasons is still one packet.
+	leadDiscarded int
+	sawKey        bool
+	LastFrame     float64
+	// The head is the packets read before the second keyframe: the first
+	// picture group with whatever precedes it. headDiscarded counts its
+	// discarded packets. leadingPictures counts the packets after the first
+	// keyframe in decode order that show before it: an open picture group's
+	// leading pictures, which may refer to pictures before the file's start.
+	// firstKeyPTS is the first keyframe's time, keys the keyframes seen.
+	headPackets, headDiscarded, leadingPictures int
+	firstKeyPTS                                 float64
+	keys                                        int
+	// headFrames is how many pictures a decoder shows from the head's
+	// packets, when headDecoded (see decodeVideoHead).
+	headFrames  int
+	headDecoded bool
 	// durations counts the packets by duration, in microseconds (0 when the
 	// container states none): a field-coded source shows itself by packets
-	// half a frame long.
+	// shorter than a frame.
 	durations map[int64]int
 	// DemuxErrors counts the packet damage the container's demuxer reported
 	// while reading. FirstError is the first of it, and FirstErrorByte the
@@ -92,73 +108,95 @@ var packetDamagePattern = mediainspect.PacketDamagePattern
 const timestampResetSeconds = mediainspect.TimestampResetSeconds
 
 // scanSourceVideo reads every packet of stream streamIndex without decoding
-// it. Healthy files of every container the library holds read with no demuxer
-// error at all; the errors of a damaged one name where the damage sits.
-// Errors of the decoders ffprobe opens to find stream parameters are not the
-// container's and are not counted.
+// it (see scanFilePackets).
 func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex int) (sourceVideoScan, error) {
-	scan := sourceVideoScan{FirstErrorByte: -1}
+	scan, err := scanFilePackets(ctx, ffprobePath, path, packetScanRequest{video: streamIndex})
+	return scan.video, err
+}
+
+// packetScanRequest is what one read of a file's packets measures: the
+// programme video (its stream index, or -1) and the audio and subtitle
+// streams listed by index.
+type packetScanRequest struct {
+	video            int
+	audio, subtitles map[int]bool
+}
+
+func (r packetScanRequest) any() bool {
+	return r.video >= 0 || len(r.audio) > 0 || len(r.subtitles) > 0
+}
+
+// filePackets is what scanFilePackets measured. audio and subtitles hold an
+// entry for every requested stream that had packets.
+type filePackets struct {
+	video     sourceVideoScan
+	audio     map[int]audioPacketSpan
+	subtitles map[int]subtitlePackets
+}
+
+// scanFilePackets reads a file's packets once, without decoding them, and
+// measures the requested streams: the video's timeline, frames and demuxer
+// damage, each audio stream's span (mediainspect.AudioPacketAccumulator, the
+// promotion's measure) and each subtitle stream's packets. Healthy files of
+// every container the library holds read with no demuxer error at all; the
+// errors of a damaged one name where the damage sits. Errors of the decoders
+// ffprobe opens to find stream parameters are not the container's and are not
+// counted.
+func scanFilePackets(ctx context.Context, ffprobePath, path string, req packetScanRequest) (filePackets, error) {
+	out := filePackets{video: sourceVideoScan{FirstErrorByte: -1}}
+	scan := &out.video
+	audio := &mediainspect.AudioPacketAccumulator{}
+	if len(req.subtitles) > 0 {
+		out.subtitles = map[int]subtitlePackets{}
+	}
+	videoOnly := len(req.audio) == 0 && len(req.subtitles) == 0
 	first := true
 	var formatName string
 	var parseErr error
 	stdout := &lineWriter{line: func(line string) {
-		fields := strings.Split(line, "|")
-		switch fields[0] {
+		parts := strings.Split(line, "|")
+		switch parts[0] {
 		case "packet":
-			var pts, dts, dur float64
-			hasPTS, hasDTS := false, false
-			key, discard := false, false
-			for _, f := range fields[1:] {
-				name, value, _ := strings.Cut(f, "=")
-				if name == "flags" {
-					key, discard = strings.Contains(value, "K"), strings.Contains(value, "D")
-					continue
-				}
-				v, err := strconv.ParseFloat(value, 64)
-				if err != nil {
-					continue // N/A
-				}
-				switch name {
-				case "pts_time":
-					pts, hasPTS = v, true
-				case "dts_time":
-					dts, hasDTS = v, true
-				case "duration_time":
-					dur = v
-				}
+			if parseErr != nil {
+				return
 			}
-			if !hasPTS {
-				// AVI and raw streams can carry decode times only.
-				if !hasDTS {
+			fields := make(map[string]string, len(parts)-1)
+			for _, f := range parts[1:] {
+				name, value, _ := strings.Cut(f, "=")
+				fields[name] = value
+			}
+			index, err := strconv.Atoi(fields["stream_index"])
+			switch {
+			case err == nil:
+			case fields["stream_index"] == "" && videoOnly:
+				// Only the video's packets are printed.
+				index = req.video
+			default:
+				parseErr = fmt.Errorf("unexpected ffprobe packet output %q", truncateForLog(line, 120))
+				return
+			}
+			switch {
+			case index == req.video:
+				addVideoPacket(scan, fields, &first)
+			case req.audio[index]:
+				if err := audio.Add(fields); err != nil {
+					parseErr = fmt.Errorf("audio stream %d: %w", index, err)
+				}
+			case req.subtitles[index]:
+				size, err := strconv.ParseInt(fields["size"], 10, 64)
+				if err != nil || size < 0 {
+					parseErr = fmt.Errorf("unexpected ffprobe subtitle packet output %q", truncateForLog(line, 120))
 					return
 				}
-				pts = dts
-			}
-			if !first && pts < scan.End-timestampResetSeconds {
-				scan.Discontinuous = true
-			}
-			if first || pts < scan.Start {
-				scan.Start = pts
-			}
-			if first || pts+dur > scan.End {
-				scan.End, scan.LastFrame = pts+dur, dur
-			}
-			first = false
-			scan.Packets++
-			if scan.durations == nil {
-				scan.durations = map[int64]int{}
-			}
-			scan.durations[int64(math.Round(dur*1e6))]++
-			if key {
-				scan.sawKey = true
-			} else if !scan.sawKey {
-				scan.LeadingNonKey++
-			}
-			if discard {
-				scan.Discarded++
+				c := out.subtitles[index]
+				c.packets++
+				if size > movTextEmptySampleBytes {
+					c.text++
+				}
+				out.subtitles[index] = c
 			}
 		case "format":
-			for _, f := range fields[1:] {
+			for _, f := range parts[1:] {
 				if key, value, _ := strings.Cut(f, "="); key == "format_name" {
 					formatName = value
 				}
@@ -209,20 +247,25 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		}
 		e.count++
 	}}
-	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
-		"-show_entries", "packet=pts_time,dts_time,duration_time,flags:format=format_name", "-of", "compact", path)
+	args := []string{"-v", "error"}
+	if videoOnly {
+		// The video alone: the other streams' packets are not printed.
+		args = append(args, "-select_streams", strconv.Itoa(req.video))
+	}
+	args = append(args, "-show_entries", "packet=stream_index,pts_time,dts_time,duration_time,size,flags:format=format_name", "-of", "compact", path)
+	cmd := exec.CommandContext(ctx, ffprobePath, args...)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := runCharged(ctx, cmd)
 	stdout.flush()
 	stderr.flush()
 	if err != nil {
-		return scan, fmt.Errorf("ffprobe video packet scan failed: %w (stderr: %s)", err, strings.Join(stderrTail, "; "))
+		return out, fmt.Errorf("ffprobe packet scan failed: %w (stderr: %s)", err, strings.Join(stderrTail, "; "))
 	}
 	if parseErr != nil {
-		return scan, parseErr
+		return out, parseErr
 	}
 	if formatName == "" {
-		return scan, errors.New("ffprobe video packet scan printed no format name")
+		return out, errors.New("ffprobe packet scan printed no format name")
 	}
 	faults := untaggedFaults
 	if e := readFaults[formatName]; e != nil {
@@ -234,7 +277,7 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 	if faults.count > 0 {
 		// Not the file's damage, so not the permanent class: the read of it
 		// failed, and a retry reads it again.
-		return scan, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its video was fully scanned (%s); the scan judged nothing about the file", faults.count, truncateForLog(faults.first, 200))
+		return out, fmt.Errorf("i/o error: the demuxer's read of the file failed %d time(s) before its packets were fully scanned (%s); the scan judged nothing about the file", faults.count, truncateForLog(faults.first, 200))
 	}
 	if e := byTag[formatName]; e != nil {
 		scan.DemuxErrors, scan.FirstError = e.count, e.first
@@ -242,7 +285,155 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 			scan.FirstErrorByte, _ = strconv.ParseInt(m[1], 10, 64)
 		}
 	}
-	return scan, nil
+	if len(req.audio) > 0 {
+		spans, err := audio.Spans()
+		if err != nil {
+			return out, fmt.Errorf("audio packets: %w", err)
+		}
+		out.audio = make(map[int]audioPacketSpan, len(spans))
+		for index, s := range spans {
+			out.audio[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes, packets: s.Packets, discarded: s.Discarded}
+		}
+	}
+	return out, nil
+}
+
+// addVideoPacket adds one programme video packet to the scan. first is set
+// until the first packet is added.
+func addVideoPacket(scan *sourceVideoScan, fields map[string]string, first *bool) {
+	var pts, dts, dur float64
+	hasPTS, hasDTS := false, false
+	for name, value := range fields {
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			continue // N/A, or not a time
+		}
+		switch name {
+		case "pts_time":
+			pts, hasPTS = v, true
+		case "dts_time":
+			dts, hasDTS = v, true
+		case "duration_time":
+			dur = v
+		}
+	}
+	if !hasPTS {
+		// AVI and raw streams can carry decode times only.
+		if !hasDTS {
+			return
+		}
+		pts = dts
+	}
+	if !*first && pts < scan.End-timestampResetSeconds {
+		scan.Discontinuous = true
+	}
+	if *first || pts < scan.Start {
+		scan.Start = pts
+	}
+	if *first || pts+dur > scan.End {
+		scan.End, scan.LastFrame = pts+dur, dur
+	}
+	*first = false
+	scan.Packets++
+	if scan.durations == nil {
+		scan.durations = map[int64]int{}
+	}
+	scan.durations[int64(math.Round(dur*1e6))]++
+	key, discard := strings.Contains(fields["flags"], "K"), strings.Contains(fields["flags"], "D")
+	leading := !key && !scan.sawKey
+	if key {
+		scan.sawKey = true
+		if scan.keys++; scan.keys == 1 {
+			scan.firstKeyPTS = pts
+		}
+	} else if leading {
+		scan.LeadingNonKey++
+	}
+	if discard {
+		scan.Discarded++
+		if leading {
+			scan.leadDiscarded++
+		}
+	}
+	if scan.keys < 2 {
+		scan.headPackets++
+		if discard {
+			scan.headDiscarded++
+		}
+		if scan.keys == 1 && !key && hasPTS && pts < scan.firstKeyPTS {
+			scan.leadingPictures++
+		}
+	}
+}
+
+// maxHeadDecodePackets bounds the head decodeVideoHead decodes: a source whose
+// first picture group runs longer (one keyframe for minutes) is not decoded,
+// and only the packets before its first keyframe may then be missing.
+const maxHeadDecodePackets = 1200
+
+// decodeVideoHead decodes the head of the programme video (the packets before
+// its second keyframe) and records how many pictures the decoder shows from
+// them. An open picture group's first keyframe can be followed by leading
+// pictures that refer to pictures before it (an HEVC CRA's RASL pictures, an
+// H.264 recovery point's leading B-frames): in a file cut from a longer one
+// those pictures are gone, the decoder drops them, and the encode has none of
+// them. The packets alone cannot tell them from leading pictures that do
+// decode (RADL), so the head is decoded: a few dozen packets, never the whole
+// file.
+func decodeVideoHead(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan) error {
+	if !scan.sawKey || scan.headPackets == 0 || scan.headPackets > maxHeadDecodePackets {
+		return nil
+	}
+	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
+		"-read_intervals", "%+#"+strconv.Itoa(scan.headPackets), "-count_frames", "-count_packets",
+		"-show_entries", "stream=nb_read_frames,nb_read_packets", "-of", "default=noprint_wrappers=1", path)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := runCharged(ctx, cmd); err != nil {
+		return fmt.Errorf("ffprobe decode of the video's first picture group failed: %w (stderr: %s)", err, truncateForLog(strings.TrimSpace(stderr.String()), 200))
+	}
+	frames, packets := -1, -1
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			continue
+		}
+		switch key {
+		case "nb_read_frames":
+			frames = n
+		case "nb_read_packets":
+			packets = n
+		}
+	}
+	if frames < 0 || packets != scan.headPackets {
+		return fmt.Errorf("ffprobe decode of the video's first picture group read %d packets and %d pictures, the packet scan %d packets (%s)", packets, frames, scan.headPackets, truncateForLog(strings.TrimSpace(stdout.String()), 200))
+	}
+	scan.headFrames, scan.headDecoded = frames, true
+	return nil
+}
+
+// startDropped is how many of the source's packets a decoder shows no picture
+// for at the video's start, and how many of those are also Discarded packets
+// (a packet skipped for two reasons is one packet).
+//
+// With the head decoded it is the head's packets less the pictures shown,
+// held to the packets that can be dropped there: those before the first
+// keyframe, the first keyframe's leading pictures and the discarded ones. A
+// field-coded head shows one picture for two packets, so for it the bound is
+// what counts. Without the decode (a head too long, a test that injects the
+// scan) it is the packets before the first keyframe, as before.
+//
+// A decoder also drops pictures after the head when an HEVC BLA picture or an
+// end of sequence sits mid-file. Those are not counted: such a source is
+// refused, fail closed; it is rare.
+func (s sourceVideoScan) startDropped() (dropped, discarded int) {
+	if !s.headDecoded {
+		return s.LeadingNonKey, s.leadDiscarded
+	}
+	bound := s.LeadingNonKey + s.leadingPictures + s.headDiscarded
+	dropped = max(0, min(s.headPackets-s.headFrames, bound))
+	return dropped, min(s.headDiscarded, dropped)
 }
 
 // demuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into
@@ -272,14 +463,15 @@ func (s sourceVideoScan) damage(sizeBytes int64) error {
 // finalWindowsFitVideo refuses final windows that run past the end of the
 // video. A container can last longer than its video (a subtitle or attachment
 // carries its duration); a window placed there has no pictures to extract,
-// which the final gate only found out after the whole encode.
+// which the final gate only found out after the whole encode. Only the grid
+// windows are held to it: a fresh window past the video's end is left out of
+// the verdict at the final gate, never a reason to refuse the job.
 func finalWindowsFitVideo(plan *transcode.Plan, scan sourceVideoScan) error {
 	if plan == nil || plan.QualityValidation == nil || scan.Packets == 0 || scan.Discontinuous {
 		return nil
 	}
-	q := plan.QualityValidation
 	video := scan.Seconds()
-	for _, window := range append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...) {
+	for _, window := range plan.QualityValidation.Samples {
 		// Half a second of slack: a window a frame past the end is the
 		// final gate's to judge, as before.
 		if end := window.StartSeconds + window.DurationSeconds; end > video+0.5 {

@@ -170,7 +170,7 @@ func TestSizeAudioLevelsRealEncodeLayouts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
+		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err != nil {
 			t.Fatalf("%s: pre-publish validation: %v", mode, err)
 		}
 		candAudio := streamsOfKind(candProbe.Streams, "audio")

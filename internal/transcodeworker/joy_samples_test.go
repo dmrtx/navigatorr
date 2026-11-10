@@ -80,7 +80,7 @@ func TestJoyRealSourceSamples(t *testing.T) {
 		if err := RunFFmpegPaths(ctx, ffmpeg, ep, source, candidate, filepath.Join(out, fmt.Sprintf("progress-%d.txt", i)), filepath.Join(out, fmt.Sprintf("encode-%d.log", i))); err != nil {
 			t.Fatal(err)
 		}
-		attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, probe, 0)
+		attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, probe, source), 0)
 		if err != nil {
 			t.Fatal(err)
 		}

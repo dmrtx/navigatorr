@@ -32,6 +32,9 @@ type caseReport struct {
 	Passed            bool    `json:"passed"`
 	Skipped           bool    `json:"skipped,omitempty"`
 	Failure           string  `json:"failure,omitempty"`
+	// PreservationFailure is the check that refused a candidate for losing
+	// part of the original, with its numbers.
+	PreservationFailure string `json:"preservation_failure,omitempty"`
 }
 
 type reporter struct {
@@ -98,6 +101,13 @@ func (r *reporter) finish(t *testing.T) {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", row.Case, row.Goal, result, src, cand, saved, vmaf, enc, (time.Duration(row.WallSeconds * float64(time.Second))).Round(time.Second), valid)
 	}
 	_ = w.Flush()
+	// A refusal for lost content names the check and its numbers below the
+	// table, so a false refusal can be told from real loss without the logs.
+	for _, row := range r.rows {
+		if row.PreservationFailure != "" {
+			fmt.Fprintf(&sb, "%s refused: %s\n", row.Case, row.PreservationFailure)
+		}
+	}
 	t.Logf("\n%s\nactions %s, %d failed", sb.String(), (time.Duration(total * float64(time.Second))).Round(time.Second), failed)
 
 	if path := os.Getenv(envReport); path != "" {

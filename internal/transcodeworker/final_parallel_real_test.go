@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -177,8 +176,9 @@ func TestRealFinalValidationReportsWindowsAndFreshWindowsDoNotGate(t *testing.T)
 	if roles["grid"] != 4 || roles["fresh"] != 2 {
 		t.Fatalf("roles %v", roles)
 	}
-	// A fresh window past the end of the encode has no pictures to compare:
-	// that fails the verdict whether or not the plan gates fresh windows.
+	// A fresh window past the end of the source has no source pictures to
+	// hold the candidate to: it is reported unmeasured and never refuses the
+	// encode, whether or not the plan gates fresh windows.
 	brokenWindow := []transcode.BenchmarkSampleWindow{{Index: 4, StartSeconds: 3.9, DurationSeconds: 0.5}}
 	for _, gate := range []bool{false, true} {
 		p := plan(brokenWindow)
@@ -190,8 +190,8 @@ func TestRealFinalValidationReportsWindowsAndFreshWindowsDoNotGate(t *testing.T)
 		}
 		w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state-"+name), AllowedRoots: []string{dir}, FFmpeg: ffmpeg, FFprobe: ffprobe, MaxParallelJobs: 1})
 		e, err := w.validateFinalPerceptual(ctx, jobDir, source, candidate, p, "sha256:candidate", 1)
-		if err == nil || e == nil || e.Verdict == "pass" || !slices.Contains(e.ReasonCodes, "quality_final_sample_misaligned") {
-			t.Fatalf("gate %v: a fresh window beyond the encode passed: %+v %v", gate, e, err)
+		if err != nil || e == nil || e.Verdict != "pass" || len(e.FreshUnmeasured) != 1 || e.FreshUnmeasured[0].ReasonCode != "quality_final_sample_misaligned" || !reflect.DeepEqual(base.VMAF, e.VMAF) {
+			t.Fatalf("gate %v: a fresh window beyond the source refused the encode or went unreported: %+v %v", gate, e, err)
 		}
 	}
 }

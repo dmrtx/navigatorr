@@ -109,7 +109,7 @@ func TestCompactAudioMain10RealEncode(t *testing.T) {
 		t.Fatalf("missing conversion evidence: %+v", ep.Conversions)
 	}
 	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
-	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err != nil {
+	if err := audioPacketsCheck(t, w, plan, source, candidate, probe, result); err != nil {
 		t.Fatal(err)
 	}
 	for _, filter := range []string{"atrim=duration=0.3", "asetpts=PTS+0.6/TB"} {
@@ -122,7 +122,7 @@ func TestCompactAudioMain10RealEncode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := w.validateAudioPackets(context.Background(), plan, source, broken, probe, badProbe); err == nil {
+		if err := audioPacketsCheck(t, w, plan, source, broken, probe, badProbe); err == nil {
 			t.Fatalf("accepted %s", filter)
 		}
 	}
@@ -262,6 +262,18 @@ func TestConvertedAudioTitle(t *testing.T) {
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("convertedAudioTitle(%q, %q, %d) = %q, %v", tc.title, tc.layout, tc.channels, got, ok)
 		}
+		// The exported form, which the acceptance suite holds converted
+		// tracks to, keeps a title that names no format.
+		want := tc.want
+		if !tc.ok {
+			want = tc.title
+		}
+		if got := ConvertedAudioTitle(tc.title, tc.layout, tc.channels); got != want {
+			t.Errorf("ConvertedAudioTitle(%q, %q, %d) = %q, want %q", tc.title, tc.layout, tc.channels, got, want)
+		}
+	}
+	if got := ConvertedAudioTitle("Japanese 5.1 FLAC", "5.1(side)", 6); got != "Japanese AAC 5.1" {
+		t.Errorf("a FLAC 5.1 track converted to AAC is named %q", got)
 	}
 }
 
@@ -443,17 +455,17 @@ func TestCompactAudioUndatedTrueHDPackets(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
-	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err != nil {
+	if err := audioPacketsCheck(t, w, plan, source, candidate, probe, result); err != nil {
 		t.Fatal(err)
 	}
 	// The candidate check reuses the spans measured before the encode
 	// instead of reading the source again.
 	probe.audioSpans = spans
-	if err := w.validateAudioPackets(context.Background(), plan, filepath.Join(dir, "missing.mkv"), candidate, probe, result); err != nil {
+	if err := audioPacketsCheck(t, w, plan, filepath.Join(dir, "missing.mkv"), candidate, probe, result); err != nil {
 		t.Fatalf("pre-encode measurement not reused: %v", err)
 	}
 	probe.audioSpans = map[int]audioPacketSpan{1: {start: spans[1].start, end: spans[1].end + 1, bytes: spans[1].bytes}}
-	if err := w.validateAudioPackets(context.Background(), plan, source, candidate, probe, result); err == nil {
+	if err := audioPacketsCheck(t, w, plan, source, candidate, probe, result); err == nil {
 		t.Fatal("a one-second duration change was accepted")
 	}
 }

@@ -11,9 +11,10 @@ var MatroskaDispositions = []string{"default", "forced", "hearing_impaired", "vi
 // to compare in the output.
 //
 // autoDefault allows got a default flag want does not have: ffmpeg marks the
-// first subtitle default when none of the output's subtitles is, unless the
-// command sets their flags, and the worker's command sets a subtitle's flags
-// only when the plan moved the default to it.
+// first track of a kind default when none of the output's tracks of that kind
+// is, unless the command sets their flags. The worker's command sets a
+// subtitle's flags only when the plan moved the default to it, and an audio
+// track's whenever the source's probe reported them (AutoDefaultAudio).
 func DispositionChange(want, got map[string]int, autoDefault bool) string {
 	for _, name := range MatroskaDispositions {
 		w, g := want[name] > 0, got[name] > 0
@@ -36,10 +37,10 @@ func LostDisposition(want, got map[string]int, flags []string) string {
 	return ""
 }
 
-// AutoDefaultSubtitle reports whether ffmpeg may have marked the output's
-// subtitle at position i default on its own: it is the first, and none of the
-// subtitles the output must carry is default.
-func AutoDefaultSubtitle(i int, planned []map[string]int) bool {
+// AutoDefault reports whether ffmpeg may have marked the output's track at
+// position i default on its own: it is the first of its kind, and none of the
+// tracks of that kind the output must carry is default.
+func AutoDefault(i int, planned []map[string]int) bool {
 	if i != 0 {
 		return false
 	}
@@ -49,4 +50,12 @@ func AutoDefaultSubtitle(i int, planned []map[string]int) bool {
 		}
 	}
 	return true
+}
+
+// AutoDefaultAudio is AutoDefault for audio: the worker's command writes every
+// kept audio track's flags (none set when the track has none), which stops
+// ffmpeg's inference, unless the probe reported no flags for the track (want
+// is nil) and the command wrote none.
+func AutoDefaultAudio(i int, want map[string]int, planned []map[string]int) bool {
+	return want == nil && AutoDefault(i, planned)
 }

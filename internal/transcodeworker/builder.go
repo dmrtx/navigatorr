@@ -394,6 +394,16 @@ func balanceBrackets(s string) string {
 // Titles that name no source format ("Commentary") are kept; ok is false
 // then. Without a reported layout (PCM in Matroska) the channel count names
 // it. A label that would still name a source format is dropped (fail safe).
+// ConvertedAudioTitle is the title a track converted to AAC carries in the
+// output (convertedAudioTitle), given the source track's title, channel layout
+// and channel count: the source title when it names no source format.
+func ConvertedAudioTitle(title, layout string, channels int) string {
+	if t, ok := convertedAudioTitle(title, layout, channels); ok {
+		return t
+	}
+	return title
+}
+
 func convertedAudioTitle(title, layout string, channels int) (string, bool) {
 	// "_" is a word character, so "English_TrueHD" is checked split.
 	namesFormat := func(s string) bool {

@@ -70,39 +70,73 @@ window that misses a limit, or cannot be measured, fails the rung; such a goal
 only runs on a worker that reports `fresh_sample_gate` and stops before
 encoding otherwise. A goal frozen before the rule keeps its digest and its
 report-only fresh windows: a score miss there is only reported, but a fresh
-window that has no matching pictures in the output
-(`quality_final_sample_misaligned`) or cannot be cut from it
-(`quality_final_sample_extract_failed`) fails the rung under any goal, since
-it means content is missing; other unmeasurable report-only windows are listed
-as unmeasured rather than dropped. Other goals, and
+window whose output pictures do not line up with a good source extract
+(`quality_final_sample_misaligned`) fails the rung under any goal, since it
+means content is missing; other unmeasurable report-only windows (an output
+extract that failed included) are listed as unmeasured rather than dropped. A
+fresh window the source has no pictures for (past the source's end, or a
+source extract that fails or comes back empty) says nothing about the output:
+it is listed as unmeasured under every goal, gated or not, and a gated verdict
+is judged on the windows that were measured. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
 file; the verdict names the failed metric and its limit.
 
-**Nothing kept may lose content.** Before publishing, the worker reads the
-packets of every kept stream in the source (before the encode) and in the
-candidate, and refuses the candidate (`preservation_not_met`) when:
+**Nothing kept may lose content.** The worker reads the packets of the
+source's programme video and of every kept audio and subtitle track once,
+in one pass, before the encode (a damaged source, untimed audio or final
+grid windows past the video's end fail there, in minutes); after the encode
+it reads the candidate's the same way and never reads the source again. It
+refuses the candidate (`preservation_not_met`) when:
 
-- the programme video has a different number of frames than the source (only
-  frames before the source's first keyframe, or marked to be discarded, may be
-  missing) or its last frame is more than one frame away from the source's.
-  A field-coded source (PAFF from a transport stream: packets half a frame
-  long against the probe's frame rate or the output's frames) is counted in
-  pictures from its packets' lengths; when they cannot be counted reliably
-  only the last frame's place is checked;
-- a copied audio track has a different packet count, or its codec differs at
-  all (E-AC-3 is not AC-3); copy plans now also get the 0.25 s start and
-  length check converted tracks always had (that one keeps its own error);
+- the programme video has fewer frames than the source (only the packets a
+  decoder shows no picture for may be missing, each counted once: those
+  marked to be discarded and those it drops at the start), more frames, or
+  its last frame is more than one frame away from the source's. The start's
+  dropped packets are measured before the encode by decoding the source's
+  first picture group (the packets before its second keyframe, a few dozen):
+  packets before the first keyframe, and the leading pictures of an open
+  group (an HEVC CRA's RASL pictures, an H.264 recovery point's leading
+  B-frames) whose references a stream-copy cut removed. The count is held to
+  the packets that can be dropped there, so leading pictures that do decode
+  (RADL) excuse nothing. Pictures a decoder drops later in the file (an HEVC
+  BLA picture or end of sequence mid-file) are not counted, and such a rare
+  source is refused. A field-coded source (PAFF or adaptive field/frame
+  coding: packets shorter than the output's picture) may carry a field per
+  packet, so its pictures lie between its whole packets plus half its
+  possible fields and all its packets; fewer frames than that fail, and more
+  are judged by where the last frame lands;
+- a copied audio track has more packets than the source track, or fewer than
+  it has without the packets the source marks to be discarded, or its codec
+  differs at all (E-AC-3 is not AC-3), or its length moves by more than
+  0.25 s. A copied track's start is not compared with the video's: its
+  packets keep their own timestamps. A converted track keeps the 0.25 s start
+  check;
 - a copied subtitle has a different packet count; a converted mov_text
-  subtitle has a different count than the source's samples that hold text
-  (the MP4 muxer's empty two-byte gap samples have no counterpart in SubRip);
-  any kept subtitle comes out empty, has no planned action, or loses its
-  language tag;
+  subtitle (the default recipe's one subtitle conversion) has a different
+  count than the source's samples that hold text (the MP4 muxer's empty
+  two-byte gap samples have no counterpart in SubRip); any other conversion a
+  recipe adds has no exact count and is only held to being non-empty; any kept
+  subtitle comes out empty, has no planned action, or loses its language tag;
 - a copied audio or subtitle track changes its title or any flag Matroska
-  stores (only ffmpeg's automatic default on the first subtitle, when the plan
-  marks none, is allowed); a converted subtitle loses one of those flags;
-- the attachments are not the source's files by name, type and size.
+  stores. ffmpeg's automatic default on the first track of a kind is allowed
+  only where the worker wrote no flags: on subtitles when the plan marks none
+  default, and on audio only when the probe reported no flags for the track
+  (the worker writes every reported audio flag, "none" included, which stops
+  the inference); a converted subtitle loses one of those flags;
+- the attachments are not the source's files by name, type and size: as many
+  (a cover the encode re-attaches is the cover art check's, not an extra
+  file), and none of the source's missing.
+
+The refusal names the check that failed (video completeness, audio packets,
+subtitle events, attachments, a track's disposition or title...) with its
+numbers ("video completeness check failed: the converted file lost content:
+the converted video has 3660 frames, the source 3662 ..."); the job's
+explanation shows it ("did not keep everything the
+original has: audio packets check failed: copied audio stream 1 has 310
+packets, the source track 313 ..."), and the acceptance report prints it under
+its table.
 
 The intentional changes stay allowed: a converted audio track's new title and
 the default flag a track selection moves. The server repeats the title, flag

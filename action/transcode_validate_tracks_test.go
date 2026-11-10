@@ -224,20 +224,41 @@ func TestDetailedValidationHoldsCopiedTrackMetadata(t *testing.T) {
 		mutate   func(*output)
 		oldFonts bool
 		reason   string
+		// source changes the source's audio records.
+		source func([]mediainspect.DetailedStream)
 	}{
-		{"every track as the source's", func(*output) {}, false, ""},
-		{"a source record without attachment sizes", func(o *output) { o.fontSize = 999 }, true, ""},
-		{"ffmpeg marked the first subtitle default", func(o *output) { o.subs[0].disp = map[string]int{"hearing_impaired": 1, "default": 1} }, false, ""},
-		{"a copied audio track renamed", func(o *output) { o.audio[1].title = "Track 2" }, false, `Copied audio track 1 was renamed: the source calls it "Commentary", the output "Track 2"`},
-		{"a copied audio track lost commentary", func(o *output) { o.audio[1].disp = nil }, false, "Copied audio track 1 changed its comment flag"},
-		{"a copied audio track became forced", func(o *output) { o.audio[0].disp = map[string]int{"default": 1, "forced": 1} }, false, "Copied audio track 0 changed its forced flag"},
-		{"a copied subtitle renamed", func(o *output) { o.subs[0].title = "" }, false, "Copied subtitle track 0 was renamed"},
-		{"a copied subtitle lost hearing_impaired", func(o *output) { o.subs[0].disp = nil }, false, "Copied subtitle track 0 changed its hearing_impaired flag"},
-		{"a converted subtitle lost forced", func(o *output) { o.subs[1].disp = nil }, false, "Forced subtitle disposition lost at stream 1"},
-		{"a converted subtitle lost visual_impaired", func(o *output) { o.subs[1].disp = map[string]int{"forced": 1} }, false, "Converted subtitle track 1 lost its visual_impaired flag"},
-		{"a converted subtitle renamed", func(o *output) { o.subs[1].title = "Spanish" }, false, ""},
-		{"a font replaced by another", func(o *output) { o.fontName = "other.ttf" }, false, `Attachment "font.ttf" (font/ttf, 1234 bytes) is missing from the output`},
-		{"a font cut short", func(o *output) { o.fontSize = 1000 }, false, `Attachment "font.ttf" (font/ttf, 1234 bytes) is missing`},
+		{"every track as the source's", func(*output) {}, false, "", nil},
+		{"a source record without attachment sizes", func(o *output) { o.fontSize = 999 }, true, "", nil},
+		{"ffmpeg marked the first subtitle default", func(o *output) { o.subs[0].disp = map[string]int{"hearing_impaired": 1, "default": 1} }, false, "", nil},
+		{"a copied audio track renamed", func(o *output) { o.audio[1].title = "Track 2" }, false, `Copied audio track 1 was renamed: the source calls it "Commentary", the output "Track 2"`, nil},
+		{"a copied audio track lost commentary", func(o *output) { o.audio[1].disp = nil }, false, "Copied audio track 1 changed its comment flag", nil},
+		{"a copied audio track became forced", func(o *output) { o.audio[0].disp = map[string]int{"default": 1, "forced": 1} }, false, "Copied audio track 0 changed its forced flag", nil},
+		{"a copied subtitle renamed", func(o *output) { o.subs[0].title = "" }, false, "Copied subtitle track 0 was renamed", nil},
+		{"a copied subtitle lost hearing_impaired", func(o *output) { o.subs[0].disp = nil }, false, "Copied subtitle track 0 changed its hearing_impaired flag", nil},
+		{"a converted subtitle lost forced", func(o *output) { o.subs[1].disp = nil }, false, "Forced subtitle disposition lost at stream 1", nil},
+		{"a converted subtitle lost visual_impaired", func(o *output) { o.subs[1].disp = map[string]int{"forced": 1} }, false, "Converted subtitle track 1 lost its visual_impaired flag", nil},
+		{"a converted subtitle renamed", func(o *output) { o.subs[1].title = "Spanish" }, false, "", nil},
+		{"a font replaced by another", func(o *output) { o.fontName = "other.ttf" }, false, `Attachment "font.ttf" (font/ttf, 1234 bytes) is missing from the output`, nil},
+		{"a font cut short", func(o *output) { o.fontSize = 1000 }, false, `Attachment "font.ttf" (font/ttf, 1234 bytes) is missing`, nil},
+		// A source whose probe reported no audio flags: the worker wrote none,
+		// and ffmpeg may mark the first audio track default on its own.
+		{"ffmpeg marked the first audio default, no flags in the source", func(o *output) {
+			o.audio[0].disp, o.audio[1].disp = map[string]int{"default": 1}, nil
+		}, false, "", func(a []mediainspect.DetailedStream) {
+			a[0].Disposition, a[1].Disposition = nil, nil
+		}},
+		{"the second audio default, no flags in the source", func(o *output) {
+			o.audio[0].disp, o.audio[1].disp = nil, map[string]int{"default": 1}
+		}, false, "Copied audio track 1 changed its default flag", func(a []mediainspect.DetailedStream) {
+			a[0].Disposition, a[1].Disposition = nil, nil
+		}},
+		// Flags reported, so written: a default the source has not is a change.
+		{"a default added to a source without one", func(o *output) {
+			o.audio[0].disp = map[string]int{"default": 1}
+			o.audio[1].disp = nil
+		}, false, "Copied audio track 0 changed its default flag", func(a []mediainspect.DetailedStream) {
+			a[0].Disposition, a[1].Disposition = map[string]int{"default": 0}, map[string]int{"default": 0}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := good()
@@ -270,6 +291,10 @@ func TestDetailedValidationHoldsCopiedTrackMetadata(t *testing.T) {
 			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			srcAudio := append([]mediainspect.DetailedStream(nil), src...)
+			if tc.source != nil {
+				tc.source(srcAudio)
+			}
 			srcFont := font("font.ttf", 1234)
 			if tc.oldFonts {
 				srcFont.ExtraDataSize = 0
@@ -282,7 +307,7 @@ func TestDetailedValidationHoldsCopiedTrackMetadata(t *testing.T) {
 				"plan":           plan,
 				"original": map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0,
 					"video":       []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8}},
-					"audio":       src,
+					"audio":       srcAudio,
 					"subtitles":   srcSubs,
 					"attachments": []mediainspect.DetailedStream{srcFont}},
 			}}

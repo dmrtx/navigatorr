@@ -187,20 +187,6 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	probeStart := time.Now()
 	probeCPU := &cpuMeter{}
 	srcProbe, probeErr := w.probeSourceDetailsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput)
-	if probeErr == nil && w.measuresAudioPackets(job.Plan, srcProbe) {
-		// Measured before the encode: a source whose audio cannot be timed
-		// fails in minutes instead of after hours of encoding, and the
-		// candidate check reuses the measurement.
-		if srcProbe.audioSpans, probeErr = w.audioPacketSpansForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput); probeErr != nil {
-			probeErr = fmt.Errorf("source audio validation: %w", probeErr)
-		}
-	}
-	if probeErr == nil && w.measuresSubtitlePackets(job.Plan, srcProbe) {
-		// The kept subtitles' packets, which the candidate's must match.
-		if srcProbe.subtitlePackets, probeErr = w.subtitlePacketsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput); probeErr != nil {
-			probeErr = fmt.Errorf("source subtitle validation: %w", probeErr)
-		}
-	}
 	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{ActiveComputeMs: probeCPU.activeComputeMs()})
 	if srcProbe.DurationSec > 0 {
 		job.DurationSec = srcProbe.DurationSec
@@ -208,12 +194,17 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if probeErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
-	// A damaged container, or final windows past the end of the video, fail
-	// in seconds here instead of at the final gate after the whole encode.
-	if videoIndex := programmeVideoIndex(srcProbe.Streams); videoIndex >= 0 {
+	// One read of the source's packets, before the encode: the programme
+	// video's frames and damage, and the kept audio and subtitle tracks'
+	// packets, which the candidate's are held to after it. A damaged
+	// container, audio that cannot be timed or final windows past the end of
+	// the video fail in minutes here instead of after hours of encoding, and
+	// the source is never read again for these checks.
+	if req := w.packetScanFor(job.Plan, srcProbe); req.any() {
 		scanStart := time.Now()
 		scanCPU := &cpuMeter{}
-		scan, scanErr := w.scanSourceVideoForJob(withCPUMeter(ctx, scanCPU), r.effectiveInput, videoIndex)
+		var scanErr error
+		srcProbe, scanErr = w.scanSourcePackets(withCPUMeter(ctx, scanCPU), job.Plan, srcProbe, r.effectiveInput)
 		scanCost := transcode.PhaseCost{ActiveComputeMs: scanCPU.activeComputeMs()}
 		if inputOnNAS {
 			scanCost.NASReadBytes = knownCount(sourceInfo.Size())
@@ -225,16 +216,16 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 				// resumable instead of failing it as killed.
 				return ctx.Err()
 			}
-			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source video packets: %w", scanErr))
+			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source packets: %w", scanErr))
 		}
-		if err := scan.damage(sourceInfo.Size()); err != nil {
-			return w.failJobTerminal(jobDir, jobFile, job, err)
+		if scan := srcProbe.videoScan; scan != nil {
+			if err := scan.damage(sourceInfo.Size()); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
+			if err := finalWindowsFitVideo(job.Plan, *scan); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
 		}
-		if err := finalWindowsFitVideo(job.Plan, scan); err != nil {
-			return w.failJobTerminal(jobDir, jobFile, job, err)
-		}
-		// The candidate's video is held to this scan's frames.
-		srcProbe.videoScan = &scan
 	}
 
 	if err := w.validateModeSourceQuality(ctx, r.effectiveInput, job.Plan); err != nil {

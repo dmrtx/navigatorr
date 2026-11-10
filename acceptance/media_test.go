@@ -251,6 +251,7 @@ type probeStream struct {
 	ColorTransfer  string            `json:"color_transfer"`
 	ColorSpace     string            `json:"color_space"`
 	Channels       int               `json:"channels"`
+	ChannelLayout  string            `json:"channel_layout"`
 	ExtradataSize  int               `json:"extradata_size"`
 	Tags           map[string]string `json:"tags"`
 	Disposition    map[string]int    `json:"disposition"`
@@ -317,4 +318,36 @@ func (s *suite) videoFrames(t *testing.T, path string) int {
 		t.Fatalf("counting frames of %s: %q", filepath.Base(path), out)
 	}
 	return n
+}
+
+// headDropped counts the packets of the first video stream's first picture
+// group (those before its second keyframe) that a decoder shows no picture
+// for. A file cut from a longer one with a stream copy can start on an open
+// picture group whose leading pictures refer to pictures that were cut away:
+// they are in the file as packets, but no decoder, and so no encode, shows
+// them.
+func (s *suite) headDropped(t *testing.T, path string) int {
+	t.Helper()
+	out := s.run(t, s.ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=flags", "-of", "csv=p=0", path)
+	head, keys := 0, 0
+	for _, flags := range strings.Fields(out) {
+		if strings.Contains(flags, "K") {
+			if keys++; keys == 2 {
+				break
+			}
+		}
+		head++
+	}
+	if head == 0 {
+		return 0
+	}
+	out = s.run(t, s.ffprobe, "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+#"+strconv.Itoa(head), "-count_frames", "-count_packets", "-show_entries", "stream=nb_read_packets,nb_read_frames", "-of", "csv=p=0", path)
+	var frames, packets int
+	if _, err := fmt.Sscanf(strings.TrimSpace(out), "%d,%d", &frames, &packets); err != nil {
+		t.Fatalf("decoding the first picture group of %s: %q", filepath.Base(path), out)
+	}
+	if packets != head {
+		t.Fatalf("decoding the first picture group of %s read %d packets, want %d", filepath.Base(path), packets, head)
+	}
+	return packets - frames
 }

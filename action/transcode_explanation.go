@@ -46,6 +46,9 @@ type TranscodeExplanation struct {
 	// ladder of fixed settings instead of searching: the rungs, the one
 	// encoding or kept, and what each earlier rung measured.
 	QualityLadder *QualityLadderRecord `json:"quality_ladder,omitempty"`
+	// PreservationFailure is the check that refused a candidate for losing
+	// part of the original, with its numbers (preservation_rejected).
+	PreservationFailure string `json:"preservation_failure,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -192,6 +195,10 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "preservation_not_met":
 		e.Outcome = "preservation_rejected"
 		e.Message = "The encoded result did not preserve the required tracks or video properties. Original preserved."
+		if detail, _ := read(preservationFailureKey).(string); detail != "" {
+			e.PreservationFailure = detail
+			e.Message = "The encoded result did not keep everything the original has: " + detail + ". Original preserved."
+		}
 	case reason == "audio_compaction_insufficient":
 		e.Outcome = "size_rejected"
 		e.Message = "No video encode met this goal, and compacting the lossless audio alone would not save enough. Original preserved."

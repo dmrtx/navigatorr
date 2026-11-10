@@ -147,6 +147,9 @@ func (r *result) describe() string {
 	}
 	if r.goal != nil {
 		msg += fmt.Sprintf(" message=%q", r.goal.Message)
+		if r.goal.PreservationFailure != "" {
+			msg += fmt.Sprintf(" preservation_failure=%q", r.goal.PreservationFailure)
+		}
 	}
 	if r.skipReason() != "" {
 		msg += fmt.Sprintf(" size_budget_skip=%q", r.skipReason())

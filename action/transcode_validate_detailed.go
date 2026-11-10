@@ -198,6 +198,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		}
 		return span, nil
 	}
+	plannedAudioDispositions := make([]map[string]int, len(origAudio))
+	for i, a := range origAudio {
+		plannedAudioDispositions[i] = a.Disposition
+	}
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
 		out := transcode.AudioOutputFor(plan.AudioMode, audioTrackOf(a, origDur))
@@ -304,7 +308,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			if a.Title != b.Title {
 				return waitDecision(fmt.Sprintf("Copied audio track %d was renamed: the source calls it %q, the output %q", i, a.Title, b.Title)), nil
 			}
-			if d := transcode.DispositionChange(a.Disposition, b.Disposition, false); d != "" {
+			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultAudio(i, a.Disposition, plannedAudioDispositions)); d != "" {
 				return waitDecision(fmt.Sprintf("Copied audio track %d changed its %s flag", i, d)), nil
 			}
 		}
@@ -367,7 +371,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			if a.Title != b.Title {
 				return waitDecision(fmt.Sprintf("Copied subtitle track %d was renamed: the source calls it %q, the output %q", i, a.Title, b.Title)), nil
 			}
-			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultSubtitle(i, plannedSubDispositions)); d != "" {
+			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefault(i, plannedSubDispositions)); d != "" {
 				return waitDecision(fmt.Sprintf("Copied subtitle track %d changed its %s flag", i, d)), nil
 			}
 		} else if d := transcode.LostDisposition(a.Disposition, b.Disposition, transcode.MatroskaDispositions); d != "" {
@@ -458,10 +462,11 @@ func sameLanguage(source, output string) bool {
 }
 
 // attachmentChange holds the output's attachments (fonts, mostly) to the
-// source's as a collection of (file name, type, size), however many of each,
-// and describes the first difference, or returns "". A source record made
-// before attachment sizes were kept carries none; its files are compared by
-// name and type.
+// source's and names the first source file, by (file name, type, size), the
+// output lacks, or returns "". The counts are compared before it, so a file
+// replaced by another shows as the one missing. A source record made before
+// attachment sizes were kept carries none; its files are compared by name and
+// type.
 func attachmentChange(orig, out []mediainspect.DetailedStream) string {
 	sized := false
 	for _, s := range orig {
@@ -481,28 +486,15 @@ func attachmentChange(orig, out []mediainspect.DetailedStream) string {
 		return k
 	}
 	count := map[key]int{}
-	var order []key
+	for _, s := range out {
+		count[keyOf(s)]++
+	}
 	for _, s := range orig {
 		k := keyOf(s)
 		if count[k] == 0 {
-			order = append(order, k)
-		}
-		count[k]++
-	}
-	for _, s := range out {
-		k := keyOf(s)
-		if _, ok := count[k]; !ok {
-			order = append(order, k)
+			return fmt.Sprintf("Attachment %q (%s, %d bytes) is missing from the output", k.name, k.mime, k.size)
 		}
 		count[k]--
-	}
-	for _, k := range order {
-		switch n := count[k]; {
-		case n > 0:
-			return fmt.Sprintf("Attachment %q (%s, %d bytes) is missing from the output", k.name, k.mime, k.size)
-		case n < 0:
-			return fmt.Sprintf("The output has an attachment %q (%s, %d bytes) the source does not", k.name, k.mime, k.size)
-		}
 	}
 	return ""
 }

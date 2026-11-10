@@ -20,6 +20,9 @@ type AudioPacketSpan struct {
 	Start, End float64
 	Bytes      int64
 	Packets    int64
+	// Discarded counts the packets the container marks to be dropped (an
+	// edit list that trims the track's start), which a decoder never plays.
+	Discarded int64
 }
 
 // Seconds is the span's duration.
@@ -74,7 +77,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 	}
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(pctx, ffprobePath, "-v", "error", "-select_streams", "a", "-show_packets", "-show_entries", "packet=stream_index,pts_time,duration_time,size", "-of", "compact=p=0", path)
+	cmd := exec.CommandContext(pctx, ffprobePath, "-v", "error", "-select_streams", "a", "-show_packets", "-show_entries", "packet=stream_index,pts_time,duration_time,size,flags", "-of", "compact=p=0", path)
 	cmd.WaitDelay = probeWaitDelay
 	stderr := &cappedBuffer{limit: probeStderrCap}
 	cmd.Stderr = stderr
@@ -111,12 +114,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 		}
 	}()
 
-	type span struct {
-		AudioPacketSpan
-		lastPTS, gap float64
-		openEnd      bool
-	}
-	spans := map[int]*span{}
+	acc := &AudioPacketAccumulator{}
 	var parseErr error
 	scanner := bufio.NewScanner(pipe)
 	for scanner.Scan() {
@@ -130,50 +128,16 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 		if fields["stream_index"] == "" {
 			continue
 		}
-		index, e1 := strconv.Atoi(fields["stream_index"])
-		pts, e2 := strconv.ParseFloat(fields["pts_time"], 64)
-		duration, e3 := 0.0, error(nil)
-		if fields["duration_time"] != "N/A" {
-			duration, e3 = strconv.ParseFloat(fields["duration_time"], 64)
-			if e3 == nil && (!finite(duration) || duration <= 0) {
-				e3 = errors.New("invalid duration")
-			}
-		}
-		size, e4 := strconv.ParseInt(fields["size"], 10, 64)
-		if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !finite(pts) || size <= 0 || index < 0 || len(spans) > 128 {
-			parseErr = errors.New("audio packet timing/size unavailable")
+		if parseErr = acc.Add(fields); parseErr != nil {
 			break
 		}
-		s, exists := spans[index]
-		if !exists {
-			s = &span{AudioPacketSpan: AudioPacketSpan{Start: pts, End: pts}}
-			spans[index] = s
-		} else if gap := pts - s.lastPTS; gap > 0 {
-			s.gap = gap
-		}
-		s.Start = math.Min(s.Start, pts)
-		if end := pts + duration; end > s.End || (end == s.End && duration == 0) {
-			s.End, s.openEnd = end, duration == 0
-		}
-		s.lastPTS = pts
-		s.Bytes += size
-		s.Packets++
 	}
 	if parseErr == nil {
 		parseErr = scanner.Err()
 	}
-	out := make(map[int]AudioPacketSpan, len(spans))
+	var out map[int]AudioPacketSpan
 	if parseErr == nil {
-		for index, s := range spans {
-			if s.openEnd {
-				if s.gap <= 0 {
-					parseErr = errors.New("audio packet timing/size unavailable")
-					break
-				}
-				s.End += s.gap
-			}
-			out[index] = s.AudioPacketSpan
-		}
+		out, parseErr = acc.Spans()
 	}
 	if parseErr != nil {
 		cancel()
@@ -191,6 +155,81 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 	}
 	if waitErr != nil && !errors.Is(waitErr, exec.ErrWaitDelay) {
 		return nil, &ProbeError{Kind: ProbeToolExit, Err: waitErr, Stderr: stderr.String(), Elapsed: elapsed}
+	}
+	return out, nil
+}
+
+// AudioPacketAccumulator measures audio packets read in file order, keyed by
+// stream index, as MeasureAudioPackets does. A caller that reads a file's
+// packets for other reasons too feeds it the audio ones, so the file is read
+// once.
+type AudioPacketAccumulator struct {
+	spans map[int]*audioSpanState
+}
+
+type audioSpanState struct {
+	AudioPacketSpan
+	lastPTS, gap float64
+	openEnd      bool
+}
+
+// errAudioPacketTiming is every failure to measure a packet.
+var errAudioPacketTiming = errors.New("audio packet timing/size unavailable")
+
+// Add measures one packet from ffprobe's fields: stream_index, pts_time,
+// duration_time (N/A when the container states none), size and, when shown,
+// flags.
+func (a *AudioPacketAccumulator) Add(fields map[string]string) error {
+	index, e1 := strconv.Atoi(fields["stream_index"])
+	pts, e2 := strconv.ParseFloat(fields["pts_time"], 64)
+	duration, e3 := 0.0, error(nil)
+	if fields["duration_time"] != "N/A" {
+		duration, e3 = strconv.ParseFloat(fields["duration_time"], 64)
+		if e3 == nil && (!finite(duration) || duration <= 0) {
+			e3 = errors.New("invalid duration")
+		}
+	}
+	size, e4 := strconv.ParseInt(fields["size"], 10, 64)
+	if a.spans == nil {
+		a.spans = map[int]*audioSpanState{}
+	}
+	if e1 != nil || e2 != nil || e3 != nil || e4 != nil || !finite(pts) || size <= 0 || index < 0 || len(a.spans) > 128 {
+		return errAudioPacketTiming
+	}
+	s, exists := a.spans[index]
+	if !exists {
+		s = &audioSpanState{AudioPacketSpan: AudioPacketSpan{Start: pts, End: pts}}
+		a.spans[index] = s
+	} else if gap := pts - s.lastPTS; gap > 0 {
+		s.gap = gap
+	}
+	s.Start = math.Min(s.Start, pts)
+	if end := pts + duration; end > s.End || (end == s.End && duration == 0) {
+		s.End, s.openEnd = end, duration == 0
+	}
+	s.lastPTS = pts
+	s.Bytes += size
+	s.Packets++
+	if strings.Contains(fields["flags"], "D") {
+		s.Discarded++
+	}
+	return nil
+}
+
+// Spans is every measured stream's span. A packet with no duration (TrueHD
+// in Matroska) ends where the next one starts, so a track that ends on one is
+// extended by its last positive gap between packets.
+func (a *AudioPacketAccumulator) Spans() (map[int]AudioPacketSpan, error) {
+	out := make(map[int]AudioPacketSpan, len(a.spans))
+	for index, s := range a.spans {
+		if s.openEnd {
+			if s.gap <= 0 {
+				return nil, errAudioPacketTiming
+			}
+			s.End += s.gap
+			s.openEnd = false
+		}
+		out[index] = s.AudioPacketSpan
 	}
 	return out, nil
 }

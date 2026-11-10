@@ -239,7 +239,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 			if err := w.validateModeSourceQuality(ctx, source, plan); err == nil || !strings.Contains(err.Error(), "quality_model_unavailable") {
 				t.Fatalf("mode preflight: %v", err)
 			}
-			if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
+			if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err != nil {
 				t.Fatalf("pre-publish validation: %v", err)
 			}
 			info, err := os.Stat(candidate)
@@ -256,7 +256,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 			if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", candidate, "-map", "0:V", "-map", "0:a", "-map", "0:t", "-c", "copy", lost).CombinedOutput(); err != nil {
 				t.Fatalf("lost-cover fixture: %v %s", err, out)
 			}
-			if _, err := w.validateEncodedCandidateFull(ctx, lost, ep, srcProbe, 0); err == nil || !strings.Contains(err.Error(), "cover art count") {
+			if _, err := w.validateEncodedCandidateFull(ctx, lost, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err == nil || !strings.Contains(err.Error(), "cover art count") {
 				t.Fatalf("accepted a candidate without its cover: %v", err)
 			}
 		})
