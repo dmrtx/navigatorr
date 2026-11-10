@@ -97,7 +97,7 @@ func TestPromotionValidationRefusesAudioWhoseLengthIsUnmeasurable(t *testing.T) 
 	}{
 		{"ffprobe exits non-zero", "echo 'read error' >&2; exit 1", "ffprobe tool_exit"},
 		{"packet scan stalls", "exec sleep 30", "no audio packet read for 300ms"},
-		{"packets without timing", "echo 'stream_index=1|pts_time=N/A|duration_time=N/A|size=10'", "audio packet timing/size unavailable"},
+		{"packets without timing", "echo 'stream_index=1|pts_time=N/A|duration_time=N/A|size=10'", "none of its 1 packets has a timestamp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, _ := validateWithPackets(t, "", tc.packets)
