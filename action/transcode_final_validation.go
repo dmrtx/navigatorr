@@ -295,7 +295,9 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if err := workerRunsPolicyVersion(caps, plan.ModePolicyVersion); err != nil {
 		return nil, fmt.Errorf("%w before encoding", err)
 	}
-	if frozenGateFreshWindows(ec) && !caps.FreshSampleGate {
+	// The same windows finalValidationInputs plans from this request: a
+	// source too short for the grid has no fresh windows, so nothing to gate.
+	if _, fresh := plannedFinalWindows(ec, req.SourceDuration); freshWindowsGated(ec, fresh) && !caps.FreshSampleGate {
 		return nil, fmt.Errorf("%s before encoding", errFreshSampleGateWorker)
 	}
 	return req, nil
@@ -315,11 +317,19 @@ func finalValidationInputs(ec *ExecutionContext) (req *transcode.BenchmarkReques
 		return nil, "", nil, nil, fmt.Errorf("the final validation request changed")
 	}
 	samples = append([]transcode.BenchmarkSampleWindow(nil), request.Samples...)
-	grid, fresh := sizeFinalWindowsWithFresh(ec, request.SourceDuration, frozenFinalFreshWindows(ec))
+	grid, fresh := plannedFinalWindows(ec, request.SourceDuration)
 	if grid != nil {
 		samples = grid
 	}
 	return &request, digest, samples, fresh, nil
+}
+
+// plannedFinalWindows is the grid and fresh windows a size goal's final gate
+// measures on a source of this duration under the frozen policy; nil for other
+// goals and sources too short for the grid. The capability check before
+// encoding and the plan read the same windows from here.
+func plannedFinalWindows(ec *ExecutionContext, duration float64) (grid, fresh []transcode.BenchmarkSampleWindow) {
+	return sizeFinalWindowsWithFresh(ec, duration, frozenFinalFreshWindows(ec))
 }
 
 // sizeFinalWindowsWithFresh plans size v3's final validation windows from the

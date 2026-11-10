@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -131,16 +132,19 @@ func TestGatedPlanNeedsFreshSampleGateWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vrep := &mediainspect.DetailedReport{DurationSec: 600, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 24, BitRate: 5000000}}}
 	for _, tc := range []struct {
-		policy  ModePolicySnapshot
-		capable bool
-		refused bool
+		policy   ModePolicySnapshot
+		duration float64
+		capable  bool
+		refused  bool
 	}{
-		{current, false, true},
-		{current, true, false},
-		{preFreshGatePolicy(current), false, false},
+		{current, 600, false, true},
+		{current, 600, true, false},
+		{preFreshGatePolicy(current), 600, false, false},
+		// Too short for the grid: no fresh windows, nothing to gate.
+		{current, 90, false, false},
 	} {
+		vrep := &mediainspect.DetailedReport{DurationSec: tc.duration, Video: []mediainspect.DetailedStream{{BitDepth: 8, FPS: 24, BitRate: 5000000}}}
 		ec := freshGateEC(t, tc.policy)
 		ec.State["plan"] = &transcode.Plan{VideoCodec: transcode.VideoCodecLibX265, Quality: 23, Preset: "medium", VideoProfile: "main", PixelFormat: "yuv420p", ExpectedBitDepth: 8, Mode: "size", AudioMode: transcode.AudioModeCompactLossless, ModePolicyVersion: transcode.ModePolicyV3}
 		caps := modeTestCapabilities()
@@ -148,7 +152,87 @@ func TestGatedPlanNeedsFreshSampleGateWorker(t *testing.T) {
 		_, err := finalRequestForPlan(ec, "/media/source.mkv", vrep, tc.policy.Profile.Optimization, caps)
 		refused := err != nil && strings.Contains(err.Error(), errFreshSampleGateWorker)
 		if refused != tc.refused {
-			t.Fatalf("capable %v, gated policy %v: %v", tc.capable, tc.policy.Digest != preFreshGatePolicy(current).Digest, err)
+			t.Fatalf("%.0f s, capable %v, gated policy %v: %v", tc.duration, tc.capable, tc.policy.Digest != preFreshGatePolicy(current).Digest, err)
 		}
+	}
+}
+
+// A whole goal frozen before the ladder started at CRF 24 and before the gate
+// keeps the digest it was frozen under, validates, plans ungated on a worker
+// without the gate, and its ladder climbs its own rungs.
+func TestOldLadderSnapshotKeepsDigestAndClimbs(t *testing.T) {
+	current, err := modePolicyWithBudget("size", false, 0, nil, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The level 1 size digest before both changes.
+	if old := oldLadderSnapshot(current); old.Digest != "sha256:c12b3cef75a61457581478f248e774e906163c9a2a27140920d07d56a52c6999" {
+		t.Fatalf("old-ladder level 1 size snapshot digest: %s", old.Digest)
+	}
+	c := oldLadderCase(t, map[string]any{"allow_hardware": false})
+	c.executor.capabilitiesFunc = func(context.Context) (transcode.WorkerCapabilities, error) {
+		caps := modeTestCapabilities()
+		caps.SizeAudioOnly, caps.FreshSampleGate = true, false
+		return caps, nil
+	}
+	if frozen, err := freezeModePolicy(c.ec); err != nil || frozen.Digest != c.snapshot.Digest || frozenGateFreshWindows(c.ec) {
+		t.Fatalf("stored old goal: %+v %v", frozen, err)
+	}
+	planRecipe(t, c)
+	plan := getPlan(c.ec.State["plan"])
+	if plan.Quality != 22 || plan.QualityValidation == nil || len(plan.QualityValidation.FreshSamples) == 0 || plan.QualityValidation.GateFreshSamples {
+		t.Fatalf("old goal plan CRF %d validation %+v", plan.Quality, plan.QualityValidation)
+	}
+	advanceRung(t, c, failedRung(90, 76))
+	if rec := QualityLadderOf(c.ec.State); rec.Rung != 1 || getPlan(c.ec.State["plan"]).Quality != 19 {
+		t.Fatalf("after CRF 22: %+v", rec)
+	}
+	// 76 then 81 points to 86 at CRF 16: equally spaced, as before.
+	res := advanceRung(t, c, failedRung(90, 81))
+	if rec := QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || !slices.Equal(rec.Values, []int{22, 19, 16}) || getPlan(c.ec.State["plan"]).Quality != 16 {
+		t.Fatalf("after CRF 19: %+v %+v", res, rec)
+	}
+}
+
+// A source too short for the grid has no fresh windows, so its plan is not
+// gated and a worker without fresh_sample_gate plans and encodes it; a long
+// source of the same goal is refused on that worker before encoding.
+func TestShortSourceNeedsNoFreshSampleGate(t *testing.T) {
+	for name, tc := range map[string]struct {
+		duration float64
+		refused  bool
+	}{
+		"short source": {90, false},
+		"long source":  {6000, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newRecipeCase(t, map[string]any{"allow_hardware": false}, func(caps *transcode.WorkerCapabilities) { caps.FreshSampleGate = false })
+			rep := budgetReport()
+			rep.DurationSec = tc.duration
+			c.ec.State["source_report"] = rep
+			res, err := c.engine.stepPlanEncode(context.Background(), c.ec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.refused {
+				if res.Status != StepWaitingDecision || res.WaitingCondition != "quality_policy_unavailable" || !strings.Contains(res.WaitingReason, errFreshSampleGateWorker) {
+					t.Fatalf("long source on an old worker: %+v", res)
+				}
+				return
+			}
+			if res.Status != StepCompleted {
+				t.Fatalf("plan %+v", res)
+			}
+			mergeMap(c.ec.State, res.Outputs)
+			plan := getPlan(c.ec.State["plan"])
+			if plan.QualityValidation == nil || len(plan.QualityValidation.FreshSamples) != 0 || plan.QualityValidation.GateFreshSamples {
+				t.Fatalf("short source validation %+v", plan.QualityValidation)
+			}
+			c.ec.State["candidate_extension"] = ".mkv"
+			sub, err := c.engine.stepTranscodeSubmit(context.Background(), c.ec)
+			if err != nil || sub.Status == StepFailed || c.executor.submitCalls != 1 {
+				t.Fatalf("submit %+v %v, %d jobs", sub, err, c.executor.submitCalls)
+			}
+		})
 	}
 }

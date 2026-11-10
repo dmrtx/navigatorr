@@ -216,6 +216,72 @@ func TestQualityLadderInsertedRungOutcomes(t *testing.T) {
 
 // An added rung never costs the ladder a frozen rung it would have encoded:
 // the trend reads only frozen rungs, so the decisions match a ladder without it.
+// oldLadderSnapshot is p as a size goal froze it before the x265 ladder
+// started at CRF 24 and before the fresh windows gated: rungs 22/19/16 and no
+// gate.
+func oldLadderSnapshot(p ModePolicySnapshot) ModePolicySnapshot {
+	old := []int{22, 19, 16}
+	if p.Recipe != nil {
+		r := *p.Recipe
+		if r.VideoCodec == transcode.VideoCodecLibX265 {
+			r.QualityValues = slices.Clone(old)
+		}
+		if r.Fallback != nil {
+			f := *r.Fallback
+			f.QualityValues = slices.Clone(old)
+			r.Fallback = &f
+		}
+		p.Recipe = &r
+	}
+	return preFreshGatePolicy(p)
+}
+
+// oldLadderCase is a recipe case whose stored goal was frozen with the old
+// ladder, as the goals still running from before it changed are.
+func oldLadderCase(t *testing.T, inputs map[string]any) *budgetCase {
+	t.Helper()
+	c := newRecipeCase(t, inputs, nil)
+	p := oldLadderSnapshot(*c.snapshot)
+	base := *c.base
+	if err := applyModePlan(&base, &p); err != nil {
+		t.Fatal(err)
+	}
+	c.snapshot, c.ec.State["mode_policy"] = &p, p
+	c.base, c.ec.State["plan"] = &base, &base
+	return c
+}
+
+// A goal frozen with 22/19/16 still inserts a rung after a narrow miss, sized
+// by the three CRF steps between its first two rungs.
+func TestOldLadderInsertsRungAfterNarrowMiss(t *testing.T) {
+	for name, tc := range map[string]struct {
+		shortfall float64
+		values    []int
+	}{
+		"a point short": {1.0, []int{22, 21, 19, 16}},
+		"over a point":  {1.2, []int{22, 20, 19, 16}},
+		"2.5 short":     {2.5, []int{22, 20, 19, 16}},
+		"too far":       {2.6, []int{22, 19, 16}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := oldLadderCase(t, map[string]any{"allow_hardware": false})
+			planRecipe(t, c)
+			if plan := getPlan(c.ec.State["plan"]); plan.Quality != 22 || planGatesFreshSamples(plan) {
+				t.Fatalf("old goal planned CRF %d, gated %v", plan.Quality, planGatesFreshSamples(plan))
+			}
+			res := advanceRung(t, c, failedP5(c, tc.shortfall))
+			rec := QualityLadderOf(c.ec.State)
+			plan := getPlan(c.ec.State["plan"])
+			if res.RewindTo != "submit_transcode" || rec.Rung != 1 || !slices.Equal(rec.Values, tc.values) || plan.Quality != tc.values[1] || !qualityLadderPlanMatches(c.snapshot, c.ec.State, plan, rec) {
+				t.Fatalf("%+v %+v plan quality %d", res, rec, plan.Quality)
+			}
+			if snapshot, err := freezeModePolicy(c.ec); err != nil || snapshot.Digest != c.snapshot.Digest || !slices.Equal(snapshot.Recipe.QualityValues, []int{22, 19, 16}) {
+				t.Fatalf("snapshot %+v %v", snapshot, err)
+			}
+		})
+	}
+}
+
 func TestQualityLadderTrendSkipsInsertedRung(t *testing.T) {
 	// Only a shortfall of a point or less adds CRF 23, so the first rung's miss
 	// is narrow whatever the inserted rung then scores.
@@ -246,7 +312,7 @@ func TestQualityLadderTrendSkipsInsertedRung(t *testing.T) {
 	if res.RewindTo != "" || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || len(rec.Tried) != 2 {
 		t.Fatalf("%+v %+v", res, rec)
 	}
-	for _, want := range []string{"stops before CRF 19", "from 81.5 at x265 CRF 24 to 81.7 at CRF 22", "about 81.9 at CRF 19"} {
+	for _, want := range []string{"stops before CRF 19", "from 81.5 at x265 CRF 24 to 81.7 at CRF 22", "about 82.0 at CRF 19"} {
 		if !strings.Contains(rec.Message, want) {
 			t.Fatalf("message %q lacks %q", rec.Message, want)
 		}

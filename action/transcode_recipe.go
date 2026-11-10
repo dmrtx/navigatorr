@@ -511,13 +511,27 @@ func (t qualityLadderTrend) improved() bool {
 // last rung to a projection 0.1 points short of the p5 floor.
 const ladderProjectionMargin = 1.0
 
+// qualityLadderStepScale is how many of the last step's setting distance the
+// next step covers: (lastQ to nextQ) over (prevQ to lastQ). Equally spaced
+// rungs (22/19/16, 20/17/14, 24/21/18, 18/16/14, VideoToolbox 60/65/70) give
+// 1; x265 24/22/19 gives 1.5 from CRF 22 to 19. Rungs that do not move in one
+// direction, or repeat a setting, fall back to 1, the unscaled line.
+func qualityLadderStepScale(prevQ, lastQ, nextQ int) float64 {
+	before, after := lastQ-prevQ, nextQ-lastQ
+	if before == 0 || after == 0 || (before > 0) != (after > 0) {
+		return 1
+	}
+	return float64(after) / float64(before)
+}
+
 // qualityLadderProjectedMiss extrapolates each check the last rung failed
-// along a straight line through the last two rungs, one rung step further. It
+// along a straight line through the last two rungs, to the next rung's
+// setting: the last step's change scaled by qualityLadderStepScale. It
 // returns the first check that would still miss its limit on the next rung,
 // or one that did not improve at all, and nil when every check it can
 // project would reach its limit. Only checks with a numeric limit and scores
 // on both rungs are projected; with nothing to go on the ladder goes on.
-func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderTrend {
+func qualityLadderProjectedMiss(prev, last *FinalQualitySummary, prevQ, lastQ, nextQ int) *qualityLadderTrend {
 	if prev == nil || last == nil || last.Limits == nil {
 		return nil
 	}
@@ -547,7 +561,7 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 		}
 		seen[t.Metric] = true
 		t.Previous, t.Last, t.Limit = *before, *now, *limit
-		t.Projected = t.Last + (t.Last - t.Previous)
+		t.Projected = t.Last + (t.Last-t.Previous)*qualityLadderStepScale(prevQ, lastQ, nextQ)
 		// The projection is a straight line through two scores, not a
 		// measurement: a trend that lands within ladderProjectionMargin of
 		// the limit still gets its encode, flat or not. A hair more absorbs
@@ -565,8 +579,8 @@ func qualityLadderProjectedMiss(prev, last *FinalQualitySummary) *qualityLadderT
 }
 
 // qualityLadderTrendMessage says where a check was heading when the ladder
-// stopped before nextQ: "VMAF p5 went from 80.7 at x265 CRF 22 to 82.2 at
-// CRF 19, which points to about 83.7 at CRF 16, short of the minimum 84.0".
+// stopped before nextQ: "VMAF p5 went from 79.7 at x265 CRF 24 to 80.7 at
+// CRF 22, which points to about 82.2 at CRF 19, short of the minimum 84.0".
 func qualityLadderTrendMessage(codec string, prevQ, lastQ, nextQ int, t *qualityLadderTrend) string {
 	short := fmt.Sprintf("short of the minimum %.1f", t.Limit)
 	if t.Maximum {
@@ -763,7 +777,7 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		prevQ, lastQ, nextQ := r.QualityValues[last-1], r.QualityValues[last], rec.Values[rec.Rung+1]
 		n := len(rec.Tried)
 		if i := slices.IndexFunc(rec.Tried, func(t QualityLadderRung) bool { return t.Quality == prevQ }); i >= 0 && rec.Tried[n-1].Quality == lastQ {
-			if trend := qualityLadderProjectedMiss(rec.Tried[i].Final, rec.Tried[n-1].Final); trend != nil {
+			if trend := qualityLadderProjectedMiss(rec.Tried[i].Final, rec.Tried[n-1].Final, prevQ, lastQ, nextQ); trend != nil {
 				msg := fmt.Sprintf("Each step tried missed this goal's quality limits: %s. The ladder stops before %s because the trend shows it would not reach them: %s. No candidate is offered; original preserved.",
 					qualityLadderTriedWords(rec), recipeRungShort(rec.VideoCodec, nextQ), qualityLadderTrendMessage(rec.VideoCodec, prevQ, lastQ, nextQ, trend))
 				return e.endQualityLadder(ctx, ec, snapshot, st, rec, reasonQualityNotMet, msg), true

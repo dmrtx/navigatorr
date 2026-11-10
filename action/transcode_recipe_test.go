@@ -375,7 +375,9 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 		"no limits":              {rung(p5, QualityNumbers{VMAFP5: f(80)}), &FinalQualitySummary{Verdict: "fail", FailedChecks: p5, Measured: QualityNumbers{VMAFP5: f(80)}}, "", 0},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := qualityLadderProjectedMiss(tc.prev, tc.last)
+			// Equally spaced rungs: the projection is one more step of the
+			// same change, as it was before it scaled by the setting distance.
+			got := qualityLadderProjectedMiss(tc.prev, tc.last, 22, 19, 16)
 			if tc.metric == "" {
 				if got != nil {
 					t.Fatalf("stopped on %+v", got)
@@ -384,6 +386,59 @@ func TestQualityLadderProjectedMiss(t *testing.T) {
 			}
 			if got == nil || got.Metric != tc.metric || got.Projected < tc.projected-1e-6 || got.Projected > tc.projected+1e-6 {
 				t.Fatalf("got %+v, want %s projected to %.1f", got, tc.metric, tc.projected)
+			}
+		})
+	}
+}
+
+// The projection covers the next rung's setting distance: the last step's
+// change scaled by how much further the next rung is. Equally spaced ladders
+// project as they always did.
+func TestQualityLadderProjectionScalesByRungDistance(t *testing.T) {
+	for _, tc := range []struct {
+		prevQ, lastQ, nextQ int
+		scale               float64
+	}{
+		{24, 22, 19, 1.5},
+		{22, 19, 16, 1}, {20, 17, 14, 1}, {24, 21, 18, 1}, {18, 16, 14, 1}, {60, 65, 70, 1},
+		// Nothing to scale by: the unscaled line.
+		{22, 22, 19, 1}, {24, 22, 22, 1}, {22, 19, 21, 1},
+	} {
+		if got := qualityLadderStepScale(tc.prevQ, tc.lastQ, tc.nextQ); got != tc.scale {
+			t.Errorf("%d/%d/%d: scale %v, want %v", tc.prevQ, tc.lastQ, tc.nextQ, got, tc.scale)
+		}
+	}
+	f := func(v float64) *float64 { return &v }
+	limits := &QualityLimits{VMAFP5: f(84), CAMBIPeak: f(16)}
+	rung := func(code string, n QualityNumbers) *FinalQualitySummary {
+		return &FinalQualitySummary{Verdict: "fail", FailedChecks: []string{code}, Measured: n, Limits: limits}
+	}
+	p5 := "quality_vmaf_p5_below_minimum"
+	for name, tc := range map[string]struct {
+		prev, last          *FinalQualitySummary
+		prevQ, lastQ, nextQ int
+		projected           float64 // 0: the ladder goes on
+	}{
+		// 80.9+1.9*1.5 = 83.75 reaches the margin; 80.9+1.9 = 82.8 would not.
+		"24/22/19, scaled reaches": {rung(p5, QualityNumbers{VMAFP5: f(79.0)}), rung(p5, QualityNumbers{VMAFP5: f(80.9)}), 24, 22, 19, 0},
+		// 80.7+1.0*1.5 = 82.2 is still more than a point short.
+		"24/22/19, still short": {rung(p5, QualityNumbers{VMAFP5: f(79.7)}), rung(p5, QualityNumbers{VMAFP5: f(80.7)}), 24, 22, 19, 82.2},
+		// A ladder spaced evenly keeps the old projection: 82.8 stops it.
+		"22/19/16, unchanged": {rung(p5, QualityNumbers{VMAFP5: f(79.0)}), rung(p5, QualityNumbers{VMAFP5: f(80.9)}), 22, 19, 16, 82.8},
+		// CAMBI falls toward its maximum: 22 then 20 points to 17 at 1.5x.
+		"24/22/19, CAMBI scaled over": {rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(22)}), rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(20)}), 24, 22, 19, 0},
+		"22/19/16, CAMBI over":        {rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(22)}), rung("quality_cambi_peak_above_maximum", QualityNumbers{CAMBIPeak: f(20)}), 22, 19, 16, 18},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := qualityLadderProjectedMiss(tc.prev, tc.last, tc.prevQ, tc.lastQ, tc.nextQ)
+			if tc.projected == 0 {
+				if got != nil {
+					t.Fatalf("stopped on %+v", got)
+				}
+				return
+			}
+			if got == nil || got.Projected < tc.projected-1e-6 || got.Projected > tc.projected+1e-6 {
+				t.Fatalf("got %+v, want projected %.2f", got, tc.projected)
 			}
 		})
 	}
@@ -400,7 +455,7 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 	if res.RewindTo != "" || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != reasonQualityNotMet || rec.Outcome != reasonQualityNotMet || rec.Rung != 1 || len(rec.Tried) != 2 {
 		t.Fatalf("trend stop: %+v %+v", res, rec)
 	}
-	for _, want := range []string{"x265 CRF 24 (VMAF p5 79.7 is below the minimum 84.0)", "x265 CRF 22 (VMAF p5 80.7", "stops before CRF 19", "VMAF p5 went from 79.7 at x265 CRF 24 to 80.7 at CRF 22", "about 81.7 at CRF 19", "minimum 84.0", "original preserved"} {
+	for _, want := range []string{"x265 CRF 24 (VMAF p5 79.7 is below the minimum 84.0)", "x265 CRF 22 (VMAF p5 80.7", "stops before CRF 19", "VMAF p5 went from 79.7 at x265 CRF 24 to 80.7 at CRF 22", "about 82.2 at CRF 19", "minimum 84.0", "original preserved"} {
 		if !strings.Contains(rec.Message, want) {
 			t.Fatalf("message %q lacks %q", rec.Message, want)
 		}
@@ -408,6 +463,17 @@ func TestQualityLadderStopsOnTrend(t *testing.T) {
 	// The ladder's outcome reads as the quality rejection it is.
 	if e := ExplainTranscode(&ActionResult{ActionName: "transcode_media", Status: StatusCompleted, Inputs: c.ec.Inputs, State: c.ec.State, Outputs: map[string]any{}}); e == nil || e.Outcome != "quality_rejected" || e.Message != rec.Message || e.FinalQuality == nil {
 		t.Fatalf("explanation %+v", e)
+	}
+
+	// p5 79.0 then 80.9 is 1.9 points over two CRF steps; the next rung is
+	// three steps on, so it points to 83.75, within the margin, and CRF 19 is
+	// encoded. One more step of the same change (82.8) would have stopped it.
+	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
+	planRecipe(t, c)
+	advanceRung(t, c, failedRung(90, 79.0))
+	res = advanceRung(t, c, failedRung(90, 80.9))
+	if rec = QualityLadderOf(c.ec.State); res.RewindTo != "submit_transcode" || rec.Rung != 2 || getPlan(c.ec.State["plan"]).Quality != 19 {
+		t.Fatalf("scaled trend on course: %+v %+v", res, rec)
 	}
 
 	c = newRecipeCase(t, map[string]any{"allow_hardware": false}, nil)
