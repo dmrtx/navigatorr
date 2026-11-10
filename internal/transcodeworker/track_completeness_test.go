@@ -261,9 +261,11 @@ func TestCopiedSubtitleAutomaticDefault(t *testing.T) {
 	if err := f.validate(t); err != nil {
 		t.Fatalf("ffmpeg's automatic default rejected: %v", err)
 	}
-	// On the second subtitle it is not ffmpeg's doing.
+	// On the second subtitle it is not ffmpeg's doing. The source's flags
+	// are known ("none set"): flags never probed have nothing to compare.
 	f = newPacketFixture(t)
 	f.src.Streams[4].Codec, f.cand.Streams[4].Codec = "subrip", "subrip"
+	f.src.Streams[4].Disposition = map[string]int{"default": 0}
 	f.srcSubs[4] = subtitlePackets{packets: 12}
 	f.cand.Streams[4].Disposition = map[string]int{"default": 1}
 	p := f.plan(t)

@@ -60,11 +60,12 @@ func TestInferredAudioDefault(t *testing.T) {
 	if err := validateAudioPreservation(plan, src, cand(map[string]int{"default": 1})); err != nil {
 		t.Fatalf("ffmpeg's inferred default rejected: %v", err)
 	}
-	// On the second track it is not ffmpeg's doing.
+	// Flags never probed have nothing to compare: the copy carries the
+	// source's own, whichever track they mark.
 	second := append([]SourceStream(nil), src...)
 	second[2].Disposition = map[string]int{"default": 1}
-	if err := validateAudioPreservation(plan, src, second); err == nil || !strings.Contains(err.Error(), "audio disposition default changed at stream 1") {
-		t.Fatalf("a default on the second audio track passed: %v", err)
+	if err := validateAudioPreservation(plan, src, second); err != nil {
+		t.Fatalf("a default on a track whose source flags are unknown was refused: %v", err)
 	}
 	// Flags reported (and so written as "0"): a default is a change.
 	flagged := append([]SourceStream(nil), src...)
@@ -77,7 +78,8 @@ func TestInferredAudioDefault(t *testing.T) {
 }
 
 // A copied track's codec is the source's, exactly; a converted one's is the
-// codec its encoder writes.
+// codec its encoder writes. A converted subtitle's is held by
+// transcode.SameConvertedSubtitleCodec, the coordinator's rule too.
 func TestCodecMatches(t *testing.T) {
 	for _, tc := range []struct {
 		expected, got string
@@ -89,8 +91,6 @@ func TestCodecMatches(t *testing.T) {
 		{"aac_at", "aac", true},
 		{"aac", "aac", true},
 		{"libopus", "opus", true},
-		{"srt", "subrip", true},
-		{"subrip", "subrip", true},
 		{"libx265", "h264", false},
 		{"aac_at", "ac3", false},
 		{"libopus", "vorbis", false},

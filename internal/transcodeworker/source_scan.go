@@ -50,8 +50,11 @@ type sourceVideoScan struct {
 	// later), which no decoder shows. leadDiscarded counts the packets that
 	// are both.
 	LeadingNonKey, Discarded, leadDiscarded int
-	sawKey                                  bool
-	firstKeyPTS                             float64
+	// untimed counts the packets with no time at all: a decoder may still
+	// show them, at a time no packet states.
+	untimed     int
+	sawKey      bool
+	firstKeyPTS float64
 	// head holds the first packets as read, at most maxHeadDecodePackets of
 	// them: decodeVideoHead decodes the first headPackets of them and
 	// records in headFrames how many pictures a decoder shows (headDecoded).
@@ -62,6 +65,18 @@ type sourceVideoScan struct {
 	// durations counts the packets by duration, in microseconds (0 when the
 	// container states none).
 	durations map[int64]int
+	// steps counts the timed packets by their step: how far, in tenths of a
+	// millisecond, a packet's time lies from the previous timed packet's in
+	// decode order, paired with that previous packet's own step (-1 for none).
+	// The two fields of a picture lie half a frame apart whatever length the
+	// container states for them, and the step before says where a run of
+	// them starts. A video whose steps take more than maxStepKinds pairs
+	// stops counting new ones (stepsOverflow) and is judged by its durations.
+	steps         map[[2]int64]int
+	stepsOverflow bool
+	prevPTS       float64
+	prevStep      int64
+	hasPrevPTS    bool
 	// DemuxErrors counts the packet damage the container's demuxer reported
 	// while reading. FirstError is the first of it, and FirstErrorByte the
 	// byte offset it names (-1 when it names none).
@@ -92,6 +107,16 @@ func (s sourceVideoScan) start() float64 {
 		return s.leadFirst
 	}
 	return s.First
+}
+
+// noPicturesFrom reports whether the video, as the scan read it, has no
+// picture at or after at, a time on the source's own timeline: every packet
+// was timed, the clock never restarted and the last picture a decoder shows
+// comes before at. A window cut from there extracts nothing, whatever the
+// extract's exit status or messages say. A nil scan (none was read) knows
+// nothing.
+func (s *sourceVideoScan) noPicturesFrom(at float64) bool {
+	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at > s.Last+0.001
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
@@ -359,12 +384,14 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 		}
 	}
 	if !hasPTS {
+		scan.untimed++
 		return
 	}
 	if scan.durations == nil {
 		scan.durations = map[int64]int{}
 	}
 	scan.durations[int64(math.Round(dur*1e6))]++
+	scan.addStep(pts)
 	if scan.anyTime && pts < scan.latest-timestampResetSeconds {
 		scan.Discontinuous = true
 	}
@@ -390,6 +417,49 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 		scan.End, scan.endKnown = pts+dur, dur > 0
 	}
 	scan.timed = true
+}
+
+// maxStepKinds bounds the pairs of steps a scan counts (sourceVideoScan.steps).
+const maxStepKinds = 4096
+
+// addStep counts a timed packet's step (sourceVideoScan.steps).
+func (s *sourceVideoScan) addStep(pts float64) {
+	step, before := int64(-1), int64(-1)
+	if s.hasPrevPTS {
+		step, before = int64(math.Round(math.Abs(pts-s.prevPTS)*1e4)), s.prevStep
+	}
+	s.prevPTS, s.prevStep, s.hasPrevPTS = pts, step, true
+	key := [2]int64{before, step}
+	if s.steps == nil {
+		s.steps = map[[2]int64]int{}
+	}
+	if _, ok := s.steps[key]; !ok && len(s.steps) >= maxStepKinds {
+		s.stepsOverflow = true
+		return
+	}
+	s.steps[key]++
+}
+
+// fieldSteps is how many timed packets lie less than fieldPacketShare of a
+// frame from a neighbour in decode order: each run of such steps holds one
+// packet more than it has steps. Those packets may be fields however long the
+// container says they are. It is 0 when the frame is unknown or the steps
+// were not all counted.
+func (s sourceVideoScan) fieldSteps(frame float64) int {
+	if frame <= 0 || s.stepsOverflow {
+		return 0
+	}
+	short := func(step int64) bool { return step >= 0 && float64(step)/1e4 < frame*fieldPacketShare }
+	n := 0
+	for k, c := range s.steps {
+		if short(k[1]) {
+			n += c
+			if !short(k[0]) {
+				n += c
+			}
+		}
+	}
+	return n
 }
 
 // maxHeadDecodePackets bounds the head decodeVideoHead decodes, and

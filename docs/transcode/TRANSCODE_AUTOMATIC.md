@@ -74,10 +74,11 @@ window whose output pictures do not line up with a good source extract
 (`quality_final_sample_misaligned`) fails the rung under any goal, since it
 means content is missing; other unmeasurable report-only windows (an output
 extract that failed included) are listed as unmeasured rather than dropped. A
-fresh window the source has no pictures for (past the source's end, or a
-source extract that comes back empty: windows are cut from the first decoded
-picture, and one past the video's last says nothing about the output) is
-listed as unmeasured under every goal, gated or not, and a gated verdict is
+fresh window the source has no pictures for (past the source's end, starting
+after the video's last picture as the packet scan before the encode read it,
+or a source extract that comes back empty: windows are cut from the first
+decoded picture, and one past the video's last says nothing about the output)
+is listed as unmeasured under every goal, gated or not, and a gated verdict is
 judged on the windows that were measured. A source extract that fails is
 tried once more; when it fails again, a gated goal fails the rung
 (`quality_final_sample_extract_failed`) rather than judge without it, and a
@@ -107,7 +108,8 @@ refuses the candidate (`preservation_not_met`) when:
   (RADL) excuse nothing. Pictures a decoder drops later in the file (an HEVC
   BLA picture or end of sequence mid-file) are not counted, and such a rare
   source is refused. A field-coded source (PAFF or adaptive field/frame
-  coding: packets shorter than the output's picture) may carry a field per
+  coding: packets shorter than the output's picture, or whose times lie less
+  than that apart whatever length the container states) may carry a field per
   packet, so its pictures lie between its whole packets plus half its
   possible fields and all its packets; fewer frames than that fail, and more
   are judged by where the last frame lands;
@@ -121,12 +123,15 @@ refuses the candidate (`preservation_not_met`) when:
   discarded or without a time may be missing); a converted subtitle has a
   different number of lines than the conversion wrote when it was run on the
   source before the encode (a mov_text track's empty gap samples, merged ASS
-  events), whatever the formats; any kept subtitle comes out empty or has no
-  planned action;
+  events), whatever the formats; a kept subtitle whose source track has lines
+  comes out empty (an empty source track may give an empty one), or a kept
+  subtitle has no planned action;
 - a kept track's codec differs from the plan's. A copy keeps the source's
   codec exactly, save the names Matroska gives back for the same bitstream
-  (`text` reads back as `subrip`, `ssa` as `ass`); a codec the probe did not
-  name is no match;
+  (`text` reads back as `subrip`, `ssa` as `ass`); a converted subtitle is in
+  its target codec exactly (`srt` is `subrip`,
+  `transcode.SameConvertedSubtitleCodec`); a codec the probe did not name is
+  no match;
 - a kept track loses its language tag. Tags are compared exactly: Matroska
   keeps codes outside ISO 639-2 (`pob`, `en`, `pt-BR`) as they are; `und` is
   the absence of a tag;
@@ -137,7 +142,9 @@ refuses the candidate (`preservation_not_met`) when:
   selection moves the default onto it; ffmpeg marks the first track of a kind
   default on its own only when the command sets no flags at all, there are
   two or more tracks of that kind and none is default, and only there is that
-  default allowed (`transcode.WrittenDisposition`, `transcode.InferredDefault`);
+  default allowed (`transcode.WrittenDisposition`, `transcode.InferredDefault`).
+  A record whose source flags were never probed has none to compare, worker
+  and coordinator alike;
 - the attachments are not the source's files by name, type and size: as many,
   and none of the source's missing. ffmpeg copies an attachment's name and
   type as they are, an empty type included. A cover is not an attachment:

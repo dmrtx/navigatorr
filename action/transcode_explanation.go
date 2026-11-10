@@ -28,6 +28,9 @@ type TranscodeExplanation struct {
 	// winner's sample score and its final score side by side per window.
 	Verification *transcode.BenchmarkVerificationEvidence `json:"verification,omitempty"`
 	Windows      []transcode.WindowComparison             `json:"windows,omitempty"`
+	// FreshUnmeasured lists the final check's fresh windows that were not
+	// measured and why: the verdict was reached without them.
+	FreshUnmeasured []transcode.UnmeasuredWindow `json:"fresh_unmeasured,omitempty"`
 	// FinalQuality is the full-file quality check of a result that failed it:
 	// which checks failed, by how much, and the numbers behind them.
 	FinalQuality *FinalQualitySummary `json:"final_quality,omitempty"`
@@ -113,6 +116,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	data, _ = json.Marshal(read("quality_evidence"))
 	if json.Unmarshal(data, &evidence) == nil {
 		e.Windows = transcode.CompareWindows(automatic.WinnerWindows, evidence.Windows)
+		e.FreshUnmeasured = evidence.FreshUnmeasured
 	}
 	reason := getString(res.State, "reason_code")
 	if reason == "" {

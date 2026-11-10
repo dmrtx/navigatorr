@@ -248,6 +248,7 @@ func TestPromotionValidationComparesShortAudioWithTheSourceTrack(t *testing.T) {
 		{"source that starts late in its own timeline", packetLine(1, 0, 1226) + packetLine(2, 0, duration), packetLine(1, 1.4, 1226) + packetLine(2, 1.4, duration), StepCompleted, ""},
 		{"source read fails: the candidate is not measured, not truncated", packetLine(1, 0, 1226) + packetLine(2, 0, duration), sourceScanFails, StepWaitingDecision, "Audio source track not measured at stream 0 ("},
 		{"source track cannot be measured", packetLine(1, 0, 900) + packetLine(2, 0, duration), "", StepWaitingDecision, "Audio source track not measured at stream 0"},
+		{"source track has no timed packets: not measured, not truncated", packetLine(1, 0, 900) + packetLine(2, 0, duration), "stream_index=1|pts_time=N/A|duration_time=N/A|size=1000\nstream_index=1|pts_time=N/A|duration_time=N/A|size=1000\n" + packetLine(2, 0, duration), StepWaitingDecision, "Audio source track not measured at stream 0 (the candidate's is 520.0s short of the container): original stream 1 has 2 packets and none states a time"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result, ec := validateWithSourcePackets(t, tc.candidate, "", tc.source)

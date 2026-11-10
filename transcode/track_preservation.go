@@ -8,13 +8,21 @@ var MatroskaDispositions = []string{"default", "forced", "hearing_impaired", "vi
 
 // DispositionChange compares the flags an output track must carry (want) with
 // the ones it has (got) and returns the first Matroska flag one has and the
-// other does not, or "" when they match. A flag missing from a map is unset.
+// other does not, or "" when they match. A flag missing from a non-empty map
+// is unset. An empty want is flags not known (a record from before the probe
+// kept them; a JSON round trip turns nil into empty and back), the same as
+// WrittenDisposition reads it: the worker wrote none, the output carries the
+// source's own, so there is nothing to compare. A probe that read the flags
+// lists every one, set or not, so a known "none set" is never empty.
 // Flags Matroska cannot store (an MP4 source's dub or captions) have nothing
 // to compare in the output.
 //
 // inferred allows got a default flag want does not have: ffmpeg's own default
 // (InferredDefault).
 func DispositionChange(want, got map[string]int, inferred bool) string {
+	if len(want) == 0 {
+		return ""
+	}
 	for _, name := range MatroskaDispositions {
 		w, g := want[name] > 0, got[name] > 0
 		if w == g || (name == "default" && inferred && g && !w) {
@@ -38,6 +46,23 @@ var copyRenames = map[string]string{"text": "subrip", "ssa": "ass"}
 func SameCopiedCodec(source, output string) bool {
 	s, o := copiedCodecName(source), copiedCodecName(output)
 	return s != "" && s == o
+}
+
+// convertedSubtitleNames are the names a plan may give a subtitle
+// conversion's target that the probe reads back under another: an SRT
+// conversion is subrip.
+var convertedSubtitleNames = map[string]string{"srt": "subrip"}
+
+// SameConvertedSubtitleCodec reports whether a converted subtitle track came
+// out in the codec the plan converts it to (target), as the probe names the
+// output's: exactly, save the names above. A codec not named, on either side,
+// is no match. The worker's check and the coordinator's both use it.
+func SameConvertedSubtitleCodec(target, output string) bool {
+	t := strings.ToLower(strings.TrimSpace(target))
+	if r, ok := convertedSubtitleNames[t]; ok {
+		t = r
+	}
+	return t != "" && t == strings.ToLower(strings.TrimSpace(output))
 }
 
 func copiedCodecName(codec string) string {
@@ -97,7 +122,11 @@ func WrittenDisposition(kind string, planned, source map[string]int) map[string]
 // position i of a kind default on its own. ffmpeg does so only when the
 // command sets no output track's flags at all (written is false), and then
 // only on the first of two or more tracks of a kind none of which is default
-// (planned holds the flags they must carry, in output order).
+// (planned holds the flags they must carry, in output order). The Matroska
+// muxer itself infers nothing (its default_mode is passthrough); the ffmpeg
+// command line does, and one -disposition on any output track, of any kind,
+// stops it for every kind. TestRealDefaultFlagInference runs each case
+// through ffmpeg.
 func InferredDefault(i int, planned []map[string]int, written bool) bool {
 	if written || i != 0 || len(planned) < 2 {
 		return false

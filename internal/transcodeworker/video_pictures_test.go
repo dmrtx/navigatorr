@@ -188,6 +188,14 @@ func TestVideoCompletenessFieldCoded(t *testing.T) {
 	// Frame-coded for its first 400 pictures, then 50 pictures as fields:
 	// the head shows frames, the short packets show the fields.
 	mixed := decoded(videoScanOf(cat(run(400, 0, 0.04, nil), run(100, 16, 0.02, func(int) string { return "" }))...), 301)
+	// The same, with each field's packet stated a whole frame long (a
+	// container's default duration): only the packets' times, half a frame
+	// apart, show the fields.
+	framed := run(100, 16, 0.02, func(int) string { return "" })
+	for i := range framed {
+		framed[i].dur = 0.04
+	}
+	mixedFramed := decoded(videoScanOf(cat(run(400, 0, 0.04, nil), framed)...), 301)
 	// Field packets whose length the container does not state.
 	unstated := decoded(videoScanOf(run(200, 0, 0.02, nil)...), 100)
 	unstated.durations = map[int64]int{0: 200}
@@ -210,6 +218,9 @@ func TestVideoCompletenessFieldCoded(t *testing.T) {
 		{"fields past the head, one missing", mixed, frames(449, 0, 0.04), "h264", 25, "449 frames, the source shows at least 450"},
 		// A codec that never codes fields apart is held to every packet.
 		{"short packets of a frame codec", mixed, frames(450, 0, 0.04), "mpeg4", 25, "450 frames, the source shows 500"},
+		{"fields past the head stated a frame long", mixedFramed, frames(450, 0, 0.04), "h264", 25, ""},
+		{"fields past the head stated a frame long, one missing", mixedFramed, frames(449, 0, 0.04), "h264", 25, "449 frames, the source shows at least 450"},
+		{"close packets of a frame codec", mixedFramed, frames(450, 0, 0.04), "mpeg4", 25, "450 frames, the source shows 500"},
 		{"fields of unstated length", unstated, frames(100, 0, 0.04), "h264", 25, ""},
 		{"fields of unstated length, half lost", unstated, frames(50, 0, 0.04), "h264", 25, "50 frames"},
 	} {

@@ -120,8 +120,10 @@ const fieldPacketShare = 0.6
 // discarded ones (the second field of each picture), or, for a source with no
 // keyframe flagged, more than a quarter. A source whose head is frame-coded
 // may still switch to fields later: a packet of a field codec lasting less
-// than fieldPacketShare of a frame says so. Its pictures then lie between
-// every packet that may show and half the possible fields fewer.
+// than fieldPacketShare of a frame says so, and so does one whose time lies
+// that close to the previous packet's, whatever length the container states
+// for it (fieldSteps). Its pictures then lie between every packet that may
+// show and half the possible fields fewer.
 func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount {
 	var out pictureCount
 	n := src.headPackets
@@ -155,6 +157,9 @@ func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount
 			// The head shows fields: a packet whose length the container
 			// does not state may be one.
 			possible += unknown
+		}
+		if fieldCodecs[strings.ToLower(codec)] {
+			possible = max(possible, src.fieldSteps(out.frame))
 		}
 		out.fields, out.most = true, most
 		out.least = max(most-leading-possible/2, (most+1)/2)
@@ -200,7 +205,7 @@ func (s sourceVideoScan) fieldCoded(codec string, frame float64, nonKey, leading
 			return true
 		}
 	}
-	return false
+	return s.fieldSteps(frame) > 0
 }
 
 // headFrame is one picture's duration as the decoded head shows it: the time

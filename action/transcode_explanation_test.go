@@ -132,7 +132,8 @@ func TestExplainTranscodeNamesTheWinningEncoder(t *testing.T) {
 }
 
 // The explanation carries the verification attempts and puts the winner's
-// sample scores next to its final scores, window by window.
+// sample scores next to its final scores, window by window, and lists the
+// fresh windows the final check could not measure.
 func TestExplainTranscodeReportsVerificationAndWindows(t *testing.T) {
 	res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted,
 		Inputs: map[string]any{"mode": "size"},
@@ -148,9 +149,12 @@ func TestExplainTranscodeReportsVerificationAndWindows(t *testing.T) {
 			"quality_evidence": transcode.FinalQualityEvidence{Verdict: "pass", Windows: []transcode.FinalWindowScore{
 				{StartSeconds: 600, DurationSeconds: 10, Role: "grid", VMAFMean: 91, VMAFP5: 88, VMAFMin: 85},
 				{StartSeconds: 1200, DurationSeconds: 10, Role: "fresh", VMAFMean: 89, VMAFP5: 86, VMAFMin: 83},
-			}},
+			}, FreshUnmeasured: []transcode.UnmeasuredWindow{{StartSeconds: 3000, DurationSeconds: 10, ReasonCode: "quality_final_sample_misaligned"}}},
 		}}
 	e := ExplainTranscode(res)
+	if len(e.FreshUnmeasured) != 1 || e.FreshUnmeasured[0].StartSeconds != 3000 || e.FreshUnmeasured[0].ReasonCode != "quality_final_sample_misaligned" {
+		t.Fatalf("a fresh window the verdict was reached without is not reported: %+v", e.FreshUnmeasured)
+	}
 	if e == nil || e.Verification == nil || len(e.Verification.Attempts) != 2 || len(e.Windows) != 2 {
 		t.Fatalf("explanation %+v", e)
 	}

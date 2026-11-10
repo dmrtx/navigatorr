@@ -310,6 +310,9 @@ func TestTrackSelectionCandidateValidation(t *testing.T) {
 	sel := &transcode.TrackSelection{KeepAudio: []int{1, 3, 4}, KeepSubtitles: []int{5, 7}}
 	plan := tracksPlan(sel)
 	src := tracksSource()
+	// The English subtitle's flags are known, none set, so one added is a
+	// change (flags never probed have nothing to compare).
+	src[5].Disposition = map[string]int{"default": 0}
 	audio := func(codec, profile, lang string, channels int, layout string, def bool) SourceStream {
 		s := SourceStream{Kind: "audio", Codec: codec, Profile: profile, Language: lang, Channels: channels, Layout: layout}
 		if def {

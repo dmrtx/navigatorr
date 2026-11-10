@@ -25,6 +25,14 @@ import (
 // benchmark plan against the exact completed local candidate before publish.
 // Both extracted windows are FFV1 (lossless), then checked frame-for-frame.
 func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, candidate string, plan *transcode.Plan, candidateSHA string, candidateSize int64) (*transcode.FinalQualityEvidence, error) {
+	return w.validateFinalPerceptualScanned(ctx, jobDir, source, candidate, plan, candidateSHA, candidateSize, nil)
+}
+
+// validateFinalPerceptualScanned is validateFinalPerceptual with the source's
+// packet scan read before the encode (nil when none was read). A window that
+// starts after the source's last picture on it has no source pictures,
+// whatever the source's extract exits with or prints.
+func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, source, candidate string, plan *transcode.Plan, candidateSHA string, candidateSize int64, scan *sourceVideoScan) (*transcode.FinalQualityEvidence, error) {
 	if plan == nil || plan.QualityValidation == nil {
 		return nil, nil
 	}
@@ -184,9 +192,10 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			return finalWindowResult{code: code, err: cause}
 		}
 		// A fresh window the source has no pictures for (past the end of its
-		// container, or an extract in which ffmpeg encodes nothing) has
-		// nothing to hold the candidate to: it is unmeasured, never a refusal
-		// (noSource). Only the source's own extract says so: the containers'
+		// container, past its last picture as the packet scan read it, or an
+		// extract in which ffmpeg encodes nothing) has nothing to hold the
+		// candidate to: it is unmeasured, never a refusal (noSource). Only
+		// the source's own packets or extract say so: the containers'
 		// durations follow their longest stream, not their video.
 		sourceless := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause, noSource: pos >= grid}
@@ -208,6 +217,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		// Which window failed and where it sits tells a gap in the source's
 		// timeline from a shifted encode.
 		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
+		// A window that starts after the source's last picture has none:
+		// the scan read every packet's time before the encode, so this does
+		// not rest on the extract's exit status or its wording.
+		if scan.noPicturesFrom(sourceFirstFrame + from) {
+			return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source's last picture, %.3fs after its first, comes before it", where, scan.Last-sourceFirstFrame))
+		}
 		// The source's extract comes first. One in which ffmpeg encodes no
 		// picture is a window past the source's video. Any other failure
 		// (a read error, a killed process, an extract ffprobe cannot read)

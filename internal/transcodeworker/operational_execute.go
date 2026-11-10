@@ -336,7 +336,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			if audioOnly {
 				qualityEvidence, verr = w.validateVideoCopy(validationCtx, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
 			} else {
-				qualityEvidence, verr = w.validateFinalPerceptual(validationCtx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+				qualityEvidence, verr = w.validateFinalPerceptualScanned(validationCtx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes, srcProbe.videoScan)
 			}
 			job.QualityEvidence = qualityEvidence
 			if verr == nil {

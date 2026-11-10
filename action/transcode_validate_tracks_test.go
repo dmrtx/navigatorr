@@ -269,9 +269,11 @@ func TestDetailedValidationHoldsCopiedTrackMetadata(t *testing.T) {
 		}, false, "", func(a, _ []mediainspect.DetailedStream) {
 			a[0].Disposition, a[1].Disposition = nil, nil
 		}},
-		{"the second audio default, no flags in the source", func(o *output) {
+		// Flags not known have nothing to compare: the worker wrote none,
+		// so the copy carries the source's own, whatever they were.
+		{"the second audio default, source flags unknown", func(o *output) {
 			o.audio[0].disp, o.audio[1].disp = nil, map[string]int{"default": 1}
-		}, false, "Copied audio track 1 changed its default flag", func(a, _ []mediainspect.DetailedStream) {
+		}, false, "", func(a, _ []mediainspect.DetailedStream) {
 			a[0].Disposition, a[1].Disposition = nil, nil
 		}},
 		// Flags reported, so written: a default the source has not is a change.

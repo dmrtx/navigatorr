@@ -205,6 +205,11 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if !ok {
 			return span, fmt.Errorf("original stream %d has no measurable packets", streamIndex)
 		}
+		if span.Timed == 0 {
+			// Packets with no time say nothing of where the track ends: its
+			// length is not measured, which is not a truncation.
+			return span, fmt.Errorf("original stream %d has %d packets and none states a time", streamIndex, span.Packets)
+		}
 		return span, nil
 	}
 	plannedAudioDispositions := plannedDispositions(origAudio)
@@ -356,7 +361,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if act.Operation == "copy" && !transcode.SameCopiedCodec(a.Codec, b.Codec) {
 			return waitDecision(fmt.Sprintf("Copied subtitle codec changed at stream %d: original=%s output=%s", i, a.Codec, b.Codec)), nil
 		}
-		if act.Operation == "transcode" && normCodec(b.Codec) != normCodec(act.Codec) {
+		if act.Operation == "transcode" && !transcode.SameConvertedSubtitleCodec(act.Codec, b.Codec) {
 			return waitDecision(fmt.Sprintf("Converted subtitle codec mismatch at stream %d: expected=%s output=%s", i, act.Codec, b.Codec)), nil
 		}
 		if !sameLanguage(a.Language, b.Language) {

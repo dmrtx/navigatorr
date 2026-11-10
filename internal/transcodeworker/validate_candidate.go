@@ -314,7 +314,6 @@ var encodedCodecNames = map[string]string{
 	"h264_videotoolbox": "h264", "libx264": "h264", "x264": "h264", "avc": "h264", "avc1": "h264",
 	"aac_at": "aac", "libfdk_aac": "aac",
 	"libopus": "opus",
-	"srt":     "subrip",
 }
 
 // codecMatches holds a converted track's codec, as the probe names it, to the
@@ -434,7 +433,7 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 				return candidateInvalid(fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrContentNotPreserved, i, a.Codec, b.Codec))
 			}
 		case "transcode":
-			if !codecMatches(act.Codec, b.Codec) {
+			if !transcode.SameConvertedSubtitleCodec(act.Codec, b.Codec) {
 				return candidateInvalid(fmt.Errorf("%w: converted subtitle codec mismatch at stream %d: expected=%s candidate=%s (fail closed, never publish)", ErrContentNotPreserved, i, act.Codec, b.Codec))
 			}
 		default:

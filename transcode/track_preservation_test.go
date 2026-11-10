@@ -84,4 +84,38 @@ func TestDispositionChange(t *testing.T) {
 	if got := DispositionChange(map[string]int{"dub": 1}, nil, false); got != "" {
 		t.Fatalf("a flag Matroska cannot store: %q", got)
 	}
+	// Flags not known (nil or empty) have nothing to compare, whatever the
+	// output carries; a known "none set" still refuses an added flag.
+	for _, unknown := range []map[string]int{nil, {}} {
+		if got := DispositionChange(unknown, sdhDef, false); got != "" {
+			t.Fatalf("unknown flags %v: %q", unknown, got)
+		}
+	}
+	if got := DispositionChange(map[string]int{"default": 0}, sdhDef, false); got != "default" {
+		t.Fatalf("known none set: %q", got)
+	}
+}
+
+// A converted subtitle is in its target codec exactly, under the probe's
+// name for it; nothing unnamed matches and no name contains another.
+func TestSameConvertedSubtitleCodec(t *testing.T) {
+	for _, tc := range []struct {
+		target, output string
+		want           bool
+	}{
+		{"subrip", "subrip", true},
+		{"srt", "subrip", true},
+		{" SubRip ", "subrip", true},
+		{"ass", "ass", true},
+		{"subrip", "ass", false},
+		{"ass", "ssa", false},
+		{"webvtt", "subrip", false},
+		{"sub", "subrip", false},
+		{"subrip", "", false},
+		{"", "", false},
+	} {
+		if got := SameConvertedSubtitleCodec(tc.target, tc.output); got != tc.want {
+			t.Errorf("SameConvertedSubtitleCodec(%q, %q) = %v, want %v", tc.target, tc.output, got, tc.want)
+		}
+	}
 }
