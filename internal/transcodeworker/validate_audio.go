@@ -14,6 +14,7 @@ import (
 type audioPacketSpan struct {
 	start, end float64
 	bytes      int64
+	packets    int64
 }
 
 // needsAudioPacketValidation reports whether the plan re-encodes audio, so
@@ -24,6 +25,26 @@ func needsAudioPacketValidation(plan *transcode.Plan, src SourceProbe) bool {
 		return countStreams(src.Streams, "audio") > 0
 	}
 	return transcode.IsAudioLevelMode(plan.AudioMode) && countStreams(src.Streams, "audio") > 0
+}
+
+// measuresAudioPackets reports whether the candidate's audio tracks are
+// measured from their packets. Every plan's are, copied tracks included: a
+// copy that lost packets is as short as a truncated encode. Only a test that
+// injects the probe without the packet scan describes files it never wrote,
+// so plans that copy their audio are not measured there.
+func (w *Worker) measuresAudioPackets(plan *transcode.Plan, src SourceProbe) bool {
+	if needsAudioPacketValidation(plan, src) {
+		return true
+	}
+	return countStreams(src.Streams, "audio") > 0 && (w.scanAudio != nil || !w.probeInjected())
+}
+
+// audioPacketSpansForJob uses the injected audio scan when present.
+func (w *Worker) audioPacketSpansForJob(ctx context.Context, path string) (map[int]audioPacketSpan, error) {
+	if w.scanAudio != nil {
+		return w.scanAudio(ctx, path)
+	}
+	return audioPacketSpans(ctx, w.ffprobePath, path)
 }
 
 // audioPacketSpans reads actual packet timing/size, not inherited Matroska
@@ -48,7 +69,7 @@ func audioPacketSpans(ctx context.Context, ffprobe, path string) (map[int]audioP
 	}
 	out := make(map[int]audioPacketSpan, len(measured))
 	for index, s := range measured {
-		out[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes}
+		out[index] = audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes, packets: s.Packets}
 	}
 	return out, nil
 }
@@ -57,11 +78,11 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 	a := src.audioSpans
 	if a == nil {
 		var err error
-		if a, err = audioPacketSpans(ctx, w.ffprobePath, source); err != nil {
+		if a, err = w.audioPacketSpansForJob(ctx, source); err != nil {
 			return fmt.Errorf("source audio validation: %w", err)
 		}
 	}
-	b, err := audioPacketSpans(ctx, w.ffprobePath, candidate)
+	b, err := w.audioPacketSpansForJob(ctx, candidate)
 	if err != nil {
 		return fmt.Errorf("candidate audio validation: %w", err)
 	}
@@ -83,7 +104,11 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 		if math.Abs((x.start-*sv.StartTime)-(y.start-*cv.StartTime)) > 0.25 || math.Abs((x.end-x.start)-(y.end-y.start)) > 0.25 {
 			return fmt.Errorf("audio stream %d duration or A/V offset changed (fail closed, never publish)", i)
 		}
-		if codec, kbps := transcode.AudioTarget(plan.AudioMode, s.AudioTrack()); codec != "copy" && y.end-y.start > 10 {
+		codec, kbps := transcode.AudioTarget(plan.AudioMode, s.AudioTrack())
+		if err := copiedAudioPackets(i, codec, x, y); err != nil {
+			return err
+		}
+		if codec != "copy" && y.end-y.start > 10 {
 			bps := float64(y.bytes) * 8 / (y.end - y.start)
 			// AAC is variable bitrate; reject gross overshoot, not silence or padding.
 			if bps > float64(transcode.AudioBitrateCeilingBps(kbps)) {
@@ -92,4 +117,14 @@ func (w *Worker) validateAudioPackets(ctx context.Context, plan *transcode.Plan,
 		}
 	}
 	return nil
+}
+
+// copiedAudioPackets holds a copied track to the source's packet count. A copy
+// carries every packet of the source track unchanged; one with fewer lost
+// sound, however close its first and last packets stay to the source's.
+func copiedAudioPackets(i int, codec string, src, cand audioPacketSpan) error {
+	if codec != "copy" || src.packets == cand.packets {
+		return nil
+	}
+	return candidateInvalid(fmt.Errorf("%w: copied audio stream %d has %d packets, the source track %d; sound was lost in the copy (fail closed, never publish)", ErrSourceInvalid, i, cand.packets, src.packets))
 }

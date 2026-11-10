@@ -92,7 +92,12 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 			}
 			streams := `{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"}`
 			for i, a := range tc.out {
-				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": %q, "channels": %d, "channel_layout": %q, "tags": {"language": %q}}`, i+1, a.codec, a.channels, a.layout, a.lang)
+				// A copied track keeps its source's name.
+				title := ""
+				if i < len(tc.titles) && i < len(tc.src) && a.codec == tc.src[i].codec {
+					title = tc.titles[i]
+				}
+				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": %q, "channels": %d, "channel_layout": %q, "tags": {"language": %q, "title": %q}}`, i+1, a.codec, a.channels, a.layout, a.lang, title)
 			}
 			probe := `{"streams": [` + streams + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
 			ffprobe := filepath.Join(dir, "ffprobe")

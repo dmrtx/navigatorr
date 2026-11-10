@@ -69,12 +69,42 @@ frozen since that rule) judges the fresh windows with the grid, so a fresh
 window that misses a limit, or cannot be measured, fails the rung; such a goal
 only runs on a worker that reports `fresh_sample_gate` and stops before
 encoding otherwise. A goal frozen before the rule keeps its digest and its
-report-only fresh windows; one of those that cannot be measured is listed as
-unmeasured rather than dropped. Other goals, and
+report-only fresh windows: a score miss there is only reported, but a fresh
+window that has no matching pictures in the output
+(`quality_final_sample_misaligned`) or cannot be cut from it
+(`quality_final_sample_extract_failed`) fails the rung under any goal, since
+it means content is missing; other unmeasurable report-only windows are listed
+as unmeasured rather than dropped. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
 file; the verdict names the failed metric and its limit.
+
+**Nothing kept may lose content.** Before publishing, the worker reads the
+packets of every kept stream in the source (before the encode) and in the
+candidate, and refuses the candidate (`preservation_not_met`) when:
+
+- the programme video has a different number of frames than the source (only
+  frames before the source's first keyframe, or marked to be discarded, may be
+  missing) or its last frame is more than one frame away from the source's;
+- a copied audio track has a different packet count, or its codec differs at
+  all (E-AC-3 is not AC-3); copy plans now also get the 0.25 s start and
+  length check converted tracks always had (that one keeps its own error);
+- a copied subtitle has a different packet count; a converted mov_text
+  subtitle has a different count than the source's samples that hold text
+  (the MP4 muxer's empty two-byte gap samples have no counterpart in SubRip);
+  any kept subtitle comes out empty, has no planned action, or loses its
+  language tag;
+- a copied audio or subtitle track changes its title or any flag Matroska
+  stores (only ffmpeg's automatic default on the first subtitle, when the plan
+  marks none, is allowed); a converted subtitle loses one of those flags;
+- the attachments are not the source's files by name, type and size.
+
+The intentional changes stay allowed: a converted audio track's new title and
+the default flag a track selection moves. The server repeats the title, flag
+and attachment checks on the finished file and asks for a decision on any
+difference; it does not repeat the packet counts, which need a full read of
+both files.
 
 When a size goal's ladder ends with no candidate and the policy allows it
 (`audio_only_fallback`, on for size), navigatorr copies the video unchanged and

@@ -298,6 +298,16 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if plan.Tracks != nil && a.Disposition["default"] > 0 && b.Disposition["default"] == 0 {
 			return waitDecision(fmt.Sprintf("Default audio disposition lost at stream %d", i)), nil
 		}
+		// A copied track is the source's track: its name and flags too. A
+		// converted one is named by the conversion (convertedAudioTitle).
+		if out.Codec == "copy" {
+			if a.Title != b.Title {
+				return waitDecision(fmt.Sprintf("Copied audio track %d was renamed: the source calls it %q, the output %q", i, a.Title, b.Title)), nil
+			}
+			if d := transcode.DispositionChange(a.Disposition, b.Disposition, false); d != "" {
+				return waitDecision(fmt.Sprintf("Copied audio track %d changed its %s flag", i, d)), nil
+			}
+		}
 		if a.Channels > 0 && b.Channels != a.Channels {
 			return waitDecision(fmt.Sprintf("Audio channel mismatch at stream %d: original=%d output=%d", i, a.Channels, b.Channels)), nil
 		}
@@ -317,6 +327,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	position := map[int]int{}
 	for i, s := range sourceSubtitles {
 		position[s.Index] = i
+	}
+	plannedSubDispositions := make([]map[string]int, len(origSubs))
+	for i, s := range origSubs {
+		plannedSubDispositions[i] = s.Disposition
 	}
 	for i, a := range origSubs {
 		b := outRep.Subtitles[i]
@@ -346,10 +360,28 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 				return waitDecision(fmt.Sprintf("%s subtitle disposition lost at stream %d", label, i)), nil
 			}
 		}
+		// A copied track keeps its name and every flag; ffmpeg may only mark
+		// the first subtitle default when the plan left none default. A
+		// converted track keeps every flag the output can store.
+		if act.Operation == "copy" {
+			if a.Title != b.Title {
+				return waitDecision(fmt.Sprintf("Copied subtitle track %d was renamed: the source calls it %q, the output %q", i, a.Title, b.Title)), nil
+			}
+			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultSubtitle(i, plannedSubDispositions)); d != "" {
+				return waitDecision(fmt.Sprintf("Copied subtitle track %d changed its %s flag", i, d)), nil
+			}
+		} else if d := transcode.LostDisposition(a.Disposition, b.Disposition, transcode.MatroskaDispositions); d != "" {
+			return waitDecision(fmt.Sprintf("Converted subtitle track %d lost its %s flag", i, d)), nil
+		}
 	}
 	origAttachments := getStreamsList(origMap, "attachments")
 	if plan.PreserveAttachments && len(outRep.Attachments) != len(origAttachments) {
 		return waitDecision(fmt.Sprintf("Attachment count mismatch: original=%d output=%d", len(origAttachments), len(outRep.Attachments))), nil
+	}
+	if plan.PreserveAttachments {
+		if change := attachmentChange(origAttachments, outRep.Attachments); change != "" {
+			return waitDecision(change), nil
+		}
 	}
 	origChapters := getInt(origMap, "chapters")
 	if plan.PreserveChapters && outRep.Chapters != origChapters {
@@ -423,6 +455,66 @@ func sameLanguage(source, output string) bool {
 		return true
 	}
 	return normCodec(source) == normCodec(output)
+}
+
+// attachmentChange holds the output's attachments (fonts, mostly) to the
+// source's as a collection of (file name, type, size), however many of each,
+// and describes the first difference, or returns "". A source record made
+// before attachment sizes were kept carries none; its files are compared by
+// name and type.
+func attachmentChange(orig, out []mediainspect.DetailedStream) string {
+	sized := false
+	for _, s := range orig {
+		if s.ExtraDataSize > 0 {
+			sized = true
+		}
+	}
+	type key struct {
+		name, mime string
+		size       int64
+	}
+	keyOf := func(s mediainspect.DetailedStream) key {
+		k := key{name: streamTag(s, "filename"), mime: strings.ToLower(streamTag(s, "mimetype"))}
+		if sized {
+			k.size = s.ExtraDataSize
+		}
+		return k
+	}
+	count := map[key]int{}
+	var order []key
+	for _, s := range orig {
+		k := keyOf(s)
+		if count[k] == 0 {
+			order = append(order, k)
+		}
+		count[k]++
+	}
+	for _, s := range out {
+		k := keyOf(s)
+		if _, ok := count[k]; !ok {
+			order = append(order, k)
+		}
+		count[k]--
+	}
+	for _, k := range order {
+		switch n := count[k]; {
+		case n > 0:
+			return fmt.Sprintf("Attachment %q (%s, %d bytes) is missing from the output", k.name, k.mime, k.size)
+		case n < 0:
+			return fmt.Sprintf("The output has an attachment %q (%s, %d bytes) the source does not", k.name, k.mime, k.size)
+		}
+	}
+	return ""
+}
+
+// streamTag is a stream's tag by name, whatever its case.
+func streamTag(s mediainspect.DetailedStream, name string) string {
+	for k, v := range s.Tags {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 // sourceTrackTolerance is how much shorter than the source track's own packets

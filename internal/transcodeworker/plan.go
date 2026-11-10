@@ -48,6 +48,8 @@ type SourceStream struct {
 	// carries both; they are reused when the cover is re-attached.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// AttachmentBytes is an attachment's size (ffprobe's extradata_size).
+	AttachmentBytes int64 `json:"attachment_bytes,omitempty"`
 	// StatisticsTags are the stream's muxer statistics tag names as the probe
 	// reports them, language-suffixed variants ("BPS-eng") included.
 	StatisticsTags []string `json:"-"`
@@ -92,8 +94,12 @@ type SourceProbe struct {
 	DurationSec float64
 	Chapters    int
 	// audioSpans is the source's measured audio packet timing, taken before
-	// the encode when the plan re-encodes audio.
+	// the encode.
 	audioSpans map[int]audioPacketSpan
+	// subtitlePackets are the source's subtitle packet counts and videoScan
+	// its programme video's packet scan, both taken before the encode.
+	subtitlePackets map[int]subtitlePackets
+	videoScan       *sourceVideoScan
 }
 
 func ProbeSourceStreams(ctx context.Context, ffprobePath, filePath string) ([]SourceStream, float64, error) {
@@ -136,6 +142,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			StartTime        string            `json:"start_time"`
 			AvgFrameRate     string            `json:"avg_frame_rate"`
 			RFrameRate       string            `json:"r_frame_rate"`
+			ExtradataSize    int64             `json:"extradata_size"`
 		} `json:"streams"`
 		Chapters []struct {
 			Index int `json:"index"`
@@ -186,6 +193,10 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if kind == "video" {
 			_, fps = mediainspect.ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
 		}
+		var attachmentBytes int64
+		if kind == "attachment" {
+			attachmentBytes = st.ExtradataSize
+		}
 		out = append(out, SourceStream{
 			FPS:        fps,
 			SampleRate: sampleRate,
@@ -193,7 +204,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
-			Filename: filename, MimeType: mimeType, BitrateKbps: bitrateKbps,
+			Filename: filename, MimeType: mimeType, AttachmentBytes: attachmentBytes, BitrateKbps: bitrateKbps,
 			StatisticsTags: statisticsTagKeys(st.Tags),
 		})
 	}
@@ -270,6 +281,8 @@ type StreamAction struct {
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// AttachmentBytes is an attachment's size (ffprobe's extradata_size).
+	AttachmentBytes int64 `json:"attachment_bytes,omitempty"`
 	// StatisticsTags are the source stream's statistics tag names, cleared on
 	// a re-encoded stream (see clearStatisticsTags).
 	StatisticsTags []string `json:"-"`

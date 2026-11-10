@@ -14,10 +14,12 @@ import (
 )
 
 // AudioPacketSpan is one audio stream's measured packets: the time from its
-// first packet's start to its last packet's end, and the bytes in between.
+// first packet's start to its last packet's end, the bytes in between and how
+// many packets carried them.
 type AudioPacketSpan struct {
 	Start, End float64
 	Bytes      int64
+	Packets    int64
 }
 
 // Seconds is the span's duration.
@@ -155,6 +157,7 @@ func MeasureAudioPackets(ctx context.Context, ffprobePath, path string) (map[int
 		}
 		s.lastPTS = pts
 		s.Bytes += size
+		s.Packets++
 	}
 	if parseErr == nil {
 		parseErr = scanner.Err()

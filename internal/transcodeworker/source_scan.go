@@ -27,6 +27,14 @@ type sourceVideoScan struct {
 	// timestampResetSeconds (a broadcast recording whose clock restarts):
 	// Start and End then no longer measure the video's length.
 	Discontinuous bool
+	// LeadingNonKey counts the packets read before the first keyframe: a
+	// decoder has nothing to show them with, so an encode may begin without
+	// them. Discarded counts the packets the container marks to be dropped
+	// (an edit list that starts the video later), which no decoder shows.
+	// LastFrame is the duration of the picture that ends the video.
+	LeadingNonKey, Discarded int
+	sawKey                   bool
+	LastFrame                float64
 	// DemuxErrors counts the packet damage the container's demuxer reported
 	// while reading. FirstError is the first of it, and FirstErrorByte the
 	// byte offset it names (-1 when it names none).
@@ -74,13 +82,18 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		case "packet":
 			var pts, dts, dur float64
 			hasPTS, hasDTS := false, false
+			key, discard := false, false
 			for _, f := range fields[1:] {
-				key, value, _ := strings.Cut(f, "=")
+				name, value, _ := strings.Cut(f, "=")
+				if name == "flags" {
+					key, discard = strings.Contains(value, "K"), strings.Contains(value, "D")
+					continue
+				}
 				v, err := strconv.ParseFloat(value, 64)
 				if err != nil {
 					continue // N/A
 				}
-				switch key {
+				switch name {
 				case "pts_time":
 					pts, hasPTS = v, true
 				case "dts_time":
@@ -103,10 +116,18 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 				scan.Start = pts
 			}
 			if first || pts+dur > scan.End {
-				scan.End = pts + dur
+				scan.End, scan.LastFrame = pts+dur, dur
 			}
 			first = false
 			scan.Packets++
+			if key {
+				scan.sawKey = true
+			} else if !scan.sawKey {
+				scan.LeadingNonKey++
+			}
+			if discard {
+				scan.Discarded++
+			}
 		case "format":
 			for _, f := range fields[1:] {
 				if key, value, _ := strings.Cut(f, "="); key == "format_name" {
@@ -160,7 +181,7 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 		e.count++
 	}}
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
-		"-show_entries", "packet=pts_time,dts_time,duration_time:format=format_name", "-of", "compact", path)
+		"-show_entries", "packet=pts_time,dts_time,duration_time,flags:format=format_name", "-of", "compact", path)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := runCharged(ctx, cmd)
 	stdout.flush()

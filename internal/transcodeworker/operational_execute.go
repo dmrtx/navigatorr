@@ -187,12 +187,18 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	probeStart := time.Now()
 	probeCPU := &cpuMeter{}
 	srcProbe, probeErr := w.probeSourceDetailsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput)
-	if probeErr == nil && needsAudioPacketValidation(job.Plan, srcProbe) {
+	if probeErr == nil && w.measuresAudioPackets(job.Plan, srcProbe) {
 		// Measured before the encode: a source whose audio cannot be timed
 		// fails in minutes instead of after hours of encoding, and the
 		// candidate check reuses the measurement.
-		if srcProbe.audioSpans, probeErr = audioPacketSpans(withCPUMeter(ctx, probeCPU), w.ffprobePath, r.effectiveInput); probeErr != nil {
+		if srcProbe.audioSpans, probeErr = w.audioPacketSpansForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput); probeErr != nil {
 			probeErr = fmt.Errorf("source audio validation: %w", probeErr)
+		}
+	}
+	if probeErr == nil && w.measuresSubtitlePackets(job.Plan, srcProbe) {
+		// The kept subtitles' packets, which the candidate's must match.
+		if srcProbe.subtitlePackets, probeErr = w.subtitlePacketsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput); probeErr != nil {
+			probeErr = fmt.Errorf("source subtitle validation: %w", probeErr)
 		}
 	}
 	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{ActiveComputeMs: probeCPU.activeComputeMs()})
@@ -227,6 +233,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		if err := finalWindowsFitVideo(job.Plan, scan); err != nil {
 			return w.failJobTerminal(jobDir, jobFile, job, err)
 		}
+		// The candidate's video is held to this scan's frames.
+		srcProbe.videoScan = &scan
 	}
 
 	if err := w.validateModeSourceQuality(ctx, r.effectiveInput, job.Plan); err != nil {
@@ -1480,6 +1488,13 @@ func (w *Worker) scanSourceVideoForJob(ctx context.Context, path string, streamI
 		return sourceVideoScan{FirstErrorByte: -1}, nil
 	}
 	return scanSourceVideo(ctx, w.ffprobePath, path, streamIndex)
+}
+
+// probeInjected reports whether a test injected the probe: it then describes
+// files it never wrote, and a packet scan has nothing to read unless the test
+// injects that too.
+func (w *Worker) probeInjected() bool {
+	return w.probeDetails != nil || w.probeSource != nil
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the

@@ -99,20 +99,23 @@ func TestFreshWindowBelowLimitFailsOnlyAGatedVerdict(t *testing.T) {
 	}
 }
 
-// A fresh window that cannot be measured fails a gated plan like a grid
+// A fresh window whose score cannot be taken fails a gated plan like a grid
 // window, and is reported, not dropped, by an ungated one, whose other fresh
 // window is still measured.
 func TestUnmeasurableFreshWindow(t *testing.T) {
-	broken := errors.New("extract failed")
-	measureWith := func(failing int) (func(context.Context, int) finalWindowResult, *atomic.Int32) {
+	broken := errors.New("vmaf log incomplete")
+	measureWithCode := func(failing int, code string) (func(context.Context, int) finalWindowResult, *atomic.Int32) {
 		calls := &atomic.Int32{}
 		return func(ctx context.Context, pos int) finalWindowResult {
 			calls.Add(1)
 			if pos == failing {
-				return finalWindowResult{code: "quality_final_sample_extract_failed", err: broken}
+				return finalWindowResult{code: code, err: broken}
 			}
 			return finalWindowResult{vmaf: freshGateWindow(t, pos, 93)}
 		}, calls
+	}
+	measureWith := func(failing int) (func(context.Context, int) finalWindowResult, *atomic.Int32) {
+		return measureWithCode(failing, "quality_vmaf_evidence_incomplete")
 	}
 
 	// Ungated: the first fresh window fails to measure.
@@ -126,7 +129,7 @@ func TestUnmeasurableFreshWindow(t *testing.T) {
 	if err != nil || e.Verdict != "pass" {
 		t.Fatalf("ungated verdict changed by an unmeasurable fresh window: %+v %v", e, err)
 	}
-	want := []transcode.UnmeasuredWindow{{StartSeconds: 400, DurationSeconds: 2, ReasonCode: "quality_final_sample_extract_failed"}}
+	want := []transcode.UnmeasuredWindow{{StartSeconds: 400, DurationSeconds: 2, ReasonCode: "quality_vmaf_evidence_incomplete"}}
 	if !slices.Equal(e.FreshUnmeasured, want) {
 		t.Fatalf("unmeasured fresh window not reported: %+v", e.FreshUnmeasured)
 	}
@@ -147,8 +150,18 @@ func TestUnmeasurableFreshWindow(t *testing.T) {
 	q = freshGatePlan(true)
 	measure, _ = measureWith(2)
 	results, failed, err = runFinalWindows(context.Background(), 4, 1, measureFreshWindows(q, measure))
-	if err != nil || failed != 2 || results[2].code != "quality_final_sample_extract_failed" || !errors.Is(results[2].err, broken) || results[2].unmeasured != "" {
+	if err != nil || failed != 2 || results[2].code != "quality_vmaf_evidence_incomplete" || !errors.Is(results[2].err, broken) || results[2].unmeasured != "" {
 		t.Fatalf("gated: failed %d result %+v err %v", failed, results[2], err)
+	}
+
+	// A fresh window whose pictures are missing from the encode or out of
+	// place fails even an ungated plan: that is lost content, not a score.
+	for _, code := range []string{"quality_final_sample_misaligned", "quality_final_sample_extract_failed"} {
+		measure, _ = measureWithCode(2, code)
+		results, failed, err = runFinalWindows(context.Background(), 4, 1, measureFreshWindows(freshGatePlan(false), measure))
+		if err != nil || failed != 2 || results[2].code != code || results[2].unmeasured != "" {
+			t.Fatalf("ungated %s: failed %d result %+v err %v", code, failed, results[2], err)
+		}
 	}
 
 	// A grid window that cannot be measured fails either way.

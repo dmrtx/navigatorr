@@ -411,15 +411,25 @@ func judgeFinalWindows(e *transcode.FinalQualityEvidence, q *transcode.QualityVa
 // fails final validation as the lowest failing window. An ungated fresh window
 // that cannot be measured is marked unmeasured instead: it does not stop the
 // windows after it, and splitFinalWindowResults reports it with its reason.
+// Its scores never decide the verdict, but the candidate's pictures there
+// do: a window whose pictures could not be cut out of the encode or do not
+// line up with the source's (freshWindowContentCodes) fails like a grid one.
 func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(context.Context, int) finalWindowResult) func(context.Context, int) finalWindowResult {
 	grid := len(q.Samples)
 	return func(ctx context.Context, pos int) finalWindowResult {
 		r := measure(ctx, pos)
-		if pos >= grid && !q.GateFreshSamples && r.code != "" {
+		if pos >= grid && !q.GateFreshSamples && r.code != "" && !freshWindowContentCodes[r.code] {
 			return finalWindowResult{unmeasured: r.code}
 		}
 		return r
 	}
+}
+
+// freshWindowContentCodes are the window failures that say the candidate's
+// pictures are missing or out of place, not that a score could not be taken.
+var freshWindowContentCodes = map[string]bool{
+	"quality_final_sample_misaligned":     true,
+	"quality_final_sample_extract_failed": true,
 }
 
 // splitFinalWindowResults separates the results that decide the verdict (the
