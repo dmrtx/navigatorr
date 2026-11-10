@@ -57,14 +57,18 @@ func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, fi
 // buildExtractionArgs is BuildReferenceExtractionArgs seeking to seekSec, a
 // time on the file's own timeline at or before the window's start, instead
 // of the start itself: the pictures the trim keeps are the same, and the
-// decode starts from a keyframe where the demuxer cannot find one itself.
+// decode starts from a keyframe where the demuxer cannot find one itself. A
+// seekSec of math.Inf(-1) makes no seek: the decode starts at the file's
+// start.
 func buildExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec, seekSec float64) []string {
 	from, to := firstFrameSec+fromSec, firstFrameSec+toSec
 	args := []string{"-y", "-nostats", "-copyts", "-noaccurate_seek"}
 	selection := fmt.Sprintf("settb=AVTB,trim=end=%.6f", to)
 	// A window from the first picture needs neither a seek nor a start bound.
 	if fromSec > 0 {
-		args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", min(seekSec, from)))
+		if seek := min(seekSec, from); !math.IsInf(seek, -1) {
+			args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", seek))
+		}
 		selection = fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", from, to)
 	}
 	return append(args,

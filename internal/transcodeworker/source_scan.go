@@ -72,6 +72,10 @@ type sourceVideoScan struct {
 	times         []videoTime
 	timesBase     float64
 	timesOverflow bool
+	// earliest is the earliest time of any timed packet (sawTime), kept
+	// whether or not times overflowed.
+	earliest float64
+	sawTime  bool
 	// fieldSample is what decoding a sample of the packets that lie close
 	// together found (sampleFieldPictures): whether two of them make one
 	// picture (fields) or each its own (a higher frame rate).
@@ -122,6 +126,13 @@ func (s sourceVideoScan) start() float64 {
 // to the extract, whose empty output says it.
 func (s *sourceVideoScan) noPicturesFrom(at float64) bool {
 	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at > s.Last+0.001
+}
+
+// picturesFrom reports whether the scan read a picture after at, a time on
+// the source's own timeline, as surely as noPicturesFrom reads none: every
+// packet timed, and a clock that never restarted.
+func (s *sourceVideoScan) picturesFrom(at float64) bool {
+	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at < s.Last-0.001
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
@@ -439,6 +450,9 @@ const maxTimedPackets = 1 << 21
 
 // addTime keeps a timed packet's time (sourceVideoScan.times).
 func (s *sourceVideoScan) addTime(pts, dur float64, key bool) {
+	if !s.sawTime || pts < s.earliest {
+		s.earliest, s.sawTime = pts, true
+	}
 	if s.timesOverflow {
 		return
 	}
@@ -496,10 +510,13 @@ func (s sourceVideoScan) possibleFields(frame float64) int {
 }
 
 // maxHeadDecodePackets bounds the head decodeVideoHead decodes, and
-// headAfterKey is how many packets after the first keyframe it reaches: the
-// keyframe's leading pictures follow it closely in decode order, and a few
-// seconds of pictures tell a field-coded video from a frame-coded one.
-// noKeyHeadPackets is the head of a video with no packet flagged a keyframe.
+// headAfterKey is how many packets after the first keyframe it reaches, not
+// counting those the container marks to be discarded (an MP4 cut by an edit
+// list inside a long group of pictures carries hundreds of them, which show
+// nothing): the keyframe's leading pictures follow it closely in decode
+// order, and a few seconds of pictures tell a field-coded video from a
+// frame-coded one. noKeyHeadPackets is the head of a video with no packet
+// flagged a keyframe.
 const (
 	maxHeadDecodePackets = 3000
 	headAfterKey         = 300
@@ -507,18 +524,28 @@ const (
 )
 
 // headLength is how many of the first packets decodeVideoHead decodes, and
-// whether they reach headAfterKey packets past the first keyframe (or the end
-// of the video): when they do not, more packets before the first keyframe
-// than maxHeadDecodePackets lie outside the decode.
+// whether they reach headAfterKey packets past the first keyframe that are
+// not discarded (or the end of the video): when they do not, more packets
+// before the first keyframe, or discarded after it, than
+// maxHeadDecodePackets lie outside the decode.
 func (s sourceVideoScan) headLength() (n int, complete bool) {
 	if !s.sawKey {
 		return min(noKeyHeadPackets, s.Packets, len(s.head)), true
 	}
 	for i, p := range s.head {
-		if p.key {
-			n = min(i+1+headAfterKey, len(s.head))
-			return n, n == s.Packets || n == i+1+headAfterKey
+		if !p.key {
+			continue
 		}
+		after := 0
+		for j := i + 1; j < len(s.head); j++ {
+			if s.head[j].discard {
+				continue
+			}
+			if after++; after == headAfterKey {
+				return j + 1, true
+			}
+		}
+		return len(s.head), len(s.head) == s.Packets
 	}
 	return len(s.head), false
 }
@@ -691,8 +718,11 @@ func sampleFieldPictures(ctx context.Context, ffprobePath, path string, streamIn
 // index into scan.times) to past to, and compares, between from and to
 // (seconds from scan.timesBase), the packets with the pictures shown and the
 // close packets (marks). read is false when the decode did not start at the
-// keyframe (a transport stream's seek lands where it can) or the window holds
-// no close packet: the sample then says nothing.
+// keyframe (a transport stream's seek lands where it can), the window holds
+// no close packet or ffprobe failed to read it: the sample then says nothing,
+// and an unsampled source keeps its range. Damage in the packets themselves
+// is the packet scan's to report (sourceVideoScan.damage), not a sample's.
+// Only a cancelled job ends the sampling with an error.
 func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan, marks []bool, key int, from, to float64) (fields, read bool, err error) {
 	keyAt := scan.timesBase + float64(scan.times[key].at)/1e4
 	seeks := []float64{keyAt + 0.0005, keyAt - fieldSampleSeekBack}
@@ -701,8 +731,11 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 	}
 	for _, seek := range seeks {
 		fields, read, err = decodeFieldWindow(ctx, ffprobePath, path, streamIndex, scan, marks, keyAt, seek, from, to)
-		if err != nil || read {
-			return fields, read, err
+		if ctx.Err() != nil {
+			return false, false, ctx.Err()
+		}
+		if err == nil && read {
+			return fields, true, nil
 		}
 	}
 	return false, false, nil
@@ -717,26 +750,46 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 // extract would start late, or hold nothing. Its seek goes
 // fieldSampleSeekBack before the last keyframe at or before at that the scan
 // read. With no keyframe times (more packets than the scan keeps, a clock
-// that restarted, no keyframe before at) the seek stays at at, and does not
-// reach a keyframe.
+// that restarted, no keyframe before at) it goes windowSeekFallback before
+// at, and is not known to reach a keyframe. The extract trims the window by
+// its times, so a seek earlier than needed keeps the same pictures and only
+// decodes more. A seek that would land at or near the video's first packet
+// is not made (math.Inf(-1)): the extract decodes from the file's start,
+// which reaches the first keyframe (an AVI cannot seek before its first
+// packet, and its extract would then start wherever its probe stopped
+// reading).
 func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
 	if indexedContainer(s.format) {
 		return at, true
 	}
-	if s.timesOverflow || s.Discontinuous {
-		return at, false
-	}
-	keyAt := math.Inf(-1)
-	for _, t := range s.times {
-		if k := s.timesBase + float64(t.at)/1e4; t.key && k <= at && k > keyAt {
-			keyAt = k
+	seek, keyed := at-windowSeekFallback, false
+	if !s.timesOverflow && !s.Discontinuous {
+		keyAt := math.Inf(-1)
+		for _, t := range s.times {
+			if k := s.timesBase + float64(t.at)/1e4; t.key && k <= at && k > keyAt {
+				keyAt = k
+			}
+		}
+		if !math.IsInf(keyAt, -1) {
+			seek, keyed = keyAt-fieldSampleSeekBack, true
 		}
 	}
-	if math.IsInf(keyAt, -1) {
-		return at, false
+	// A clock that restarted has no first time to measure from.
+	if s.sawTime && !s.Discontinuous && seek < s.earliest+windowSeekStartMargin {
+		return math.Inf(-1), true
 	}
-	return keyAt - fieldSampleSeekBack, true
+	return seek, keyed
 }
+
+// windowSeekFallback is how far before a window an extract seeks when the
+// scan holds no keyframe time before it: several groups of pictures of a
+// broadcast stream. windowSeekStartMargin is how close to the video's first
+// packet a seek may land before none is made: ffmpeg moves a seek back a
+// little for a video with B-pictures.
+const (
+	windowSeekFallback    = 20.0
+	windowSeekStartMargin = 0.5
+)
 
 // indexedContainer reports whether a demuxer seeks by an index of keyframes,
 // to the one at or before the time asked: Matroska and MP4 do.
@@ -754,45 +807,15 @@ func decodeFieldWindow(ctx context.Context, ffprobePath, path string, streamInde
 	start, end := scan.timesBase+from, scan.timesBase+to
 	interval := strconv.FormatFloat(seek, 'f', 6, 64) + "%" + strconv.FormatFloat(end+0.5, 'f', 6, 64)
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
-		"-read_intervals", interval, "-show_entries", "packet=pts_time,flags:frame=best_effort_timestamp_time", "-of", "compact", path)
+		"-read_intervals", interval, "-show_entries", "packet=pts_time,dts_time,flags:frame=best_effort_timestamp_time", "-of", "compact", path)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := runCharged(ctx, cmd); err != nil {
 		return false, false, fmt.Errorf("ffprobe decode of the video from %.3fs to %.3fs failed: %w (stderr: %s)", keyAt, end, err, truncateForLog(strings.TrimSpace(stderr.String()), 200))
 	}
-	sawKey := false
-	packets, pictures := 0, 0
-	for _, line := range strings.Split(stdout.String(), "\n") {
-		kind, rest, _ := strings.Cut(strings.TrimSpace(line), "|")
-		var t float64
-		timed, keyFlag := false, false
-		for _, f := range strings.Split(rest, "|") {
-			name, value, _ := strings.Cut(f, "=")
-			switch name {
-			case "pts_time", "best_effort_timestamp_time":
-				if v, err := strconv.ParseFloat(value, 64); err == nil {
-					t, timed = v, true
-				}
-			case "flags":
-				keyFlag = strings.Contains(value, "K")
-			}
-		}
-		switch kind {
-		case "packet":
-			if keyFlag && timed && math.Abs(t-keyAt) < 0.0005 {
-				sawKey = true
-			}
-			if timed && t >= start && t < end {
-				packets++
-			}
-		case "frame":
-			if !timed {
-				return false, false, nil // a picture shown at no time: the sample says nothing
-			}
-			if t >= start && t < end {
-				pictures++
-			}
-		}
+	sawKey, packets, pictures, ok := countFieldWindow(stdout.String(), keyAt, start, end)
+	if !ok {
+		return false, false, nil // a picture shown at no time: the sample says nothing
 	}
 	near := 0
 	for i, p := range scan.times {
@@ -805,6 +828,56 @@ func decodeFieldWindow(ctx context.Context, ffprobePath, path string, streamInde
 	}
 	missing := packets - pictures
 	return missing > 0 && 4*missing >= near, true, nil
+}
+
+// countFieldWindow reads decodeFieldWindow's ffprobe output: whether the
+// keyframe at keyAt was read, and how many packets and pictures lie between
+// start and end. A packet is timed as the scan times it (addVideoPacket): by
+// its presentation time, or its decode time when it has none (AVI). ok is
+// false when a picture was shown at no time.
+func countFieldWindow(output string, keyAt, start, end float64) (sawKey bool, packets, pictures int, ok bool) {
+	for _, line := range strings.Split(output, "\n") {
+		kind, rest, _ := strings.Cut(strings.TrimSpace(line), "|")
+		var t, dts float64
+		timed, hasDTS, keyFlag := false, false, false
+		for _, f := range strings.Split(rest, "|") {
+			name, value, _ := strings.Cut(f, "=")
+			v, err := strconv.ParseFloat(value, 64)
+			bad := err != nil || math.IsNaN(v) || math.IsInf(v, 0)
+			switch name {
+			case "pts_time", "best_effort_timestamp_time":
+				if !bad {
+					t, timed = v, true
+				}
+			case "dts_time":
+				if !bad {
+					dts, hasDTS = v, true
+				}
+			case "flags":
+				keyFlag = strings.Contains(value, "K")
+			}
+		}
+		switch kind {
+		case "packet":
+			if !timed && hasDTS {
+				t, timed = dts, true
+			}
+			if keyFlag && timed && math.Abs(t-keyAt) < 0.0005 {
+				sawKey = true
+			}
+			if timed && t >= start && t < end {
+				packets++
+			}
+		case "frame":
+			if !timed {
+				return false, 0, 0, false
+			}
+			if t >= start && t < end {
+				pictures++
+			}
+		}
+	}
+	return sawKey, packets, pictures, true
 }
 
 // demuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into

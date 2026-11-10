@@ -277,14 +277,13 @@ const pgsEndSize = "3"
 // add counts one packet from ffprobe's fields.
 func (c *subtitlePackets) add(fields map[string]string) {
 	c.packets++
-	if fields["size"] == pgsEndSize {
-		c.ends++
-	}
 	switch {
 	case strings.Contains(fields["flags"], "D"):
 		c.discarded++
 	case !timedField(fields["pts_time"]) && !timedField(fields["dts_time"]):
 		c.untimed++
+	case fields["size"] == pgsEndSize:
+		c.ends++
 	}
 }
 
@@ -546,7 +545,7 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 		converted := norm(act.Operation) != "copy"
 		least, most := x.packets-x.discarded-x.untimed, x.packets
 		if sets, ok := pgsDisplaySets(a.Codec, x); ok && !converted {
-			least, most = sets-x.discarded-x.untimed, sets
+			least = sets
 		}
 		if converted {
 			if !x.counted {
@@ -570,13 +569,17 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 	return nil
 }
 
-// pgsDisplaySets is how many packets a copy of a PGS track has in Matroska
-// when the source carries each segment of a display set as a packet of its
-// own (a Blu-ray transport stream, a .sup file): ffmpeg's Matroska muxer
-// merges each display set into one packet (pgs_frame_merge), so the copy has
-// one packet per END segment. A source that already carries display sets
-// (Matroska) has no packet the size of an END segment alone, and is counted
-// by its packets.
+// pgsDisplaySets is how many packets a copy of a PGS track has in Matroska at
+// least when the source carries segments of its display sets as packets of
+// their own (a Blu-ray transport stream, a .sup file): ffmpeg's Matroska
+// muxer merges the packets up to each END segment into one
+// (pgs_frame_merge), so the copy has one packet per END segment the source
+// carries alone, timed and kept. It may have more: a display set whose END
+// shares a packet with its other segments is a packet of its own, and a
+// track cut before its last END leaves that set's segments as one more
+// packet. Each packet of the source makes one packet of the copy at most. A
+// source that already carries display sets (Matroska) has no packet the size
+// of an END segment alone, and is counted by its packets.
 func pgsDisplaySets(codec string, x subtitlePackets) (int64, bool) {
 	switch strings.ToLower(codec) {
 	case "hdmv_pgs_subtitle", "pgs":

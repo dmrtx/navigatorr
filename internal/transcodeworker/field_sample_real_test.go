@@ -81,6 +81,21 @@ func TestRealFieldSampleTellsHigherFrameRate(t *testing.T) {
 			if p := sourcePictures(s, "h264", 0); p.fields || p.least != tc.pictures || p.most != tc.pictures {
 				t.Fatalf("source counted %+v, want exactly %d pictures", p, tc.pictures)
 			}
+			// A sample ffprobe fails to read says nothing: the source keeps
+			// its range and the job goes on.
+			unread := scan(src)
+			if err := decodeVideoHead(ctx, ffprobe, src, 0, &unread); err != nil {
+				t.Fatal(err)
+			}
+			if err := sampleFieldPictures(ctx, "false", src, 0, &unread, "h264", 0); err != nil || unread.fieldSample != fieldsNotSampled {
+				t.Fatalf("failed sample reads: %v, sample %d, want none read and no error", err, unread.fieldSample)
+			}
+			if p := sourcePictures(unread, "h264", 0); !p.fields || p.least >= tc.pictures || p.most < tc.pictures {
+				t.Fatalf("unsampled source counted %+v, want a range around %d", p, tc.pictures)
+			}
+			if err := videoCompleteness(unread, scan(good), "h264", 0); err != nil {
+				t.Fatalf("a conversion keeping every picture refused by the unsampled range: %v", err)
+			}
 			if err := videoCompleteness(s, scan(good), "h264", 0); err != nil {
 				t.Fatalf("a conversion keeping every picture refused: %v", err)
 			}

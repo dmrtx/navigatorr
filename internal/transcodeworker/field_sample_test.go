@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,8 +141,10 @@ func TestVideoTimesOverflowStaysLoose(t *testing.T) {
 
 // A window's source extract seeks before the keyframe its pictures are
 // decoded from when the container has no keyframe index, and to the
-// window's start when it has one; with no keyframe times to aim at, the seek
-// stays at the start and is said not to reach a keyframe.
+// window's start when it has one. With no keyframe times to aim at, the seek
+// goes windowSeekFallback before the start and is said not to reach a
+// keyframe. A seek at or near the video's first packet is not made: the
+// extract decodes from the file's start, which reaches the first keyframe.
 func TestWindowSeek(t *testing.T) {
 	ts := func() *sourceVideoScan {
 		s := &sourceVideoScan{format: "mpegts"}
@@ -150,6 +153,7 @@ func TestWindowSeek(t *testing.T) {
 		}
 		return s
 	}
+	start := math.Inf(-1)
 	cases := []struct {
 		name  string
 		scan  func() *sourceVideoScan
@@ -160,18 +164,55 @@ func TestWindowSeek(t *testing.T) {
 		{"indexed container", func() *sourceVideoScan { s := ts(); s.format = "matroska,webm"; return s }, 9.95, 9.95, true},
 		{"transport stream", ts, 9.95, 5.5, true},
 		{"just after a keyframe", ts, 11.55, 10.5, true},
-		{"before the first keyframe", ts, 1.45, 1.45, false},
-		{"times overflowed", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 9.95, 9.95, false},
-		{"clock restarted", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 9.95, 9.95, false},
+		{"in the first group of pictures", ts, 4.05, start, true},
+		{"before the first keyframe", ts, 1.45, start, true},
+		{"no keyframe before it", func() *sourceVideoScan {
+			s := &sourceVideoScan{format: "mpegts"}
+			for i, at := range times(300, 1.5, 0.1) { // a cut stream whose first keyframe is at 26.5
+				s.addTime(at, 0.1, i == 250)
+			}
+			return s
+		}, 25.95, 5.95, false},
+		{"times overflowed", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 29.95, 9.95, false},
+		{"times overflowed, near the start", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 9.95, start, true},
+		{"clock restarted", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 9.95, -10.05, false},
 	}
 	for _, tc := range cases {
 		seek, keyed := tc.scan().windowSeek(tc.at)
-		if keyed != tc.keyed || seek < tc.seek-1e-6 || seek > tc.seek+1e-6 {
+		if keyed != tc.keyed || seek != tc.seek && (seek < tc.seek-1e-6 || seek > tc.seek+1e-6) {
 			t.Errorf("%s: seek %.4f keyed %v, want %.4f %v", tc.name, seek, keyed, tc.seek, tc.keyed)
 		}
 	}
 	args := buildExtractionArgs("src.ts", "out.mkv", 0, 1.5, 8.45, 12.45, 5.5)
 	if got := strings.Join(args, " "); !strings.Contains(got, "-ss 5.500000 -i src.ts") || !strings.Contains(got, "trim=start=9.950000:end=13.950000") {
 		t.Fatalf("extract args %s", got)
+	}
+	args = buildExtractionArgs("src.avi", "out.mkv", 0, 0, 2.45, 6.45, start)
+	if got := strings.Join(args, " "); strings.Contains(got, "-ss") || strings.Contains(got, "seek_timestamp") || !strings.Contains(got, "trim=start=2.450000:end=6.450000") {
+		t.Fatalf("extract args with no seek %s", got)
+	}
+}
+
+// A sample's packets are timed as the scan times them: an AVI's packets carry
+// decode times only, and are counted by them, so the keyframe is found and
+// the packets compared with the pictures.
+func TestCountFieldWindowDecodeTimes(t *testing.T) {
+	var out strings.Builder
+	for i := 0; i < 20; i++ {
+		flags := "__"
+		if i == 0 {
+			flags = "K_"
+		}
+		fmt.Fprintf(&out, "packet|pts_time=N/A|dts_time=%.6f|flags=%s\n", 10+float64(i)/60, flags)
+	}
+	for i := 0; i < 10; i++ { // fields: a picture per two packets
+		fmt.Fprintf(&out, "frame|best_effort_timestamp_time=%.6f\n", 10+float64(2*i)/60)
+	}
+	sawKey, packets, pictures, ok := countFieldWindow(out.String(), 10, 10, 10.5)
+	if !sawKey || !ok || packets != 20 || pictures != 10 {
+		t.Fatalf("key %v ok %v, %d packets %d pictures, want the key and 20 packets, 10 pictures", sawKey, ok, packets, pictures)
+	}
+	if _, _, _, ok := countFieldWindow("frame|best_effort_timestamp_time=N/A\n", 10, 10, 10.5); ok {
+		t.Fatal("a picture shown at no time was read")
 	}
 }

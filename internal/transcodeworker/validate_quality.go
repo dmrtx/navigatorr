@@ -193,14 +193,20 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		}
 		// A fresh window the source has no pictures for (past the end of its
 		// container, past its last picture as the packet scan read it, or an
-		// extract in which ffmpeg encodes nothing) has nothing to hold the
+		// extract in which ffmpeg encodes nothing, aimed at a keyframe, where
+		// the scan cannot say there are pictures) has nothing to hold the
 		// candidate to: it is unmeasured, never a refusal (noSource). Only
 		// the source's own packets or extract say so: the containers'
 		// durations follow their longest stream, not their video.
 		sourceless := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause, noSource: pos >= grid}
 		}
-		if end := window.StartSeconds + window.DurationSeconds; window.StartSeconds < 0 || window.DurationSeconds <= 0 || end > sourceRep.DurationSec+0.05 {
+		// A window with no extent is the plan's error, not the source's: it
+		// fails, gated or not.
+		if window.StartSeconds < 0 || window.DurationSeconds <= 0 {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d starts at %.3fs and lasts %.3fs", window.Index, window.StartSeconds, window.DurationSeconds))
+		}
+		if end := window.StartSeconds + window.DurationSeconds; end > sourceRep.DurationSec+0.05 {
 			return sourceless("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds the source's timeline", window.Index))
 		}
 		// Each window owns a directory, removed as soon as it is measured,
@@ -227,12 +233,14 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		// the window (sourceVideoScan.windowSeek; without a scan the seek is
 		// the window's start, as for a container with a keyframe index). One
 		// in which ffmpeg encodes no picture is a window past the source's
-		// video, unless the seek could not reach a keyframe: a decoder shows
-		// nothing until one, so that window fails instead. Any other failure
-		// (a read error, a killed process, an extract ffprobe cannot read)
-		// is retried once and then fails the window: it is not a window
-		// without pictures, and a gate must not pass on windows it never
-		// measured.
+		// video, unless the seek could not reach a keyframe (a decoder shows
+		// nothing until one) or the scan read pictures there: that extract
+		// failed. Any other failure (a read error, a killed process, an
+		// extract ffprobe cannot read) is retried once and then fails the
+		// window: it is not a window without pictures, and a gate must not
+		// pass on windows it never measured. A source extract that failed
+		// says nothing about the candidate: an ungated fresh window is then
+		// unmeasured (measureFreshWindows).
 		seek, keyed := sourceFirstFrame+from, true
 		if scan != nil {
 			seek, keyed = scan.windowSeek(sourceFirstFrame + from)
@@ -245,8 +253,11 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		for attempt := 1; ; attempt++ {
 			output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
 			if err == nil && emptyExtract(output) {
-				if !keyed {
-					return bad("quality_final_sample_misaligned", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
+				switch {
+				case !keyed:
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
+				case scan.picturesFrom(sourceFirstFrame + from):
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures up to %.3fs after its first", where, scan.Last-sourceFirstFrame))
 				}
 				return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))
 			}
@@ -263,8 +274,10 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		if compactCandidateChain != "" {
 			candArgs = withReferenceChain(candArgs, compactCandidateChain)
 		}
+		// The candidate is the encode's own file: one that cannot be read
+		// there is a bad candidate, not a window left unmeasured.
 		if _, err := runQualityCommand(ctx, w.ffmpegPath, candArgs); err != nil {
-			return bad("quality_final_sample_extract_failed", err)
+			return bad("quality_final_candidate_extract_failed", fmt.Errorf("%s, candidate extract: %w", where, err))
 		}
 		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
 		if err != nil {
@@ -457,8 +470,8 @@ func judgeFinalWindows(e *transcode.FinalQualityEvidence, q *transcode.QualityVa
 // that cannot be measured is marked unmeasured instead: it does not stop the
 // windows after it, and splitFinalWindowResults reports it with its reason.
 // Its scores never decide the verdict, but the candidate's pictures there
-// do: a window whose candidate pictures do not line up with the source's
-// (freshWindowContentCodes) fails like a grid one. Fresh windows come from the
+// do: a window whose candidate pictures do not line up with the source's, or
+// cannot be read (freshWindowContentCodes), fails like a grid one. Fresh windows come from the
 // plan's verification, not from the grid the source was checked against
 // before the encode, so one the source has no pictures for (noSource) is
 // unmeasured whether or not the plan gates them: it says nothing about the
@@ -480,13 +493,15 @@ func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(contex
 }
 
 // freshWindowContentCodes are the window failures that say the candidate's
-// pictures are out of place, not that a score could not be taken. A
-// misalignment counts only once the source's extract is known good: a source
-// with no pictures there is noSource, and a source extract that failed twice
-// is quality_final_sample_extract_failed, which fails a gated plan and leaves
-// an ungated window unmeasured.
+// pictures are out of place or unreadable, not that a score could not be
+// taken. A misalignment counts only once the source's extract is known good:
+// a source with no pictures there is noSource, and a source extract that
+// failed (twice, or empty where it should not be) is
+// quality_final_sample_extract_failed, which fails a gated plan and leaves an
+// ungated window unmeasured.
 var freshWindowContentCodes = map[string]bool{
-	"quality_final_sample_misaligned": true,
+	"quality_final_sample_misaligned":        true,
+	"quality_final_candidate_extract_failed": true,
 }
 
 // splitFinalWindowResults separates the results that decide the verdict (the

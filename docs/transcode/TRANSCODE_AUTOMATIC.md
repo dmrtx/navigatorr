@@ -72,23 +72,32 @@ encoding otherwise. A goal frozen before the rule keeps its digest and its
 report-only fresh windows: a score miss there is only reported, but a fresh
 window whose output pictures do not line up with a good source extract
 (`quality_final_sample_misaligned`) fails the rung under any goal, since it
-means content is missing; other unmeasurable report-only windows (an output
-extract that failed included) are listed as unmeasured rather than dropped. A
+means content is missing, and so does one whose output extract fails
+(`quality_final_candidate_extract_failed`: the output cannot be read there);
+other unmeasurable report-only windows are listed as unmeasured rather than
+dropped. A window with no extent (a negative start, no length) fails under
+any goal. A
 fresh window the source has no pictures for (past the source's end, starting
 after the video's last picture as the packet scan before the encode read it
 when every packet carries a time,
-or a source extract that comes back empty: windows are cut from the first
-decoded picture, and one past the video's last says nothing about the output)
-is listed as unmeasured under every goal, gated or not, and a gated verdict is
-judged on the windows that were measured. A source with no keyframe index
-(MPEG transport and program streams) seeks to a packet near the time asked,
-and a decoder shows nothing until the next keyframe, so its extract seeks a
-second before the keyframe the packet scan found at or before the window; a
-source the scan kept no keyframe times for is cut where it lands, and an
-empty extract of it fails the window instead of passing as past the video. A source extract that fails is
-tried once more; when it fails again, a gated goal fails the rung
-(`quality_final_sample_extract_failed`) rather than judge without it, and a
-report-only one lists the window as unmeasured. Other goals, and
+or a source extract that comes back empty where the scan cannot say the video
+has pictures: windows are cut from the first decoded picture, and one past
+the video's last says nothing about the output) is listed as unmeasured under
+every goal, gated or not, and a gated verdict is judged on the windows that
+were measured. A source with no keyframe index (MPEG transport and program
+streams, AVI) seeks to a packet near the time asked, and a decoder shows
+nothing until the next keyframe, so its extract seeks a second before the
+keyframe the packet scan found at or before the window; a source the scan
+kept no keyframe times for seeks 20 seconds before the window (the extract
+keeps the window's pictures by their times, so an earlier seek only decodes
+more). A seek that would land within half a second of the video's first
+packet is not made: the extract decodes from the file's start (an AVI cannot
+seek to or before its first packet). A source extract that fails is tried
+once more, and one that comes back empty is a failed extract too when its
+seek was not aimed at a keyframe or the scan read pictures in the window;
+then a gated goal fails the rung (`quality_final_sample_extract_failed`)
+rather than judge without it, and a report-only one lists the window as
+unmeasured. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
@@ -112,7 +121,9 @@ when:
   marked to be discarded and those it drops at the start), more frames, or
   its last frame is more than one frame away from the source's. The start's
   dropped packets are measured before the encode by decoding the source's
-  first picture group (the packets before its second keyframe, a few dozen):
+  head (the packets up to 300 past its first keyframe that are not marked to
+  be discarded, so an MP4 cut by an edit list inside a long picture group is
+  decoded past the packets it hides):
   packets before the first keyframe, and the leading pictures of an open
   group (an HEVC CRA's RASL pictures, an H.264 recovery point's leading
   B-frames) whose references a stream-copy cut removed. The count is held to
@@ -131,7 +142,11 @@ when:
   second each from the keyframe before it (at most 1,500 packets before the
   place): a sample of fields shows about half as many pictures as packets.
   When every sample read shows a picture per packet the source is counted
-  exactly; a sample of fields, or no sample read, keeps the range. A video
+  exactly; a sample of fields, or no sample read, keeps the range. A sample
+  ffprobe fails to read is a sample not read: it keeps the range and does not
+  fail the job (damage in the packets themselves is the packet scan's to
+  report). Packets with no presentation time (AVI) are timed by their decode
+  time, as the scan times them. A video
   of more than about two million timed packets keeps no times and keeps the
   range;
 - a copied audio track has more packets than the source track, or fewer than
@@ -142,8 +157,11 @@ when:
   check;
 - a copied subtitle has a different packet count (only packets marked to be
   discarded or without a time may be missing; a PGS track whose source
-  carries each segment as a packet, a Blu-ray transport stream or a .sup,
-  has one packet per display set in Matroska, its END segments); a converted subtitle has a
+  carries segments as packets of their own, a Blu-ray transport stream or a
+  .sup, has one packet per display set in Matroska: at least one per END
+  segment carried alone, timed and kept, and at most one per source packet,
+  since a set whose END shares a packet with its other segments, or a track
+  cut before its last END, adds one); a converted subtitle has a
   different number of lines than the conversion wrote when it was run on the
   source before the encode (a mov_text track's empty gap samples, merged ASS
   events), whatever the formats; a kept subtitle whose source track has lines

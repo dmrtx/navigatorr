@@ -181,3 +181,84 @@ func TestRealFreshWindowPastVideoByScan(t *testing.T) {
 		t.Fatalf("boundary at the last picture %.3f", scan.Last)
 	}
 }
+
+// A fresh window the plan does not gate still fails when the candidate's
+// pictures there cannot be read: the candidate is the encode's own file, and
+// one that cannot be extracted is a bad candidate, not an unmeasured window.
+// A source extract that comes out empty where the packet scan read pictures
+// failed (it is not a window past the video): it fails a gated plan and
+// leaves an ungated window unmeasured. A window with no extent is the plan's
+// error and fails, gated or not.
+func TestRealFreshWindowExtractFailures(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	caps, err := ProbeWorkerCapabilitiesWithScratch(ctx, ffmpeg, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.Filters["ssim"] {
+		t.Skip("ssim filter unavailable")
+	}
+	source := filepath.Join(dir, "source.mkv")
+	candidate := filepath.Join(dir, "candidate.mkv")
+	for _, args := range [][]string{
+		{"-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=4", "-c:v", "ffv1", "-pix_fmt", "yuv420p", source},
+		{"-nostdin", "-v", "error", "-i", source, "-map", "0:v", "-c:v", "mpeg4", "-q:v", "2", candidate},
+	} {
+		if out, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
+			t.Fatalf("fixture: %v %s", err, out)
+		}
+	}
+	// The wrapper fails the candidate's extract of window 8, and makes the
+	// source's extract of window 9 say it holds nothing.
+	wrapper := filepath.Join(dir, "ffmpeg-wrapper")
+	script := fmt.Sprintf("#!/bin/sh\nfor a; do last=$a; done\ncase \"$last\" in */candidate_8.mkv) exit 1;; */reference_9.mkv) echo 'Output file is empty, nothing was encoded' >&2; exit 0;; esac\nexec %q \"$@\"\n", ffmpeg)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	packets, err := scanFilePackets(ctx, ffprobe, source, packetScanRequest{video: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grid := []transcode.BenchmarkSampleWindow{{Index: 0, StartSeconds: 0.5, DurationSeconds: 1}}
+	run := func(name string, gated bool, fresh ...transcode.BenchmarkSampleWindow) (*transcode.FinalQualityEvidence, error) {
+		jobDir := filepath.Join(dir, name)
+		if err := os.MkdirAll(jobDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		plan := &transcode.Plan{QualityValidation: &transcode.QualityValidationPlan{
+			Metric:                 "ssim",
+			Samples:                grid,
+			FreshSamples:           fresh,
+			GateFreshSamples:       gated,
+			BenchmarkRequestDigest: "sha256:" + strings.Repeat("3", 64),
+			Quality:                transcode.BenchmarkQualityConfig{FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}},
+		}}
+		w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state-"+name), AllowedRoots: []string{dir}, FFmpeg: wrapper, FFprobe: ffprobe, MaxParallelJobs: 1})
+		return w.validateFinalPerceptualScanned(ctx, jobDir, source, candidate, plan, "sha256:candidate", 1, &packets.video)
+	}
+	unreadable := transcode.BenchmarkSampleWindow{Index: 8, StartSeconds: 2, DurationSeconds: 1}
+	if e, err := run("candidate", false, unreadable); err == nil || !strings.Contains(err.Error(), "quality_final_candidate_extract_failed") {
+		t.Fatalf("an ungated window whose candidate extract failed passed: %+v %v", e, err)
+	}
+	empty := transcode.BenchmarkSampleWindow{Index: 9, StartSeconds: 2, DurationSeconds: 1}
+	if e, err := run("empty-gated", true, empty); err == nil || !strings.Contains(err.Error(), "quality_final_sample_extract_failed") {
+		t.Fatalf("a gated window whose source extract was empty inside the video passed: %+v %v", e, err)
+	}
+	e, err := run("empty-ungated", false, empty)
+	if err != nil || e.Verdict != "pass" || len(e.FreshUnmeasured) != 1 || e.FreshUnmeasured[0].ReasonCode != "quality_final_sample_extract_failed" {
+		t.Fatalf("an ungated window whose source extract failed must be unmeasured: %+v %v", e, err)
+	}
+	if e, err := run("no-extent", false, transcode.BenchmarkSampleWindow{Index: 10, StartSeconds: -1, DurationSeconds: 1}); err == nil || !strings.Contains(err.Error(), "quality_final_sample_misaligned") {
+		t.Fatalf("an ungated window with no extent passed: %+v %v", e, err)
+	}
+}

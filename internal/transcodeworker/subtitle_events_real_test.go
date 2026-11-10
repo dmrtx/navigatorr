@@ -116,10 +116,14 @@ func pgsDisplaySet(pts uint32, number uint16, show bool) []byte {
 
 // A Blu-ray transport stream (and a .sup file) carries each segment of a
 // PGS display set as a packet of its own, and ffmpeg's Matroska muxer merges
-// each display set into one packet: a faithful copy of the track into the
-// candidate has a packet per display set, not per segment. A copy from
-// Matroska keeps its packets. A copy that lost a display set is refused
-// either way.
+// the packets up to each END segment into one: a faithful copy of the track
+// into the candidate has a packet per display set, not per segment. A copy
+// from Matroska keeps its packets. A track cut before its last END segment
+// comes out with that set's segments as one packet more, and one whose first
+// sets each sit in one packet (remuxed from Matroska) and the rest in a
+// packet per segment has as many packets as sets: both pass, the END
+// segments carried alone bounding the copy from below. A copy that lost
+// display sets is refused either way.
 func TestRealCopiedPGSDisplaySets(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -130,24 +134,54 @@ func TestRealCopiedPGSDisplaySets(t *testing.T) {
 		t.Skip("ffprobe unavailable")
 	}
 	dir := t.TempDir()
-	var sup []byte
-	for i := 0; i < 10; i++ { // ten lines, each shown then cleared: 20 sets, 80 segments
-		sup = append(sup, pgsDisplaySet(uint32(90000*(1+2*i)), uint16(2*i), true)...)
-		sup = append(sup, pgsDisplaySet(uint32(90000*(2+2*i)), uint16(2*i+1), false)...)
+	lines := func(from, to int) []byte { // each line shown then cleared: two sets, eight segments
+		var sup []byte
+		for i := from; i < to; i++ {
+			sup = append(sup, pgsDisplaySet(uint32(90000*(1+2*i)), uint16(2*i), true)...)
+			sup = append(sup, pgsDisplaySet(uint32(90000*(2+2*i)), uint16(2*i+1), false)...)
+		}
+		return sup
 	}
-	supPath := filepath.Join(dir, "lines.sup")
-	if err := os.WriteFile(supPath, sup, 0o600); err != nil {
-		t.Fatal(err)
+	write := func(name string, data []byte) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
 	}
+	full := lines(0, 10)
+	supPath := write("lines.sup", full)
+	cutPath := write("cut.sup", full[:len(full)-13]) // the last set's END segment (a 13-byte header) is gone
+	headPath, tailPath := write("head.sup", lines(0, 5)), write("tail.sup", lines(5, 10))
 	run := func(args ...string) {
 		t.Helper()
 		if out, err := exec.Command(ffmpeg, append([]string{"-nostdin", "-v", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("ffmpeg %v: %v\n%s", args, err, out)
 		}
 	}
-	m2ts, mkv := filepath.Join(dir, "source.m2ts"), filepath.Join(dir, "source.mkv")
-	run("-f", "lavfi", "-i", "testsrc=d=22:s=64x48:r=10", "-i", supPath, "-map", "0", "-map", "1", "-c:v", "mpeg2video", "-c:s", "copy", "-f", "mpegts", "-mpegts_m2ts_mode", "1", m2ts)
+	m2ts := func(sup, out string) {
+		run("-f", "lavfi", "-i", "testsrc=d=22:s=64x48:r=10", "-i", sup, "-map", "0", "-map", "1", "-c:v", "mpeg2video", "-c:s", "copy", "-f", "mpegts", "-mpegts_m2ts_mode", "1", out)
+	}
+	source, cut, mkv := filepath.Join(dir, "source.m2ts"), filepath.Join(dir, "cut.m2ts"), filepath.Join(dir, "source.mkv")
+	m2ts(supPath, source)
+	m2ts(cutPath, cut)
 	run("-f", "lavfi", "-i", "testsrc=d=22:s=64x48:r=10", "-i", supPath, "-map", "0", "-map", "1", "-c:v", "mpeg2video", "-c:s", "copy", mkv)
+	// The first five lines remuxed from Matroska (a display set per packet),
+	// then five lines with a packet per segment, as one file.
+	headMKV, head, tail := filepath.Join(dir, "head.mkv"), filepath.Join(dir, "head.m2ts"), filepath.Join(dir, "tail.m2ts")
+	run("-f", "lavfi", "-i", "testsrc=d=11:s=64x48:r=10", "-i", headPath, "-map", "0", "-map", "1", "-c:v", "mpeg2video", "-c:s", "copy", headMKV)
+	run("-i", headMKV, "-map", "0", "-c", "copy", "-f", "mpegts", "-mpegts_m2ts_mode", "1", head)
+	m2ts(tailPath, tail)
+	var joined []byte
+	for _, part := range []string{head, tail} {
+		data, err := os.ReadFile(part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined = append(joined, data...)
+	}
+	mixed := write("mixed.m2ts", joined)
 	scan := func(path string) map[int]subtitlePackets {
 		t.Helper()
 		got, err := scanFilePackets(context.Background(), ffprobe, path, packetScanRequest{video: 0, subtitles: map[int]bool{1: true}})
@@ -158,20 +192,24 @@ func TestRealCopiedPGSDisplaySets(t *testing.T) {
 	}
 	plan := &transcode.Plan{SubtitleActions: []transcode.SubtitleAction{{TypeIndex: 0, SourceStreamIndex: 1, SourceCodec: "hdmv_pgs_subtitle", Operation: "copy", Codec: "copy"}}}
 	streams := []SourceStream{{Kind: "video", Index: 0, Codec: "mpeg2video"}, {Kind: "subtitle", Index: 1, TypeIndex: 0, Codec: "hdmv_pgs_subtitle"}}
-	for _, source := range []string{m2ts, mkv} {
-		candidate := filepath.Join(dir, "candidate-"+filepath.Base(source)+".mkv")
+	for _, tc := range []struct {
+		source string
+		least  int64 // the fewest packets a copy may have
+	}{{source, 20}, {mkv, 20}, {cut, 19}, {mixed, 10}} {
+		name := filepath.Base(tc.source)
+		candidate := filepath.Join(dir, "candidate-"+name+".mkv")
 		// The worker's argument shape for a copied track.
-		run("-i", source, "-map", "0:v", "-map", "0:s", "-c", "copy", candidate)
-		src, cand := scan(source), scan(candidate)
+		run("-i", tc.source, "-map", "0:v", "-map", "0:s", "-c", "copy", candidate)
+		src, cand := scan(tc.source), scan(candidate)
 		if cand[1].packets != 20 {
-			t.Fatalf("%s: the copy has %d packets, want a display set each (20)", filepath.Base(source), cand[1].packets)
+			t.Fatalf("%s: the copy has %d packets, want a display set each (20)", name, cand[1].packets)
 		}
 		if err := subtitleEvents(plan, streams, streams, src, cand); err != nil {
-			t.Fatalf("%s (%+v): a faithful copy was refused: %v", filepath.Base(source), src[1], err)
+			t.Fatalf("%s (%+v): a faithful copy was refused: %v", name, src[1], err)
 		}
-		lost := map[int]subtitlePackets{1: {packets: cand[1].packets - 1}}
+		lost := map[int]subtitlePackets{1: {packets: tc.least - 1}}
 		if err := subtitleEvents(plan, streams, streams, src, lost); err == nil || !strings.Contains(err.Error(), "copied subtitle stream 0") {
-			t.Fatalf("%s: a copy that lost a display set passed: %v", filepath.Base(source), err)
+			t.Fatalf("%s (%+v): a copy that lost display sets passed: %v", name, src[1], err)
 		}
 	}
 }
