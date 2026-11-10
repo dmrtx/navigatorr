@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -35,6 +37,10 @@ type sourceVideoScan struct {
 	LeadingNonKey, Discarded int
 	sawKey                   bool
 	LastFrame                float64
+	// durations counts the packets by duration, in microseconds (0 when the
+	// container states none): a field-coded source shows itself by packets
+	// half a frame long.
+	durations map[int64]int
 	// DemuxErrors counts the packet damage the container's demuxer reported
 	// while reading. FirstError is the first of it, and FirstErrorByte the
 	// byte offset it names (-1 when it names none).
@@ -50,6 +56,25 @@ func (s sourceVideoScan) Seconds() float64 {
 		return 0
 	}
 	return s.End - s.Start
+}
+
+// medianDuration is the median packet duration in seconds, or 0 when the scan
+// kept none.
+func (s sourceVideoScan) medianDuration() float64 {
+	n := 0
+	keys := make([]int64, 0, len(s.durations))
+	for d, c := range s.durations {
+		keys = append(keys, d)
+		n += c
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	seen := 0
+	for _, d := range keys {
+		if seen += s.durations[d]; 2*seen >= n {
+			return float64(d) / 1e6
+		}
+	}
+	return 0
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
@@ -120,6 +145,10 @@ func scanSourceVideo(ctx context.Context, ffprobePath, path string, streamIndex 
 			}
 			first = false
 			scan.Packets++
+			if scan.durations == nil {
+				scan.durations = map[int64]int{}
+			}
+			scan.durations[int64(math.Round(dur*1e6))]++
 			if key {
 				scan.sawKey = true
 			} else if !scan.sawKey {

@@ -47,7 +47,78 @@ func TestVideoCompleteness(t *testing.T) {
 		{"source not scanned", sourceVideoScan{}, sourceVideoScan{Packets: 1}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := videoCompleteness(tc.src, tc.cand)
+			err := videoCompleteness(tc.src, tc.cand, 25)
+			if tc.fail == "" {
+				if err != nil {
+					t.Fatalf("rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, ErrSourceInvalid) || !strings.Contains(err.Error(), tc.fail) {
+				t.Fatalf("error %v, want a preservation failure saying %q", err, tc.fail)
+			}
+		})
+	}
+}
+
+// scanOf is a scan whose packets have the given lengths, laid end to end from
+// zero, the first a keyframe.
+func scanOf(lengths ...packetRun) sourceVideoScan {
+	s := sourceVideoScan{sawKey: true, durations: map[int64]int{}}
+	for _, r := range lengths {
+		for range r.n {
+			s.Packets++
+			s.End += r.seconds
+			s.LastFrame = r.seconds
+			s.durations[int64(r.seconds*1e6+0.5)]++
+		}
+	}
+	return s
+}
+
+type packetRun struct {
+	n       int
+	seconds float64
+}
+
+// A field-coded source (PAFF in a transport stream) carries a field per
+// packet, two per picture, and the encode one packet per picture: its
+// pictures are counted from its packets' lengths, and when they cannot be
+// counted only the end decides, never the count.
+func TestVideoCompletenessFieldCoded(t *testing.T) {
+	fields := scanOf(packetRun{200, 0.02}) // 100 pictures at 25 FPS, 4 s
+	frames := func(n int) sourceVideoScan { return scanOf(packetRun{n, 0.04}) }
+	for _, tc := range []struct {
+		name      string
+		src, cand sourceVideoScan
+		fps       float64
+		fail      string
+	}{
+		{"every picture of a field-coded source", fields, frames(100), 25, ""},
+		{"a field-coded source's encode missing 10 frames", fields, frames(90), 25, "90 frames, the source 100"},
+		{"missing 10 frames while ending in place", fields, func() sourceVideoScan { c := frames(90); c.End = 4; return c }(), 25, "90 frames, the source 100"},
+		{"a picture added", fields, frames(101), 25, "101 frames, the source 100"},
+		{"no frame rate: the encode's frames tell", fields, frames(100), 0, ""},
+		{"no frame rate, 10 frames missing", fields, frames(90), 0, "90 frames, the source 100"},
+		{"the encode states no lengths: the frame rate tells", fields, func() sourceVideoScan { c := frames(90); c.durations = nil; c.LastFrame = 0; return c }(), 25, "90 frames, the source 100"},
+		// Adaptive field/frame coding: 100 field packets (50 pictures) and
+		// 50 frame-coded pictures; a pulled-down picture spans three fields.
+		{"fields and frames mixed", scanOf(packetRun{100, 0.02}, packetRun{50, 0.04}), frames(100), 25, ""},
+		{"fields and frames mixed, one missing", scanOf(packetRun{100, 0.02}, packetRun{50, 0.04}), frames(99), 25, "99 frames, the source 100"},
+		{"pulled-down pictures", scanOf(packetRun{200, 0.02}, packetRun{2, 0.06}), frames(103), 25, ""},
+		// The probe states the field rate while the encode has one packet
+		// per picture: nothing reliable to count, so only the end decides.
+		{"field rate in the probe: count not trusted", fields, func() sourceVideoScan { c := frames(90); c.End = 4; return c }(), 50, ""},
+		{"field rate in the probe: the end still checked", fields, frames(90), 50, "ends 3.600s"},
+		// Packet lengths that are no whole number of fields.
+		{"uneven lengths: count not trusted", scanOf(packetRun{190, 0.02}, packetRun{10, 0.013}), func() sourceVideoScan { c := frames(90); c.End = 3.93; return c }(), 25, ""},
+		{"uneven lengths: the end still checked", scanOf(packetRun{190, 0.02}, packetRun{10, 0.013}), frames(80), 25, "ends 3.200s"},
+		// A progressive 50 FPS source is not field-coded.
+		{"progressive at 50 FPS", fields, scanOf(packetRun{200, 0.02}), 50, ""},
+		{"progressive at 50 FPS missing 10 frames", fields, scanOf(packetRun{190, 0.02}), 50, "190 frames, the source 200"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := videoCompleteness(tc.src, tc.cand, tc.fps)
 			if tc.fail == "" {
 				if err != nil {
 					t.Fatalf("rejected: %v", err)

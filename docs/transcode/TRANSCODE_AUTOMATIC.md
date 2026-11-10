@@ -86,7 +86,11 @@ candidate, and refuses the candidate (`preservation_not_met`) when:
 
 - the programme video has a different number of frames than the source (only
   frames before the source's first keyframe, or marked to be discarded, may be
-  missing) or its last frame is more than one frame away from the source's;
+  missing) or its last frame is more than one frame away from the source's.
+  A field-coded source (PAFF from a transport stream: packets half a frame
+  long against the probe's frame rate or the output's frames) is counted in
+  pictures from its packets' lengths; when they cannot be counted reliably
+  only the last frame's place is checked;
 - a copied audio track has a different packet count, or its codec differs at
   all (E-AC-3 is not AC-3); copy plans now also get the 0.25 s start and
   length check converted tracks always had (that one keeps its own error);

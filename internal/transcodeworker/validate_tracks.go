@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -25,7 +26,14 @@ import (
 // source's first keyframe and those its container marks to be discarded.
 // Without them the candidate starts later, so its span may be shorter by as
 // many frames; it is never longer than the source's by more than one frame.
-func videoCompleteness(src, cand sourceVideoScan) error {
+//
+// A field-coded source (PAFF, from a transport stream) may carry each field
+// in a packet of its own, two per picture, and the candidate one per picture:
+// its pictures are counted from its packets' lengths (see fieldCoding). When
+// they cannot be counted reliably, only the end is checked; the count never
+// refuses a candidate it cannot be sure of. fps is the source video's frame
+// rate as the probe states it (0 when unknown).
+func videoCompleteness(src, cand sourceVideoScan, fps float64) error {
 	if src.Packets == 0 {
 		// Nothing was scanned (a test that injects the probe only).
 		return nil
@@ -42,21 +50,29 @@ func videoCompleteness(src, cand sourceVideoScan) error {
 		// decoder skips, so none may be missing.
 		lead = 0
 	}
-	least := src.Packets - lead - src.Discarded
-	if cand.Packets > src.Packets || cand.Packets < least {
-		return candidateInvalid(fmt.Errorf("%w: the converted video has %d frames, the source %d; frames were lost or added in the conversion (fail closed, never publish)", ErrSourceInvalid, cand.Packets, src.Packets))
+	skippable := lead + src.Discarded
+	frames, frame, countable := src.Packets, src.LastFrame, true
+	if f := fieldCoding(src, cand, fps); f.fields {
+		frames, frame, countable = f.pictures, f.frame, f.countable
+	}
+	if countable && (cand.Packets > frames || cand.Packets < frames-skippable) {
+		return candidateInvalid(fmt.Errorf("%w: the converted video has %d frames, the source %d; frames were lost or added in the conversion (fail closed, never publish)", ErrSourceInvalid, cand.Packets, frames))
 	}
 	if src.Discontinuous || cand.Discontinuous {
 		// A timeline that restarts has no length to compare; the frames do.
 		return nil
 	}
-	frame := src.LastFrame
-	if frame <= 0 && src.Packets > 0 {
-		frame = src.Seconds() / float64(src.Packets)
+	if frame <= 0 && frames > 0 {
+		frame = src.Seconds() / float64(frames)
 	}
 	// A millisecond of slack absorbs the containers' timestamp rounding.
 	const rounding = 0.001
-	missing := float64(src.Packets - cand.Packets)
+	// The pictures the candidate may lack at its start: those it is short of
+	// the source's count or, uncounted, the skippable packets.
+	missing := float64(skippable)
+	if countable {
+		missing = float64(frames - cand.Packets)
+	}
 	short := src.Seconds() - cand.Seconds()
 	if short > frame*(1+missing)+rounding || -short > frame+rounding {
 		return candidateInvalid(fmt.Errorf("%w: the converted video ends %.3fs after its first picture, the source's %.3fs; its last frame is not where the source's is (fail closed, never publish)", ErrSourceInvalid, cand.Seconds(), src.Seconds()))
@@ -88,7 +104,74 @@ func (w *Worker) validateVideoCompleteness(ctx context.Context, srcProbe SourceP
 	if err != nil {
 		return fmt.Errorf("candidate video validation: %w", err)
 	}
-	return videoCompleteness(src, cand)
+	var fps float64
+	for _, s := range srcProbe.Streams {
+		if s.Index == srcIndex {
+			fps = s.FPS
+		}
+	}
+	return videoCompleteness(src, cand, fps)
+}
+
+// fieldTolerance is how far, as a fraction, a packet's length may be from a
+// whole number of fields and still count as that many.
+const fieldTolerance = 0.15
+
+// fieldCount is what fieldCoding found.
+type fieldCount struct {
+	// fields is set when the source's packets are mostly half a frame long.
+	fields bool
+	// frame is one picture's duration; pictures is how many the source
+	// shows; countable is false when they cannot be counted reliably.
+	frame     float64
+	pictures  int
+	countable bool
+}
+
+// fieldCoding tells a field-coded source by its packets: their median length
+// is half a frame, the frame being 1/fps from the probe or else the
+// candidate's median packet (one per picture). When the two disagree (one
+// says the packets are fields, the other frames) nothing is counted. The
+// source's pictures are its packets' lengths in fields, halved: a field pair
+// is one picture, and a frame-coded picture (two fields) or a pulled-down one
+// (three) counts by its length. A packet whose length is unknown or no whole
+// number of fields leaves the pictures uncounted.
+func fieldCoding(src, cand sourceVideoScan, fps float64) fieldCount {
+	median := src.medianDuration()
+	if median <= 0 {
+		return fieldCount{}
+	}
+	var probeFrame float64
+	if fps > 0 {
+		probeFrame = 1 / fps
+	}
+	candFrame := cand.medianDuration()
+	half := func(ref float64) bool { return ref > 0 && math.Abs(median-ref/2) <= fieldTolerance*ref/2 }
+	same := func(ref float64) bool { return ref > 0 && math.Abs(median-ref) <= fieldTolerance*ref }
+	out := fieldCount{fields: true}
+	switch {
+	case half(probeFrame):
+		out.frame = probeFrame
+	case half(candFrame):
+		out.frame = candFrame
+	default:
+		return fieldCount{}
+	}
+	if (half(probeFrame) && same(candFrame)) || (half(candFrame) && same(probeFrame)) {
+		out.frame = math.Max(probeFrame, candFrame)
+		return out
+	}
+	units := 0
+	for d, n := range src.durations {
+		r := 2 * (float64(d) / 1e6) / out.frame
+		u := math.Round(r)
+		if u < 1 || math.Abs(r-u) > fieldTolerance {
+			return out
+		}
+		units += int(u) * n
+	}
+	out.pictures, out.countable = (units+1)/2, true
+	return out
 }
 
 // subtitlePackets is one subtitle stream's packets: how many, and how many
