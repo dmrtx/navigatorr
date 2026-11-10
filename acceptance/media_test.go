@@ -251,6 +251,7 @@ type probeStream struct {
 	ColorTransfer  string            `json:"color_transfer"`
 	ColorSpace     string            `json:"color_space"`
 	Channels       int               `json:"channels"`
+	ExtradataSize  int               `json:"extradata_size"`
 	Tags           map[string]string `json:"tags"`
 	Disposition    map[string]int    `json:"disposition"`
 }

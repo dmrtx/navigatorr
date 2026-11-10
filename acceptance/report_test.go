@@ -27,9 +27,11 @@ type caseReport struct {
 	Rung         int     `json:"vt_rung,omitempty"` // 1-based VideoToolbox budget ladder rung
 	LadderStep   int     `json:"ladder_step,omitempty"`
 	WallSeconds  float64 `json:"wall_seconds"`
-	Passed       bool    `json:"passed"`
-	Skipped      bool    `json:"skipped,omitempty"`
-	Failure      string  `json:"failure,omitempty"`
+	// ValidationSeconds is the worker's validation phase, when it states one.
+	ValidationSeconds float64 `json:"validation_seconds,omitempty"`
+	Passed            bool    `json:"passed"`
+	Skipped           bool    `json:"skipped,omitempty"`
+	Failure           string  `json:"failure,omitempty"`
 }
 
 type reporter struct {
@@ -52,7 +54,7 @@ func (r *reporter) finish(t *testing.T) {
 	}
 	var sb strings.Builder
 	w := tabwriter.NewWriter(&sb, 2, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "CASE\tGOAL\tRESULT\tSOURCE\tCANDIDATE\tSAVED\tVMAF mean/p5/worst\tENCODER\tWALL")
+	fmt.Fprintln(w, "CASE\tGOAL\tRESULT\tSOURCE\tCANDIDATE\tSAVED\tVMAF mean/p5/worst\tENCODER\tWALL\tVALIDATION")
 	var total float64
 	failed := 0
 	for _, row := range r.rows {
@@ -88,8 +90,12 @@ func (r *reporter) finish(t *testing.T) {
 		if row.SourceBytes > 0 {
 			src = megabytes(row.SourceBytes)
 		}
+		valid := "-"
+		if row.ValidationSeconds > 0 {
+			valid = (time.Duration(row.ValidationSeconds * float64(time.Second))).Round(time.Second).String()
+		}
 		total += row.WallSeconds
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", row.Case, row.Goal, result, src, cand, saved, vmaf, enc, (time.Duration(row.WallSeconds * float64(time.Second))).Round(time.Second))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", row.Case, row.Goal, result, src, cand, saved, vmaf, enc, (time.Duration(row.WallSeconds * float64(time.Second))).Round(time.Second), valid)
 	}
 	_ = w.Flush()
 	t.Logf("\n%s\nactions %s, %d failed", sb.String(), (time.Duration(total * float64(time.Second))).Round(time.Second), failed)
