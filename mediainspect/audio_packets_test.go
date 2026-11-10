@@ -42,9 +42,8 @@ P
 // A scan that cannot be read, or fails, is a ProbeError: nothing was measured.
 func TestMeasureAudioPacketsFailures(t *testing.T) {
 	for name, body := range map[string]string{
-		"unparseable": "echo 'stream_index=1|pts_time=N/A|duration_time=N/A|size=0'\n",
+		"unparseable": "echo 'stream_index=1|pts_time=0|duration_time=N/A|size=none'\n",
 		"exit":        "echo broken >&2; exit 1\n",
-		"open end":    "echo 'stream_index=1|pts_time=0.0|duration_time=N/A|size=10'\n",
 	} {
 		_, err := MeasureAudioPackets(context.Background(), fakePacketProbe(t, body), "candidate.mkv")
 		if _, ok := AsProbeError(err); !ok {

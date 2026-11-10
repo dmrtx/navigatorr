@@ -218,7 +218,7 @@ func TestExplainTranscodeAudioOnlyOvershoot(t *testing.T) {
 func TestExplainTranscodeNamesTheFailedPreservationCheck(t *testing.T) {
 	workerError := "audio packets check failed: the converted file lost content: copied audio stream 1 has 310 packets, the source 313 (2 marked discard); sound was lost or added in the copy (fail closed, never publish)"
 	mock := &mockTranscodeExecutor{statusFunc: func(context.Context, string) (transcode.JobStatus, error) {
-		return transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "preservation_not_met", Error: workerError}, nil
+		return transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "preservation_not_met", Error: workerError, JobTelemetry: transcode.JobTelemetry{ValidationStartedAt: time.Now()}}, nil
 	}}
 	engine := NewEngine(EngineDeps{Transcode: mock})
 	ec := &ExecutionContext{Inputs: map[string]any{"mode": "size"}, State: map[string]any{"job_id": "job"}, Outputs: map[string]any{}}
@@ -246,5 +246,36 @@ func TestExplainTranscodeNamesTheFailedPreservationCheck(t *testing.T) {
 		Outputs: map[string]any{"reason_code": "preservation_not_met", "skipped": true}}
 	if e := ExplainTranscode(legacy); e.PreservationFailure != "" || !strings.Contains(e.Message, "did not preserve the required tracks") {
 		t.Fatalf("legacy explanation %+v", e)
+	}
+}
+
+// A source the worker refused before encoding is not told as a converted
+// file that lost content, and a refusal's detail never outlives its attempt.
+func TestExplainTranscodePreservationRefusedBeforeEncoding(t *testing.T) {
+	status := transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "preservation_not_met", Error: "audio-only source no longer matches its frozen plan"}
+	mock := &mockTranscodeExecutor{statusFunc: func(context.Context, string) (transcode.JobStatus, error) { return status, nil }}
+	engine := NewEngine(EngineDeps{Transcode: mock})
+	// An earlier attempt's candidate refusal is still in the state.
+	ec := &ExecutionContext{Inputs: map[string]any{"mode": "size"}, State: map[string]any{"job_id": "job", preservationFailureKey: "audio packets check failed: earlier"}, Outputs: map[string]any{}}
+	result, err := engine.stepTranscodeWait(context.Background(), ec)
+	if err != nil || result.Status != StepCompleted {
+		t.Fatalf("rejection: %+v, %v", result, err)
+	}
+	if _, stale := ec.State[preservationFailureKey]; stale {
+		t.Fatalf("an earlier attempt's detail kept: %v", ec.State)
+	}
+	res := &ActionResult{ActionName: "transcode_media", Status: StatusCompleted, Inputs: ec.Inputs, State: ec.State, Outputs: result.Outputs}
+	e := ExplainTranscode(res)
+	if e.PreservationFailure != status.Error || !strings.Contains(e.Message, "refused before anything was encoded: "+status.Error) || strings.Contains(e.Message, "encoded result") {
+		t.Fatalf("explanation %+v", e)
+	}
+
+	// A new attempt (here the worker dropped a retained candidate and the
+	// job encodes again) starts without the last one's detail.
+	engine.retainedExpiredResult(ec, "job-2")
+	for _, key := range []string{preservationFailureKey, preservationBeforeEncodeKey} {
+		if _, stale := ec.State[key]; stale {
+			t.Fatalf("a refusal's detail outlived its attempt: %v", ec.State)
+		}
 	}
 }

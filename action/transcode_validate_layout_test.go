@@ -81,6 +81,7 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 		// Size mode converts lossless Atmos to AAC on its 7.1 bed; a copied
 		// TrueHD Atmos track is a plan mismatch. E-AC-3 Atmos stays copied.
 		{"size converted TrueHD Atmos", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}, {"eac3", "", "5.1", "spa", 6}}, []track{{"aac", "", "7.1", "eng", 8}, {"eac3", "", "5.1", "spa", 6}}, StepCompleted, "", []string{"TrueHD Atmos 7.1", "DD+ Atmos 5.1"}},
+		{"size converted track kept the source's name", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"aac", "", "7.1", "eng", 8}}, StepWaitingDecision, `Converted audio track 0 was renamed: the plan calls it "AAC 7.1", the output "TrueHD Atmos 7.1"`, []string{"TrueHD Atmos 7.1"}},
 		{"size copied TrueHD Atmos", transcode.AudioModeCompactLossless, []track{{"truehd", "", "7.1", "eng", 8}}, []track{{"truehd", "", "7.1", "eng", 8}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"TrueHD Atmos 7.1"}},
 		{"size converted E-AC-3 Atmos", transcode.AudioModeCompactLossless, []track{{"eac3", "", "5.1", "eng", 6}}, []track{{"aac", "", "5.1", "eng", 6}}, StepWaitingDecision, "Audio codec mismatch at stream 0", []string{"DD+ Atmos 5.1"}},
 	} {
@@ -92,9 +93,16 @@ func TestDetailedValidationMultiTrackAudio(t *testing.T) {
 			}
 			streams := `{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"}`
 			for i, a := range tc.out {
-				// A copied track keeps its source's name.
+				// A copied track keeps its source's name; a converted one
+				// carries the conversion's.
 				title := ""
-				if i < len(tc.titles) && i < len(tc.src) && a.codec == tc.src[i].codec {
+				if i < len(tc.titles) && i < len(tc.src) {
+					title = tc.titles[i]
+					if a.codec != tc.src[i].codec {
+						title = transcode.ConvertedAudioTitle(title, tc.src[i].layout, tc.src[i].channels)
+					}
+				}
+				if tc.name == "size converted track kept the source's name" {
 					title = tc.titles[i]
 				}
 				streams += fmt.Sprintf(`,{"index": %d, "codec_type": "audio", "codec_name": %q, "channels": %d, "channel_layout": %q, "tags": {"language": %q, "title": %q}}`, i+1, a.codec, a.channels, a.layout, a.lang, title)

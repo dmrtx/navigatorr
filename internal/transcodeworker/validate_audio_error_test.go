@@ -25,7 +25,7 @@ func TestAudioPacketSpansKeepTheWorkersWordingAndClass(t *testing.T) {
 	for _, tc := range []struct {
 		name, ffprobe, want string
 	}{
-		{"unparseable packets", probe("unparseable", "echo 'stream_index=1|pts_time=N/A|duration_time=N/A|size=0'\n"), "audio packet timing/size unavailable"},
+		{"unparseable packets", probe("unparseable", "echo 'stream_index=1|pts_time=0|duration_time=N/A|size=none'\n"), "audio packet timing/size unavailable"},
 		{"tool exit", probe("exit", "echo broken >&2; exit 1\n"), "audio packet probe failed: exit status 1"},
 		{"tool missing", filepath.Join(dir, "missing-ffprobe"), "no such file or directory"},
 	} {

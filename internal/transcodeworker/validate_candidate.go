@@ -171,27 +171,26 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	}
 	// The candidate's packets are read in one pass for every kind the
 	// source's were measured for before the encode; the source is not read
-	// again.
-	measured := packetScanRequest{video: -1}
-	if srcProbe.videoScan != nil {
-		measured.video = 0
+	// again. Every kind the source's scan reads must have been measured: a
+	// check never passes for want of a measure.
+	want := w.packetScanFor(execPlan.Plan, srcProbe)
+	if err := sourceMeasured(want, srcProbe); err != nil {
+		return attest, failedCheck("source packets", err)
 	}
-	if srcProbe.audioSpans != nil {
-		measured.audio = map[int]bool{}
-	}
-	if srcProbe.subtitlePackets != nil {
-		measured.subtitles = map[int]bool{}
-	}
-	if req := candidateScanFor(measured, candProbe.Streams, candVideo); req.any() {
+	if req := candidateScanFor(want, candProbe.Streams, candVideo); req.any() {
 		candScan, err := w.packetsForJob(ctx, localCandidate, req)
 		if err != nil {
 			return attest, fmt.Errorf("candidate packet validation: %w", err)
 		}
-		if err := validateAudioPackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.audio)); err != nil {
-			return attest, failedCheck("audio packets", err)
+		if req.audio != nil {
+			if err := validateAudioPackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.audio)); err != nil {
+				return attest, failedCheck("audio packets", err)
+			}
 		}
-		if err := validateSubtitlePackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.subtitles)); err != nil {
-			return attest, failedCheck("subtitle events", err)
+		if req.subtitles != nil {
+			if err := validateSubtitlePackets(execPlan.Plan, srcProbe, candProbe, nonNil(candScan.subtitles)); err != nil {
+				return attest, failedCheck("subtitle events", err)
+			}
 		}
 		// The container's duration is its longest stream's: only the
 		// video's own frames show a video that stops early.
@@ -203,13 +202,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	}
 	// Attachment preservation policy: the same files, not just as many.
 	if execPlan.Plan.PreserveAttachments {
-		var covers []StreamAction
-		for _, s := range execPlan.Streams {
-			if s.Kind == "cover" {
-				covers = append(covers, s)
-			}
-		}
-		if err := attachmentsPreserved(covers, srcProbe.Streams, candProbe.Streams); err != nil {
+		if err := attachmentsPreserved(srcProbe.Streams, candProbe.Streams); err != nil {
 			return attest, failedCheck("attachments", err)
 		}
 	}
@@ -308,10 +301,10 @@ func expectedWorkerVideoCodec(codec string) string {
 }
 
 // copiedCodecMatches holds a copied track's codec, as the probe names it, to
-// the source track's: exactly, for a copy keeps the bitstream (a substring
-// test let an E-AC-3 track pass for AC-3).
+// the source track's (transcode.SameCopiedCodec, which the coordinator's
+// check uses too).
 func copiedCodecMatches(source, got string) bool {
-	return source == "" || (got != "" && norm(source) == norm(got))
+	return transcode.SameCopiedCodec(source, got)
 }
 
 // encodedCodecNames maps the encoder or plan names a converted track is asked
@@ -372,10 +365,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 	if len(candAudio) != len(srcAudio) {
 		return candidateInvalid(fmt.Errorf("%w: local candidate audio count %d != %s %d (fail closed, never publish)", ErrContentNotPreserved, len(candAudio), plannedLabel(plan), len(srcAudio)))
 	}
-	planned := make([]map[string]int, len(srcAudio))
-	for i, s := range srcAudio {
-		planned[i] = s.Disposition
-	}
+	planned, written := plannedDispositions(srcAudio), dispositionsWritten(plan, src)
 	for i := range srcAudio {
 		a, b := srcAudio[i], candAudio[i]
 		out := transcode.AudioOutputFor(plan.AudioMode, a.AudioTrack())
@@ -399,7 +389,7 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		if !matches {
 			return candidateInvalid(fmt.Errorf("%w: local candidate audio codec %q at stream %d != expected %q (fail closed, never publish)", ErrContentNotPreserved, b.Codec, i, target))
 		}
-		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
+		if !transcode.SameLanguage(a.Language, b.Language) {
 			return candidateInvalid(fmt.Errorf("%w: local candidate audio language %q at stream %d != source %q (fail closed, never publish)", ErrContentNotPreserved, b.Language, i, a.Language))
 		}
 		if a.Channels > 0 && a.Channels != b.Channels {
@@ -408,13 +398,17 @@ func validateAudioPreservation(plan *transcode.Plan, src, cand []SourceStream) e
 		if checkLayout && !transcode.SameAudioLayout(a.Layout, b.Layout) {
 			return candidateInvalid(fmt.Errorf("%w: local candidate audio layout %q at stream %d != source %q (fail closed, never publish)", ErrContentNotPreserved, b.Layout, i, a.Layout))
 		}
-		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefaultAudio(i, a.Disposition, planned)); d != "" {
+		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.InferredDefault(i, planned, written)); d != "" {
 			return checkInvalid("audio disposition", fmt.Errorf("%w: audio disposition %s changed at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
 		}
-		// A copied track keeps its name; a converted one may be renamed
-		// (convertedAudioTitle), which the encode alone decides.
-		if out.Codec == "copy" && a.Title != b.Title {
-			return checkInvalid("audio title", fmt.Errorf("%w: copied audio stream %d is named %q, the source track %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, a.Title))
+		// A copied track keeps its name; a converted one carries the name
+		// the conversion gives it (transcode.ConvertedAudioTitle).
+		want := a.Title
+		if out.Codec != "copy" {
+			want = transcode.ConvertedAudioTitle(a.Title, a.Layout, a.Channels)
+		}
+		if b.Title != want {
+			return checkInvalid("audio title", fmt.Errorf("%w: audio stream %d is named %q, the plan names it %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, want))
 		}
 	}
 	return nil
@@ -425,10 +419,7 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 	if len(candSubs) != len(srcSubs) {
 		return candidateInvalid(fmt.Errorf("%w: local candidate subtitle count %d != %s %d (fail closed, never publish)", ErrContentNotPreserved, len(candSubs), plannedLabel(plan), len(srcSubs)))
 	}
-	planned := make([]map[string]int, len(srcSubs))
-	for i, s := range srcSubs {
-		planned[i] = s.Disposition
-	}
+	planned, written := plannedDispositions(srcSubs), dispositionsWritten(plan, src)
 	for i := range srcSubs {
 		a, b := srcSubs[i], candSubs[i]
 		act, ok := subtitleActionFor(plan, a)
@@ -437,10 +428,8 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 			// candidate that has one anyway was not made by this plan.
 			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has no planned action (fail closed, never publish)", ErrContentNotPreserved, i))
 		}
-		copied := false
 		switch norm(act.Operation) {
 		case "copy":
-			copied = true
 			if !copiedCodecMatches(a.Codec, b.Codec) {
 				return candidateInvalid(fmt.Errorf("%w: copied subtitle codec changed at stream %d: source=%s candidate=%s (fail closed, never publish)", ErrContentNotPreserved, i, a.Codec, b.Codec))
 			}
@@ -453,19 +442,17 @@ func validateSubtitlePreservation(plan *transcode.Plan, src, cand []SourceStream
 		}
 		// A language the source names is kept; "und" is the absence of one,
 		// which the muxer writes as no tag.
-		if a.Language != "" && !(norm(a.Language) == "und" && b.Language == "") && norm(a.Language) != norm(b.Language) {
+		if !transcode.SameLanguage(a.Language, b.Language) {
 			return candidateInvalid(fmt.Errorf("%w: subtitle language mismatch at stream %d: source=%q candidate=%q (fail closed, never publish)", ErrContentNotPreserved, i, a.Language, b.Language))
 		}
-		if copied {
-			// A copied track is the source's: every flag, and its name.
-			if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.AutoDefault(i, planned)); d != "" {
-				return checkInvalid("subtitle disposition", fmt.Errorf("%w: subtitle disposition %s changed at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
-			}
-			if a.Title != b.Title {
-				return checkInvalid("subtitle title", fmt.Errorf("%w: copied subtitle stream %d is named %q, the source track %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, a.Title))
-			}
-		} else if d := transcode.LostDisposition(a.Disposition, b.Disposition, transcode.MatroskaDispositions); d != "" {
-			return checkInvalid("subtitle disposition", fmt.Errorf("%w: %s subtitle disposition lost at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
+		// ffmpeg carries a subtitle's flags and name over whether it copies
+		// or converts it, and the command names no subtitle: every flag the
+		// output stores, and the name, are the plan's.
+		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.InferredDefault(i, planned, written)); d != "" {
+			return checkInvalid("subtitle disposition", fmt.Errorf("%w: subtitle disposition %s changed at stream %d (fail closed, never publish)", ErrContentNotPreserved, d, i))
+		}
+		if a.Title != b.Title {
+			return checkInvalid("subtitle title", fmt.Errorf("%w: subtitle stream %d is named %q, the source track %q (fail closed, never publish)", ErrContentNotPreserved, i, b.Title, a.Title))
 		}
 	}
 	return nil
@@ -500,6 +487,35 @@ func plannedStreams(plan *transcode.Plan, src []SourceStream, kind string) []Sou
 		}
 	}
 	return out
+}
+
+// plannedDispositions are the flags the output's tracks of a kind must carry,
+// in output order.
+func plannedDispositions(planned []SourceStream) []map[string]int {
+	out := make([]map[string]int, len(planned))
+	for i, s := range planned {
+		out[i] = s.Disposition
+	}
+	return out
+}
+
+// dispositionsWritten reports whether the worker's command set any output
+// track's flags, which stops ffmpeg's own default on every track
+// (transcode.InferredDefault). It reads the plan the way the command was
+// built from it (transcode.WrittenDisposition).
+func dispositionsWritten(plan *transcode.Plan, src []SourceStream) bool {
+	source := map[int]map[string]int{}
+	for _, s := range src {
+		source[s.Index] = s.Disposition
+	}
+	for _, kind := range []string{"audio", "subtitle"} {
+		for _, s := range plannedStreams(plan, src, kind) {
+			if transcode.WrittenDisposition(kind, s.Disposition, source[s.Index]) != nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // plannedLabel names what the candidate's track counts are compared with.

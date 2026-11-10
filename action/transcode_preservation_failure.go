@@ -1,11 +1,29 @@
 package action
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/jakenesler/navigatorr/transcode"
+)
 
 // preservationFailureKey holds, for a candidate the worker refused for losing
 // part of the original (preservation_not_met), which check refused it and its
-// numbers, in the owner's words.
-const preservationFailureKey = "preservation_failure"
+// numbers, in the owner's words. preservationBeforeEncodeKey holds the same
+// for a source the worker refused before encoding anything (an audio-only
+// plan whose source no longer matches it): no converted file lost anything.
+const (
+	preservationFailureKey      = "preservation_failure"
+	preservationBeforeEncodeKey = "preservation_failure_before_encode"
+)
+
+// preservationKeyFor is where a preservation refusal's detail is kept: the
+// worker starts validating only once it has a converted file.
+func preservationKeyFor(st transcode.JobStatus) string {
+	if st.ValidationStartedAt.IsZero() {
+		return preservationBeforeEncodeKey
+	}
+	return preservationFailureKey
+}
 
 // workerPreservationNoise is wording the worker's preservation errors carry
 // for its logs that says nothing the explanation does not already say: the

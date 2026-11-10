@@ -75,9 +75,13 @@ window whose output pictures do not line up with a good source extract
 means content is missing; other unmeasurable report-only windows (an output
 extract that failed included) are listed as unmeasured rather than dropped. A
 fresh window the source has no pictures for (past the source's end, or a
-source extract that fails or comes back empty) says nothing about the output:
-it is listed as unmeasured under every goal, gated or not, and a gated verdict
-is judged on the windows that were measured. Other goals, and
+source extract that comes back empty: windows are cut from the first decoded
+picture, and one past the video's last says nothing about the output) is
+listed as unmeasured under every goal, gated or not, and a gated verdict is
+judged on the windows that were measured. A source extract that fails is
+tried once more; when it fails again, a gated goal fails the rung
+(`quality_final_sample_extract_failed`) rather than judge without it, and a
+report-only one lists the window as unmeasured. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
@@ -113,21 +117,32 @@ refuses the candidate (`preservation_not_met`) when:
   0.25 s. A copied track's start is not compared with the video's: its
   packets keep their own timestamps. A converted track keeps the 0.25 s start
   check;
-- a copied subtitle has a different packet count; a converted mov_text
-  subtitle (the default recipe's one subtitle conversion) has a different
-  count than the source's samples that hold text (the MP4 muxer's empty
-  two-byte gap samples have no counterpart in SubRip); any other conversion a
-  recipe adds has no exact count and is only held to being non-empty; any kept
-  subtitle comes out empty, has no planned action, or loses its language tag;
-- a copied audio or subtitle track changes its title or any flag Matroska
-  stores. ffmpeg's automatic default on the first track of a kind is allowed
-  only where the worker wrote no flags: on subtitles when the plan marks none
-  default, and on audio only when the probe reported no flags for the track
-  (the worker writes every reported audio flag, "none" included, which stops
-  the inference); a converted subtitle loses one of those flags;
-- the attachments are not the source's files by name, type and size: as many
-  (a cover the encode re-attaches is the cover art check's, not an extra
-  file), and none of the source's missing.
+- a copied subtitle has a different packet count (only packets marked to be
+  discarded or without a time may be missing); a converted subtitle has a
+  different number of lines than the conversion wrote when it was run on the
+  source before the encode (a mov_text track's empty gap samples, merged ASS
+  events), whatever the formats; any kept subtitle comes out empty or has no
+  planned action;
+- a kept track's codec differs from the plan's. A copy keeps the source's
+  codec exactly, save the names Matroska gives back for the same bitstream
+  (`text` reads back as `subrip`, `ssa` as `ass`); a codec the probe did not
+  name is no match;
+- a kept track loses its language tag. Tags are compared exactly: Matroska
+  keeps codes outside ISO 639-2 (`pob`, `en`, `pt-BR`) as they are; `und` is
+  the absence of a tag;
+- an audio or subtitle track, copied or converted, changes its title or any
+  flag Matroska stores. A converted audio track carries the title its
+  conversion gives it ("AAC 5.1"). The worker writes an audio track's flags
+  whenever the probe reported them, and a subtitle's only when a track
+  selection moves the default onto it; ffmpeg marks the first track of a kind
+  default on its own only when the command sets no flags at all, there are
+  two or more tracks of that kind and none is default, and only there is that
+  default allowed (`transcode.WrittenDisposition`, `transcode.InferredDefault`);
+- the attachments are not the source's files by name, type and size: as many,
+  and none of the source's missing. ffmpeg copies an attachment's name and
+  type as they are, an empty type included. A cover is not an attachment:
+  Matroska reads a re-attached JPEG, PNG, GIF or TIFF cover back as a
+  picture, which the cover art count checks.
 
 The refusal names the check that failed (video completeness, audio packets,
 subtitle events, attachments, a track's disposition or title...) with its
@@ -138,11 +153,17 @@ original has: audio packets check failed: copied audio stream 1 has 310
 packets, the source track 313 ..."), and the acceptance report prints it under
 its table.
 
+A refusal before the encode (an audio-only plan whose source no longer
+matches it) is told as one: "The original was refused before anything was
+encoded: ...". Only the current attempt's refusal is told; a new attempt
+starts without the last one's detail.
+
 The intentional changes stay allowed: a converted audio track's new title and
-the default flag a track selection moves. The server repeats the title, flag
-and attachment checks on the finished file and asks for a decision on any
-difference; it does not repeat the packet counts, which need a full read of
-both files.
+the default flag a track selection moves. The server repeats the codec,
+language, title, flag and attachment checks on the finished file with the same
+functions (`transcode.SameCopiedCodec`, `SameLanguage`, `DispositionChange`,
+`AttachmentChange`) and asks for a decision on any difference; it does not
+repeat the packet counts, which need a full read of both files.
 
 When a size goal's ladder ends with no candidate and the policy allows it
 (`audio_only_fallback`, on for size), navigatorr copies the video unchanged and

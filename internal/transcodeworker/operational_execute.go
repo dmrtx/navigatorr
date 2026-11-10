@@ -1469,14 +1469,10 @@ func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (Sou
 }
 
 // scanSourceVideoForJob uses the injected scan when present. A test that
-// injects the probe describes a file it never wrote, so without an injected
-// scan there is nothing to scan and the scan finds nothing.
+// injects the probe without it measures no video (packetScanFor).
 func (w *Worker) scanSourceVideoForJob(ctx context.Context, path string, streamIndex int) (sourceVideoScan, error) {
 	if w.scanVideo != nil {
 		return w.scanVideo(ctx, path, streamIndex)
-	}
-	if w.probeDetails != nil || w.probeSource != nil {
-		return sourceVideoScan{FirstErrorByte: -1}, nil
 	}
 	return scanSourceVideo(ctx, w.ffprobePath, path, streamIndex)
 }

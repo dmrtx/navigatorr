@@ -3,7 +3,10 @@ package transcodeworker
 import (
 	"context"
 	"fmt"
-	"math"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -14,27 +17,26 @@ import (
 
 // videoCompleteness holds the candidate's programme video to the source's
 // packet scan. The encode passes every source picture through with its own
-// timestamp (sourceTimestampArgs), so the candidate has as many pictures as
-// the source, ending where the source's end. The container's duration cannot
-// tell: it is the longest stream's, so a video that stops early hides behind
-// audio that runs to the end.
+// timestamp (sourceTimestampArgs), so the candidate has one frame for each
+// picture a decoder shows from the source, and its pictures sit where the
+// source's do. The container's duration cannot tell: it is the longest
+// stream's, so a video that stops early hides behind audio that runs to the
+// end.
 //
-// Only the packets a decoder shows no picture for may be missing: those at
-// the start it drops (before the first keyframe, or an open picture group's
-// leading pictures whose references were cut away; see startDropped) and
-// those the container marks to be discarded, each packet counted once.
-// Without them the candidate starts later, so its span may be shorter by as
-// many pictures; it is never longer than the source's by more than one
-// picture.
+// The source's pictures are counted before the encode (sourcePictures): its
+// head is decoded, which says exactly which of the first packets show, and
+// every later packet shows but for those the container marks to be
+// discarded. Only a field-coded source, whose pictures may each take one
+// packet or two, is held to a range.
 //
-// A field-coded source (PAFF, from a transport stream) may carry a field in a
-// packet of its own, and the candidate has one packet per picture: its
-// pictures are counted as a range (see sourcePictures). fps is the source
-// video's frame rate as the probe states it (0 when unknown).
-func videoCompleteness(src, cand sourceVideoScan, fps float64) error {
+// The candidate's first and last pictures are then held to the source's, by
+// their times, not by the length of the last one: a variable frame rate has
+// no one frame length. The candidate may start on a leading picture the
+// source's first keyframe carries, or, for a source with no keyframe flagged,
+// as many pictures late as the decoder skipped.
+func videoCompleteness(src, cand sourceVideoScan, codec string, fps float64) error {
 	if src.Packets == 0 {
-		// Nothing was scanned (a test that injects the probe only).
-		return nil
+		return candidateInvalid(fmt.Errorf("%w: the source's video was measured with no packets; nothing says what the converted video must hold (fail closed, never publish)", ErrContentNotPreserved))
 	}
 	if cand.Packets == 0 {
 		return candidateInvalid(fmt.Errorf("%w: the converted video has no frames; the source has %d (fail closed, never publish)", ErrContentNotPreserved, src.Packets))
@@ -42,130 +44,221 @@ func videoCompleteness(src, cand sourceVideoScan, fps float64) error {
 	if cand.DemuxErrors > 0 {
 		return candidateInvalid(fmt.Errorf("%w: the converted video is damaged: reading it reported %d error(s) (%s) (fail closed, never publish)", ErrContentNotPreserved, cand.DemuxErrors, truncateForLog(cand.FirstError, 200)))
 	}
-	dropped, droppedDiscarded := src.startDropped()
-	if !src.sawKey && src.LeadingNonKey == src.Packets {
-		// No packet is flagged a keyframe: nothing tells which ones a
-		// decoder skips, so none may be missing but the discarded ones.
-		dropped, droppedDiscarded = 0, 0
-	}
-	// A dropped packet that is also discarded is one packet a decoder
-	// skips, not two.
-	skippable := dropped + src.Discarded - droppedDiscarded
-	p := sourcePictures(src, cand, fps)
-	if cand.Packets > p.most || cand.Packets < p.least-skippable {
-		source := fmt.Sprintf("the source %d", p.least)
+	p := sourcePictures(src, codec, fps)
+	if cand.Packets < p.least || cand.Packets > p.most {
+		source := fmt.Sprintf("the source shows %d", p.least)
 		switch {
 		case p.fields && cand.Packets > p.most:
-			source = fmt.Sprintf("the field-coded source at most %d", p.most)
-		case p.fields:
-			source = fmt.Sprintf("the field-coded source at least %d", p.least)
+			source = fmt.Sprintf("the field-coded source shows at most %d", p.most)
+		case p.fields || p.least != p.most:
+			source = fmt.Sprintf("the source shows at least %d", p.least)
 		}
 		return candidateInvalid(fmt.Errorf("%w: the converted video has %d frames, %s; frames were lost or added in the conversion (fail closed, never publish)", ErrContentNotPreserved, cand.Packets, source))
 	}
-	if src.Discontinuous || cand.Discontinuous {
-		// A timeline that restarts has no length to compare; the frames do.
+	if !src.timed || !cand.timed || src.Discontinuous || cand.Discontinuous {
+		// A timeline that restarts, or has no times, has no span to compare;
+		// the frames do.
 		return nil
 	}
-	frame := p.frame
-	if frame <= 0 {
-		frame = src.Seconds() / float64(p.least)
-	}
-	// A millisecond of slack absorbs the containers' timestamp rounding.
-	const rounding = 0.001
-	// The pictures the candidate may lack at its start: those it is short of
-	// the source's count or, for a field-coded source, the skippable packets.
-	missing := float64(skippable)
-	if !p.fields {
-		missing = float64(src.Packets - cand.Packets)
-	}
-	short := src.Seconds() - cand.Seconds()
-	if short > frame*(1+missing)+rounding || -short > frame+rounding {
-		return candidateInvalid(fmt.Errorf("%w: the converted video ends %.3fs after its first picture, the source's %.3fs; its last frame is not where the source's is (fail closed, never publish)", ErrContentNotPreserved, cand.Seconds(), src.Seconds()))
+	// Half a frame of slack absorbs the containers' timestamp rounding and a
+	// field-coded source's last field, which shows half a frame after its
+	// picture's first.
+	tol := 0.002 + p.frame/2
+	srcSpan, candSpan := src.Last-src.First, cand.Last-cand.start()
+	diff := candSpan - srcSpan
+	if diff < -p.lateStart-tol || diff > (src.First-src.start())+tol {
+		return candidateInvalid(fmt.Errorf("%w: the converted video's last frame shows %.3fs after its first, the source's %.3fs; its pictures are not where the source's are (fail closed, never publish)", ErrContentNotPreserved, candSpan, srcSpan))
 	}
 	return nil
 }
 
 // validateVideoCompleteness holds the candidate's programme video, as scanned
 // with its other tracks, to the source's scan taken before the encode. The
-// source is never read again after the encode: without that scan (a test that
-// injects the probe only) nothing is compared.
+// source is never read again after the encode.
 func validateVideoCompleteness(srcProbe SourceProbe, cand sourceVideoScan) error {
-	if srcProbe.videoScan == nil || srcProbe.videoScan.Packets == 0 {
-		return nil
+	if srcProbe.videoScan == nil {
+		return candidateInvalid(fmt.Errorf("%w: the source's video was not measured before the encode (fail closed, never publish)", ErrContentNotPreserved))
 	}
-	srcIndex := programmeVideoIndex(srcProbe.Streams)
-	var fps float64
-	for _, s := range srcProbe.Streams {
-		if s.Index == srcIndex {
-			fps = s.FPS
-		}
+	v := firstMainVideo(srcProbe.Streams)
+	if v == nil {
+		return candidateInvalid(fmt.Errorf("%w: the source has no programme video to hold the converted one to (fail closed, never publish)", ErrContentNotPreserved))
 	}
-	return videoCompleteness(*srcProbe.videoScan, cand, fps)
+	return videoCompleteness(*srcProbe.videoScan, cand, v.Codec, v.FPS)
 }
 
-// fieldTolerance is how far, as a fraction of a frame, a packet must fall
-// short of a whole frame to count as a possible field.
-const fieldTolerance = 0.15
-
-// pictureCount is how many pictures the source's packets show.
+// pictureCount is how many pictures a decoder shows from the source's video.
 type pictureCount struct {
-	// least and most bound the pictures; they are the packet count unless
-	// some packets may be fields.
+	// least and most bound the pictures; they are equal unless the source is
+	// field-coded or its head could not be decoded far enough.
 	least, most int
 	// fields is set when some packets may be fields.
 	fields bool
-	// frame is one picture's duration, for the end check.
-	frame float64
+	// frame is one picture's duration (0 when unknown), and lateStart how
+	// much later than the source's first picture the candidate's may be.
+	frame, lateStart float64
 }
 
-// sourcePictures counts the source's pictures from its packets. A packet at
-// least a frame long (a frame-coded picture, or a pulled-down one three
-// fields long) is one picture. A shorter one may be a field: two make one
-// picture, or one alone does, so the pictures lie between the whole packets
-// plus half the possible fields, rounded up, and every packet. The frame is
-// the longer of 1/fps from the probe and the candidate's median packet (one
-// per picture), so a probe that states the field rate cannot make a field
-// look like a picture. Packets whose length the container does not state are
-// possible fields only when some packet with a length is one.
-func sourcePictures(src, cand sourceVideoScan, fps float64) pictureCount {
-	out := pictureCount{least: src.Packets, most: src.Packets, frame: src.LastFrame}
-	var frame float64
-	if fps > 0 {
-		frame = 1 / fps
+// fieldCodecs are the codecs whose pictures may be coded as two fields, each
+// in a packet of its own (PAFF, from a transport stream).
+var fieldCodecs = map[string]bool{"h264": true, "mpeg2video": true, "vc1": true}
+
+// fieldPacketShare is how far, as a share of a frame, a packet must fall
+// short of a whole frame to count as a possible field.
+const fieldPacketShare = 0.6
+
+// sourcePictures counts the pictures a decoder shows from the source.
+//
+// The decoded head says exactly how many of its packets show no picture: those
+// before the first keyframe, the keyframe's leading pictures whose references
+// were cut away and those the container marks to be discarded. Every packet
+// after the head shows a picture but the discarded ones, so a frame-coded
+// source has exactly Packets - (head packets - head pictures) - (discarded
+// after the head) pictures, with no slack.
+//
+// A field-coded source is told by its head: more of its packets show no
+// picture than the packets before the keyframe, its leading pictures and the
+// discarded ones (the second field of each picture), or, for a source with no
+// keyframe flagged, more than a quarter. A source whose head is frame-coded
+// may still switch to fields later: a packet of a field codec lasting less
+// than fieldPacketShare of a frame says so. Its pictures then lie between
+// every packet that may show and half the possible fields fewer.
+func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount {
+	var out pictureCount
+	n := src.headPackets
+	if !src.headDecoded {
+		n, _ = src.headLength()
 	}
-	frame = math.Max(frame, cand.medianDuration())
-	if frame <= 0 {
-		return out
+	nonKey, leading, headDiscarded := src.headStats(n)
+	out.frame = src.headFrame()
+	if fps > 0 && out.frame <= 0 {
+		out.frame = 1 / fps
 	}
-	possible, unknown := 0, 0
-	for d, n := range src.durations {
-		switch {
-		case d <= 0:
-			unknown += n
-		case float64(d)/1e6 < frame*(1-fieldTolerance):
-			possible += n
+	// Every packet but those before the first keyframe and the discarded
+	// ones, each counted once.
+	most := src.Packets - src.LeadingNonKey - (src.Discarded - src.leadDiscarded)
+	if !src.sawKey {
+		most = src.Packets - src.Discarded
+	}
+	notShown := src.headPackets - src.headFrames
+	switch {
+	case src.fieldCoded(codec, out.frame, nonKey, leading, headDiscarded):
+		possible, unknown := 0, 0
+		for d, c := range src.durations {
+			switch {
+			case d <= 0:
+				unknown += c
+			case out.frame > 0 && float64(d)/1e6 < out.frame*fieldPacketShare:
+				possible += c
+			}
+		}
+		if src.headDecoded && src.headFrames < src.headPackets-nonKey-leading-headDiscarded {
+			// The head shows fields: a packet whose length the container
+			// does not state may be one.
+			possible += unknown
+		}
+		out.fields, out.most = true, most
+		out.least = max(most-leading-possible/2, (most+1)/2)
+	case !src.headDecoded:
+		// A test's scan, never decoded: the leading pictures may or may not
+		// show.
+		out.least, out.most = most, most
+		if src.sawKey {
+			out.least = most - leading
+		}
+	default:
+		exact := src.Packets - notShown - (src.Discarded - headDiscarded)
+		out.least, out.most = exact, exact
+		if _, complete := src.headLength(); !complete {
+			// More packets before the first keyframe than the head holds:
+			// those past it show nothing either.
+			out.least = min(exact, most-leading)
+		}
+		if !src.sawKey {
+			out.lateStart = float64(notShown) * out.frame
 		}
 	}
-	if possible == 0 {
-		return out
-	}
-	possible += unknown
-	out.least = src.Packets - possible + (possible+1)/2
-	out.fields, out.frame = true, frame
 	return out
 }
 
-// subtitlePackets is one subtitle stream's packets: how many, and how many
-// hold more than two bytes. A mov_text sample of two bytes is its text length
-// alone, zero: an empty sample the MP4 muxer writes to fill the gap between
-// two lines, which a conversion drops.
-type subtitlePackets struct {
-	packets int64
-	text    int64
+// fieldCoded reports whether some of the source's pictures may be coded as
+// two packets (see sourcePictures).
+func (s sourceVideoScan) fieldCoded(codec string, frame float64, nonKey, leading, discarded int) bool {
+	if s.headDecoded {
+		notShown := s.headPackets - s.headFrames
+		if s.sawKey && notShown > nonKey+leading+discarded {
+			return true
+		}
+		if !s.sawKey && 4*notShown > s.headPackets {
+			return true
+		}
+	}
+	if !fieldCodecs[strings.ToLower(codec)] || frame <= 0 {
+		return false
+	}
+	for d, c := range s.durations {
+		if d > 0 && c > 0 && float64(d)/1e6 < frame*fieldPacketShare {
+			return true
+		}
+	}
+	return false
 }
 
-// movTextEmptySampleBytes is the size of a mov_text sample with no text.
-const movTextEmptySampleBytes = 2
+// headFrame is one picture's duration as the decoded head shows it: the time
+// its pictures from the first keyframe on span, over their count (0 when the
+// head was not decoded or holds one picture). A field's packet is half a
+// picture, so the packets' own lengths cannot tell it.
+func (s sourceVideoScan) headFrame() float64 {
+	if !s.headDecoded || s.headFrames < 2 || s.headPackets > len(s.head) {
+		return 0
+	}
+	lo, hi, seen := 0.0, 0.0, false
+	started, keyPTS := !s.sawKey, 0.0
+	for _, p := range s.head[:s.headPackets] {
+		if !started {
+			if !p.key {
+				continue
+			}
+			started, keyPTS = true, p.pts
+		}
+		if !p.timed || p.discard || (s.sawKey && p.pts < keyPTS) {
+			continue
+		}
+		if !seen || p.pts < lo {
+			lo = p.pts
+		}
+		if !seen || p.pts > hi {
+			hi = p.pts
+		}
+		seen = true
+	}
+	return (hi - lo) / float64(s.headFrames)
+}
+
+// subtitlePackets is one subtitle stream's packets: how many, how many the
+// container marks to be discarded and how many carry no time. events is how
+// many lines a conversion of the track writes (counted when it is converted,
+// see countSubtitleEvents).
+type subtitlePackets struct {
+	packets, discarded, untimed int64
+	events                      int64
+	counted                     bool
+}
+
+// add counts one packet from ffprobe's fields.
+func (c *subtitlePackets) add(fields map[string]string) {
+	c.packets++
+	switch {
+	case strings.Contains(fields["flags"], "D"):
+		c.discarded++
+	case !timedField(fields["pts_time"]) && !timedField(fields["dts_time"]):
+		c.untimed++
+	}
+}
+
+func timedField(v string) bool {
+	_, err := strconv.ParseFloat(v, 64)
+	return err == nil
+}
 
 // measuresSubtitlePackets reports whether the kept subtitles' packets are
 // counted: whenever the output keeps any, unless a test injected the probe
@@ -186,9 +279,14 @@ func (w *Worker) subtitlePacketsForJob(ctx context.Context, path string, indexes
 // packetScanFor is what the source's scan before the encode measures: the
 // programme video, and the audio and subtitle tracks the output keeps whose
 // packets the candidate's are held to. A dropped track is not read: its
-// packets cannot fail a job that leaves it out.
+// packets cannot fail a job that leaves it out. A test that injects the probe
+// describes files it never wrote: only the kinds it injects scans for are
+// measured there.
 func (w *Worker) packetScanFor(plan *transcode.Plan, src SourceProbe) packetScanRequest {
-	req := packetScanRequest{video: programmeVideoIndex(src.Streams)}
+	req := packetScanRequest{video: -1}
+	if w.scanVideo != nil || !w.probeInjected() {
+		req.video = programmeVideoIndex(src.Streams)
+	}
 	if w.measuresAudioPackets(plan, src) {
 		req.audio = streamIndexes(plannedStreams(plan, src.Streams, "audio"))
 	}
@@ -196,6 +294,26 @@ func (w *Worker) packetScanFor(plan *transcode.Plan, src SourceProbe) packetScan
 		req.subtitles = streamIndexes(plannedStreams(plan, src.Streams, "subtitle"))
 	}
 	return req
+}
+
+// sourceMeasured fails when a kind the source's scan measures (packetScanFor)
+// carries no measurement: the candidate's packets would then be held to
+// nothing, and a check never passes for want of one.
+func sourceMeasured(req packetScanRequest, src SourceProbe) error {
+	var missing []string
+	if req.video >= 0 && src.videoScan == nil {
+		missing = append(missing, "video")
+	}
+	if req.audio != nil && src.audioSpans == nil {
+		missing = append(missing, "audio")
+	}
+	if req.subtitles != nil && src.subtitlePackets == nil {
+		missing = append(missing, "subtitle")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("the source's %s packets were not measured before the encode; the converted file's cannot be held to them (fail closed, never publish)", strings.Join(missing, " and "))
 }
 
 // candidateScanFor is what the candidate's scan after the encode measures:
@@ -257,7 +375,9 @@ func (w *Worker) packetsForJob(ctx context.Context, path string, req packetScanR
 // scanSourcePackets reads the source's packets once, before the encode, for
 // everything the candidate is held to after it (packetScanFor), and keeps the
 // measures on the probe it returns. The candidate checks never read the
-// source again.
+// source again. What the checks after the encode could only refuse is refused
+// here, before hours of encoding: a video with no packets, a converted audio
+// track with no timed packet to measure it by.
 func (w *Worker) scanSourcePackets(ctx context.Context, plan *transcode.Plan, probe SourceProbe, path string) (SourceProbe, error) {
 	req := w.packetScanFor(plan, probe)
 	if !req.any() {
@@ -269,6 +389,9 @@ func (w *Worker) scanSourcePackets(ctx context.Context, plan *transcode.Plan, pr
 	}
 	if req.video >= 0 {
 		if w.readsPackets() {
+			if scan.video.Packets == 0 {
+				return probe, sourceDamaged(fmt.Errorf("%w: the source's video has no packets to convert", ErrSourceInvalid))
+			}
 			if err := decodeVideoHead(ctx, w.ffprobePath, path, req.video, &scan.video); err != nil {
 				return probe, err
 			}
@@ -277,9 +400,17 @@ func (w *Worker) scanSourcePackets(ctx context.Context, plan *transcode.Plan, pr
 	}
 	if req.audio != nil {
 		probe.audioSpans = nonNil(scan.audio)
+		if err := convertedAudioMeasurable(plan, probe); err != nil {
+			return probe, err
+		}
 	}
 	if req.subtitles != nil {
 		probe.subtitlePackets = nonNil(scan.subtitles)
+		if w.readsPackets() {
+			if err := w.countSubtitleEvents(ctx, plan, probe, path); err != nil {
+				return probe, err
+			}
+		}
 	}
 	return probe, nil
 }
@@ -293,24 +424,75 @@ func nonNil[V any](m map[int]V) map[int]V {
 	return m
 }
 
+// countSubtitleEvents counts, before the encode, the lines each converted
+// subtitle track comes out with: the conversion runs alone, writing its
+// packets nowhere but to a count, through the same decoder and encoder the
+// encode uses. The packets cannot tell it (a mov_text sample holding only
+// spaces or a style box writes no line), and the encode's own output is what
+// the count is held to, so only a run of the conversion is exact.
+func (w *Worker) countSubtitleEvents(ctx context.Context, plan *transcode.Plan, probe SourceProbe, path string) error {
+	type converted struct {
+		index int
+		codec string
+	}
+	var tracks []converted
+	for _, s := range plannedStreams(plan, probe.Streams, "subtitle") {
+		act, ok := subtitleActionFor(plan, s)
+		if ok && norm(act.Operation) != "copy" {
+			tracks = append(tracks, converted{s.Index, act.Codec})
+		}
+	}
+	if len(tracks) == 0 {
+		return nil
+	}
+	sort.Slice(tracks, func(i, j int) bool { return tracks[i].index < tracks[j].index })
+	args := []string{"-nostdin", "-v", "error", "-i", path}
+	for k, t := range tracks {
+		args = append(args, "-map", fmt.Sprintf("0:%d", t.index), fmt.Sprintf("-c:s:%d", k), t.codec)
+	}
+	args = append(args, "-f", "framecrc", "-")
+	cmd := exec.CommandContext(ctx, w.ffmpegPath, args...)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := runCharged(ctx, cmd); err != nil {
+		return fmt.Errorf("counting the converted subtitles' lines failed: %w (stderr: %s)", err, truncateForLog(strings.TrimSpace(stderr.String()), 200))
+	}
+	counts := make([]int64, len(tracks))
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		field, _, _ := strings.Cut(line, ",")
+		k, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil || k < 0 || k >= len(tracks) {
+			return fmt.Errorf("counting the converted subtitles' lines: unexpected output %q", truncateForLog(line, 120))
+		}
+		counts[k]++
+	}
+	for k, t := range tracks {
+		c := probe.subtitlePackets[t.index]
+		c.events, c.counted = counts[k], true
+		probe.subtitlePackets[t.index] = c
+	}
+	return nil
+}
+
 // validateSubtitlePackets holds each kept subtitle's packets, as scanned with
 // the candidate's other tracks, to the source's (see subtitleEvents), counted
-// before the encode. The source is never read again after the encode: without
-// that count nothing is compared.
+// before the encode. The source is never read again after the encode.
 func validateSubtitlePackets(plan *transcode.Plan, srcProbe SourceProbe, candProbe SourceProbe, cand map[int]subtitlePackets) error {
-	if srcProbe.subtitlePackets == nil || cand == nil {
-		return nil
+	if srcProbe.subtitlePackets == nil {
+		return candidateInvalid(fmt.Errorf("%w: the source's subtitle packets were not counted before the encode (fail closed, never publish)", ErrContentNotPreserved))
 	}
 	return subtitleEvents(plan, srcProbe.Streams, candProbe.Streams, srcProbe.subtitlePackets, cand)
 }
 
-// subtitleEvents holds every kept subtitle to the source track's events. A
-// copied track carries every packet unchanged, so the counts are equal. A
-// converted track (mov_text to SubRip, the default recipe's one conversion)
-// has one packet per line of text: the source's empty gap samples have no
-// counterpart, so the candidate's packets equal the source's samples that hold
-// text. Any other conversion has no exact count and is held only to being
-// non-empty. A track whose source had packets never comes out with none.
+// subtitleEvents holds every kept subtitle to the source track's lines. A
+// copied track carries every packet unchanged; only those its container marks
+// to be discarded or that carry no time may be left out. A converted track
+// has exactly the lines the conversion wrote when it was run before the
+// encode (countSubtitleEvents): a track with none to count is refused, never
+// passed. A track that should have lines never comes out with none.
 func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, candPackets map[int]subtitlePackets) error {
 	srcSubs, candSubs := plannedStreams(plan, src, "subtitle"), streamsOfKind(cand, "subtitle")
 	if len(srcSubs) != len(candSubs) {
@@ -323,26 +505,25 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d has no planned action (fail closed, never publish)", ErrContentNotPreserved, i))
 		}
 		x, y := srcPackets[a.Index], candPackets[b.Index]
-		want := x.packets
-		if norm(act.Operation) != "copy" && norm(a.Codec) == "mov_text" {
-			want = x.text
-		}
-		if x.packets > 0 && y.packets == 0 {
-			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d came out empty; the source track has %d lines (fail closed, never publish)", ErrContentNotPreserved, i, want))
-		}
 		converted := norm(act.Operation) != "copy"
-		if converted && norm(a.Codec) != "mov_text" {
-			// A conversion a recipe may add has no known packet-per-line
-			// rule (formats merge or split events): only an empty track
-			// says lines were lost.
-			continue
+		least, most := x.packets-x.discarded-x.untimed, x.packets
+		if converted {
+			if !x.counted {
+				return candidateInvalid(fmt.Errorf("%w: converted subtitle stream %d had its lines counted by no conversion before the encode (fail closed, never publish)", ErrContentNotPreserved, i))
+			}
+			least, most = x.events, x.events
 		}
-		if y.packets != want {
-			what := "copied"
+		if least > 0 && y.packets == 0 {
+			return candidateInvalid(fmt.Errorf("%w: subtitle stream %d came out empty; the source track has %d lines (fail closed, never publish)", ErrContentNotPreserved, i, least))
+		}
+		if y.packets < least || y.packets > most {
+			what, want := "copied", strconv.FormatInt(most, 10)
 			if converted {
 				what = "converted"
+			} else if least != most {
+				want = fmt.Sprintf("%d to %d", least, most)
 			}
-			return candidateInvalid(fmt.Errorf("%w: %s subtitle stream %d has %d lines, the source track %d; lines were lost or added (fail closed, never publish)", ErrContentNotPreserved, what, i, y.packets, want))
+			return candidateInvalid(fmt.Errorf("%w: %s subtitle stream %d has %d lines, the source track %s; lines were lost or added (fail closed, never publish)", ErrContentNotPreserved, what, i, y.packets, want))
 		}
 	}
 	return nil
@@ -363,50 +544,20 @@ func subtitleActionFor(plan *transcode.Plan, s SourceStream) (transcode.Subtitle
 	return transcode.SubtitleAction{}, false
 }
 
-// attachmentKey identifies an attachment by what it carries: its name, its
-// type and its size.
-type attachmentKey struct {
-	filename, mimetype string
-	size               int64
-}
-
 // attachmentsPreserved holds the candidate's attachments (fonts, mostly) to
-// the source's: as many, and every source file among them by name, type and
-// size, however many of each. A source without attachments has none to lose
-// and is not checked. A cover the encode re-attaches (covers) is the cover
-// art check's: should the probe show it as an attachment rather than as a
-// picture, it is not counted as one.
-func attachmentsPreserved(covers []StreamAction, src, cand []SourceStream) error {
-	sa := streamsOfKind(src, "attachment")
-	if len(sa) == 0 {
-		return nil
-	}
-	reattached := map[[2]string]int{}
-	for _, c := range covers {
-		reattached[[2]string{c.Filename, norm(c.MimeType)}]++
-	}
-	var ca []SourceStream
-	for _, s := range streamsOfKind(cand, "attachment") {
-		if k := [2]string{s.Filename, norm(s.MimeType)}; reattached[k] > 0 {
-			reattached[k]--
-			continue
+// the source's by the rule the coordinator's check uses too
+// (transcode.AttachmentChange): as many, and every source file among them by
+// name, type and size.
+func attachmentsPreserved(src, cand []SourceStream) error {
+	files := func(streams []SourceStream) []transcode.AttachedFile {
+		var out []transcode.AttachedFile
+		for _, s := range streamsOfKind(streams, "attachment") {
+			out = append(out, transcode.AttachedFile{Name: s.Filename, MimeType: s.MimeType, Size: s.AttachmentBytes})
 		}
-		ca = append(ca, s)
+		return out
 	}
-	if len(ca) != len(sa) {
-		return candidateInvalid(fmt.Errorf("%w: local candidate attachment count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, len(ca), len(sa)))
-	}
-	count := map[attachmentKey]int{}
-	for _, s := range ca {
-		count[attachmentKey{s.Filename, norm(s.MimeType), s.AttachmentBytes}]++
-	}
-	// The first source file missing is reported, in file order.
-	for _, s := range sa {
-		k := attachmentKey{s.Filename, norm(s.MimeType), s.AttachmentBytes}
-		if count[k] == 0 {
-			return candidateInvalid(fmt.Errorf("%w: attachment %q (%s, %d bytes) is missing from the converted file (fail closed, never publish)", ErrContentNotPreserved, k.filename, k.mimetype, k.size))
-		}
-		count[k]--
+	if change := transcode.AttachmentChange(files(src), files(cand)); change != "" {
+		return candidateInvalid(fmt.Errorf("%w: %s (fail closed, never publish)", ErrContentNotPreserved, change))
 	}
 	return nil
 }

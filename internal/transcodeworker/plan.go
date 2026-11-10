@@ -253,6 +253,8 @@ func anyToString(v any) string {
 }
 
 type StreamAction struct {
+	// Disposition is the flags the command sets on the output track, nil
+	// when it sets none (transcode.WrittenDisposition).
 	Disposition map[string]int `json:"disposition,omitempty"`
 	Kind        string         `json:"kind"`
 	SourceIndex int            `json:"source_index"`
@@ -438,10 +440,11 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "audio":
 			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
 			target, bitrate := out.Codec, out.Kbps
-			disposition := s.Disposition
+			planned := s.Disposition
 			if plan.Tracks != nil {
-				disposition, seenKept[s.Index] = kept[s.Index], true
+				planned, seenKept[s.Index] = kept[s.Index], true
 			}
+			disposition := transcode.WrittenDisposition("audio", planned, s.Disposition)
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, SampleRate: s.SampleRate, StatisticsTags: s.StatisticsTags})
 			outAudio++
 			if target != "copy" {
@@ -480,9 +483,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 				seenKept[s.Index] = true
 				// Subtitle dispositions are copied with the stream; only a
 				// default that moved to this track is written.
-				if kept[s.Index]["default"] > 0 && s.Disposition["default"] == 0 {
-					disposition = kept[s.Index]
-				}
+				disposition = transcode.WrittenDisposition("subtitle", kept[s.Index], s.Disposition)
 			}
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outSubtitle, Codec: s.Codec, TargetCodec: target, Disposition: disposition, StatisticsTags: s.StatisticsTags})
 			outSubtitle++

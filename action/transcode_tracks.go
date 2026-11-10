@@ -475,6 +475,32 @@ func keptStreams(audio, subtitles []mediainspect.DetailedStream, sel *transcode.
 	return pick(audio, ka), pick(subtitles, ks)
 }
 
+// plannedDispositions are the flags the output's tracks of a kind must carry,
+// in output order.
+func plannedDispositions(kept []mediainspect.DetailedStream) []map[string]int {
+	out := make([]map[string]int, len(kept))
+	for i, s := range kept {
+		out[i] = s.Disposition
+	}
+	return out
+}
+
+// dispositionsWritten reports whether the worker's command set the flags of
+// any kept track of a kind (transcode.WrittenDisposition), given the source's
+// tracks of that kind and the kept ones with their planned flags.
+func dispositionsWritten(kind string, source, kept []mediainspect.DetailedStream) bool {
+	flags := map[int]map[string]int{}
+	for _, s := range source {
+		flags[s.Index] = s.Disposition
+	}
+	for _, s := range kept {
+		if transcode.WrittenDisposition(kind, s.Disposition, flags[s.Index]) != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // TrackEntry is one audio or subtitle track in a selection report.
 type TrackEntry struct {
 	Index    int    `json:"index"`

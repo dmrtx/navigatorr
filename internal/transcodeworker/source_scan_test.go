@@ -114,12 +114,38 @@ func TestFinalWindowsPastTheVideoFailBeforeTheEncode(t *testing.T) {
 		{Index: 1, StartSeconds: 6, DurationSeconds: 2},
 	}}}
 	err = finalWindowsFitVideo(plan, scan)
-	if err == nil || !strings.Contains(err.Error(), "final window 1 ends 8.0s") || resilience.ClassifyError(err) != resilience.InternalInvariant {
+	if err == nil || !strings.Contains(err.Error(), "final window 1 ends at 8.0s") || resilience.ClassifyError(err) != resilience.InternalInvariant {
 		t.Fatalf("err = %v (%s), want window 1 refused as an internal invariant", err, resilience.ClassifyError(err))
 	}
 	plan.QualityValidation.Samples = plan.QualityValidation.Samples[:1]
 	if err := finalWindowsFitVideo(plan, scan); err != nil {
 		t.Fatalf("a window inside the video was refused: %v", err)
+	}
+}
+
+// Windows are cut from the first decoded picture, so the video's end is
+// measured from it even when audio starts two seconds earlier; a last picture
+// of unstated length only refuses a window that starts after it.
+func TestFinalWindowsMeasureFromTheFirstPicture(t *testing.T) {
+	plan := func(start, dur float64) *transcode.Plan {
+		return &transcode.Plan{QualityValidation: &transcode.QualityValidationPlan{Samples: []transcode.BenchmarkSampleWindow{{Index: 3, StartSeconds: start, DurationSeconds: dur}}}}
+	}
+	// Video from 2 s to 12 s on the container's timeline: 10 s of pictures.
+	scan := sourceVideoScan{First: 2, Last: 11.96, End: 12, timed: true, endKnown: true}
+	if err := finalWindowsFitVideo(plan(7, 3), scan); err != nil {
+		t.Fatalf("a window inside the video was refused: %v", err)
+	}
+	if err := finalWindowsFitVideo(plan(9, 3), scan); err == nil || !strings.Contains(err.Error(), "final window 3 ends at 12.0s") {
+		t.Fatalf("err = %v, want the window past the 10 s of pictures refused", err)
+	}
+	// The container does not state the last picture's length: it may last
+	// to the container's end, so a window that only ends past it stands.
+	scan.endKnown, scan.End = false, 11.96
+	if err := finalWindowsFitVideo(plan(9, 3), scan); err != nil {
+		t.Fatalf("a window starting inside the video was refused: %v", err)
+	}
+	if err := finalWindowsFitVideo(plan(11, 2), scan); err == nil || !strings.Contains(err.Error(), "final window 3 starts at 11.0s") {
+		t.Fatalf("err = %v, want the window starting past the last picture refused", err)
 	}
 }
 

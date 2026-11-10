@@ -3,146 +3,12 @@ package transcodeworker
 import (
 	"context"
 	"errors"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
-
-// A candidate's programme video is held to the source's frames: the same
-// number, ending where the source's ends. Only frames a decoder never shows
-// may be missing.
-func TestVideoCompleteness(t *testing.T) {
-	// 100 frames at 25 FPS, the first a keyframe.
-	src := sourceVideoScan{Packets: 100, Start: 0, End: 4, LastFrame: 0.04, sawKey: true}
-	for _, tc := range []struct {
-		name string
-		src  sourceVideoScan
-		cand sourceVideoScan
-		fail string
-	}{
-		{"identical", src, src, ""},
-		{"the last second missing", src, sourceVideoScan{Packets: 75, End: 3, LastFrame: 0.04, sawKey: true}, "75 frames, the source 100"},
-		{"one frame missing at the end", src, sourceVideoScan{Packets: 99, End: 3.96, LastFrame: 0.04, sawKey: true}, "99 frames"},
-		{"a frame added", src, sourceVideoScan{Packets: 101, End: 4.04, LastFrame: 0.04, sawKey: true}, "101 frames"},
-		{"every frame but squeezed short", src, sourceVideoScan{Packets: 100, End: 3.5, LastFrame: 0.035, sawKey: true}, "ends 3.500s"},
-		{"every frame but running long", src, sourceVideoScan{Packets: 100, End: 4.2, LastFrame: 0.04, sawKey: true}, "ends 4.200s"},
-		{"no frames at all", src, sourceVideoScan{}, "has no frames"},
-		{"a damaged encode", src, sourceVideoScan{Packets: 100, End: 4, LastFrame: 0.04, sawKey: true, DemuxErrors: 2, FirstError: "invalid"}, "is damaged"},
-		{"timestamps rounded by a millisecond", src, sourceVideoScan{Packets: 100, Start: 0, End: 4.0009, LastFrame: 0.04, sawKey: true}, ""},
-		// Two packets before the first keyframe: a decoder shows nothing
-		// for them, so the encode may start two frames later.
-		{"leading non-keyframes skipped", sourceVideoScan{Packets: 102, Start: 0, End: 4.08, LastFrame: 0.04, LeadingNonKey: 2, sawKey: true}, sourceVideoScan{Packets: 100, Start: 0, End: 4, LastFrame: 0.04, sawKey: true}, ""},
-		{"more than the leading non-keyframes missing", sourceVideoScan{Packets: 102, Start: 0, End: 4.08, LastFrame: 0.04, LeadingNonKey: 2, sawKey: true}, sourceVideoScan{Packets: 99, Start: 0, End: 3.96, LastFrame: 0.04, sawKey: true}, "99 frames"},
-		{"leading non-keyframes kept but the end cut", sourceVideoScan{Packets: 102, Start: 0, End: 4.08, LastFrame: 0.04, LeadingNonKey: 2, sawKey: true}, sourceVideoScan{Packets: 102, Start: 0, End: 3.9, LastFrame: 0.04, sawKey: true}, "ends 3.900s"},
-		{"an edit list's discarded frames", sourceVideoScan{Packets: 103, Start: -0.12, End: 4, LastFrame: 0.04, Discarded: 3, sawKey: true}, sourceVideoScan{Packets: 100, Start: 0, End: 4, LastFrame: 0.04, sawKey: true}, ""},
-		// A packet before the first keyframe that is also marked discard is
-		// one packet a decoder skips, not two.
-		{"leading packets both skipped and discarded", sourceVideoScan{Packets: 102, Start: -0.08, End: 4, LastFrame: 0.04, LeadingNonKey: 2, Discarded: 2, leadDiscarded: 2, sawKey: true}, sourceVideoScan{Packets: 100, Start: 0, End: 4, LastFrame: 0.04, sawKey: true}, ""},
-		{"leading packets both skipped and discarded, one more missing", sourceVideoScan{Packets: 102, Start: -0.08, End: 4, LastFrame: 0.04, LeadingNonKey: 2, Discarded: 2, leadDiscarded: 2, sawKey: true}, sourceVideoScan{Packets: 99, Start: 0, End: 3.96, LastFrame: 0.04, sawKey: true}, "99 frames"},
-		// No keyframe flag at all: nothing says which frames a decoder
-		// skips, so none may be missing.
-		{"no keyframe flagged", sourceVideoScan{Packets: 100, End: 4, LastFrame: 0.04, LeadingNonKey: 100}, sourceVideoScan{Packets: 98, End: 3.92, LastFrame: 0.04, sawKey: true}, "98 frames"},
-		{"a restarted timeline is held to its frames", sourceVideoScan{Packets: 100, End: 2, LastFrame: 0.04, Discontinuous: true, sawKey: true}, sourceVideoScan{Packets: 100, End: 4, LastFrame: 0.04, sawKey: true}, ""},
-		{"a restarted timeline that lost frames", sourceVideoScan{Packets: 100, End: 2, LastFrame: 0.04, Discontinuous: true, sawKey: true}, sourceVideoScan{Packets: 90, End: 3.6, LastFrame: 0.04, sawKey: true}, "90 frames"},
-		{"source not scanned", sourceVideoScan{}, sourceVideoScan{Packets: 1}, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := videoCompleteness(tc.src, tc.cand, 25)
-			if tc.fail == "" {
-				if err != nil {
-					t.Fatalf("rejected: %v", err)
-				}
-				return
-			}
-			if err == nil || !errors.Is(err, ErrSourceInvalid) || !strings.Contains(err.Error(), tc.fail) {
-				t.Fatalf("error %v, want a preservation failure saying %q", err, tc.fail)
-			}
-		})
-	}
-}
-
-// scanOf is a scan whose packets have the given lengths, laid end to end from
-// zero, the first a keyframe.
-func scanOf(lengths ...packetRun) sourceVideoScan {
-	s := sourceVideoScan{sawKey: true, durations: map[int64]int{}}
-	for _, r := range lengths {
-		for range r.n {
-			s.Packets++
-			s.End += r.seconds
-			s.LastFrame = r.seconds
-			s.durations[int64(r.seconds*1e6+0.5)]++
-		}
-	}
-	return s
-}
-
-type packetRun struct {
-	n       int
-	seconds float64
-}
-
-// A field-coded source (PAFF in a transport stream) may carry a field per
-// packet, and the encode one packet per picture: a packet shorter than the
-// encode's picture may be a field, so the source's pictures lie between its
-// whole packets plus half its possible fields and all its packets. Fewer
-// frames than that fail; more are told by the end.
-func TestVideoCompletenessFieldCoded(t *testing.T) {
-	fields := scanOf(packetRun{200, 0.02}) // 100 pictures at 25 FPS, 4 s
-	frames := func(n int) sourceVideoScan { return scanOf(packetRun{n, 0.04}) }
-	for _, tc := range []struct {
-		name      string
-		src, cand sourceVideoScan
-		fps       float64
-		fail      string
-	}{
-		{"every picture of a field-coded source", fields, frames(100), 25, ""},
-		{"a field-coded source's encode missing 10 frames", fields, frames(90), 25, "90 frames, the field-coded source at least 100"},
-		{"missing 10 frames while ending in place", fields, func() sourceVideoScan { c := frames(90); c.End = 4; return c }(), 25, "90 frames, the field-coded source at least 100"},
-		// Two field packets may be one picture or two: the count cannot
-		// tell a picture added, the end does.
-		{"two pictures added", fields, frames(102), 25, "ends 4.080s"},
-		{"no frame rate: the encode's frames tell", fields, frames(100), 0, ""},
-		{"no frame rate, 10 frames missing", fields, frames(90), 0, "90 frames, the field-coded source at least 100"},
-		{"the encode states no lengths: the frame rate tells", fields, func() sourceVideoScan { c := frames(90); c.durations = nil; c.LastFrame = 0; return c }(), 25, "90 frames, the field-coded source at least 100"},
-		// Adaptive field/frame coding: 100 field packets (50 pictures) and
-		// 50 frame-coded pictures.
-		{"fields and frames mixed", scanOf(packetRun{100, 0.02}, packetRun{50, 0.04}), frames(100), 25, ""},
-		{"fields and frames mixed, one missing", scanOf(packetRun{100, 0.02}, packetRun{50, 0.04}), frames(99), 25, "99 frames, the field-coded source at least 100"},
-		{"mostly frames, a few fields", scanOf(packetRun{1000, 0.04}, packetRun{20, 0.02}), frames(1010), 25, ""},
-		{"mostly frames, a few fields, five missing", scanOf(packetRun{1000, 0.04}, packetRun{20, 0.02}), frames(1005), 25, "1005 frames, the field-coded source at least 1010"},
-		// A pulled-down picture spans three fields in one packet: one picture.
-		{"pulled-down pictures", scanOf(packetRun{200, 0.02}, packetRun{2, 0.06}), frames(102), 25, ""},
-		{"pulled-down pictures, one missing", scanOf(packetRun{200, 0.02}, packetRun{2, 0.06}), frames(101), 25, "101 frames, the field-coded source at least 102"},
-		// The probe states the field rate: the candidate's one packet per
-		// picture still tells a field from a picture.
-		{"field rate in the probe", fields, frames(100), 50, ""},
-		{"field rate in the probe, 10 missing", fields, func() sourceVideoScan { c := frames(90); c.End = 4; return c }(), 50, "90 frames, the field-coded source at least 100"},
-		{"field rate in the probe: the end still checked", fields, func() sourceVideoScan { c := frames(100); c.End = 3.6; return c }(), 50, "ends 3.600s"},
-		// Packet lengths that are no whole number of fields.
-		{"uneven lengths", scanOf(packetRun{190, 0.02}, packetRun{10, 0.013}), func() sourceVideoScan { c := frames(100); c.End = 3.93; return c }(), 25, ""},
-		{"uneven lengths, 10 missing", scanOf(packetRun{190, 0.02}, packetRun{10, 0.013}), frames(90), 25, "90 frames, the field-coded source at least 100"},
-		// A progressive 50 FPS source is not field-coded.
-		{"progressive at 50 FPS", fields, scanOf(packetRun{200, 0.02}), 50, ""},
-		{"progressive at 50 FPS missing 10 frames", fields, scanOf(packetRun{190, 0.02}), 50, "190 frames, the source 200"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			err := videoCompleteness(tc.src, tc.cand, tc.fps)
-			if tc.fail == "" {
-				if err != nil {
-					t.Fatalf("rejected: %v", err)
-				}
-				return
-			}
-			if err == nil || !errors.Is(err, ErrSourceInvalid) || !strings.Contains(err.Error(), tc.fail) {
-				t.Fatalf("error %v, want a preservation failure saying %q", err, tc.fail)
-			}
-		})
-	}
-}
 
 // packetFixture is a source and a candidate described by injected probes and
 // scans: a video, two copied audio tracks, a copied SubRip subtitle, a
@@ -174,13 +40,14 @@ func newPacketFixture(t *testing.T) *packetFixture {
 		dir:       dir,
 		source:    ioOptWriteFile(t, filepath.Join(dir, "source.mp4"), "source"),
 		candidate: ioOptWriteFile(t, filepath.Join(dir, "candidate.mkv"), "candidate"),
-		srcVideo:  sourceVideoScan{Packets: 250, End: 10, LastFrame: 0.04, sawKey: true},
-		candVideo: sourceVideoScan{Packets: 250, End: 10, LastFrame: 0.04, sawKey: true},
-		srcAudio:  map[int]audioPacketSpan{1: {start: 0, end: 10, bytes: 800000, packets: 313}, 2: {start: 0, end: 10, bytes: 240000, packets: 313}},
-		candAudio: map[int]audioPacketSpan{1: {start: 0, end: 10, bytes: 800000, packets: 313}, 2: {start: 0, end: 10, bytes: 240000, packets: 313}},
-		// The mov_text track holds 12 lines and 11 empty gap samples.
-		srcSubs:  map[int]subtitlePackets{3: {packets: 40, text: 40}, 4: {packets: 23, text: 12}},
-		candSubs: map[int]subtitlePackets{3: {packets: 40, text: 40}, 4: {packets: 12, text: 12}},
+		srcVideo:  decoded(frames(250, 0, 0.04), 250),
+		candVideo: frames(250, 0, 0.04),
+		srcAudio:  map[int]audioPacketSpan{1: {start: 0, end: 10, bytes: 800000, packets: 313, timed: 313}, 2: {start: 0, end: 10, bytes: 240000, packets: 313, timed: 313}},
+		candAudio: map[int]audioPacketSpan{1: {start: 0, end: 10, bytes: 800000, packets: 313, timed: 313}, 2: {start: 0, end: 10, bytes: 240000, packets: 313, timed: 313}},
+		// The mov_text track holds 12 lines and 11 empty gap samples: its
+		// conversion, run before the encode, wrote 12.
+		srcSubs:  map[int]subtitlePackets{3: {packets: 40}, 4: {packets: 23, events: 12, counted: true}},
+		candSubs: map[int]subtitlePackets{3: {packets: 40}, 4: {packets: 12}},
 	}
 	f.src = SourceProbe{Path: f.source, Streams: streams(), DurationSec: 10}
 	f.cand = SourceProbe{Path: f.candidate, Streams: streams(), DurationSec: 10}
@@ -267,36 +134,48 @@ func TestCandidateTrackPackets(t *testing.T) {
 		fail   string
 	}{
 		{"video ends early behind full-length audio", func(f *packetFixture) {
-			f.candVideo = sourceVideoScan{Packets: 200, End: 8, LastFrame: 0.04, sawKey: true}
-		}, "video completeness", "200 frames, the source 250"},
+			f.candVideo = frames(200, 0, 0.04)
+		}, "video completeness", "200 frames, the source shows 250"},
 		{"a copied audio track lost packets", func(f *packetFixture) {
-			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 230000, packets: 300}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 230000, packets: 300, timed: 300}
 		}, "audio packets", "copied audio stream 1 has 300 packets, the source track 313"},
 		{"a copied audio track lost more packets than its discarded ones", func(f *packetFixture) {
-			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, discarded: 2}
-			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 239000, packets: 310}
+			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, timed: 311, discarded: 2}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 239000, packets: 310, timed: 310}
 		}, "audio packets", "copied audio stream 1 has 310 packets, the source track 313"},
 		{"a copied audio track gained packets", func(f *packetFixture) {
-			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240800, packets: 314}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240800, packets: 314, timed: 314}
 		}, "audio packets", "copied audio stream 1 has 314 packets"},
 		{"E-AC-3 copied as AC-3", func(f *packetFixture) { f.cand.Streams[1].Codec = "ac3" }, "audio tracks", "audio codec \"ac3\""},
-		{"a copied subtitle lost lines", func(f *packetFixture) { f.candSubs[3] = subtitlePackets{packets: 39, text: 39} }, "subtitle events", "copied subtitle stream 0 has 39 lines, the source track 40"},
-		{"a converted subtitle lost a line", func(f *packetFixture) { f.candSubs[4] = subtitlePackets{packets: 11, text: 11} }, "subtitle events", "converted subtitle stream 1 has 11 lines, the source track 12"},
-		{"a converted subtitle kept the gap samples", func(f *packetFixture) { f.candSubs[4] = subtitlePackets{packets: 23, text: 12} }, "subtitle events", "has 23 lines"},
+		{"a copied audio track cut short", func(f *packetFixture) {
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 9.5, bytes: 240000, packets: 313, timed: 313}
+		}, "audio packets", "copied audio stream 1 lasts 9.500s, the source track 10.000s"},
+		{"a copied audio track longer than its untimed packets", func(f *packetFixture) {
+			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, timed: 311, untimed: 2}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10.5, bytes: 240000, packets: 313, timed: 313}
+		}, "audio packets", "copied audio stream 1 lasts 10.500s"},
+		{"a copied subtitle lost lines", func(f *packetFixture) { f.candSubs[3] = subtitlePackets{packets: 39} }, "subtitle events", "copied subtitle stream 0 has 39 lines, the source track 40"},
+		{"a copied subtitle lost more than its discarded packets", func(f *packetFixture) {
+			f.srcSubs[3] = subtitlePackets{packets: 40, discarded: 2}
+			f.candSubs[3] = subtitlePackets{packets: 37}
+		}, "subtitle events", "copied subtitle stream 0 has 37 lines, the source track 38 to 40"},
+		{"a converted subtitle lost a line", func(f *packetFixture) { f.candSubs[4] = subtitlePackets{packets: 11} }, "subtitle events", "converted subtitle stream 1 has 11 lines, the source track 12"},
+		{"a converted subtitle kept the gap samples", func(f *packetFixture) { f.candSubs[4] = subtitlePackets{packets: 23} }, "subtitle events", "has 23 lines"},
+		{"a converted subtitle no conversion counted", func(f *packetFixture) { f.srcSubs[4] = subtitlePackets{packets: 23} }, "subtitle events", "had its lines counted by no conversion"},
 		{"a subtitle came out empty", func(f *packetFixture) { delete(f.candSubs, 3) }, "subtitle events", "came out empty"},
 		{"a subtitle lost its language", func(f *packetFixture) { f.cand.Streams[4].Language = "" }, "subtitle tracks", "subtitle language mismatch"},
-		{"a copied subtitle lost its name", func(f *packetFixture) { f.cand.Streams[3].Title = "" }, "subtitle title", "copied subtitle stream 0 is named \"\""},
+		{"a copied subtitle lost its name", func(f *packetFixture) { f.cand.Streams[3].Title = "" }, "subtitle title", "subtitle stream 0 is named \"\", the source track \"SDH\""},
 		{"a copied subtitle lost hearing_impaired", func(f *packetFixture) { f.cand.Streams[3].Disposition = nil }, "subtitle disposition", "subtitle disposition hearing_impaired"},
 		{"a copied subtitle became forced", func(f *packetFixture) {
 			f.cand.Streams[3].Disposition = map[string]int{"hearing_impaired": 1, "forced": 1}
 		}, "subtitle disposition", "subtitle disposition forced"},
-		{"a copied audio track lost its name", func(f *packetFixture) { f.cand.Streams[2].Title = "" }, "audio title", "copied audio stream 1 is named"},
+		{"a copied audio track lost its name", func(f *packetFixture) { f.cand.Streams[2].Title = "" }, "audio title", "audio stream 1 is named \"\", the plan names it \"Commentary\""},
 		{"a copied audio track lost comment", func(f *packetFixture) { f.cand.Streams[2].Disposition = nil }, "audio disposition", "audio disposition comment"},
 		{"a font replaced by another of the same count", func(f *packetFixture) {
 			f.cand.Streams[5].Filename = "other.ttf"
-		}, "attachments", "attachment \"font.ttf\" (font/ttf, 1234 bytes) is missing"},
-		{"a font truncated", func(f *packetFixture) { f.cand.Streams[5].AttachmentBytes = 1000 }, "attachments", "attachment \"font.ttf\" (font/ttf, 1234 bytes) is missing"},
-		{"a font lost", func(f *packetFixture) { f.cand.Streams = f.cand.Streams[:5] }, "attachments", "attachment count 0 != source 1"},
+		}, "attachments", "Attachment \"font.ttf\" (font/ttf, 1234 bytes) is missing"},
+		{"a font truncated", func(f *packetFixture) { f.cand.Streams[5].AttachmentBytes = 1000 }, "attachments", "Attachment \"font.ttf\" (font/ttf, 1234 bytes) is missing"},
+		{"a font lost", func(f *packetFixture) { f.cand.Streams = f.cand.Streams[:5] }, "attachments", "the source has 1, the output 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPacketFixture(t)
@@ -319,17 +198,39 @@ func TestCandidateTrackPackets(t *testing.T) {
 		// A copied track keeps the source's timestamps: its start is not
 		// re-timed against the video, only its packets and length count.
 		{"a copied audio track that starts where the source's does, late", func(f *packetFixture) {
-			f.srcAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313}
-			f.candAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313}
+			f.srcAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313, timed: 313}
+			f.candAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313, timed: 313}
 		}},
 		{"a copied audio track shifted as a whole", func(f *packetFixture) {
-			f.candAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313}
+			f.candAudio[2] = audioPacketSpan{start: 0.5, end: 10.5, bytes: 240000, packets: 313, timed: 313}
 		}},
 		// Packets the source marks discard a decoder never plays: a copy
 		// may leave them out.
 		{"a copied audio track without its discarded packets", func(f *packetFixture) {
-			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, discarded: 2}
-			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 239500, packets: 311}
+			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, timed: 311, discarded: 2}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 239500, packets: 311, timed: 311}
+		}},
+		// A packet with no time is copied and timed: the copy runs longer
+		// by it.
+		{"a copied audio track with untimed packets", func(f *packetFixture) {
+			f.srcAudio[2] = audioPacketSpan{start: 0, end: 10, bytes: 240000, packets: 313, timed: 311, untimed: 2}
+			f.candAudio[2] = audioPacketSpan{start: 0, end: 10.064, bytes: 240000, packets: 313, timed: 313}
+		}},
+		// Whatever packets a copy carries, a track with none timed on
+		// either side is held to its count alone.
+		{"a copied audio track with no timed packet", func(f *packetFixture) {
+			f.srcAudio[2] = audioPacketSpan{packets: 313, untimed: 313}
+			f.candAudio[2] = audioPacketSpan{packets: 313, untimed: 313}
+		}},
+		{"a copied subtitle without its discarded packets", func(f *packetFixture) {
+			f.srcSubs[3] = subtitlePackets{packets: 40, discarded: 2}
+			f.candSubs[3] = subtitlePackets{packets: 38}
+		}},
+		// A mov_text track of empty samples only converts to no line: the
+		// track comes out empty, as the conversion run before the encode did.
+		{"a converted subtitle of empty samples only", func(f *packetFixture) {
+			f.srcSubs[4] = subtitlePackets{packets: 5, events: 0, counted: true}
+			delete(f.candSubs, 4)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -342,11 +243,20 @@ func TestCandidateTrackPackets(t *testing.T) {
 	}
 }
 
-// ffmpeg marks the first subtitle default on its own when none of the
-// output's is, and the worker's command leaves subtitle flags alone unless
-// the plan moved the default. That flag is no change of the track.
+// ffmpeg marks the first of two or more subtitles default on its own when
+// none of them is, but only when the command sets no track's flags. The
+// worker's command sets every audio track's flags it knows, so with them no
+// default appears by itself; without them that flag is no change of the track.
 func TestCopiedSubtitleAutomaticDefault(t *testing.T) {
 	f := newPacketFixture(t)
+	f.cand.Streams[3].Disposition = map[string]int{"hearing_impaired": 1, "default": 1}
+	if err := f.validate(t); err == nil || !strings.Contains(err.Error(), "subtitle disposition default changed at stream 0") {
+		t.Fatalf("a default ffmpeg could not have set passed: %v", err)
+	}
+	f = newPacketFixture(t)
+	for _, streams := range [][]SourceStream{f.src.Streams, f.cand.Streams} {
+		streams[1].Disposition, streams[2].Disposition = nil, nil
+	}
 	f.cand.Streams[3].Disposition = map[string]int{"hearing_impaired": 1, "default": 1}
 	if err := f.validate(t); err != nil {
 		t.Fatalf("ffmpeg's automatic default rejected: %v", err)
@@ -354,7 +264,7 @@ func TestCopiedSubtitleAutomaticDefault(t *testing.T) {
 	// On the second subtitle it is not ffmpeg's doing.
 	f = newPacketFixture(t)
 	f.src.Streams[4].Codec, f.cand.Streams[4].Codec = "subrip", "subrip"
-	f.srcSubs[4] = subtitlePackets{packets: 12, text: 12}
+	f.srcSubs[4] = subtitlePackets{packets: 12}
 	f.cand.Streams[4].Disposition = map[string]int{"default": 1}
 	p := f.plan(t)
 	p.SubtitleActions[1] = transcode.SubtitleAction{TypeIndex: 1, SourceStreamIndex: 4, SourceCodec: "subrip", Operation: "copy", Codec: "copy"}
@@ -389,60 +299,5 @@ func TestSubtitleWithoutAction(t *testing.T) {
 	}
 	if err := subtitleTrackChecks(legacy, f); err != nil {
 		t.Fatalf("legacy shim plan rejected: %v", err)
-	}
-}
-
-// mov_text writes an empty two-byte sample into every gap between lines, and
-// converting the track to SubRip drops them: the scan counts the samples that
-// hold text, which is what the converted track has, on files ffmpeg made.
-func TestRealSubtitlePacketScan(t *testing.T) {
-	ffmpeg, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe unavailable")
-	}
-	dir := t.TempDir()
-	srt := filepath.Join(dir, "lines.srt")
-	body := "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:04,000 --> 00:00:05,000\nWorld\n\n3\n00:00:07,000 --> 00:00:08,500\nAgain\n"
-	if err := os.WriteFile(srt, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	run := func(args ...string) {
-		t.Helper()
-		if out, err := exec.Command(ffmpeg, append([]string{"-v", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
-			t.Fatalf("ffmpeg %v: %v\n%s", args, err, out)
-		}
-	}
-	mp4, mkv := filepath.Join(dir, "source.mp4"), filepath.Join(dir, "converted.mkv")
-	run("-f", "lavfi", "-i", "testsrc=d=10:s=64x48:r=10", "-i", srt, "-map", "0", "-map", "1", "-c:v", "mpeg4", "-c:s", "mov_text", mp4)
-	run("-i", mp4, "-map", "0", "-c:v", "copy", "-c:s", "subrip", mkv)
-	scan := func(path string) map[int]subtitlePackets {
-		t.Helper()
-		// The merged scan, as the job runs it: the video and the subtitle
-		// in one pass.
-		got, err := scanFilePackets(context.Background(), ffprobe, path, packetScanRequest{video: 0, subtitles: map[int]bool{1: true}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.video.Packets != 100 {
-			t.Fatalf("%s: merged scan counted %d video packets, want 100", filepath.Base(path), got.video.Packets)
-		}
-		return got.subtitles
-	}
-	src, cand := scan(mp4), scan(mkv)
-	if src[1].packets <= src[1].text || src[1].text != 3 {
-		t.Fatalf("mov_text source scan %+v: want 3 lines and gap samples", src[1])
-	}
-	if cand[1].packets != 3 {
-		t.Fatalf("converted track scan %+v: want 3 lines", cand[1])
-	}
-	plan := &transcode.Plan{SubtitleActions: []transcode.SubtitleAction{{TypeIndex: 0, SourceStreamIndex: 1, SourceCodec: "mov_text", Operation: "transcode", Codec: "subrip"}}}
-	srcStreams := []SourceStream{{Kind: "subtitle", Index: 1, TypeIndex: 0, Codec: "mov_text"}}
-	candStreams := []SourceStream{{Kind: "subtitle", Index: 1, TypeIndex: 0, Codec: "subrip"}}
-	if err := subtitleEvents(plan, srcStreams, candStreams, src, cand); err != nil {
-		t.Fatalf("a faithful conversion was rejected: %v", err)
 	}
 }

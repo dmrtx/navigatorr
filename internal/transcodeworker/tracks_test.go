@@ -318,8 +318,11 @@ func TestTrackSelectionCandidateValidation(t *testing.T) {
 		return s
 	}
 	good := func() []SourceStream {
+		eng := audio("aac", "LC", "eng", 6, "5.1", true)
+		// The title names no source format, so the conversion keeps it.
+		eng.Title = "English 5.1"
 		return []SourceStream{
-			audio("aac", "LC", "eng", 6, "5.1", true),
+			eng,
 			audio("aac", "LC", "spa", 2, "stereo", false),
 			audio("aac", "LC", "jpn", 6, "5.1", false),
 			{Kind: "subtitle", Codec: "subrip", Language: "eng"},
@@ -350,10 +353,15 @@ func TestTrackSelectionCandidateValidation(t *testing.T) {
 		"a dropped subtitle kept": {func(c []SourceStream) []SourceStream {
 			return slices.Insert(c, 4, SourceStream{Kind: "subtitle", Codec: "subrip", Language: "fre"})
 		}, false, true},
-		"a kept subtitle missing": {func(c []SourceStream) []SourceStream { return c[:4] }, false, true},
-		"subtitle language wrong": {func(c []SourceStream) []SourceStream { c[3].Language = "ger"; return c }, false, true},
-		"the default flag lost":   {func(c []SourceStream) []SourceStream { c[0].Disposition = nil; return c }, true, false},
-		"the forced flag lost":    {func(c []SourceStream) []SourceStream { c[4].Disposition = nil; return c }, false, true},
+		"a kept subtitle missing":       {func(c []SourceStream) []SourceStream { return c[:4] }, false, true},
+		"subtitle language wrong":       {func(c []SourceStream) []SourceStream { c[3].Language = "ger"; return c }, false, true},
+		"the default flag lost":         {func(c []SourceStream) []SourceStream { c[0].Disposition = nil; return c }, true, false},
+		"a converted track's name lost": {func(c []SourceStream) []SourceStream { c[0].Title = ""; return c }, true, false},
+		"a converted subtitle flag added": {func(c []SourceStream) []SourceStream {
+			c[3].Disposition = map[string]int{"hearing_impaired": 1}
+			return c
+		}, false, true},
+		"the forced flag lost": {func(c []SourceStream) []SourceStream { c[4].Disposition = nil; return c }, false, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, s := check(tc.mutate(good()))

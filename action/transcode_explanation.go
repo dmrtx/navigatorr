@@ -198,6 +198,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 		if detail, _ := read(preservationFailureKey).(string); detail != "" {
 			e.PreservationFailure = detail
 			e.Message = "The encoded result did not keep everything the original has: " + detail + ". Original preserved."
+		} else if detail, _ := read(preservationBeforeEncodeKey).(string); detail != "" {
+			e.PreservationFailure = detail
+			e.Message = "The original was refused before anything was encoded: " + detail + ". Original preserved."
 		}
 	case reason == "audio_compaction_insufficient":
 		e.Outcome = "size_rejected"
