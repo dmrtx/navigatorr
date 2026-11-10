@@ -137,3 +137,41 @@ func TestVideoTimesOverflowStaysLoose(t *testing.T) {
 		t.Fatalf("frame codec counted %+v, want exactly 11", p)
 	}
 }
+
+// A window's source extract seeks before the keyframe its pictures are
+// decoded from when the container has no keyframe index, and to the
+// window's start when it has one; with no keyframe times to aim at, the seek
+// stays at the start and is said not to reach a keyframe.
+func TestWindowSeek(t *testing.T) {
+	ts := func() *sourceVideoScan {
+		s := &sourceVideoScan{format: "mpegts"}
+		for i, at := range times(300, 1.5, 0.1) { // a keyframe every 50 packets: 1.5, 6.5, 11.5, ...
+			s.addTime(at, 0.1, i%50 == 0)
+		}
+		return s
+	}
+	cases := []struct {
+		name  string
+		scan  func() *sourceVideoScan
+		at    float64
+		seek  float64
+		keyed bool
+	}{
+		{"indexed container", func() *sourceVideoScan { s := ts(); s.format = "matroska,webm"; return s }, 9.95, 9.95, true},
+		{"transport stream", ts, 9.95, 5.5, true},
+		{"just after a keyframe", ts, 11.55, 10.5, true},
+		{"before the first keyframe", ts, 1.45, 1.45, false},
+		{"times overflowed", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 9.95, 9.95, false},
+		{"clock restarted", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 9.95, 9.95, false},
+	}
+	for _, tc := range cases {
+		seek, keyed := tc.scan().windowSeek(tc.at)
+		if keyed != tc.keyed || seek < tc.seek-1e-6 || seek > tc.seek+1e-6 {
+			t.Errorf("%s: seek %.4f keyed %v, want %.4f %v", tc.name, seek, keyed, tc.seek, tc.keyed)
+		}
+	}
+	args := buildExtractionArgs("src.ts", "out.mkv", 0, 1.5, 8.45, 12.45, 5.5)
+	if got := strings.Join(args, " "); !strings.Contains(got, "-ss 5.500000 -i src.ts") || !strings.Contains(got, "trim=start=9.950000:end=13.950000") {
+		t.Fatalf("extract args %s", got)
+	}
+}

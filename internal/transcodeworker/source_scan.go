@@ -708,6 +708,36 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 	return false, false, nil
 }
 
+// windowSeek is where an extract of the source seeks to decode the pictures
+// from at (a time on the source's own timeline), and whether that seek
+// reaches the keyframe they are decoded from. A container with a keyframe
+// index (Matroska, MP4) seeks to the keyframe at or before the time asked by
+// itself. A transport stream seeks to a packet near the time, inside a group
+// of pictures, and a decoder shows nothing until the next keyframe: the
+// extract would start late, or hold nothing. Its seek goes
+// fieldSampleSeekBack before the last keyframe at or before at that the scan
+// read. With no keyframe times (more packets than the scan keeps, a clock
+// that restarted, no keyframe before at) the seek stays at at, and does not
+// reach a keyframe.
+func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
+	if indexedContainer(s.format) {
+		return at, true
+	}
+	if s.timesOverflow || s.Discontinuous {
+		return at, false
+	}
+	keyAt := math.Inf(-1)
+	for _, t := range s.times {
+		if k := s.timesBase + float64(t.at)/1e4; t.key && k <= at && k > keyAt {
+			keyAt = k
+		}
+	}
+	if math.IsInf(keyAt, -1) {
+		return at, false
+	}
+	return keyAt - fieldSampleSeekBack, true
+}
+
 // indexedContainer reports whether a demuxer seeks by an index of keyframes,
 // to the one at or before the time asked: Matroska and MP4 do.
 func indexedContainer(format string) bool {

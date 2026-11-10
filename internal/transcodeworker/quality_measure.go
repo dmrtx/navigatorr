@@ -35,7 +35,10 @@ import (
 //     while the encode's 1 ms Matroska time base does not, so the source kept
 //     a picture its encode did not. `-copyts` keeps the decoded timestamps
 //     untouched; `-seek_timestamp` makes `-ss` that same absolute time, and
-//     `-noaccurate_seek` only seeks to the keyframe at or before it.
+//     `-noaccurate_seek` only seeks to the keyframe at or before it. A
+//     transport stream's demuxer has no keyframe index and seeks to a packet
+//     near the time instead; that source's extract seeks before its keyframe
+//     (buildExtractionArgs, sourceVideoScan.windowSeek).
 //  2. Exact selection: `settb=AVTB,trim` keeps the pictures between the bounds,
 //     compared in microseconds, and ends the decode at the end bound. The
 //     bounds lie halfway between frames of a constant-rate source, so there
@@ -48,12 +51,20 @@ import (
 //     Source timestamps pass through unchanged (sourceTimestampArgs).
 //  5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
 func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) []string {
+	return buildExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec, firstFrameSec+fromSec)
+}
+
+// buildExtractionArgs is BuildReferenceExtractionArgs seeking to seekSec, a
+// time on the file's own timeline at or before the window's start, instead
+// of the start itself: the pictures the trim keeps are the same, and the
+// decode starts from a keyframe where the demuxer cannot find one itself.
+func buildExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec, seekSec float64) []string {
 	from, to := firstFrameSec+fromSec, firstFrameSec+toSec
 	args := []string{"-y", "-nostats", "-copyts", "-noaccurate_seek"}
 	selection := fmt.Sprintf("settb=AVTB,trim=end=%.6f", to)
 	// A window from the first picture needs neither a seek nor a start bound.
 	if fromSec > 0 {
-		args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", from))
+		args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", min(seekSec, from)))
 		selection = fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", from, to)
 	}
 	return append(args,

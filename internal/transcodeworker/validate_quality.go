@@ -223,13 +223,21 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		if scan.noPicturesFrom(sourceFirstFrame + from) {
 			return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source's last picture, %.3fs after its first, comes before it", where, scan.Last-sourceFirstFrame))
 		}
-		// The source's extract comes first. One in which ffmpeg encodes no
-		// picture is a window past the source's video. Any other failure
+		// The source's extract comes first, decoded from the keyframe before
+		// the window (sourceVideoScan.windowSeek; without a scan the seek is
+		// the window's start, as for a container with a keyframe index). One
+		// in which ffmpeg encodes no picture is a window past the source's
+		// video, unless the seek could not reach a keyframe: a decoder shows
+		// nothing until one, so that window fails instead. Any other failure
 		// (a read error, a killed process, an extract ffprobe cannot read)
 		// is retried once and then fails the window: it is not a window
 		// without pictures, and a gate must not pass on windows it never
 		// measured.
-		refArgs := BuildReferenceExtractionArgs(source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to)
+		seek, keyed := sourceFirstFrame+from, true
+		if scan != nil {
+			seek, keyed = scan.windowSeek(sourceFirstFrame + from)
+		}
+		refArgs := buildExtractionArgs(source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to, seek)
 		if compactChain != "" {
 			refArgs = withReferenceChain(refArgs, compactChain)
 		}
@@ -237,6 +245,9 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		for attempt := 1; ; attempt++ {
 			output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
 			if err == nil && emptyExtract(output) {
+				if !keyed {
+					return bad("quality_final_sample_misaligned", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
+				}
 				return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))
 			}
 			if err == nil {

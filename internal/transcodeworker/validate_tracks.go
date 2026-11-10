@@ -259,16 +259,27 @@ func (s sourceVideoScan) headFrame() float64 {
 // subtitlePackets is one subtitle stream's packets: how many, how many the
 // container marks to be discarded and how many carry no time. events is how
 // many lines a conversion of the track writes (counted when it is converted,
-// see countSubtitleEvents).
+// see countSubtitleEvents). ends is how many packets are pgsEndSize bytes
+// long: in a PGS track, the END segments that close its display sets when
+// each segment is a packet of its own (see pgsDisplaySets).
 type subtitlePackets struct {
 	packets, discarded, untimed int64
 	events                      int64
 	counted                     bool
+	ends                        int64
 }
+
+// pgsEndSize is the size of a PGS END segment, the last of every display
+// set: its type and a zero length, with no payload. Every other segment
+// carries one, so a packet this size is an END segment alone.
+const pgsEndSize = "3"
 
 // add counts one packet from ffprobe's fields.
 func (c *subtitlePackets) add(fields map[string]string) {
 	c.packets++
+	if fields["size"] == pgsEndSize {
+		c.ends++
+	}
 	switch {
 	case strings.Contains(fields["flags"], "D"):
 		c.discarded++
@@ -534,6 +545,9 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 		x, y := srcPackets[a.Index], candPackets[b.Index]
 		converted := norm(act.Operation) != "copy"
 		least, most := x.packets-x.discarded-x.untimed, x.packets
+		if sets, ok := pgsDisplaySets(a.Codec, x); ok && !converted {
+			least, most = sets-x.discarded-x.untimed, sets
+		}
 		if converted {
 			if !x.counted {
 				return candidateInvalid(fmt.Errorf("%w: converted subtitle stream %d had its lines counted by no conversion before the encode (fail closed, never publish)", ErrContentNotPreserved, i))
@@ -554,6 +568,21 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 		}
 	}
 	return nil
+}
+
+// pgsDisplaySets is how many packets a copy of a PGS track has in Matroska
+// when the source carries each segment of a display set as a packet of its
+// own (a Blu-ray transport stream, a .sup file): ffmpeg's Matroska muxer
+// merges each display set into one packet (pgs_frame_merge), so the copy has
+// one packet per END segment. A source that already carries display sets
+// (Matroska) has no packet the size of an END segment alone, and is counted
+// by its packets.
+func pgsDisplaySets(codec string, x subtitlePackets) (int64, bool) {
+	switch strings.ToLower(codec) {
+	case "hdmv_pgs_subtitle", "pgs":
+		return x.ends, x.ends > 0
+	}
+	return 0, false
 }
 
 // subtitleActionFor is the plan's action for a source subtitle. A legacy

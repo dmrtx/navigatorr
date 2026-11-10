@@ -80,7 +80,12 @@ when every packet carries a time,
 or a source extract that comes back empty: windows are cut from the first
 decoded picture, and one past the video's last says nothing about the output)
 is listed as unmeasured under every goal, gated or not, and a gated verdict is
-judged on the windows that were measured. A source extract that fails is
+judged on the windows that were measured. A source with no keyframe index
+(MPEG transport and program streams) seeks to a packet near the time asked,
+and a decoder shows nothing until the next keyframe, so its extract seeks a
+second before the keyframe the packet scan found at or before the window; a
+source the scan kept no keyframe times for is cut where it lands, and an
+empty extract of it fails the window instead of passing as past the video. A source extract that fails is
 tried once more; when it fails again, a gated goal fails the rung
 (`quality_final_sample_extract_failed`) rather than judge without it, and a
 report-only one lists the window as unmeasured. Other goals, and
@@ -136,7 +141,9 @@ when:
   packets keep their own timestamps. A converted track keeps the 0.25 s start
   check;
 - a copied subtitle has a different packet count (only packets marked to be
-  discarded or without a time may be missing); a converted subtitle has a
+  discarded or without a time may be missing; a PGS track whose source
+  carries each segment as a packet, a Blu-ray transport stream or a .sup,
+  has one packet per display set in Matroska, its END segments); a converted subtitle has a
   different number of lines than the conversion wrote when it was run on the
   source before the encode (a mov_text track's empty gap samples, merged ASS
   events), whatever the formats; a kept subtitle whose source track has lines
