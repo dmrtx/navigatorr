@@ -46,15 +46,16 @@ func (t *windowThreads) pass() int {
 func (t *windowThreads) done() { t.finished.Add(1) }
 
 // The steps of final validation whose cost is reported, each summed over the
-// windows that ran it. They are worker phase costs named validation_<step>.
+// windows that ran it. They are the steps of the worker's validation phase
+// cost (PhaseCost.Steps), never phases of their own.
 const (
-	validationStepExtract    = "validation_extract"
-	validationStepTimestamps = "validation_timestamps"
-	validationStepAlignment  = "validation_alignment"
-	validationStepVMAF       = "validation_vmaf"
-	validationStepCAMBI      = "validation_cambi"
-	validationStepSSIM       = "validation_ssim"
-	validationStepChroma     = "validation_chroma"
+	validationStepExtract    = "extract"
+	validationStepTimestamps = "timestamps"
+	validationStepAlignment  = "alignment"
+	validationStepVMAF       = "vmaf"
+	validationStepCAMBI      = "cambi"
+	validationStepSSIM       = "ssim"
+	validationStepChroma     = "chroma"
 )
 
 // validationSteps sums the wall time and the children's CPU time of each step
@@ -67,10 +68,12 @@ type validationSteps struct {
 	steps map[string]*validationStepCost
 }
 
+// Times are summed at full resolution and rounded to milliseconds once, so a
+// step of many short children (a probe per window) loses nothing per child.
 type validationStepCost struct {
-	wallMs, cpuMs int64
-	cpuMeasured   bool
-	runs          int
+	wall, cpu   time.Duration
+	cpuMeasured bool
+	runs        int
 }
 
 type validationStepsKey struct{}
@@ -101,7 +104,7 @@ func beginValidationStep(ctx context.Context, name string) (stepCtx context.Cont
 	start := time.Now()
 	return context.WithValue(ctx, validationStepRunKey{}, &validationStepRun{steps: s, name: name}), func() {
 		s.add(name, func(c *validationStepCost) {
-			c.wallMs += time.Since(start).Milliseconds()
+			c.wall += time.Since(start)
 			c.runs++
 		})
 	}
@@ -115,7 +118,7 @@ func chargeValidationStep(ctx context.Context, ps *os.ProcessState) {
 	}
 	d := ps.UserTime() + ps.SystemTime()
 	run.steps.add(run.name, func(c *validationStepCost) {
-		c.cpuMs += d.Milliseconds()
+		c.cpu += d
 		c.cpuMeasured = true
 	})
 }
@@ -134,10 +137,10 @@ func (s *validationSteps) add(name string, update func(*validationStepCost)) {
 	update(c)
 }
 
-// phaseCosts are the steps that ran, as phase costs: wall time summed over
-// windows, Attempts the windows that ran the step, and CPU time only where a
-// child was measured.
-func (s *validationSteps) phaseCosts() map[string]transcode.PhaseCost {
+// phaseSteps are the steps that ran, for the validation phase's cost: wall
+// time summed over windows, one attempt (this validation), Runs the windows
+// that ran the step, and CPU time only where a child was measured.
+func (s *validationSteps) phaseSteps() map[string]transcode.PhaseCost {
 	if s == nil {
 		return nil
 	}
@@ -148,11 +151,14 @@ func (s *validationSteps) phaseCosts() map[string]transcode.PhaseCost {
 		if c.runs == 0 {
 			continue
 		}
-		cost := transcode.PhaseCost{DurationMs: c.wallMs, Attempts: c.runs}
+		cost := transcode.PhaseCost{DurationMs: c.wall.Milliseconds(), Attempts: 1, Runs: c.runs}
 		if c.cpuMeasured {
-			cost.ActiveComputeMs = knownCount(c.cpuMs)
+			cost.ActiveComputeMs = knownCount(c.cpu.Milliseconds())
 		}
 		out[name] = cost
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

@@ -309,7 +309,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	validationCPU := &cpuMeter{}
 	validationStart := time.Now()
 	// Final validation also reports each step's wall and CPU time, summed over
-	// its windows, as validation_<step> phases.
+	// its windows, as the steps of its validation phase cost.
 	validationSteps := &validationSteps{}
 	validationCtx := withValidationSteps(withCPUMeter(ctx, validationCPU), validationSteps)
 	attest, verr := w.validateEncodedCandidateFull(validationCtx, r.localCandidate, execPlan, srcProbe, 0)
@@ -356,11 +356,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			}
 		}
 	}
-	if cpu := validationCPU.activeComputeMs(); cpu != nil {
+	if cpu, steps := validationCPU.activeComputeMs(), validationSteps.phaseSteps(); cpu != nil || steps != nil {
 		// A rejected candidate still spent its CPU time.
-		w.persistPhaseCost(jobDir, jobFile, job, "validation", validationStart, transcode.PhaseCost{ActiveComputeMs: cpu})
+		w.persistPhaseCost(jobDir, jobFile, job, "validation", validationStart, transcode.PhaseCost{ActiveComputeMs: cpu, Steps: steps})
 	}
-	w.addPhaseCosts(jobDir, jobFile, job, validationSteps.phaseCosts())
 	if verr != nil {
 		var rejected *transcode.PolicyRejectionError
 		if errors.As(verr, &rejected) {

@@ -8006,11 +8006,18 @@ function renderPhaseCosts(host, job) {
   for (const label of ["Phase", "Wall time", "CPU time", "Invocations", "NAS read", "NAS written", "Cache hits / misses"]) header.append(node("th", label));
   table.append(header);
   const labels = {coordinator_inventory:"Coordinator · Inventory",coordinator_preflight:"Coordinator · Preflight",coordinator_source_hash:"Coordinator · Source hash",coordinator_probe:"Coordinator · Probe",coordinator_promotion:"Coordinator · Promotion"};
-  for (const [phase, cost] of entries) {
+  // A phase's steps (final validation's extract, VMAF, CAMBI...) are part of
+  // its cost: each follows its phase as a row of its own, and its invocations
+  // are the windows that ran it.
+  const costRow = (label, cost, invocations) => {
     const row = node("tr");
-    const label = labels[phase] || phase.replace(/^worker_benchmark_/, "Worker samples · ").replace(/^worker_/, "Worker · ").replaceAll("_", " ");
-    row.append(node("td", label), node("td", Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.active_compute_ms) ? `${cost.active_compute_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.attempts) ? String(cost.attempts) : "Unknown"), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
+    row.append(node("td", label), node("td", Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown"), node("td", Number.isFinite(cost.active_compute_ms) ? `${cost.active_compute_ms} ms` : "Unknown"), node("td", Number.isFinite(invocations) ? String(invocations) : "Unknown"), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
     table.append(row);
+  };
+  for (const [phase, cost] of entries) {
+    const label = labels[phase] || phase.replace(/^worker_benchmark_/, "Worker samples · ").replace(/^worker_/, "Worker · ").replaceAll("_", " ");
+    costRow(label, cost, cost.attempts);
+    for (const [step, stepCost] of Object.entries(cost.steps || {})) costRow(`${label} · ${step.replaceAll("_", " ")}`, stepCost, Number.isFinite(stepCost.runs) ? stepCost.runs : stepCost.attempts);
   }
   detail.append(table); host.append(detail);
 }

@@ -90,22 +90,27 @@ func TestPhaseCostsShareTheActionStatusProjection(t *testing.T) {
 }
 
 // The worker's per-step final validation costs survive the operations
-// snapshot of a conversion: the page and action_status both list them, in the
-// shape the coordinator mirrors them (TestWorkerValidationStepCostsAreMirrored),
-// with wall time, windows and CPU time.
+// snapshot of a conversion: the page and action_status both list them, nested
+// under the validation phase in the shape the coordinator mirrors them
+// (TestWorkerValidationStepCostsAreMirrored), with wall time, attempts, runs
+// and CPU time, and never as phases of their own.
 func TestValidationStepCostsReachTheOperationsPage(t *testing.T) {
 	s, h := testUI(t)
-	step := func(duration, attempts, cpu int) map[string]any {
-		return map[string]any{"duration_ms": duration, "attempts": attempts, "active_compute_ms": cpu, "nas_read_bytes": nil, "nas_written_bytes": nil, "cache_hits": nil, "cache_misses": nil, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+	cost := func(duration, attempts, runs, cpu int) map[string]any {
+		c := map[string]any{"duration_ms": duration, "attempts": attempts, "active_compute_ms": cpu, "nas_read_bytes": nil, "nas_written_bytes": nil, "cache_hits": nil, "cache_misses": nil, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+		if runs > 0 {
+			c["runs"] = runs
+		}
+		return c
 	}
-	costs := map[string]any{
-		"worker_validation":            step(240000, 1, 1900000),
-		"worker_validation_extract":    step(61000, 7, 300000),
-		"worker_validation_timestamps": step(900, 7, 700),
-		"worker_validation_alignment":  step(8000, 7, 30000),
-		"worker_validation_vmaf":       step(250000, 7, 900000),
-		"worker_validation_cambi":      step(260000, 7, 700000),
+	stepNames := []string{"extract", "timestamps", "alignment", "vmaf", "cambi", "ssim", "chroma"}
+	steps := map[string]any{}
+	for i, name := range stepNames {
+		steps[name] = cost(1000*(i+1), 1, 7, 2000*(i+1))
 	}
+	validation := cost(240000, 1, 0, 1900000)
+	validation["steps"] = steps
+	costs := map[string]any{"worker_encode": cost(900000, 1, 0, 7000000), "worker_validation": validation}
 	seedOperation(t, s.engine.Deps().Store, "validated", "transcode_media", "completed", map[string]any{"path": "/media/a.mkv"}, map[string]any{"phase_costs": costs}, map[string]any{"phase_costs": costs})
 	w := request(h, "GET", "/api/maintenance/operations?id=validated", "", true)
 	if w.Code != 200 {
@@ -119,10 +124,15 @@ func TestValidationStepCostsReachTheOperationsPage(t *testing.T) {
 		t.Fatalf("unexpected jobs: %+v", page)
 	}
 	shown, _ := page.Jobs[0]["phase_costs"].(map[string]any)
-	for _, name := range []string{"worker_validation_extract", "worker_validation_timestamps", "worker_validation_alignment", "worker_validation_vmaf", "worker_validation_cambi"} {
-		c, _ := shown[name].(map[string]any)
-		if c["attempts"] != float64(7) || c["active_compute_ms"] == nil || c["duration_ms"] == nil {
-			t.Fatalf("%s missing from the operations page: %v", name, shown)
+	if len(shown) != 2 {
+		t.Fatalf("steps listed as phases of their own: %v", shown)
+	}
+	shownValidation, _ := shown["worker_validation"].(map[string]any)
+	shownSteps, _ := shownValidation["steps"].(map[string]any)
+	for _, name := range stepNames {
+		c, _ := shownSteps[name].(map[string]any)
+		if c["attempts"] != float64(1) || c["runs"] != float64(7) || c["active_compute_ms"] == nil || c["duration_ms"] == nil {
+			t.Fatalf("%s missing from the operations page: %v", name, shownValidation)
 		}
 	}
 	response := request(h, "POST", "/api/maintenance/tool", `{"name":"action_status","arguments":{"id":"validated"}}`, true)

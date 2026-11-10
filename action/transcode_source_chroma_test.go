@@ -9,66 +9,108 @@ import (
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-// The coordinator applies the worker's pixel-format admission to the resolved
-// mode plan: a source beyond 4:2:0 needs a plan that pins a 4:2:0 output, and
-// a picture no class covers (RGB, 4:1:1, a format the probe could not name)
-// is never admitted. The refusal is the worker's, word for word.
+// The coordinator refuses a picture no measurement class covers (RGB, 4:1:1,
+// alpha, a format the probe could not name), with the worker's message word
+// for word, and leaves everything else to the worker: a 4:2:2 or 4:4:4 source
+// is the worker's to admit with whatever 4:2:0 output a later step pins, an
+// audio-only plan or a size budget that may still copy the picture is never
+// measured, and x265_preserve refuses an HEVC source as already_hevc first.
 func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 	pinned := &transcode.Plan{Mode: "size", PixelFormat: "yuv420p"}
 	pinned10 := &transcode.Plan{Mode: "quality", PixelFormat: "p010le"}
 	open := &transcode.Plan{Mode: "size"}
+	// A mode plan before its encode is planned carries no perceptual
+	// validation yet; the worker still checks its picture first.
+	unvalidated := &transcode.Plan{Mode: "quality", PixelFormat: "yuv420p"}
 	audioOnly := &transcode.Plan{Mode: "size", ModePolicyVersion: transcode.ModePolicyV7, VideoCodec: transcode.VideoCodecCopy}
+	preserve := &transcode.Plan{Mode: "x265_preserve", PixelFormat: "yuv420p"}
 	noMode := &transcode.Plan{}
+	sizeGoal := &ModePolicySnapshot{Mode: "size", Size: &ModeSizePolicy{AudioOnlyFallback: true}}
+	budget := &ModePolicySnapshot{Mode: "size", Size: &ModeSizePolicy{AudioOnlyFallback: true, SizeBudget: &SizeBudgetPolicy{}}}
+	budgetNoAudioOnly := &ModePolicySnapshot{Mode: "size", Size: &ModeSizePolicy{SizeBudget: &SizeBudgetPolicy{}}}
+	audioOnlyGoal := &ModePolicySnapshot{Mode: "size", Size: &ModeSizePolicy{AudioOnly: true}}
 	refusal := transcode.SourceClassUnsupportedError().Error()
 	for _, c := range []struct {
-		name   string
-		plan   *transcode.Plan
-		pixFmt string
-		depth  int
-		main10 bool
-		refuse bool
+		name     string
+		plan     *transcode.Plan
+		snapshot *ModePolicySnapshot
+		codec    string
+		pixFmt   string
+		depth    int
+		refuse   bool
 	}{
-		{"4:2:0 on an open plan", open, "yuv420p", 8, false, false},
-		{"full-range 4:2:0", open, "yuvj420p", 8, false, false},
-		{"10-bit 4:2:0", open, "yuv420p10le", 10, false, false},
-		{"4:4:4 on a pinned plan", pinned, "yuv444p", 8, false, false},
-		{"4:2:2 on a pinned plan", pinned, "yuv422p", 8, false, false},
-		{"10-bit 4:4:4 on a pinned plan", pinned10, "yuv444p10le", 10, false, false},
-		{"10-bit 4:2:2 on a pinned plan", pinned10, "yuv422p10le", 10, false, false},
-		{"4:4:4 on an open plan", open, "yuv444p", 8, false, true},
-		{"4:2:2 on an open plan", open, "yuv422p", 8, false, true},
-		{"10-bit 4:2:2 on an open plan", open, "yuv422p10le", 10, false, true},
-		{"4:2:2 an early Main10 switch would pin", open, "yuv422p", 8, true, false},
-		{"unknown pixel format", pinned, "", 8, false, true},
-		{"unknown pixel format an early Main10 switch cannot admit", open, "", 8, true, true},
-		{"RGB", pinned, "gbrp", 8, false, true},
-		{"4:1:1", pinned, "yuv411p", 8, false, true},
-		{"packed 4:2:2", pinned, "yuyv422", 8, false, true},
-		{"4:4:4 with alpha", pinned10, "yuva444p10le", 10, false, true},
-		{"audio-only copies the picture", audioOnly, "gbrp", 8, false, false},
-		{"not a mode plan", noMode, "gbrp", 8, false, false},
+		{"4:2:0 on an open plan", open, sizeGoal, "h264", "yuv420p", 8, false},
+		{"full-range 4:2:0", open, sizeGoal, "h264", "yuvj420p", 8, false},
+		{"10-bit 4:2:0", open, nil, "h264", "yuv420p10le", 10, false},
+		{"4:4:4 on a pinned plan", pinned, sizeGoal, "h264", "yuv444p", 8, false},
+		{"4:2:2 on a pinned plan", pinned, sizeGoal, "h264", "yuv422p", 8, false},
+		{"10-bit 4:4:4 on a pinned plan", pinned10, nil, "h264", "yuv444p10le", 10, false},
+		{"10-bit 4:2:2 on a pinned plan", pinned10, nil, "h264", "yuv422p10le", 10, false},
+		{"4:4:4 on an open plan", open, sizeGoal, "h264", "yuv444p", 8, false},
+		{"8-bit 4:2:2 on an open size plan", open, sizeGoal, "h264", "yuv422p", 8, false},
+		{"10-bit 4:2:2 on an open plan", open, nil, "h264", "yuv422p10le", 10, false},
+		{"4:2:2 on a plan without perceptual validation", unvalidated, nil, "h264", "yuv422p", 8, false},
+		{"unknown pixel format", pinned, sizeGoal, "h264", "", 8, true},
+		{"unknown pixel format on an open plan", open, sizeGoal, "h264", "", 8, true},
+		{"a format that does not match the depth", pinned, nil, "h264", "yuv420p10le", 8, true},
+		{"RGB", pinned, sizeGoal, "h264", "gbrp", 8, true},
+		{"RGB on a plan without perceptual validation", unvalidated, nil, "h264", "gbrp", 8, true},
+		{"4:1:1", pinned, sizeGoal, "h264", "yuv411p", 8, true},
+		{"packed 4:2:2", pinned, sizeGoal, "h264", "yuyv422", 8, true},
+		{"4:4:4 with alpha", pinned10, nil, "h264", "yuva444p10le", 10, true},
+		{"RGB under x265_preserve", preserve, nil, "h264", "gbrp", 8, true},
+		{"HEVC under x265_preserve is already_hevc first", preserve, nil, "hevc", "gbrp", 8, false},
+		{"audio-only copies the picture", audioOnly, sizeGoal, "h264", "gbrp", 8, false},
+		{"an audio-only goal", pinned, audioOnlyGoal, "h264", "gbrp", 8, false},
+		{"a size budget may still copy the picture", pinned, budget, "h264", "gbrp", 8, false},
+		{"a size budget without audio-only", pinned, budgetNoAudioOnly, "h264", "gbrp", 8, true},
+		{"not a mode plan", noMode, nil, "h264", "gbrp", 8, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			rep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: c.pixFmt, BitDepth: c.depth}}}
-			err := modeSourceChromaError(c.plan, rep, c.main10)
+			rep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: c.codec, PixelFormat: c.pixFmt, BitDepth: c.depth}}}
+			err := modeSourceChromaError(c.plan, c.snapshot, rep)
 			if c.refuse != (err != nil) {
 				t.Fatalf("refused=%v, want %v (%v)", err != nil, c.refuse, err)
 			}
 			if err != nil && err.Error() != refusal {
 				t.Fatalf("message %q, want the worker's %q", err, refusal)
 			}
-			// The worker's own rule, on the same plan, agrees.
-			if c.plan.Mode != "" && !transcode.IsSizeAudioOnlyPlan(c.plan) && !c.main10 && transcode.SourceChromaAdmitted(c.plan, c.pixFmt, c.depth) == c.refuse {
-				t.Fatal("coordinator and worker admission disagree")
-			}
 		})
+	}
+	if modeSourceChromaError(pinned, sizeGoal, nil) != nil {
+		t.Fatal("a missing report was refused")
+	}
+	if modeSourceChromaError(pinned, sizeGoal, &mediainspect.DetailedReport{}) != nil {
+		t.Fatal("a report without a main video stream was refused")
+	}
+}
+
+// Whatever output pixel format a later step pins (none, the size plans'
+// yuv420p, the Main10 switch's p010le, or anything else), a picture the
+// coordinator refuses is one the worker's own admission refuses too: the
+// coordinator never refuses what a worker would accept.
+func TestModeSourceChromaErrorNeverRefusesWhatTheWorkerAdmits(t *testing.T) {
+	formats := []string{"", "unknown", "yuv420p", "yuvj420p", "nv12", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv420p10le", "p010le", "yuv422p10le", "yuv444p10le", "yuv411p", "yuv410p", "gbrp", "gbrp10le", "rgb24", "yuva420p", "yuva444p10le", "gray", "gray10le", "yuyv422", "uyvy422", "yuv440p", "yuv420p12le", "nv16"}
+	for _, pixFmt := range formats {
+		for _, depth := range []int{8, 10} {
+			rep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: pixFmt, BitDepth: depth}}}
+			if modeSourceChromaError(&transcode.Plan{Mode: "size"}, nil, rep) == nil {
+				continue
+			}
+			for _, out := range append([]string{""}, formats...) {
+				if transcode.SourceChromaAdmitted(&transcode.Plan{Mode: "size", PixelFormat: out}, pixFmt, depth) {
+					t.Fatalf("%s %d-bit: refused, but the worker admits it on a plan pinned to %q", pixFmt, depth, out)
+				}
+			}
+		}
 	}
 }
 
 // Through the early check of a conversion waiting for a worker: a picture no
 // worker measures fails at once, with the worker's code and message, as a
 // permanent source rejection, and no work is sent. A 4:4:4 or 4:2:2 source
-// keeps waiting: every goal's plan pins a 4:2:0 output. The real preflight on
+// (8-bit included) is never refused here, early or in the real preflight: the
+// worker admits it with the 4:2:0 output its plan pins. The real preflight on
 // a worker refuses the same files the same way before submitting anything.
 func TestPreflightRefusesAPictureNoWorkerMeasures(t *testing.T) {
 	probe := func(pixFmt, depth string) string {
@@ -81,7 +123,7 @@ func TestPreflightRefusesAPictureNoWorkerMeasures(t *testing.T) {
 		refuse              bool
 	}{
 		{"4:4:4", "yuv444p", "8", false},
-		{"4:2:2", "yuv422p", "8", false},
+		{"8-bit 4:2:2", "yuv422p", "8", false},
 		{"10-bit 4:4:4", "yuv444p10le", "10", false},
 		{"10-bit 4:2:2", "yuv422p10le", "10", false},
 		{"unknown pixel format", "unknown", "8", true},

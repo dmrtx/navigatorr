@@ -82,11 +82,11 @@ func TestRealFinalValidationParallelMatchesSequential(t *testing.T) {
 			t.Fatalf("%s: final validation CPU not measured: %v", name, ms)
 		}
 		// And to their own step, summed over the four windows.
-		costs := steps.phaseCosts()
+		costs := steps.phaseSteps()
 		var stepCPU int64
 		for _, step := range []string{validationStepExtract, validationStepTimestamps, validationStepAlignment, validationStepVMAF, validationStepCAMBI} {
 			c, ok := costs[step]
-			if !ok || c.Attempts != 4 || c.ActiveComputeMs == nil {
+			if !ok || c.Attempts != 1 || c.Runs != 4 || c.ActiveComputeMs == nil {
 				t.Fatalf("%s: step %s cost %+v", name, step, c)
 			}
 			stepCPU += *c.ActiveComputeMs

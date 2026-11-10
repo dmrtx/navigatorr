@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -98,8 +100,9 @@ func TestWindowThreadsNeverExceedTheJobsThreads(t *testing.T) {
 }
 
 // Each step's children charge both the phase's meter and the step, and a step
-// reports its wall time summed over its runs, how many windows ran it, and CPU
-// time only where a child was measured.
+// reports its wall time summed over its runs, one attempt (this validation),
+// the windows that ran it as Runs, and CPU time only where a child was
+// measured.
 func TestValidationStepsChargeEachStep(t *testing.T) {
 	meter := &cpuMeter{}
 	steps := &validationSteps{}
@@ -114,12 +117,12 @@ func TestValidationStepsChargeEachStep(t *testing.T) {
 	_, end := beginValidationStep(ctx, validationStepAlignment)
 	time.Sleep(5 * time.Millisecond)
 	end()
-	costs := steps.phaseCosts()
+	costs := steps.phaseSteps()
 	vmaf, align := costs[validationStepVMAF], costs[validationStepAlignment]
-	if vmaf.Attempts != 2 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs < 0 {
+	if vmaf.Attempts != 1 || vmaf.Runs != 2 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs < 0 {
 		t.Fatalf("vmaf step %+v", vmaf)
 	}
-	if align.Attempts != 1 || align.DurationMs < 5 || align.ActiveComputeMs != nil {
+	if align.Attempts != 1 || align.Runs != 1 || align.DurationMs < 5 || align.ActiveComputeMs != nil {
 		t.Fatalf("a step that ran no child must report unknown CPU: %+v", align)
 	}
 	if meter.activeComputeMs() == nil || *meter.activeComputeMs() < *vmaf.ActiveComputeMs {
@@ -134,37 +137,154 @@ func TestValidationStepsChargeEachStep(t *testing.T) {
 	if plain != context.Background() {
 		t.Fatal("a step began without validation steps")
 	}
+	if (&validationSteps{}).phaseSteps() != nil {
+		t.Fatal("a validation that ran no step reported steps")
+	}
 }
 
-// Step costs are stored on the job in one write, keep their own durations and
-// window counts, and add up over a second validation (a resumed job).
-func TestAddPhaseCostsAccumulatesStepCosts(t *testing.T) {
+// Child CPU time is summed at full resolution and rounded to milliseconds
+// once: many sub-millisecond children add up instead of each rounding to 0.
+func TestCPUTimeIsRoundedOnceNotPerChild(t *testing.T) {
+	meter := &cpuMeter{}
+	steps := &validationSteps{}
+	ctx := withValidationSteps(withCPUMeter(context.Background(), meter), steps)
+	stepCtx, end := beginValidationStep(ctx, validationStepTimestamps)
+	var total time.Duration
+	var perChildMs int64
+	for range 40 {
+		cmd := exec.Command("/usr/bin/true")
+		if err := runCharged(stepCtx, cmd); err != nil {
+			t.Fatal(err)
+		}
+		d := cmd.ProcessState.UserTime() + cmd.ProcessState.SystemTime()
+		total += d
+		perChildMs += d.Milliseconds()
+	}
+	end()
+	if got := *meter.activeComputeMs(); got != total.Milliseconds() {
+		t.Fatalf("phase CPU %d ms, children summed %v", got, total)
+	}
+	if got := *steps.phaseSteps()[validationStepTimestamps].ActiveComputeMs; got != total.Milliseconds() {
+		t.Fatalf("step CPU %d ms, children summed %v", got, total)
+	}
+	if total.Milliseconds() < perChildMs {
+		t.Fatal("rounding once lost time")
+	}
+}
+
+// A new execution of a phase adds to the earlier ones. A counter only one
+// side measured stays known (nil+x = x, x+nil = x); it is unknown only when
+// neither measured it. Steps accumulate by name, Runs add up, and Attempts
+// count executions.
+func TestAccumulatePhaseCostKeepsTheKnownSide(t *testing.T) {
+	n := func(v int64) *int64 { return &v }
+	value := func(p *int64) string {
+		if p == nil {
+			return "nil"
+		}
+		return strconv.FormatInt(*p, 10)
+	}
+	for _, c := range []struct {
+		name           string
+		previous, next *int64
+		want           string
+	}{
+		{"both unknown", nil, nil, "nil"},
+		{"only the retry measured", nil, n(300), "300"},
+		{"only the first attempt measured", n(200), nil, "200"},
+		{"both measured", n(200), n(300), "500"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := accumulatePhaseCost(
+				transcode.PhaseCost{DurationMs: 10, Attempts: 1, ActiveComputeMs: c.previous, NASReadBytes: c.previous},
+				transcode.PhaseCost{DurationMs: 5, Attempts: 1, ActiveComputeMs: c.next, NASReadBytes: c.next},
+			)
+			if value(got.ActiveComputeMs) != c.want || value(got.NASReadBytes) != c.want || got.DurationMs != 15 || got.Attempts != 2 {
+				t.Fatalf("got cpu=%s nas=%s %+v, want %s", value(got.ActiveComputeMs), value(got.NASReadBytes), got, c.want)
+			}
+		})
+	}
+	first := transcode.PhaseCost{DurationMs: 100, Attempts: 1, Steps: map[string]transcode.PhaseCost{
+		validationStepVMAF:    {DurationMs: 60, Attempts: 1, Runs: 7, ActiveComputeMs: n(500)},
+		validationStepExtract: {DurationMs: 30, Attempts: 1, Runs: 7},
+	}}
+	retry := transcode.PhaseCost{DurationMs: 80, Attempts: 1, Steps: map[string]transcode.PhaseCost{
+		validationStepVMAF:  {DurationMs: 50, Attempts: 1, Runs: 6, ActiveComputeMs: n(400)},
+		validationStepCAMBI: {DurationMs: 40, Attempts: 1, Runs: 6, ActiveComputeMs: n(300)},
+	}}
+	got := accumulatePhaseCost(first, retry)
+	vmaf, extract, cambi := got.Steps[validationStepVMAF], got.Steps[validationStepExtract], got.Steps[validationStepCAMBI]
+	if got.Attempts != 2 || vmaf.Attempts != 2 || vmaf.Runs != 13 || vmaf.DurationMs != 110 || *vmaf.ActiveComputeMs != 900 {
+		t.Fatalf("vmaf %+v in %+v", vmaf, got)
+	}
+	if extract.Runs != 7 || extract.ActiveComputeMs != nil || cambi.Runs != 6 || *cambi.ActiveComputeMs != 300 {
+		t.Fatalf("steps %+v", got.Steps)
+	}
+	if first.Steps[validationStepVMAF].Runs != 7 {
+		t.Fatal("accumulating changed the earlier cost")
+	}
+}
+
+// Steps live inside the validation phase's cost, so the job's phases are the
+// same with or without them and a sum over the phases counts final validation
+// once. They survive a second validation (a resumed job) and the telemetry
+// the coordinator reads, whose validation duration comes from timestamps.
+func TestValidationStepsDoNotChangeTheJobsPhaseTotals(t *testing.T) {
 	jobDir := t.TempDir()
 	jobFile := filepath.Join(jobDir, "job.json")
-	job := &JobRecord{ID: "steps", Status: "running"}
+	start := time.Now().Add(-time.Minute).UTC()
+	job := &JobRecord{ID: "steps", Status: "running", CreatedAt: start, StartedAt: start}
+	job.ValidationStartedAt = start
+	job.ValidationFinishedAt = start.Add(30 * time.Second)
 	if err := SaveJobAtomic(jobFile, job); err != nil {
 		t.Fatal(err)
 	}
 	w := &Worker{cfg: &WorkerConfig{}}
-	cpu := func(n int64) *int64 { return &n }
+	n := func(v int64) *int64 { return &v }
 	for range 2 {
-		w.addPhaseCosts(jobDir, jobFile, job, map[string]transcode.PhaseCost{
-			validationStepVMAF:      {DurationMs: 1000, Attempts: 7, ActiveComputeMs: cpu(5000)},
-			validationStepAlignment: {DurationMs: 30, Attempts: 7},
-		})
+		w.persistPhaseCost(jobDir, jobFile, job, "validation", time.Now(), transcode.PhaseCost{ActiveComputeMs: n(5000), Steps: map[string]transcode.PhaseCost{
+			validationStepVMAF:      {DurationMs: 1000, Attempts: 1, Runs: 7, ActiveComputeMs: n(3000)},
+			validationStepAlignment: {DurationMs: 30, Attempts: 1, Runs: 7},
+		}})
 	}
+	w.persistPhaseCost(jobDir, jobFile, job, "encode", time.Now(), transcode.PhaseCost{ActiveComputeMs: n(9000)})
 	stored, err := LoadJob(jobFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vmaf, align := stored.PhaseCosts[validationStepVMAF], stored.PhaseCosts[validationStepAlignment]
-	if vmaf.DurationMs != 2000 || vmaf.Attempts != 14 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs != 10000 {
-		t.Fatalf("vmaf step %+v", vmaf)
+	for name, costs := range map[string]map[string]transcode.PhaseCost{"stored": stored.PhaseCosts, "telemetry": telemetryFor(stored, time.Now()).PhaseCosts} {
+		var cpu int64
+		phases := []string{}
+		for phase, cost := range costs {
+			phases = append(phases, phase)
+			if cost.ActiveComputeMs != nil {
+				cpu += *cost.ActiveComputeMs
+			}
+		}
+		if cpu != 19000 {
+			t.Fatalf("%s: phases %v sum to %d ms of CPU, want the phases' own 19000", name, phases, cpu)
+		}
+		validation := costs["validation"]
+		if validation.Attempts < 1 || len(validation.Steps) != 2 {
+			t.Fatalf("%s: validation %+v", name, validation)
+		}
+		vmaf, align := validation.Steps[validationStepVMAF], validation.Steps[validationStepAlignment]
+		if vmaf.DurationMs != 2000 || vmaf.Attempts != 2 || vmaf.Runs != 14 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs != 6000 {
+			t.Fatalf("%s: vmaf step %+v", name, vmaf)
+		}
+		if align.DurationMs != 60 || align.Runs != 14 || align.ActiveComputeMs != nil {
+			t.Fatalf("%s: alignment step %+v", name, align)
+		}
+		for phase := range costs {
+			if strings.HasPrefix(phase, "validation_") {
+				t.Fatalf("%s: a step is a phase of its own: %v", name, phases)
+			}
+		}
 	}
-	if align.DurationMs != 60 || align.Attempts != 14 || align.ActiveComputeMs != nil {
-		t.Fatalf("alignment step %+v", align)
+	if telemetryFor(stored, time.Now()).PhaseCosts["validation"].DurationMs != 30000 {
+		t.Fatal("validation's duration no longer comes from its timestamps")
 	}
-	if job.PhaseCosts[validationStepVMAF].Attempts != 14 {
+	if job.PhaseCosts["validation"].Steps[validationStepVMAF].Runs != 14 {
 		t.Fatal("the in-memory job missed the stored costs")
 	}
 }

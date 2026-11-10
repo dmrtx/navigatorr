@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -200,31 +201,74 @@ func TestCoordinatorMeasurementPreservesPolicySkipOutputs(t *testing.T) {
 	}
 }
 
-// The worker's per-step final validation costs (validation_extract,
-// validation_vmaf, validation_cambi, …) reach the action's phase costs beside
-// the validation phase, with their wall time, the windows that ran them and
-// their CPU time.
+// The worker's per-step final validation costs (extract, timestamps,
+// alignment, VMAF, CAMBI, SSIM, chroma) reach the action nested under its
+// validation phase, with their wall time, attempts (validations), runs
+// (windows) and CPU time. The phases beside each other are the same, and add
+// up to the same CPU time, with or without the steps.
 func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
 	cpu := func(n int64) *int64 { return &n }
-	ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
-	e := NewEngine(EngineDeps{Config: &config.Config{}})
-	e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{PhaseCosts: map[string]transcode.PhaseCost{
-		"validation":            {DurationMs: 240000, Attempts: 1, ActiveComputeMs: cpu(1900000)},
-		"validation_extract":    {DurationMs: 61000, Attempts: 7, ActiveComputeMs: cpu(300000)},
-		"validation_timestamps": {DurationMs: 900, Attempts: 7, ActiveComputeMs: cpu(700)},
-		"validation_alignment":  {DurationMs: 8000, Attempts: 7, ActiveComputeMs: cpu(30000)},
-		"validation_vmaf":       {DurationMs: 250000, Attempts: 7, ActiveComputeMs: cpu(900000)},
-		"validation_cambi":      {DurationMs: 260000, Attempts: 7, ActiveComputeMs: cpu(700000)},
-	}}})
-	raw, _ := json.Marshal(ec.State["phase_costs"])
-	var costs map[string]map[string]any
-	if err := json.Unmarshal(raw, &costs); err != nil {
-		t.Fatal(err)
+	steps := map[string]transcode.PhaseCost{
+		"extract":    {DurationMs: 61000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(300000)},
+		"timestamps": {DurationMs: 900, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(700)},
+		"alignment":  {DurationMs: 8000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(30000)},
+		"vmaf":       {DurationMs: 250000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(500000)},
+		"cambi":      {DurationMs: 260000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(700000)},
+		"ssim":       {DurationMs: 40000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(90000)},
+		"chroma":     {DurationMs: 30000, Attempts: 1, Runs: 2, ActiveComputeMs: cpu(60000)},
 	}
-	for step, want := range map[string]float64{"worker_validation_extract": 300000, "worker_validation_timestamps": 700, "worker_validation_alignment": 30000, "worker_validation_vmaf": 900000, "worker_validation_cambi": 700000} {
-		c := costs[step]
-		if c["active_compute_ms"] != want || c["attempts"] != float64(7) || c["provenance"] != "worker_measured" {
-			t.Fatalf("%s: %v", step, c)
+	mirror := func(withSteps bool) map[string]map[string]any {
+		validation := transcode.PhaseCost{DurationMs: 240000, Attempts: 1, ActiveComputeMs: cpu(1900000)}
+		if withSteps {
+			validation.Steps = steps
 		}
+		ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
+		e := NewEngine(EngineDeps{Config: &config.Config{}})
+		e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{PhaseCosts: map[string]transcode.PhaseCost{
+			"encode":     {DurationMs: 900000, Attempts: 1, ActiveComputeMs: cpu(7000000)},
+			"validation": validation,
+		}}})
+		raw, _ := json.Marshal(ec.State["phase_costs"])
+		var costs map[string]map[string]any
+		if err := json.Unmarshal(raw, &costs); err != nil {
+			t.Fatal(err)
+		}
+		return costs
+	}
+	total := func(costs map[string]map[string]any) (sum float64, phases []string) {
+		for phase, c := range costs {
+			phases = append(phases, phase)
+			if v, ok := c["active_compute_ms"].(float64); ok {
+				sum += v
+			}
+		}
+		slices.Sort(phases)
+		return sum, phases
+	}
+	with, without := mirror(true), mirror(false)
+	withCPU, withPhases := total(with)
+	withoutCPU, withoutPhases := total(without)
+	if withCPU != withoutCPU || withCPU != 8900000 || !slices.Equal(withPhases, withoutPhases) {
+		t.Fatalf("steps changed the phases: %v %v vs %v %v", withPhases, withCPU, withoutPhases, withoutCPU)
+	}
+	validation := with["worker_validation"]
+	if validation["attempts"] != float64(1) || validation["active_compute_ms"] != float64(1900000) {
+		t.Fatalf("validation %v", validation)
+	}
+	mirrored, _ := validation["steps"].(map[string]any)
+	if len(mirrored) != len(steps) {
+		t.Fatalf("steps %v", mirrored)
+	}
+	for name, want := range steps {
+		c, _ := mirrored[name].(map[string]any)
+		if c["active_compute_ms"] != float64(*want.ActiveComputeMs) || c["attempts"] != float64(1) || c["runs"] != float64(want.Runs) || c["duration_ms"] != float64(want.DurationMs) || c["provenance"] != "worker_measured" {
+			t.Fatalf("%s: %v", name, c)
+		}
+	}
+	if _, ok := without["worker_validation"]["steps"]; ok {
+		t.Fatal("a validation without steps mirrored some")
+	}
+	if _, ok := with["worker_encode"]["runs"]; ok {
+		t.Fatal("a phase without runs mirrored them")
 	}
 }

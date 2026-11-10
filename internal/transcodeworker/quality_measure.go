@@ -89,8 +89,9 @@ func sampleFrameBounds(startSec, durationSec, fps float64) (from, to float64) {
 
 // isSupportedSourceChroma, isMeasurableSourceChroma and sourceChromaAdmitted
 // are the shared admission rules (transcode.SupportedSourceChroma and its
-// siblings), which the coordinator's preflight applies to the library file
-// before any worker stages it.
+// siblings). The coordinator's preflight refuses, before any worker stages
+// it, a library file whose picture no output could make admissible
+// (transcode.MeasurableSourceChroma); the rest stays this check's.
 func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
 	return transcode.SupportedSourceChroma(pixFmt, bitDepth)
 }

@@ -429,10 +429,9 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 		// The worker refuses a picture no measurement class covers only after
-		// staging and scanning the whole file; the plan that decides it is
-		// already resolved here.
-		mayPinMain10 := early && modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10
-		if err := modeSourceChromaError(plan, &rep, mayPinMain10); err != nil {
+		// staging and scanning the whole file; whatever output a later step
+		// pins, it cannot admit one.
+		if err := modeSourceChromaError(plan, modeSnapshot, &rep); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
 	}

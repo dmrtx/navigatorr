@@ -871,17 +871,34 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 	return ""
 }
 
-// modeSourceChromaError is the worker's pixel-format admission
-// (transcode.SourceChromaAdmitted) on a resolved mode plan, so a source the
-// worker would refuse as quality_source_class_unsupported fails here, with the
-// same message, before a worker stages it. modeSourceReason has already
-// skipped the other classes that check covers (depth, HDR, frame rate). An
-// audio-only plan copies the picture and is not measured, as on the worker.
-// mayPinMain10 is an early check, which skips the Size Main10 switch because
-// it needs the worker's capabilities; that switch pins p010le, so such a
-// source is refused only when no plan could admit it.
-func modeSourceChromaError(plan *transcode.Plan, rep *mediainspect.DetailedReport, mayPinMain10 bool) error {
-	if plan == nil || plan.Mode == "" || transcode.IsSizeAudioOnlyPlan(plan) {
+// modeSourceChromaError refuses, before a worker stages it, a source whose
+// picture the worker's mode preflight (validateModeSourceQuality) refuses as
+// quality_source_class_unsupported whatever the plan's output: a pixel format
+// no measurement class covers (RGB, 4:1:1, alpha, grey, packed, a format the
+// probe could not name, a format that does not match the bit depth). The
+// message is the worker's, word for word.
+//
+// It never refuses what the worker accepts. A refused source fails
+// transcode.MeasurableSourceChroma, and the worker admits nothing beyond it
+// (SourceChromaAdmitted), whichever output a later step pins: the Size Main10
+// switch (p010le, needs the worker's capabilities and is skipped by the early
+// check) or a size budget encoder. A 4:2:2 or 4:4:4 source that only a pinned
+// 4:2:0 output admits is left to the worker.
+//
+// The worker checks the picture of every mode plan it is sent except an
+// audio-only one, before anything else about the plan (its VMAF policy is
+// attached only when the encode is planned, after this preflight, and is
+// checked after the picture). So the rule is skipped only where the worker
+// would not reach that check: no mode, an audio-only plan (the copy is not
+// measured), a size budget goal that may still plan audio-only before any
+// video encode (startSizeBudgetLadder), and x265_preserve on an HEVC source
+// (refused first as already_hevc). The other classes that check covers
+// (depth, HDR, frame rate) are modeSourceReason's.
+func modeSourceChromaError(plan *transcode.Plan, snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport) error {
+	if plan == nil || plan.Mode == "" || rep == nil || transcode.IsSizeAudioOnlyPlan(plan) {
+		return nil
+	}
+	if snapshot != nil && snapshot.Size != nil && (snapshot.Size.AudioOnly || snapshot.Size.SizeBudget != nil && snapshot.Size.AudioOnlyFallback) {
 		return nil
 	}
 	video := rep.MainVideo()
@@ -889,7 +906,10 @@ func modeSourceChromaError(plan *transcode.Plan, rep *mediainspect.DetailedRepor
 		return nil
 	}
 	v := video[0]
-	if transcode.SourceChromaAdmitted(plan, v.PixelFormat, v.BitDepth) || mayPinMain10 && transcode.MeasurableSourceChroma(v.PixelFormat, v.BitDepth) {
+	if codec := strings.ToLower(strings.TrimSpace(v.Codec)); plan.Mode == "x265_preserve" && (codec == "hevc" || codec == "h265") {
+		return nil
+	}
+	if transcode.MeasurableSourceChroma(v.PixelFormat, v.BitDepth) {
 		return nil
 	}
 	return transcode.SourceClassUnsupportedError()

@@ -165,11 +165,11 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	}
 	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
 		if duration != nil {
-			// Timestamps own the duration; byte counters and CPU time a phase
-			// recorded (for example an encode reading an unstaged NAS source)
-			// survive.
+			// Timestamps own the duration; byte counters, CPU time and steps a
+			// phase recorded (for example an encode reading an unstaged NAS
+			// source, or final validation's steps) survive.
 			cost := t.PhaseCosts[name]
-			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs}
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs, Steps: cost.Steps}
 		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
@@ -270,40 +270,58 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 	if cost.Attempts <= 0 {
 		cost.Attempts = 1 // one phase run; a transfer that reconnected reports more
 	}
-	w.addPhaseCosts(jobDir, jobFile, job, map[string]transcode.PhaseCost{phase: cost})
-}
-
-// addPhaseCosts adds measured costs to the job's phase costs in one write: a
-// phase that already has a cost (an earlier attempt) accumulates. Each cost
-// carries its own duration and attempts.
-func (w *Worker) addPhaseCosts(jobDir, jobFile string, job *JobRecord, costs map[string]transcode.PhaseCost) {
-	if len(costs) == 0 {
-		return
-	}
 	shadow := *job
 	_, _ = w.persistOperationalProgress(jobDir, jobFile, &shadow, func(latest *JobRecord) {
 		if latest.PhaseCosts == nil {
 			latest.PhaseCosts = map[string]transcode.PhaseCost{}
 		}
-		for phase, cost := range costs {
-			previous := latest.PhaseCosts[phase]
-			cost.DurationMs += previous.DurationMs
-			cost.Attempts += previous.Attempts
-			add := func(a, b *int64) *int64 {
-				if a == nil || b == nil {
-					return nil
-				}
-				return knownCount(*a + *b)
-			}
-			if previous.Attempts > 0 {
-				cost.NASReadBytes = add(previous.NASReadBytes, cost.NASReadBytes)
-				cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
-				cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
-				cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
-				cost.ActiveComputeMs = add(previous.ActiveComputeMs, cost.ActiveComputeMs)
-			}
-			latest.PhaseCosts[phase] = cost
+		if previous, ok := latest.PhaseCosts[phase]; ok {
+			cost = accumulatePhaseCost(previous, cost)
 		}
+		latest.PhaseCosts[phase] = cost
 	})
 	job.PhaseCosts = shadow.PhaseCosts
+}
+
+// accumulatePhaseCost adds a new execution of a phase (a retry, a resumed job)
+// to what earlier executions recorded. A counter one execution measured and
+// another did not stays known: the measured part is a floor, and it is unknown
+// only when no execution measured it. Steps accumulate the same way, by name.
+func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost {
+	cost.DurationMs += previous.DurationMs
+	cost.Attempts += previous.Attempts
+	cost.Runs += previous.Runs
+	cost.NASReadBytes = addKnown(previous.NASReadBytes, cost.NASReadBytes)
+	cost.NASWrittenBytes = addKnown(previous.NASWrittenBytes, cost.NASWrittenBytes)
+	cost.CacheHits = addKnown(previous.CacheHits, cost.CacheHits)
+	cost.CacheMisses = addKnown(previous.CacheMisses, cost.CacheMisses)
+	cost.ActiveComputeMs = addKnown(previous.ActiveComputeMs, cost.ActiveComputeMs)
+	if len(previous.Steps) > 0 {
+		steps := make(map[string]transcode.PhaseCost, len(previous.Steps)+len(cost.Steps))
+		for name, step := range previous.Steps {
+			steps[name] = step
+		}
+		for name, step := range cost.Steps {
+			if earlier, ok := steps[name]; ok {
+				step = accumulatePhaseCost(earlier, step)
+			}
+			steps[name] = step
+		}
+		cost.Steps = steps
+	}
+	return cost
+}
+
+// addKnown sums two counters, keeping whichever side is known: nil+x = x,
+// x+nil = x, nil+nil = nil.
+func addKnown(a, b *int64) *int64 {
+	switch {
+	case a == nil && b == nil:
+		return nil
+	case a == nil:
+		return knownCount(*b)
+	case b == nil:
+		return knownCount(*a)
+	}
+	return knownCount(*a + *b)
 }

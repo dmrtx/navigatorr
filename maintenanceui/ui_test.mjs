@@ -5228,6 +5228,16 @@ test("phase cost detail shows measured worker CPU time and keeps an older worker
   assert.match(rendered, /Unknown/);
 });
 
+test("phase cost detail lists final validation's steps under their phase", () => {
+  const h = harness();
+  h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{worker_validation:{duration_ms:240000,attempts:1,active_compute_ms:1900000,steps:{vmaf:{duration_ms:250000,attempts:1,runs:7,active_compute_ms:900000},cambi:{duration_ms:260000,attempts:1,runs:7,active_compute_ms:700000}}}}});');
+  const rendered = JSON.stringify(h.elements.get("detail-summary").children);
+  assert.match(rendered, /Worker · validation · vmaf/);
+  assert.match(rendered, /Worker · validation · cambi/);
+  assert.match(rendered, /900000 ms/);
+  assert.match(rendered, /"7"/);
+});
+
 test("an old worker-busy failure reads plainly and hides the worker URL", () => {
   const h = harness();
   for (const error of [

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // cpuMeter sums the CPU time (user + system) of the ffmpeg/ffprobe children
@@ -15,8 +16,10 @@ import (
 // thread but not grandchildren; ffmpeg and ffprobe do not fork. A phase that
 // ran no measured child reports nil (unknown), never 0.
 type cpuMeter struct {
-	mu       sync.Mutex
-	ms       int64
+	mu sync.Mutex
+	// cpu is summed at full resolution and rounded to milliseconds once, so
+	// many short children (a probe per window) lose nothing each.
+	cpu      time.Duration
 	measured bool
 }
 
@@ -56,7 +59,7 @@ func (m *cpuMeter) add(ps *os.ProcessState) {
 	}
 	d := ps.UserTime() + ps.SystemTime()
 	m.mu.Lock()
-	m.ms += d.Milliseconds()
+	m.cpu += d
 	m.measured = true
 	m.mu.Unlock()
 }
@@ -72,5 +75,5 @@ func (m *cpuMeter) activeComputeMs() *int64 {
 	if !m.measured {
 		return nil
 	}
-	return knownCount(m.ms)
+	return knownCount(m.cpu.Milliseconds())
 }
