@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,5 +136,68 @@ func TestRealTransportStreamFinalGate(t *testing.T) {
 				t.Fatalf("without keyframe times the seek at the window's start measured aligned windows: %+v %v", e, err)
 			}
 		})
+	}
+}
+
+// An MPEG program stream joined from two recordings whose clock restarts 40
+// seconds lower than it began (100 s, then 60 s): the scan reads a restarted
+// clock and keeps no keyframe times, so a window 5 s into the video would
+// seek 20 s before it, to 85 s. No packet before the window has that time,
+// and the demuxer's seek finds the restarted part, whose decode never
+// reaches the window: an empty extract. A seek before the first packet's
+// time is not made; the extract decodes from the file's start and holds the
+// window's pictures.
+func TestRealWindowSeekClockRestartedLower(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	var joined []byte
+	for _, part := range []struct{ name, src, offset string }{{"a.mpg", "testsrc", "100"}, {"b.mpg", "testsrc2", "60"}} {
+		path := filepath.Join(dir, part.name)
+		if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", part.src+"=d=30:s=320x240:r=25",
+			"-c:v", "mpeg2video", "-g", "12", "-bf", "2", "-output_ts_offset", part.offset, "-f", "vob", path).CombinedOutput(); err != nil {
+			t.Fatalf("fixture: %v %s", err, out)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined = append(joined, data...)
+	}
+	source := filepath.Join(dir, "joined.mpg")
+	if err := os.WriteFile(source, joined, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packets, err := scanFilePackets(ctx, ffprobe, source, packetScanRequest{video: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := &packets.video
+	// The video's first picture is the first packet's, at 100 s; the
+	// restarted part holds the earliest times.
+	first := scan.firstTime
+	if !scan.Discontinuous || scan.earliest > first-20.5 {
+		t.Fatalf("fixture: restarted %v, earliest %.3f, first packet %.3f", scan.Discontinuous, scan.earliest, first)
+	}
+	from, to := 5.0, 6.0
+	seek, keyed := scan.windowSeek(first + from)
+	if !math.IsInf(seek, -1) || !keyed {
+		t.Fatalf("seek %.3f keyed %v, want the file's start", seek, keyed)
+	}
+	out := filepath.Join(dir, "reference.mkv")
+	if b, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin", "-v", "error"}, buildExtractionArgs(source, out, 0, first, from, to, seek)...)...).CombinedOutput(); err != nil {
+		t.Fatalf("extract: %v %s", err, b)
+	}
+	pts, err := probeSamplePTS(ctx, ffprobe, out)
+	if err != nil || len(pts) != 25 {
+		t.Fatalf("extract holds %d pictures (%v), want the window's 25", len(pts), err)
 	}
 }

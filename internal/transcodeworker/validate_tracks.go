@@ -74,8 +74,11 @@ func videoCompleteness(src, cand sourceVideoScan, codec string, fps float64) err
 
 // validateVideoCompleteness holds the candidate's programme video, as scanned
 // with its other tracks, to the source's scan taken before the encode. The
-// source is never read again after the encode.
-func validateVideoCompleteness(srcProbe SourceProbe, cand sourceVideoScan) error {
+// source is never read again after the encode. A plan that copies the video
+// (the audio-only shape) keeps every packet, shown or not (-copyinkf): its
+// candidate has the source's packets, not the pictures a decoder shows, and
+// is held to them one for one (validateVideoCopy then compares each).
+func validateVideoCompleteness(plan *transcode.Plan, srcProbe SourceProbe, cand sourceVideoScan) error {
 	if srcProbe.videoScan == nil {
 		return candidateInvalid(fmt.Errorf("%w: the source's video was not measured before the encode (fail closed, never publish)", ErrContentNotPreserved))
 	}
@@ -83,7 +86,25 @@ func validateVideoCompleteness(srcProbe SourceProbe, cand sourceVideoScan) error
 	if v == nil {
 		return candidateInvalid(fmt.Errorf("%w: the source has no programme video to hold the converted one to (fail closed, never publish)", ErrContentNotPreserved))
 	}
+	if plan != nil && norm(plan.VideoCodec) == transcode.VideoCodecCopy {
+		return copiedVideoCompleteness(*srcProbe.videoScan, cand)
+	}
 	return videoCompleteness(*srcProbe.videoScan, cand, v.Codec, v.FPS)
+}
+
+// copiedVideoCompleteness holds a copied video to the source's packets: the
+// same number, none damaged.
+func copiedVideoCompleteness(src, cand sourceVideoScan) error {
+	if src.Packets == 0 {
+		return candidateInvalid(fmt.Errorf("%w: the source's video was measured with no packets; nothing says what the copied video must hold (fail closed, never publish)", ErrContentNotPreserved))
+	}
+	if cand.DemuxErrors > 0 {
+		return candidateInvalid(fmt.Errorf("%w: the copied video is damaged: reading it reported %d error(s) (%s) (fail closed, never publish)", ErrContentNotPreserved, cand.DemuxErrors, truncateForLog(cand.FirstError, 200)))
+	}
+	if cand.Packets != src.Packets {
+		return candidateInvalid(fmt.Errorf("%w: the copied video has %d packets, the source %d; packets were lost or added in the copy (fail closed, never publish)", ErrContentNotPreserved, cand.Packets, src.Packets))
+	}
+	return nil
 }
 
 // pictureCount is how many pictures a decoder shows from the source's video.
@@ -187,6 +208,11 @@ func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount
 		if !src.sawKey {
 			out.lateStart = float64(notShown) * out.frame
 		}
+	}
+	if src.headDecoded && src.headShownTimed && src.sawKey && src.headFirstShown > src.First {
+		// The decoder started after the first keyframe (headStats): the
+		// encode's first picture is the first it showed.
+		out.lateStart = max(out.lateStart, src.headFirstShown-src.First)
 	}
 	return out
 }

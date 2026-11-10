@@ -195,7 +195,7 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		// The container's duration is its longest stream's: only the
 		// video's own frames show a video that stops early.
 		if req.video >= 0 {
-			if err := validateVideoCompleteness(srcProbe, candScan.video); err != nil {
+			if err := validateVideoCompleteness(execPlan.Plan, srcProbe, candScan.video); err != nil {
 				return attest, failedCheck("video completeness", err)
 			}
 		}

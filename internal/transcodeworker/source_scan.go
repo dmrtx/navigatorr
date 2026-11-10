@@ -62,6 +62,12 @@ type sourceVideoScan struct {
 	headPackets int
 	headFrames  int
 	headDecoded bool
+	// headFirstShown is the time of the first picture the head decode
+	// showed (headShownTimed): a decoder that starts at a recovery point
+	// (H.264 intra refresh, cut) shows nothing until the picture is
+	// whole again, later than the keyframe.
+	headFirstShown float64
+	headShownTimed bool
 	// durations counts the packets by duration, in microseconds (0 when the
 	// container states none).
 	durations map[int64]int
@@ -72,10 +78,11 @@ type sourceVideoScan struct {
 	times         []videoTime
 	timesBase     float64
 	timesOverflow bool
-	// earliest is the earliest time of any timed packet (sawTime), kept
-	// whether or not times overflowed.
-	earliest float64
-	sawTime  bool
+	// earliest is the earliest time of any timed packet and firstTime the
+	// first timed packet's (sawTime), kept whether or not times overflowed.
+	// They differ when the clock restarted lower than it began.
+	earliest, firstTime float64
+	sawTime             bool
 	// fieldSample is what decoding a sample of the packets that lie close
 	// together found (sampleFieldPictures): whether two of them make one
 	// picture (fields) or each its own (a higher frame rate).
@@ -470,6 +477,9 @@ const maxTimedPackets = 1 << 21
 
 // addTime keeps a timed packet's time (sourceVideoScan.times).
 func (s *sourceVideoScan) addTime(pts, dur float64, key, discard bool) {
+	if !s.sawTime {
+		s.firstTime = pts
+	}
 	if !s.sawTime || pts < s.earliest {
 		s.earliest, s.sawTime = pts, true
 	}
@@ -571,17 +581,29 @@ func (s sourceVideoScan) headLength() (n int, complete bool) {
 }
 
 // headStats counts, over the first n packets, those before the first
-// keyframe, the keyframe's leading pictures and the discarded ones.
+// keyframe, the keyframe's leading pictures and the discarded ones. The
+// pictures from the keyframe on that the head decode showed none of, being
+// timed before its first picture (headFirstShown), count as leading too:
+// the decoder started there and the encode has none of them (a recovery
+// point it shows only once the picture is whole again).
 func (s sourceVideoScan) headStats(n int) (nonKey, leading, discarded int) {
 	seenKey := false
 	keyPTS := 0.0
+	late := func(p headPacket) bool {
+		return s.headDecoded && s.headShownTimed && !p.discard && p.timed && p.pts >= keyPTS && p.pts < s.headFirstShown-0.0005
+	}
 	for _, p := range s.head[:min(n, len(s.head))] {
 		switch {
 		case !seenKey && p.key:
 			seenKey, keyPTS = true, p.pts
+			if late(p) {
+				leading++
+			}
 		case !seenKey:
 			nonKey++
 		case !p.key && p.timed && p.pts < keyPTS:
+			leading++
+		case late(p):
 			leading++
 		}
 		if p.discard {
@@ -599,7 +621,10 @@ func (s sourceVideoScan) headStats(n int) (nonKey, leading, discarded int) {
 // the decoder drops them, and the encode has none of them. The packets alone
 // cannot tell them from leading pictures that do decode (RADL), nor a
 // field-coded picture (two packets, one picture) from a frame, so the head is
-// decoded: a few seconds of packets, never the whole file.
+// decoded: a few seconds of packets, never the whole file. The time of the
+// first picture it shows is kept too: a decoder that starts at a recovery
+// point drops the pictures after it until the picture is whole again
+// (headStats), which are not fields.
 func decodeVideoHead(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan) error {
 	n, _ := scan.headLength()
 	if n == 0 {
@@ -607,24 +632,38 @@ func decodeVideoHead(ctx context.Context, ffprobePath, path string, streamIndex 
 	}
 	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
 		"-read_intervals", "%+#"+strconv.Itoa(n), "-count_frames", "-count_packets",
-		"-show_entries", "stream=nb_read_frames,nb_read_packets", "-of", "default=noprint_wrappers=1", path)
+		"-show_entries", "stream=nb_read_frames,nb_read_packets:frame=best_effort_timestamp_time", "-of", "compact", path)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := runCharged(ctx, cmd); err != nil {
 		return fmt.Errorf("ffprobe decode of the video's first %d packets failed: %w (stderr: %s)", n, err, truncateForLog(strings.TrimSpace(stderr.String()), 200))
 	}
 	frames, packets := -1, -1
+	firstShown, shownTimed, shownUntimed := 0.0, false, false
 	for _, line := range strings.Split(stdout.String(), "\n") {
-		key, value, _ := strings.Cut(strings.TrimSpace(line), "=")
-		v, err := strconv.Atoi(value)
-		if err != nil {
-			continue
-		}
-		switch key {
-		case "nb_read_frames":
-			frames = v
-		case "nb_read_packets":
-			packets = v
+		section, rest, _ := strings.Cut(strings.TrimSpace(line), "|")
+		for _, field := range strings.Split(rest, "|") {
+			key, value, _ := strings.Cut(field, "=")
+			if section == "frame" && key == "best_effort_timestamp_time" {
+				t, err := strconv.ParseFloat(value, 64)
+				switch {
+				case err != nil || math.IsNaN(t) || math.IsInf(t, 0):
+					shownUntimed = true
+				case !shownTimed || t < firstShown:
+					firstShown, shownTimed = t, true
+				}
+				continue
+			}
+			v, err := strconv.Atoi(value)
+			if err != nil {
+				continue
+			}
+			switch key {
+			case "nb_read_frames":
+				frames = v
+			case "nb_read_packets":
+				packets = v
+			}
 		}
 	}
 	if frames < 0 || packets != n {
@@ -634,6 +673,8 @@ func decodeVideoHead(ctx context.Context, ffprobePath, path string, streamIndex 
 		return sourceDamaged(fmt.Errorf("%w: the source's video shows no picture in its first %d packets; nothing can say which of its pictures an encode must keep", ErrSourceInvalid, n))
 	}
 	scan.headPackets, scan.headFrames, scan.headDecoded = n, frames, true
+	// A picture shown at no time says nothing of where the decoder started.
+	scan.headFirstShown, scan.headShownTimed = firstShown, shownTimed && !shownUntimed
 	return nil
 }
 
@@ -773,13 +814,15 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 // that restarted, no keyframe before at) it goes windowSeekFallback before
 // at, and is not known to reach a keyframe. The extract trims the window by
 // its times, so a seek earlier than needed keeps the same pictures and only
-// decodes more. A seek that would land before zero, or at or near the
-// earliest packet time the scan read, is not made (math.Inf(-1)): the
-// extract decodes from the file's start, which reaches the first keyframe
-// (an AVI cannot seek before its first packet, and its extract would then
-// start wherever its probe stopped reading). That holds for a clock that
-// restarted too: its earliest time is still the earliest any packet has, and
-// a seek before it aims at no packet. Decoding from the start is keyed: the
+// decodes more. A seek that would land before zero, or at or near the time
+// of the first packet or of the earliest one the scan read, is not made
+// (math.Inf(-1)): the extract decodes from the file's start, which reaches
+// the first keyframe (an AVI cannot seek before its first packet, and its
+// extract would then start wherever its probe stopped reading). That holds
+// for a clock that restarted too: a seek before the first packet's time
+// aims at no packet before the window, and where the clock restarted lower
+// than it began, it finds the restarted part instead (an MPEG program
+// stream's seek lands there, and decodes nothing of the window). Decoding from the start is keyed: the
 // decoder shows every picture from the first keyframe on, and a picture
 // before it is shown by no decoder (picturesIn reads none there).
 func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
@@ -798,7 +841,7 @@ func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
 			seek, keyed = keyAt-fieldSampleSeekBack, true
 		}
 	}
-	if seek < 0 || s.sawTime && seek < s.earliest+windowSeekStartMargin {
+	if seek < 0 || s.sawTime && seek < max(s.earliest, s.firstTime)+windowSeekStartMargin {
 		return math.Inf(-1), true
 	}
 	return seek, keyed

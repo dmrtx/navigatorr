@@ -92,9 +92,10 @@ keyframe the packet scan found at or before the window; a source the scan
 kept no keyframe times for seeks 20 seconds before the window (the extract
 keeps the window's pictures by their times, so an earlier seek only decodes
 more). A seek that would land before zero or within half a second of the
-video's earliest packet is not made, even on a clock that restarted: the
-extract decodes from the file's start (an AVI cannot seek to or before its
-first packet). A source extract that fails is tried once more, as is the
+video's first or earliest packet is not made, even on a clock that
+restarted: the extract decodes from the file's start (an AVI cannot seek to
+or before its first packet, and an MPEG program stream whose clock restarted
+lower than it began seeks into the restarted part). A source extract that fails is tried once more, as is the
 output's, and a source extract that comes back empty is a failed extract too
 when its seek was not aimed at a keyframe or the scan read a picture inside
 the window;
@@ -119,7 +120,9 @@ worker reads the candidate's packets the same way and never reads the source
 again for these checks. It refuses the candidate (`preservation_not_met`)
 when:
 
-- the programme video has fewer frames than the source (only the packets a
+- the programme video has fewer frames than the source (a plan that copies
+  the video, the audio-only shape, keeps every packet and is held to the
+  source's packets one for one; otherwise only the packets a
   decoder shows no picture for may be missing, each counted once: those
   marked to be discarded and those it drops at the start), more frames, or
   its last frame is more than one frame away from the source's. The start's
@@ -129,7 +132,11 @@ when:
   decoded past the packets it hides):
   packets before the first keyframe, and the leading pictures of an open
   group (an HEVC CRA's RASL pictures, an H.264 recovery point's leading
-  B-frames) whose references a stream-copy cut removed. The count is held to
+  B-frames) whose references a stream-copy cut removed, and the pictures
+  after a recovery point the decoder shows none of until the picture is
+  whole again (an x264 intra-refresh stream cut anywhere: they are timed
+  before the head's first shown picture, where the output's video then
+  starts). The count is held to
   the packets that can be dropped there, so leading pictures that do decode
   (RADL) excuse nothing. Pictures a decoder drops later in the file (an HEVC
   BLA picture or end of sequence mid-file) are not counted, and such a rare
