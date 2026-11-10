@@ -10,11 +10,13 @@ import (
 )
 
 // The coordinator refuses a picture no measurement class covers (RGB, 4:1:1,
-// alpha, a format the probe could not name), with the worker's message word
-// for word, and leaves everything else to the worker: a 4:2:2 or 4:4:4 source
-// is the worker's to admit with whatever 4:2:0 output a later step pins, an
-// audio-only plan or a size budget that may still copy the picture is never
-// measured, and x265_preserve refuses an HEVC source as already_hevc first.
+// alpha, big-endian, 12-bit), with the worker's message word for word, and
+// leaves everything else to the worker: a 4:2:2 or 4:4:4 source is the
+// worker's to admit with whatever 4:2:0 output a later step pins, a probe
+// without a pixel format or depth is the worker's own probe to judge, an
+// audio-only plan is never measured, a size budget may end before any worker
+// sees the file, and x265_preserve refuses an HEVC source as already_hevc
+// first.
 func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 	pinned := &transcode.Plan{Mode: "size", PixelFormat: "yuv420p"}
 	pinned10 := &transcode.Plan{Mode: "quality", PixelFormat: "p010le"}
@@ -50,9 +52,16 @@ func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 		{"8-bit 4:2:2 on an open size plan", open, sizeGoal, "h264", "yuv422p", 8, false},
 		{"10-bit 4:2:2 on an open plan", open, nil, "h264", "yuv422p10le", 10, false},
 		{"4:2:2 on a plan without perceptual validation", unvalidated, nil, "h264", "yuv422p", 8, false},
-		{"unknown pixel format", pinned, sizeGoal, "h264", "", 8, true},
-		{"unknown pixel format on an open plan", open, sizeGoal, "h264", "", 8, true},
+		// A probe that named no pixel format or depth (late headers, a shallow
+		// probe) is no evidence for a permanent refusal: the worker probes the
+		// staged copy itself.
+		{"no pixel format", pinned, sizeGoal, "h264", "", 8, false},
+		{"an unknown pixel format", open, sizeGoal, "h264", "unknown", 8, false},
+		{"no bit depth", pinned, sizeGoal, "h264", "gbrp", 0, false},
+		{"no bit depth on 4:2:0", pinned, sizeGoal, "h264", "yuv420p", 0, false},
 		{"a format that does not match the depth", pinned, nil, "h264", "yuv420p10le", 8, true},
+		{"big-endian 10-bit", pinned10, nil, "h264", "yuv420p10be", 10, true},
+		{"12-bit", pinned10, nil, "h264", "yuv420p12le", 12, true},
 		{"RGB", pinned, sizeGoal, "h264", "gbrp", 8, true},
 		{"RGB on a plan without perceptual validation", unvalidated, nil, "h264", "gbrp", 8, true},
 		{"4:1:1", pinned, sizeGoal, "h264", "yuv411p", 8, true},
@@ -63,7 +72,9 @@ func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 		{"audio-only copies the picture", audioOnly, sizeGoal, "h264", "gbrp", 8, false},
 		{"an audio-only goal", pinned, audioOnlyGoal, "h264", "gbrp", 8, false},
 		{"a size budget may still copy the picture", pinned, budget, "h264", "gbrp", 8, false},
-		{"a size budget without audio-only", pinned, budgetNoAudioOnly, "h264", "gbrp", 8, true},
+		// A size budget may end with its own reason (no budget, unreachable,
+		// worker unsupported) before any worker sees the file.
+		{"a size budget without audio-only", pinned, budgetNoAudioOnly, "h264", "gbrp", 8, false},
 		{"not a mode plan", noMode, nil, "h264", "gbrp", 8, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -90,9 +101,9 @@ func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 // coordinator refuses is one the worker's own admission refuses too: the
 // coordinator never refuses what a worker would accept.
 func TestModeSourceChromaErrorNeverRefusesWhatTheWorkerAdmits(t *testing.T) {
-	formats := []string{"", "unknown", "yuv420p", "yuvj420p", "nv12", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv420p10le", "p010le", "yuv422p10le", "yuv444p10le", "yuv411p", "yuv410p", "gbrp", "gbrp10le", "rgb24", "yuva420p", "yuva444p10le", "gray", "gray10le", "yuyv422", "uyvy422", "yuv440p", "yuv420p12le", "nv16"}
+	formats := []string{"", "unknown", "yuv420p10be", "yuv444p10be", "yuv420p", "yuvj420p", "nv12", "yuv422p", "yuvj422p", "yuv444p", "yuvj444p", "yuv420p10le", "p010le", "yuv422p10le", "yuv444p10le", "yuv411p", "yuv410p", "gbrp", "gbrp10le", "rgb24", "yuva420p", "yuva444p10le", "gray", "gray10le", "yuyv422", "uyvy422", "yuv440p", "yuv420p12le", "nv16"}
 	for _, pixFmt := range formats {
-		for _, depth := range []int{8, 10} {
+		for _, depth := range []int{0, 8, 10, 12} {
 			rep := &mediainspect.DetailedReport{Video: []mediainspect.DetailedStream{{Index: 0, Kind: "video", Codec: "h264", PixelFormat: pixFmt, BitDepth: depth}}}
 			if modeSourceChromaError(&transcode.Plan{Mode: "size"}, nil, rep) == nil {
 				continue
@@ -126,9 +137,10 @@ func TestPreflightRefusesAPictureNoWorkerMeasures(t *testing.T) {
 		{"8-bit 4:2:2", "yuv422p", "8", false},
 		{"10-bit 4:4:4", "yuv444p10le", "10", false},
 		{"10-bit 4:2:2", "yuv422p10le", "10", false},
-		{"unknown pixel format", "unknown", "8", true},
-		{"no pixel format", "", "8", true},
+		{"unknown pixel format", "unknown", "8", false},
+		{"no pixel format", "", "8", false},
 		{"RGB", "gbrp", "8", true},
+		{"big-endian 10-bit 4:2:0", "yuv420p10be", "10", true},
 		{"4:1:1", "yuv411p", "8", true},
 		{"10-bit 4:4:4 with alpha", "yuva444p10le", "10", true},
 	} {

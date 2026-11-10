@@ -874,9 +874,14 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 // modeSourceChromaError refuses, before a worker stages it, a source whose
 // picture the worker's mode preflight (validateModeSourceQuality) refuses as
 // quality_source_class_unsupported whatever the plan's output: a pixel format
-// no measurement class covers (RGB, 4:1:1, alpha, grey, packed, a format the
-// probe could not name, a format that does not match the bit depth). The
-// message is the worker's, word for word.
+// no measurement class covers (RGB, 4:1:1, alpha, grey, packed, big-endian, a
+// format that does not match the bit depth). The message is the worker's, word
+// for word.
+//
+// A probe that named no pixel format or no bit depth (late headers in a
+// transport stream, a shallow probe) is no evidence: the refusal is permanent,
+// so it is left to the worker's own probe of the staged copy. The bit depth is
+// already the one ParseBitDepth infers from the pixel format, as on the worker.
 //
 // It never refuses what the worker accepts. A refused source fails
 // transcode.MeasurableSourceChroma, and the worker admits nothing beyond it
@@ -890,15 +895,16 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 // attached only when the encode is planned, after this preflight, and is
 // checked after the picture). So the rule is skipped only where the worker
 // would not reach that check: no mode, an audio-only plan (the copy is not
-// measured), a size budget goal that may still plan audio-only before any
-// video encode (startSizeBudgetLadder), and x265_preserve on an HEVC source
-// (refused first as already_hevc). The other classes that check covers
-// (depth, HDR, frame rate) are modeSourceReason's.
+// measured), a size budget goal (startSizeBudgetLadder may plan audio-only,
+// or end the conversion with its own reason, before any worker sees the
+// file), and x265_preserve on an HEVC source (refused first as
+// already_hevc). The other classes that check covers (depth, HDR, frame
+// rate) are modeSourceReason's.
 func modeSourceChromaError(plan *transcode.Plan, snapshot *ModePolicySnapshot, rep *mediainspect.DetailedReport) error {
 	if plan == nil || plan.Mode == "" || rep == nil || transcode.IsSizeAudioOnlyPlan(plan) {
 		return nil
 	}
-	if snapshot != nil && snapshot.Size != nil && (snapshot.Size.AudioOnly || snapshot.Size.SizeBudget != nil && snapshot.Size.AudioOnlyFallback) {
+	if snapshot != nil && snapshot.Size != nil && (snapshot.Size.AudioOnly || snapshot.Size.SizeBudget != nil) {
 		return nil
 	}
 	video := rep.MainVideo()
@@ -907,6 +913,9 @@ func modeSourceChromaError(plan *transcode.Plan, snapshot *ModePolicySnapshot, r
 	}
 	v := video[0]
 	if codec := strings.ToLower(strings.TrimSpace(v.Codec)); plan.Mode == "x265_preserve" && (codec == "hevc" || codec == "h265") {
+		return nil
+	}
+	if pixFmt := strings.ToLower(strings.TrimSpace(v.PixelFormat)); pixFmt == "" || pixFmt == "unknown" || pixFmt == "none" || v.BitDepth <= 0 {
 		return nil
 	}
 	if transcode.MeasurableSourceChroma(v.PixelFormat, v.BitDepth) {

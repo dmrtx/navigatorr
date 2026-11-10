@@ -5235,7 +5235,13 @@ test("phase cost detail lists final validation's steps under their phase", () =>
   assert.match(rendered, /Worker · validation · vmaf/);
   assert.match(rendered, /Worker · validation · cambi/);
   assert.match(rendered, /900000 ms/);
-  assert.match(rendered, /"7"/);
+  // A step's wall time adds up overlapping windows: it never reads as elapsed
+  // time, and its invocations name their unit. The phase row is unchanged.
+  assert.match(rendered, /250000 ms added up over 7 windows/);
+  assert.doesNotMatch(rendered, /"250000 ms"/);
+  assert.match(rendered, /"7 windows"/);
+  assert.match(rendered, /"240000 ms"/);
+  assert.match(rendered, /"1"/);
 });
 
 test("an old worker-busy failure reads plainly and hides the worker URL", () => {

@@ -252,8 +252,13 @@ func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
 		t.Fatalf("steps changed the phases: %v %v vs %v %v", withPhases, withCPU, withoutPhases, withoutCPU)
 	}
 	validation := with["worker_validation"]
-	if validation["attempts"] != float64(1) || validation["active_compute_ms"] != float64(1900000) {
+	if validation["attempts"] != float64(1) || validation["active_compute_ms"] != float64(1900000) || validation["timing_scope"] != "phase_wall; phases may overlap" {
 		t.Fatalf("validation %v", validation)
+	}
+	// A step's duration adds up its windows, which overlap: it says so, and
+	// is never labelled as the phase's elapsed wall time.
+	if cambi, _ := validation["steps"].(map[string]any)["cambi"].(map[string]any); cambi["timing_scope"] != "step_window_wall_sum; runs overlap" || cambi["duration_ms"].(float64) <= validation["duration_ms"].(float64) {
+		t.Fatalf("cambi step %v", cambi)
 	}
 	mirrored, _ := validation["steps"].(map[string]any)
 	if len(mirrored) != len(steps) {

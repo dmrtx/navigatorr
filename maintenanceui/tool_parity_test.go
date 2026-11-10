@@ -106,7 +106,9 @@ func TestValidationStepCostsReachTheOperationsPage(t *testing.T) {
 	stepNames := []string{"extract", "timestamps", "alignment", "vmaf", "cambi", "ssim", "chroma"}
 	steps := map[string]any{}
 	for i, name := range stepNames {
-		steps[name] = cost(1000*(i+1), 1, 7, 2000*(i+1))
+		step := cost(1000*(i+1), 1, 7, 2000*(i+1))
+		step["timing_scope"] = "step_window_wall_sum; runs overlap"
+		steps[name] = step
 	}
 	validation := cost(240000, 1, 0, 1900000)
 	validation["steps"] = steps
@@ -131,7 +133,7 @@ func TestValidationStepCostsReachTheOperationsPage(t *testing.T) {
 	shownSteps, _ := shownValidation["steps"].(map[string]any)
 	for _, name := range stepNames {
 		c, _ := shownSteps[name].(map[string]any)
-		if c["attempts"] != float64(1) || c["runs"] != float64(7) || c["active_compute_ms"] == nil || c["duration_ms"] == nil {
+		if c["attempts"] != float64(1) || c["runs"] != float64(7) || c["active_compute_ms"] == nil || c["duration_ms"] == nil || c["timing_scope"] != "step_window_wall_sum; runs overlap" {
 			t.Fatalf("%s missing from the operations page: %v", name, shownValidation)
 		}
 	}

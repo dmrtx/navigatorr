@@ -165,11 +165,14 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	}
 	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
 		if duration != nil {
-			// Timestamps own the duration; byte counters, CPU time and steps a
-			// phase recorded (for example an encode reading an unstaged NAS
-			// source, or final validation's steps) survive.
+			// Timestamps own the duration and make the phase one attempt;
+			// byte counters, CPU time and steps a phase recorded (for example
+			// an encode reading an unstaged NAS source, or final validation's
+			// steps) survive. Its steps follow the same rule, one attempt
+			// each, while their runs, wall and CPU time keep every execution
+			// the phase's CPU time keeps.
 			cost := t.PhaseCosts[name]
-			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs, Steps: cost.Steps}
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs, Steps: oneAttemptSteps(cost.Steps)}
 		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
@@ -310,6 +313,20 @@ func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost
 		cost.Steps = steps
 	}
 	return cost
+}
+
+// oneAttemptSteps is a copy of steps counted as one attempt each, for a phase
+// whose telemetry counts one attempt; the job's own record is not changed.
+func oneAttemptSteps(steps map[string]transcode.PhaseCost) map[string]transcode.PhaseCost {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make(map[string]transcode.PhaseCost, len(steps))
+	for name, step := range steps {
+		step.Attempts = 1
+		out[name] = step
+	}
+	return out
 }
 
 // addKnown sums two counters, keeping whichever side is known: nil+x = x,

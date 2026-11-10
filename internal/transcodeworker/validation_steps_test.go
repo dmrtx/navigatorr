@@ -264,12 +264,16 @@ func TestValidationStepsDoNotChangeTheJobsPhaseTotals(t *testing.T) {
 		if cpu != 19000 {
 			t.Fatalf("%s: phases %v sum to %d ms of CPU, want the phases' own 19000", name, phases, cpu)
 		}
+		// The stored record counts both validations; the telemetry counts the
+		// phase as one attempt (its duration is the timestamps'), and its
+		// steps the same way.
+		attempts := map[string]int{"stored": 2, "telemetry": 1}[name]
 		validation := costs["validation"]
-		if validation.Attempts < 1 || len(validation.Steps) != 2 {
+		if validation.Attempts != attempts || len(validation.Steps) != 2 {
 			t.Fatalf("%s: validation %+v", name, validation)
 		}
 		vmaf, align := validation.Steps[validationStepVMAF], validation.Steps[validationStepAlignment]
-		if vmaf.DurationMs != 2000 || vmaf.Attempts != 2 || vmaf.Runs != 14 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs != 6000 {
+		if align.Attempts != attempts || vmaf.DurationMs != 2000 || vmaf.Attempts != attempts || vmaf.Runs != 14 || vmaf.ActiveComputeMs == nil || *vmaf.ActiveComputeMs != 6000 {
 			t.Fatalf("%s: vmaf step %+v", name, vmaf)
 		}
 		if align.DurationMs != 60 || align.Runs != 14 || align.ActiveComputeMs != nil {
@@ -284,7 +288,7 @@ func TestValidationStepsDoNotChangeTheJobsPhaseTotals(t *testing.T) {
 	if telemetryFor(stored, time.Now()).PhaseCosts["validation"].DurationMs != 30000 {
 		t.Fatal("validation's duration no longer comes from its timestamps")
 	}
-	if job.PhaseCosts["validation"].Steps[validationStepVMAF].Runs != 14 {
+	if job.PhaseCosts["validation"].Steps[validationStepVMAF].Runs != 14 || stored.PhaseCosts["validation"].Steps[validationStepVMAF].Attempts != 2 {
 		t.Fatal("the in-memory job missed the stored costs")
 	}
 }

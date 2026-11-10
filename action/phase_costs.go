@@ -84,18 +84,26 @@ func mirrorWorkerPhaseCosts(ec *ExecutionContext, prefix string, costs map[strin
 		if cost.DurationMs < 0 || cost.Attempts <= 0 {
 			continue
 		}
-		target[prefix+phase] = workerPhaseCost(cost)
+		target[prefix+phase] = workerPhaseCost(cost, workerPhaseTimingScope)
 	}
 	if ec.Outputs != nil {
 		ec.Outputs["phase_costs"] = target
 	}
 }
 
+const (
+	workerPhaseTimingScope = "phase_wall; phases may overlap"
+	// A step's duration is the wall time of each of its runs (windows)
+	// added up. Runs overlap, so it is not elapsed time and can exceed its
+	// phase's.
+	workerStepTimingScope = "step_window_wall_sum; runs overlap"
+)
+
 // workerPhaseCost is one mirrored worker cost. Its steps (final validation's
 // extract, VMAF, CAMBI...) stay nested under it: they are part of the phase,
 // so the phases listed side by side never count them twice.
-func workerPhaseCost(cost transcode.PhaseCost) map[string]any {
-	out := map[string]any{"duration_ms": cost.DurationMs, "attempts": cost.Attempts, "nas_read_bytes": cost.NASReadBytes, "nas_written_bytes": cost.NASWrittenBytes, "cache_hits": cost.CacheHits, "cache_misses": cost.CacheMisses, "active_compute_ms": cost.ActiveComputeMs, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+func workerPhaseCost(cost transcode.PhaseCost, timingScope string) map[string]any {
+	out := map[string]any{"duration_ms": cost.DurationMs, "attempts": cost.Attempts, "nas_read_bytes": cost.NASReadBytes, "nas_written_bytes": cost.NASWrittenBytes, "cache_hits": cost.CacheHits, "cache_misses": cost.CacheMisses, "active_compute_ms": cost.ActiveComputeMs, "provenance": "worker_measured", "timing_scope": timingScope}
 	if cost.Runs > 0 {
 		out["runs"] = cost.Runs
 	}
@@ -105,7 +113,7 @@ func workerPhaseCost(cost transcode.PhaseCost) map[string]any {
 			if step.DurationMs < 0 || step.Attempts <= 0 {
 				continue
 			}
-			steps[name] = workerPhaseCost(step)
+			steps[name] = workerPhaseCost(step, workerStepTimingScope)
 		}
 		if len(steps) > 0 {
 			out["steps"] = steps
