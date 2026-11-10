@@ -120,10 +120,13 @@ const fieldPacketShare = 0.6
 // discarded ones (the second field of each picture), or, for a source with no
 // keyframe flagged, more than a quarter. A source whose head is frame-coded
 // may still switch to fields later: a packet of a field codec lasting less
-// than fieldPacketShare of a frame says so, and so does one whose time lies
-// that close to the previous packet's, whatever length the container states
-// for it (fieldSteps). Its pictures then lie between every packet that may
-// show and half the possible fields fewer.
+// than fieldPacketShare of a frame, or whose time lies that close to a
+// neighbour's whatever length the container states for it, may be a field
+// (closePackets). So may a picture of a section at a higher frame rate, and
+// the timing cannot tell them apart: a sample of those packets is decoded
+// before the encode (sampleFieldPictures). When every sample shows a picture
+// per packet the source is counted exactly; otherwise its pictures lie
+// between every packet that may show and half the possible fields fewer.
 func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount {
 	var out pictureCount
 	n := src.headPackets
@@ -159,7 +162,10 @@ func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount
 			possible += unknown
 		}
 		if fieldCodecs[strings.ToLower(codec)] {
-			possible = max(possible, src.fieldSteps(out.frame))
+			possible = max(possible, src.possibleFields(out.frame))
+			if src.timesOverflow {
+				possible = most
+			}
 		}
 		out.fields, out.most = true, most
 		out.least = max(most-leading-possible/2, (most+1)/2)
@@ -188,24 +194,35 @@ func sourcePictures(src sourceVideoScan, codec string, fps float64) pictureCount
 // fieldCoded reports whether some of the source's pictures may be coded as
 // two packets (see sourcePictures).
 func (s sourceVideoScan) fieldCoded(codec string, frame float64, nonKey, leading, discarded int) bool {
-	if s.headDecoded {
-		notShown := s.headPackets - s.headFrames
-		if s.sawKey && notShown > nonKey+leading+discarded {
-			return true
-		}
-		if !s.sawKey && 4*notShown > s.headPackets {
-			return true
-		}
+	if s.headShowsFields(nonKey, leading, discarded) {
+		return true
 	}
 	if !fieldCodecs[strings.ToLower(codec)] || frame <= 0 {
 		return false
 	}
-	for d, c := range s.durations {
-		if d > 0 && c > 0 && float64(d)/1e6 < frame*fieldPacketShare {
-			return true
-		}
+	if s.timesOverflow {
+		// Not every packet's time was kept: any may be a field.
+		return true
 	}
-	return s.fieldSteps(frame) > 0
+	if s.fieldSample == fieldsSampledFrames {
+		// The close packets decoded one picture each: a higher frame rate,
+		// not fields.
+		return false
+	}
+	return s.possibleFields(frame) > 0
+}
+
+// headShowsFields reports whether the decoded head shows fewer pictures than
+// its packets that show one: the second field of each picture.
+func (s sourceVideoScan) headShowsFields(nonKey, leading, discarded int) bool {
+	if !s.headDecoded {
+		return false
+	}
+	notShown := s.headPackets - s.headFrames
+	if s.sawKey {
+		return notShown > nonKey+leading+discarded
+	}
+	return 4*notShown > s.headPackets
 }
 
 // headFrame is one picture's duration as the decoded head shows it: the time
@@ -399,6 +416,11 @@ func (w *Worker) scanSourcePackets(ctx context.Context, plan *transcode.Plan, pr
 			}
 			if err := decodeVideoHead(ctx, w.ffprobePath, path, req.video, &scan.video); err != nil {
 				return probe, err
+			}
+			if v := firstMainVideo(probe.Streams); v != nil && v.Index == req.video {
+				if err := sampleFieldPictures(ctx, w.ffprobePath, path, req.video, &scan.video, v.Codec, v.FPS); err != nil {
+					return probe, err
+				}
 			}
 		}
 		probe.videoScan = &scan.video

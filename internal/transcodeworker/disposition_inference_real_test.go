@@ -62,7 +62,9 @@ func TestRealDefaultFlagInference(t *testing.T) {
 	}
 	two, one := source("two", 2, 2), source("one", 1, 1)
 
-	none := map[string]int{}
+	// Known flags, as the probe reports a track with none set: every track
+	// is compared (an empty map would say nothing was measured).
+	none := map[string]int{"default": 0, "forced": 0, "hearing_impaired": 0, "visual_impaired": 0, "original": 0, "comment": 0}
 	pair := []map[string]int{none, none}
 	cases := []struct {
 		name          string
@@ -75,7 +77,7 @@ func TestRealDefaultFlagInference(t *testing.T) {
 		{name: "no flags written", src: two, audio: pair, subs: pair, wantInference: 2},
 		{name: "audio flags written", src: two, audio: pair, subs: pair,
 			written: map[string]map[string]int{"a:0": none, "a:1": none}},
-		{name: "only a subtitle default written", src: two, audio: pair, subs: []map[string]int{none, {"default": 1}},
+		{name: "only a subtitle default written", src: two, audio: pair, subs: []map[string]int{none, {"default": 1, "forced": 0}},
 			written: map[string]map[string]int{"s:1": {"default": 1}}},
 		{name: "one track of each kind", src: one, audio: []map[string]int{none}, subs: []map[string]int{none}},
 		{name: "one track of each kind, flags written", src: one, audio: []map[string]int{none}, subs: []map[string]int{none},

@@ -65,18 +65,19 @@ type sourceVideoScan struct {
 	// durations counts the packets by duration, in microseconds (0 when the
 	// container states none).
 	durations map[int64]int
-	// steps counts the timed packets by their step: how far, in tenths of a
-	// millisecond, a packet's time lies from the previous timed packet's in
-	// decode order, paired with that previous packet's own step (-1 for none).
-	// The two fields of a picture lie half a frame apart whatever length the
-	// container states for them, and the step before says where a run of
-	// them starts. A video whose steps take more than maxStepKinds pairs
-	// stops counting new ones (stepsOverflow) and is judged by its durations.
-	steps         map[[2]int64]int
-	stepsOverflow bool
-	prevPTS       float64
-	prevStep      int64
-	hasPrevPTS    bool
+	// times holds every timed packet in decode order (see videoTime), at
+	// most maxTimedPackets of them; a longer video sets timesOverflow, and
+	// any of its packets may then be a field. timesBase is the first timed
+	// packet's time, which the others are counted from.
+	times         []videoTime
+	timesBase     float64
+	timesOverflow bool
+	// fieldSample is what decoding a sample of the packets that lie close
+	// together found (sampleFieldPictures): whether two of them make one
+	// picture (fields) or each its own (a higher frame rate).
+	fieldSample fieldSampleResult
+	// format is the container's name as the demuxer gives it.
+	format string
 	// DemuxErrors counts the packet damage the container's demuxer reported
 	// while reading. FirstError is the first of it, and FirstErrorByte the
 	// byte offset it names (-1 when it names none).
@@ -114,7 +115,11 @@ func (s sourceVideoScan) start() float64 {
 // was timed, the clock never restarted and the last picture a decoder shows
 // comes before at. A window cut from there extracts nothing, whatever the
 // extract's exit status or messages say. A nil scan (none was read) knows
-// nothing.
+// nothing. One packet with no time is enough to know nothing: the decoder
+// shows its picture at a time the reader guesses (after the picture before
+// it, by a length nothing states), so no bound from the timed packets holds,
+// and a window called empty is left out of the verdict. Such a video is left
+// to the extract, whose empty output says it.
 func (s *sourceVideoScan) noPicturesFrom(at float64) bool {
 	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at > s.Last+0.001
 }
@@ -309,6 +314,7 @@ func scanFilePackets(ctx context.Context, ffprobePath, path string, req packetSc
 	if formatName == "" {
 		return out, errors.New("ffprobe packet scan printed no format name")
 	}
+	scan.format = formatName
 	faults := untaggedFaults
 	if e := readFaults[formatName]; e != nil {
 		if faults.count == 0 {
@@ -391,7 +397,7 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 		scan.durations = map[int64]int{}
 	}
 	scan.durations[int64(math.Round(dur*1e6))]++
-	scan.addStep(pts)
+	scan.addTime(pts, dur, key)
 	if scan.anyTime && pts < scan.latest-timestampResetSeconds {
 		scan.Discontinuous = true
 	}
@@ -419,44 +425,71 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 	scan.timed = true
 }
 
-// maxStepKinds bounds the pairs of steps a scan counts (sourceVideoScan.steps).
-const maxStepKinds = 4096
-
-// addStep counts a timed packet's step (sourceVideoScan.steps).
-func (s *sourceVideoScan) addStep(pts float64) {
-	step, before := int64(-1), int64(-1)
-	if s.hasPrevPTS {
-		step, before = int64(math.Round(math.Abs(pts-s.prevPTS)*1e4)), s.prevStep
-	}
-	s.prevPTS, s.prevStep, s.hasPrevPTS = pts, step, true
-	key := [2]int64{before, step}
-	if s.steps == nil {
-		s.steps = map[[2]int64]int{}
-	}
-	if _, ok := s.steps[key]; !ok && len(s.steps) >= maxStepKinds {
-		s.stepsOverflow = true
-		return
-	}
-	s.steps[key]++
+// videoTime is one timed packet of the programme video: its time from the
+// scan's first, in tenths of a millisecond, the length the container states
+// for it in microseconds (0 for none) and whether it is a keyframe.
+type videoTime struct {
+	at, dur int32
+	key     bool
 }
 
-// fieldSteps is how many timed packets lie less than fieldPacketShare of a
-// frame from a neighbour in decode order: each run of such steps holds one
-// packet more than it has steps. Those packets may be fields however long the
-// container says they are. It is 0 when the frame is unknown or the steps
-// were not all counted.
-func (s sourceVideoScan) fieldSteps(frame float64) int {
-	if frame <= 0 || s.stepsOverflow {
-		return 0
+// maxTimedPackets bounds the packets a scan keeps the times of: twelve bytes
+// each, nine hours at 60 packets a second.
+const maxTimedPackets = 1 << 21
+
+// addTime keeps a timed packet's time (sourceVideoScan.times).
+func (s *sourceVideoScan) addTime(pts, dur float64, key bool) {
+	if s.timesOverflow {
+		return
 	}
-	short := func(step int64) bool { return step >= 0 && float64(step)/1e4 < frame*fieldPacketShare }
+	if len(s.times) == 0 {
+		s.timesBase = pts
+	}
+	at := math.Round((pts - s.timesBase) * 1e4)
+	if len(s.times) >= maxTimedPackets || math.Abs(at) > math.MaxInt32 {
+		s.times, s.timesOverflow = nil, true
+		return
+	}
+	s.times = append(s.times, videoTime{at: int32(at), dur: int32(min(math.Round(dur*1e6), math.MaxInt32)), key: key})
+}
+
+// closePackets marks the timed packets that may be fields: those the
+// container states less than fieldPacketShare of a frame long, and those
+// whose time lies that close to the previous or the next packet's in decode
+// order, whatever length the container states for them (the two fields of a
+// picture lie half a frame apart). A packet of a video at a higher frame rate
+// than its head's is marked too: only decoding it tells (sampleFieldPictures).
+// It is nil when the frame is unknown or no packet is close.
+func (s sourceVideoScan) closePackets(frame float64) []bool {
+	if frame <= 0 {
+		return nil
+	}
+	limit := frame * fieldPacketShare
+	var marks []bool
+	mark := func(i int) {
+		if marks == nil {
+			marks = make([]bool, len(s.times))
+		}
+		marks[i] = true
+	}
+	for i, p := range s.times {
+		if p.dur > 0 && float64(p.dur)/1e6 < limit {
+			mark(i)
+		}
+		if i > 0 && math.Abs(float64(p.at)-float64(s.times[i-1].at))/1e4 < limit {
+			mark(i - 1)
+			mark(i)
+		}
+	}
+	return marks
+}
+
+// possibleFields is how many timed packets may be fields (closePackets).
+func (s sourceVideoScan) possibleFields(frame float64) int {
 	n := 0
-	for k, c := range s.steps {
-		if short(k[1]) {
-			n += c
-			if !short(k[0]) {
-				n += c
-			}
+	for _, near := range s.closePackets(frame) {
+		if near {
+			n++
 		}
 	}
 	return n
@@ -555,6 +588,193 @@ func decodeVideoHead(ctx context.Context, ffprobePath, path string, streamIndex 
 	}
 	scan.headPackets, scan.headFrames, scan.headDecoded = n, frames, true
 	return nil
+}
+
+// fieldSampleResult is what sampleFieldPictures found.
+type fieldSampleResult int
+
+const (
+	// fieldsNotSampled: nothing was decoded (no packet lies close to
+	// another, the head already shows fields, or no sample could be read).
+	fieldsNotSampled fieldSampleResult = iota
+	// fieldsSampledFrames: every sample read showed one picture per packet.
+	fieldsSampledFrames
+	// fieldsSampledFields: a sample showed two packets making one picture.
+	fieldsSampledFields
+)
+
+// fieldSamples is how many places among the close packets are decoded,
+// fieldSampleSeconds how long each one is, and maxFieldSampleLead how many
+// packets a sample may decode before it, from the keyframe it starts at: a
+// sample further from its keyframe is skipped. A container with an index
+// (Matroska, MP4) seeks to the keyframe at or before the time asked, so its
+// read aims at the keyframe itself; a transport stream seeks to a packet near
+// the time, so its read starts fieldSampleSeekBack before the keyframe. When
+// a read does not start at the keyframe the other way is tried.
+const (
+	fieldSamples        = 5
+	fieldSampleSeconds  = 1.0
+	maxFieldSampleLead  = 1500
+	fieldSampleSeekBack = 1.0
+)
+
+// sampleFieldPictures tells, for a source of a field codec whose head is
+// frame-coded, whether its later packets that lie close together
+// (closePackets) are fields or the pictures of a higher frame rate: a
+// section at 60 frames a second after a 30 or 24 frame head looks like fields
+// by its timing alone, and would let a conversion lose half of it unseen. Up
+// to fieldSamples places spread over those packets are decoded, each
+// fieldSampleSeconds long from the keyframe before it: the second field of a
+// picture shows no picture of its own, so a sample of fields shows about half
+// as many pictures as it has close packets, a sample of frames one per packet.
+// One sample of fields marks the source fields; every sample read showing
+// frames marks it frame-coded, counted exactly. A few seconds of packets are
+// decoded at most per sample, never the whole file.
+func sampleFieldPictures(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan, codec string, fps float64) error {
+	if !fieldCodecs[strings.ToLower(codec)] || !scan.headDecoded || scan.timesOverflow {
+		return nil
+	}
+	if scan.headShowsFields(scan.headStats(scan.headPackets)) {
+		return nil
+	}
+	frame := scan.headFrame()
+	if frame <= 0 && fps > 0 {
+		frame = 1 / fps
+	}
+	marks := scan.closePackets(frame)
+	var near []int
+	for i, m := range marks {
+		if m {
+			near = append(near, i)
+		}
+	}
+	if len(near) == 0 {
+		return nil
+	}
+	result := fieldsNotSampled
+	sampledTo := math.Inf(-1)
+	for j := 0; j < fieldSamples; j++ {
+		i := near[(len(near)-1)*j/(fieldSamples-1)]
+		from := float64(scan.times[i].at) / 1e4
+		if from < sampledTo {
+			continue // inside the previous sample
+		}
+		key := -1
+		for k := i; k >= 0 && i-k <= maxFieldSampleLead; k-- {
+			if scan.times[k].key && scan.times[k].at <= scan.times[i].at {
+				key = k
+				break
+			}
+		}
+		if key < 0 {
+			continue
+		}
+		sampledTo = from + fieldSampleSeconds
+		fields, read, err := decodeFieldSample(ctx, ffprobePath, path, streamIndex, scan, marks, key, from, sampledTo)
+		if err != nil {
+			return err
+		}
+		switch {
+		case !read:
+		case fields:
+			scan.fieldSample = fieldsSampledFields
+			return nil
+		default:
+			result = fieldsSampledFrames
+		}
+	}
+	scan.fieldSample = result
+	return nil
+}
+
+// decodeFieldSample decodes the source's video from the keyframe key (an
+// index into scan.times) to past to, and compares, between from and to
+// (seconds from scan.timesBase), the packets with the pictures shown and the
+// close packets (marks). read is false when the decode did not start at the
+// keyframe (a transport stream's seek lands where it can) or the window holds
+// no close packet: the sample then says nothing.
+func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan, marks []bool, key int, from, to float64) (fields, read bool, err error) {
+	keyAt := scan.timesBase + float64(scan.times[key].at)/1e4
+	seeks := []float64{keyAt + 0.0005, keyAt - fieldSampleSeekBack}
+	if !indexedContainer(scan.format) {
+		seeks[0], seeks[1] = seeks[1], seeks[0]
+	}
+	for _, seek := range seeks {
+		fields, read, err = decodeFieldWindow(ctx, ffprobePath, path, streamIndex, scan, marks, keyAt, seek, from, to)
+		if err != nil || read {
+			return fields, read, err
+		}
+	}
+	return false, false, nil
+}
+
+// indexedContainer reports whether a demuxer seeks by an index of keyframes,
+// to the one at or before the time asked: Matroska and MP4 do.
+func indexedContainer(format string) bool {
+	for _, name := range strings.Split(format, ",") {
+		if name == "matroska" || name == "mov" {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeFieldWindow is one read of decodeFieldSample, seeking to seek.
+func decodeFieldWindow(ctx context.Context, ffprobePath, path string, streamIndex int, scan *sourceVideoScan, marks []bool, keyAt, seek, from, to float64) (fields, read bool, err error) {
+	start, end := scan.timesBase+from, scan.timesBase+to
+	interval := strconv.FormatFloat(seek, 'f', 6, 64) + "%" + strconv.FormatFloat(end+0.5, 'f', 6, 64)
+	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", strconv.Itoa(streamIndex),
+		"-read_intervals", interval, "-show_entries", "packet=pts_time,flags:frame=best_effort_timestamp_time", "-of", "compact", path)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := runCharged(ctx, cmd); err != nil {
+		return false, false, fmt.Errorf("ffprobe decode of the video from %.3fs to %.3fs failed: %w (stderr: %s)", keyAt, end, err, truncateForLog(strings.TrimSpace(stderr.String()), 200))
+	}
+	sawKey := false
+	packets, pictures := 0, 0
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		kind, rest, _ := strings.Cut(strings.TrimSpace(line), "|")
+		var t float64
+		timed, keyFlag := false, false
+		for _, f := range strings.Split(rest, "|") {
+			name, value, _ := strings.Cut(f, "=")
+			switch name {
+			case "pts_time", "best_effort_timestamp_time":
+				if v, err := strconv.ParseFloat(value, 64); err == nil {
+					t, timed = v, true
+				}
+			case "flags":
+				keyFlag = strings.Contains(value, "K")
+			}
+		}
+		switch kind {
+		case "packet":
+			if keyFlag && timed && math.Abs(t-keyAt) < 0.0005 {
+				sawKey = true
+			}
+			if timed && t >= start && t < end {
+				packets++
+			}
+		case "frame":
+			if !timed {
+				return false, false, nil // a picture shown at no time: the sample says nothing
+			}
+			if t >= start && t < end {
+				pictures++
+			}
+		}
+	}
+	near := 0
+	for i, p := range scan.times {
+		if at := float64(p.at) / 1e4; marks[i] && at >= from && at < to {
+			near++
+		}
+	}
+	if !sawKey || packets == 0 || near == 0 {
+		return false, false, nil
+	}
+	missing := packets - pictures
+	return missing > 0 && 4*missing >= near, true, nil
 }
 
 // demuxerTag splits an ffmpeg log line "[matroska,webm @ 0x7f..] text" into

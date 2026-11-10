@@ -75,7 +75,8 @@ window whose output pictures do not line up with a good source extract
 means content is missing; other unmeasurable report-only windows (an output
 extract that failed included) are listed as unmeasured rather than dropped. A
 fresh window the source has no pictures for (past the source's end, starting
-after the video's last picture as the packet scan before the encode read it,
+after the video's last picture as the packet scan before the encode read it
+when every packet carries a time,
 or a source extract that comes back empty: windows are cut from the first
 decoded picture, and one past the video's last says nothing about the output)
 is listed as unmeasured under every goal, gated or not, and a gated verdict is
@@ -88,12 +89,18 @@ positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
 file; the verdict names the failed metric and its limit.
 
-**Nothing kept may lose content.** The worker reads the packets of the
-source's programme video and of every kept audio and subtitle track once,
-in one pass, before the encode (a damaged source, untimed audio or final
-grid windows past the video's end fail there, in minutes); after the encode
-it reads the candidate's the same way and never reads the source again. It
-refuses the candidate (`preservation_not_met`) when:
+**Nothing kept may lose content.** Before the encode the worker reads the
+packets of the source's programme video and of every kept audio and subtitle
+track in one pass, without decoding them (a damaged source, untimed audio or
+final grid windows past the video's end fail there, in minutes). It also
+decodes a few seconds of the video: its first picture group and, for a field
+codec, up to five one-second samples (see below). When a kept subtitle is
+converted, the conversion is run once over the source to count its lines: a
+second read of the whole file, which the `source_scan` phase's NAS read bytes
+do not count (they count the source's size once). After the encode the
+worker reads the candidate's packets the same way and never reads the source
+again for these checks. It refuses the candidate (`preservation_not_met`)
+when:
 
 - the programme video has fewer frames than the source (only the packets a
   decoder shows no picture for may be missing, each counted once: those
@@ -108,11 +115,20 @@ refuses the candidate (`preservation_not_met`) when:
   (RADL) excuse nothing. Pictures a decoder drops later in the file (an HEVC
   BLA picture or end of sequence mid-file) are not counted, and such a rare
   source is refused. A field-coded source (PAFF or adaptive field/frame
-  coding: packets shorter than the output's picture, or whose times lie less
-  than that apart whatever length the container states) may carry a field per
-  packet, so its pictures lie between its whole packets plus half its
-  possible fields and all its packets; fewer frames than that fail, and more
-  are judged by where the last frame lands;
+  coding) may carry a field per packet, so its pictures lie between its whole
+  packets plus half its possible fields and all its packets; fewer frames
+  than that fail, and more are judged by where the last frame lands. Its head
+  shows it (half its packets decode to no picture), or, past a frame-coded
+  head, packets of H.264, MPEG-2 or VC-1 shorter than 0.6 of a head picture
+  or whose times lie closer than that. Such packets are also what a section at
+  a higher frame rate looks like (60 frames a second after a 30 or 24 frame
+  head), so up to five places among them are decoded before the encode, a
+  second each from the keyframe before it (at most 1,500 packets before the
+  place): a sample of fields shows about half as many pictures as packets.
+  When every sample read shows a picture per packet the source is counted
+  exactly; a sample of fields, or no sample read, keeps the range. A video
+  of more than about two million timed packets keeps no times and keeps the
+  range;
 - a copied audio track has more packets than the source track, or fewer than
   it has without the packets the source marks to be discarded, or its codec
   differs at all (E-AC-3 is not AC-3), or its length moves by more than

@@ -199,7 +199,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// packets, which the candidate's are held to after it. A damaged
 	// container, audio that cannot be timed or final windows past the end of
 	// the video fail in minutes here instead of after hours of encoding, and
-	// the source is never read again for these checks.
+	// the source is never read again for these checks. The phase also
+	// decodes a few seconds of the video and, when a kept subtitle is
+	// converted, runs that conversion over the whole source to count its
+	// lines; the NAS read bytes count the source's size once.
 	if req := w.packetScanFor(job.Plan, srcProbe); req.any() {
 		scanStart := time.Now()
 		scanCPU := &cpuMeter{}
