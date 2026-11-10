@@ -428,6 +428,13 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		if err := applyTrackSelection(plan, trackSel); err != nil {
 			return StepResult{Status: StepFailed, Error: err.Error()}, nil
 		}
+		// The worker refuses a picture no measurement class covers only after
+		// staging and scanning the whole file; the plan that decides it is
+		// already resolved here.
+		mayPinMain10 := early && modeSnapshot.Size != nil && modeSnapshot.Size.EightBitMain10
+		if err := modeSourceChromaError(plan, &rep, mayPinMain10); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
+		}
 	}
 	ext, err := transcode.ContainerExtension(plan.Container)
 	if err != nil {

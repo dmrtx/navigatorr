@@ -178,11 +178,19 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	grid := len(q.Samples)
 	windows := append(append([]transcode.BenchmarkSampleWindow(nil), q.Samples...), q.FreshSamples...)
 	concurrency := w.finalValidationConcurrency(len(windows))
-	threads := w.metricThreads(concurrency)
+	threads := w.newWindowThreads(concurrency, len(windows))
 	measure := func(ctx context.Context, pos int) finalWindowResult {
+		defer threads.done()
 		window := windows[pos]
 		bad := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause}
+		}
+		// step runs one step of the window, timed and charged on its own
+		// (validationSteps); a result with a code fails the window.
+		step := func(name string, run func(context.Context) finalWindowResult) finalWindowResult {
+			stepCtx, end := beginValidationStep(ctx, name)
+			defer end()
+			return run(stepCtx)
 		}
 		if window.StartSeconds < 0 || window.DurationSeconds <= 0 || window.StartSeconds+window.DurationSeconds > timeline+0.05 {
 			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
@@ -198,90 +206,125 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		candPath := filepath.Join(dir, fmt.Sprintf("candidate_%d.mkv", window.Index))
 		// One set of bounds, on the source's frame grid, for both files.
 		from, to := sampleFrameBounds(window.StartSeconds, window.DurationSeconds, sourceVideoStreams[0].FPS)
-		for _, item := range []struct {
-			source, out string
-			videoIndex  int
-			firstFrame  float64
-		}{{source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame}, {candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame}} {
-			args := BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, item.firstFrame, from, to)
-			if compactChain != "" && item.out == refPath {
-				args = withReferenceChain(args, compactChain)
+		if r := step(validationStepExtract, func(ctx context.Context) finalWindowResult {
+			for _, item := range []struct {
+				source, out string
+				videoIndex  int
+				firstFrame  float64
+			}{{source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame}, {candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame}} {
+				args := BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, item.firstFrame, from, to)
+				if compactChain != "" && item.out == refPath {
+					args = withReferenceChain(args, compactChain)
+				}
+				if compactCandidateChain != "" && item.out == candPath {
+					args = withReferenceChain(args, compactCandidateChain)
+				}
+				if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
+					return bad("quality_final_sample_extract_failed", err)
+				}
 			}
-			if compactCandidateChain != "" && item.out == candPath {
-				args = withReferenceChain(args, compactCandidateChain)
-			}
-			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
-				return bad("quality_final_sample_extract_failed", err)
-			}
+			return finalWindowResult{}
+		}); r.code != "" {
+			return r
 		}
 		// Which window failed and where it sits tells a gap in the source's
 		// timeline from a shifted encode.
 		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
-		refPTS, err := probeSamplePTS(ctx, w.ffprobePath, refPath)
-		if err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
+		var refPTS, candPTS []float64
+		if r := step(validationStepTimestamps, func(ctx context.Context) finalWindowResult {
+			var err error
+			if refPTS, err = probeSamplePTS(ctx, w.ffprobePath, refPath); err != nil {
+				return bad("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
+			}
+			if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err != nil {
+				return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract: %w", where, err))
+			}
+			return finalWindowResult{}
+		}); r.code != "" {
+			return r
 		}
-		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
-		if err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract: %w", where, err))
-		}
-		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))
-		}
-		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
+		if r := step(validationStepAlignment, func(ctx context.Context) finalWindowResult {
+			if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
+				return bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))
+			}
+			if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads.pass()); err != nil {
+				return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
+			}
+			return finalWindowResult{}
+		}); r.code != "" {
+			return r
 		}
 		var r finalWindowResult
 		if runVMAF {
-			logPath := filepath.Join(dir, fmt.Sprintf("vmaf_%d.json", window.Index))
-			args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, vmafDecimation, threads)
-			if err != nil {
-				return bad("quality_vmaf_measurement_path_unavailable", err)
+			if failed := step(validationStepVMAF, func(ctx context.Context) finalWindowResult {
+				logPath := filepath.Join(dir, fmt.Sprintf("vmaf_%d.json", window.Index))
+				args, err := BuildVMAFModelArgs(candPath, refPath, logPath, *model, candidateVideoStreams[0].BitDepth, vmafDecimation, threads.pass())
+				if err != nil {
+					return bad("quality_vmaf_measurement_path_unavailable", err)
+				}
+				if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
+					return bad("quality_vmaf_measurement_path_unavailable", err)
+				}
+				data, err := readMetricLogFile(logPath)
+				if err != nil {
+					return bad("quality_vmaf_evidence_incomplete", err)
+				}
+				stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, vmafDecimation, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
+				if err != nil || stats.FramesTotal != quality.DecimatedFrameCount(len(refPTS), vmafDecimation) {
+					return bad("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
+				}
+				r.vmaf = &stats
+				return finalWindowResult{}
+			}); failed.code != "" {
+				return failed
 			}
-			if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
-				return bad("quality_vmaf_measurement_path_unavailable", err)
-			}
-			data, err := readMetricLogFile(logPath)
-			if err != nil {
-				return bad("quality_vmaf_evidence_incomplete", err)
-			}
-			stats, err := quality.ParseVMAF(data, MaxMetricLogSizeBytes, *model, window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, vmafDecimation, q.Quality.VMAF.WorstWindowSeconds, q.Quality.VMAF.FrameThreshold)
-			if err != nil || stats.FramesTotal != quality.DecimatedFrameCount(len(refPTS), vmafDecimation) {
-				return bad("quality_vmaf_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
-			}
-			r.vmaf = &stats
 		}
 		if runCAMBI {
-			stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, dir, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, candidateVideoStreams[0].BitDepth, caps.Quality.CAMBIOutput, threads)
-			if err != nil || stats.FramesTotal != len(refPTS) {
-				return bad("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
+			if failed := step(validationStepCAMBI, func(ctx context.Context) finalWindowResult {
+				stats, err := runCAMBIMetricSample(ctx, w.ffmpegPath, dir, candPath, refPath, 0, "final", window.Index, window.StartSeconds, sourceVideoStreams[0].FPS, candidateVideoStreams[0].BitDepth, caps.Quality.CAMBIOutput, threads.pass())
+				if err != nil || stats.FramesTotal != len(refPTS) {
+					return bad("quality_cambi_evidence_incomplete", fmt.Errorf("sample %d: %v", window.Index, err))
+				}
+				r.cambi = &stats
+				return finalWindowResult{}
+			}); failed.code != "" {
+				return failed
 			}
-			r.cambi = &stats
 		}
 		if runSSIM {
-			logPath := filepath.Join(dir, fmt.Sprintf("ssim_%d.log", window.Index))
-			output, err := runQualityCommand(ctx, w.ffmpegPath, BuildSSIMArgs(candPath, refPath, logPath))
-			if err != nil {
-				return bad("quality_ssim_evidence_incomplete", err)
+			if failed := step(validationStepSSIM, func(ctx context.Context) finalWindowResult {
+				logPath := filepath.Join(dir, fmt.Sprintf("ssim_%d.log", window.Index))
+				output, err := runQualityCommand(ctx, w.ffmpegPath, BuildSSIMArgs(candPath, refPath, logPath))
+				if err != nil {
+					return bad("quality_ssim_evidence_incomplete", err)
+				}
+				data, err := readMetricLogFile(logPath)
+				var score float64
+				if err == nil {
+					score, err = ParseSSIMStatsFile(data)
+				} else {
+					score, err = ParseSSIMStderr(string(output))
+				}
+				if err != nil {
+					return bad("quality_ssim_evidence_incomplete", err)
+				}
+				r.ssim = &score
+				return finalWindowResult{}
+			}); failed.code != "" {
+				return failed
 			}
-			data, err := readMetricLogFile(logPath)
-			var score float64
-			if err == nil {
-				score, err = ParseSSIMStatsFile(data)
-			} else {
-				score, err = ParseSSIMStderr(string(output))
-			}
-			if err != nil {
-				return bad("quality_ssim_evidence_incomplete", err)
-			}
-			r.ssim = &score
 		}
 		if runChroma && (pos < grid || q.GateFreshSamples) {
-			u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath, threads)
-			if err != nil {
-				return bad("quality_chroma_evidence_incomplete", fmt.Errorf("sample %d: %w", window.Index, err))
+			if failed := step(validationStepChroma, func(ctx context.Context) finalWindowResult {
+				u, v, err := windowChromaPSNR(ctx, w.ffmpegPath, candPath, refPath, threads.pass())
+				if err != nil {
+					return bad("quality_chroma_evidence_incomplete", fmt.Errorf("sample %d: %w", window.Index, err))
+				}
+				r.chroma = &[2]float64{u, v}
+				return finalWindowResult{}
+			}); failed.code != "" {
+				return failed
 			}
-			r.chroma = &[2]float64{u, v}
 		}
 		return r
 	}
@@ -591,30 +634,54 @@ func runQualityCommand(ctx context.Context, ffmpegPath string, args []string) ([
 	return output, nil
 }
 
+// probeSamplePTS is the presentation timestamp of every picture of a lossless
+// sample extract, in order. Extracts are FFV1, which is intra-only and never
+// reorders: each packet holds exactly one picture, in presentation order, with
+// that picture's timestamp. Reading the packets gives the timestamps decoding
+// would, without decoding a window of lossless frames.
 func probeSamplePTS(ctx context.Context, ffprobePath, samplePath string) ([]float64, error) {
-	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=best_effort_timestamp_time", "-of", "json", samplePath)
+	cmd := exec.CommandContext(ctx, ffprobePath, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name:packet=pts_time,dts_time", "-of", "json", samplePath)
 	output, err := cmd.Output()
 	chargeCPU(ctx, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe sample frame timestamps: %w", err)
+		return nil, fmt.Errorf("ffprobe sample packet timestamps: %w", err)
 	}
+	return parseSamplePacketPTS(output)
+}
+
+// parseSamplePacketPTS reads probeSamplePTS's ffprobe output. A packet without
+// a presentation timestamp falls back to its decode timestamp, which an
+// intra-only stream shares, as the decoder's best-effort timestamp would.
+func parseSamplePacketPTS(output []byte) ([]float64, error) {
 	if len(output) > 4*MaxMetricLogSizeBytes {
 		return nil, fmt.Errorf("sample frame timestamp evidence oversized")
 	}
 	var log struct {
-		Frames []struct {
-			PTS string `json:"best_effort_timestamp_time"`
-		} `json:"frames"`
+		Streams []struct {
+			Codec string `json:"codec_name"`
+		} `json:"streams"`
+		Packets []struct {
+			PTS string `json:"pts_time"`
+			DTS string `json:"dts_time"`
+		} `json:"packets"`
 	}
 	if err := json.Unmarshal(output, &log); err != nil {
 		return nil, err
 	}
-	if len(log.Frames) == 0 {
+	// Only an intra-only extract has one picture per packet, in order.
+	if len(log.Streams) != 1 || log.Streams[0].Codec != "ffv1" {
+		return nil, fmt.Errorf("sample is not a single FFV1 stream")
+	}
+	if len(log.Packets) == 0 {
 		return nil, fmt.Errorf("sample has no video frames")
 	}
-	pts := make([]float64, len(log.Frames))
-	for i, frame := range log.Frames {
-		v, err := strconv.ParseFloat(frame.PTS, 64)
+	pts := make([]float64, len(log.Packets))
+	for i, packet := range log.Packets {
+		stamp := packet.PTS
+		if _, err := strconv.ParseFloat(stamp, 64); err != nil {
+			stamp = packet.DTS
+		}
+		v, err := strconv.ParseFloat(stamp, 64)
 		if err != nil || !isFiniteQuality(v) {
 			return nil, fmt.Errorf("invalid sample frame timestamp at %d", i)
 		}
@@ -869,7 +936,7 @@ func (w *Worker) validateModeSourceQuality(ctx context.Context, source string, p
 		return nil
 	}
 	if _, err := quality.TemporalDecimationForStream(v.FPS, v.FieldOrder); err != nil || (plan.Compact == nil && mediainspect.IsHDRorDolbyVisionReport(&rep)) || (v.BitDepth != 8 && v.BitDepth != 10) || !sourceChromaAdmitted(plan, v.PixelFormat, v.BitDepth) {
-		return fmt.Errorf("quality_source_class_unsupported: native SDR 8/10-bit 4:2:0, 4:2:2 or 4:4:4 evidence at a measurable frame rate (up to %.0f FPS) required", quality.HFRMaxFPS)
+		return transcode.SourceClassUnsupportedError()
 	}
 	q := plan.QualityValidation
 	if q == nil || q.Quality.VMAF == nil || q.Quality.VMAF.Model == "" || (q.Metric != "vmaf" && q.Metric != "both" && q.Metric != "vmaf+ssim") {

@@ -199,3 +199,32 @@ func TestCoordinatorMeasurementPreservesPolicySkipOutputs(t *testing.T) {
 		t.Fatal("skipped policy lost phase measurement outputs")
 	}
 }
+
+// The worker's per-step final validation costs (validation_extract,
+// validation_vmaf, validation_cambi, …) reach the action's phase costs beside
+// the validation phase, with their wall time, the windows that ran them and
+// their CPU time.
+func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
+	cpu := func(n int64) *int64 { return &n }
+	ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
+	e := NewEngine(EngineDeps{Config: &config.Config{}})
+	e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{PhaseCosts: map[string]transcode.PhaseCost{
+		"validation":            {DurationMs: 240000, Attempts: 1, ActiveComputeMs: cpu(1900000)},
+		"validation_extract":    {DurationMs: 61000, Attempts: 7, ActiveComputeMs: cpu(300000)},
+		"validation_timestamps": {DurationMs: 900, Attempts: 7, ActiveComputeMs: cpu(700)},
+		"validation_alignment":  {DurationMs: 8000, Attempts: 7, ActiveComputeMs: cpu(30000)},
+		"validation_vmaf":       {DurationMs: 250000, Attempts: 7, ActiveComputeMs: cpu(900000)},
+		"validation_cambi":      {DurationMs: 260000, Attempts: 7, ActiveComputeMs: cpu(700000)},
+	}}})
+	raw, _ := json.Marshal(ec.State["phase_costs"])
+	var costs map[string]map[string]any
+	if err := json.Unmarshal(raw, &costs); err != nil {
+		t.Fatal(err)
+	}
+	for step, want := range map[string]float64{"worker_validation_extract": 300000, "worker_validation_timestamps": 700, "worker_validation_alignment": 30000, "worker_validation_vmaf": 900000, "worker_validation_cambi": 700000} {
+		c := costs[step]
+		if c["active_compute_ms"] != want || c["attempts"] != float64(7) || c["provenance"] != "worker_measured" {
+			t.Fatalf("%s: %v", step, c)
+		}
+	}
+}

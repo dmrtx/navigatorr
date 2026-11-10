@@ -270,28 +270,40 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 	if cost.Attempts <= 0 {
 		cost.Attempts = 1 // one phase run; a transfer that reconnected reports more
 	}
+	w.addPhaseCosts(jobDir, jobFile, job, map[string]transcode.PhaseCost{phase: cost})
+}
+
+// addPhaseCosts adds measured costs to the job's phase costs in one write: a
+// phase that already has a cost (an earlier attempt) accumulates. Each cost
+// carries its own duration and attempts.
+func (w *Worker) addPhaseCosts(jobDir, jobFile string, job *JobRecord, costs map[string]transcode.PhaseCost) {
+	if len(costs) == 0 {
+		return
+	}
 	shadow := *job
 	_, _ = w.persistOperationalProgress(jobDir, jobFile, &shadow, func(latest *JobRecord) {
 		if latest.PhaseCosts == nil {
 			latest.PhaseCosts = map[string]transcode.PhaseCost{}
 		}
-		previous := latest.PhaseCosts[phase]
-		cost.DurationMs += previous.DurationMs
-		cost.Attempts += previous.Attempts
-		add := func(a, b *int64) *int64 {
-			if a == nil || b == nil {
-				return nil
+		for phase, cost := range costs {
+			previous := latest.PhaseCosts[phase]
+			cost.DurationMs += previous.DurationMs
+			cost.Attempts += previous.Attempts
+			add := func(a, b *int64) *int64 {
+				if a == nil || b == nil {
+					return nil
+				}
+				return knownCount(*a + *b)
 			}
-			return knownCount(*a + *b)
+			if previous.Attempts > 0 {
+				cost.NASReadBytes = add(previous.NASReadBytes, cost.NASReadBytes)
+				cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
+				cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
+				cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
+				cost.ActiveComputeMs = add(previous.ActiveComputeMs, cost.ActiveComputeMs)
+			}
+			latest.PhaseCosts[phase] = cost
 		}
-		if previous.Attempts > 0 {
-			cost.NASReadBytes = add(previous.NASReadBytes, cost.NASReadBytes)
-			cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
-			cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
-			cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
-			cost.ActiveComputeMs = add(previous.ActiveComputeMs, cost.ActiveComputeMs)
-		}
-		latest.PhaseCosts[phase] = cost
 	})
 	job.PhaseCosts = shadow.PhaseCosts
 }

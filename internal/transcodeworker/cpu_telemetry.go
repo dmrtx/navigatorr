@@ -34,9 +34,13 @@ func withCPUMeter(ctx context.Context, m *cpuMeter) context.Context {
 // after Run/Output returned, whatever the error: a failed or cancelled child
 // still spent its CPU time.
 func chargeCPU(ctx context.Context, cmd *exec.Cmd) {
-	if m, ok := ctx.Value(cpuMeterKey{}).(*cpuMeter); ok && cmd != nil {
+	if cmd == nil {
+		return
+	}
+	if m, ok := ctx.Value(cpuMeterKey{}).(*cpuMeter); ok {
 		m.add(cmd.ProcessState)
 	}
+	chargeValidationStep(ctx, cmd.ProcessState)
 }
 
 // runCharged runs cmd and charges its CPU time to the meter on ctx.

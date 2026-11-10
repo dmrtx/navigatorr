@@ -871,6 +871,30 @@ func modeSourceReason(mode string, rep *mediainspect.DetailedReport, hfrSupporte
 	return ""
 }
 
+// modeSourceChromaError is the worker's pixel-format admission
+// (transcode.SourceChromaAdmitted) on a resolved mode plan, so a source the
+// worker would refuse as quality_source_class_unsupported fails here, with the
+// same message, before a worker stages it. modeSourceReason has already
+// skipped the other classes that check covers (depth, HDR, frame rate). An
+// audio-only plan copies the picture and is not measured, as on the worker.
+// mayPinMain10 is an early check, which skips the Size Main10 switch because
+// it needs the worker's capabilities; that switch pins p010le, so such a
+// source is refused only when no plan could admit it.
+func modeSourceChromaError(plan *transcode.Plan, rep *mediainspect.DetailedReport, mayPinMain10 bool) error {
+	if plan == nil || plan.Mode == "" || transcode.IsSizeAudioOnlyPlan(plan) {
+		return nil
+	}
+	video := rep.MainVideo()
+	if len(video) != 1 {
+		return nil
+	}
+	v := video[0]
+	if transcode.SourceChromaAdmitted(plan, v.PixelFormat, v.BitDepth) || mayPinMain10 && transcode.MeasurableSourceChroma(v.PixelFormat, v.BitDepth) {
+		return nil
+	}
+	return transcode.SourceClassUnsupportedError()
+}
+
 // saveSpaceHDRMaxHeight is the limit Save space gives an HDR or Dolby Vision
 // source: 4K stays 4K, a smaller file is not upscaled, and anything wider or
 // taller than 3840x2160 is scaled to fit.

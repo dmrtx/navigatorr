@@ -83,7 +83,7 @@ func TestTelemetryKeepsMeasuredCPUWhenTimestampsOwnDuration(t *testing.T) {
 func TestQualityHelpersChargeTheContextMeter(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "tool")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho '{\"frames\":[{\"best_effort_timestamp_time\":\"0.0\"}]}'\n"), 0o755); err != nil {
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho '{\"streams\":[{\"codec_name\":\"ffv1\"}],\"packets\":[{\"pts_time\":\"0.0\"}]}'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	meter := &cpuMeter{}
