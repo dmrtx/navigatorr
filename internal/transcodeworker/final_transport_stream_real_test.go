@@ -201,3 +201,93 @@ func TestRealWindowSeekClockRestartedLower(t *testing.T) {
 		t.Fatalf("extract holds %d pictures (%v), want the window's 25", len(pts), err)
 	}
 }
+
+// The same program stream, measured the way the final gate does: every
+// window of the source is cut from the first picture and compared with the
+// encode's. The source's own times are no timeline (the second recording
+// runs 60 s to 90 s, before the first one's 100 s to 130 s), the encode's is
+// continuous. A window inside the first recording but more than 20.5 s
+// after its start found no picture through a seek (the demuxer finds the
+// restarted part), and a window in the second recording named a time the
+// source never has: both came back empty, and the gate refused a good
+// encode after the whole encode. Each window now holds the pictures the
+// encode holds at the same time.
+func TestRealFinalWindowsClockRestartedLower(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	ffprobe, err := exec.LookPath("ffprobe")
+	if err != nil {
+		t.Skip("ffprobe unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	var joined []byte
+	for _, part := range []struct{ name, src, offset string }{{"a.mpg", "testsrc", "100"}, {"b.mpg", "testsrc2", "60"}} {
+		path := filepath.Join(dir, part.name)
+		if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", part.src+"=d=30:s=320x240:r=25",
+			"-c:v", "mpeg2video", "-g", "12", "-bf", "2", "-output_ts_offset", part.offset, "-f", "vob", path).CombinedOutput(); err != nil {
+			t.Fatalf("fixture: %v %s", err, out)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined = append(joined, data...)
+	}
+	source := filepath.Join(dir, "joined.mpg")
+	if err := os.WriteFile(source, joined, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source, "-map", "0:v:0", "-c:v", "ffv1", candidate).CombinedOutput(); err != nil {
+		t.Fatalf("candidate: %v %s", err, out)
+	}
+	packets, err := scanFilePackets(ctx, ffprobe, source, packetScanRequest{video: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := &packets.video
+	if !scan.Discontinuous {
+		t.Fatal("fixture: the clock did not restart")
+	}
+	sourceFirst, err := probeFirstFrameTime(ctx, ffprobe, source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateFirst, err := probeFirstFrameTime(ctx, ffprobe, candidate, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Inside the first recording (5 s, 15 s, 25 s, 28 s), at the restart
+	// (29.5 s) and inside the second (35 s, 45 s, 58 s).
+	for _, start := range []float64{5, 15, 25, 28, 29.5, 35, 45, 58} {
+		from, to := sampleFrameBounds(start, 1, 25)
+		ref := filepath.Join(dir, "ref.mkv")
+		cand := filepath.Join(dir, "cand.mkv")
+		args, keyed := sourceExtractionArgs(scan, source, ref, 0, sourceFirst, from, to)
+		output, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin"}, args...)...).CombinedOutput()
+		if err != nil || emptyExtract(output) || !keyed {
+			t.Fatalf("window at %.1f s: source extract keyed %v, empty %v: %v", start, keyed, emptyExtract(output), err)
+		}
+		if out, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin", "-v", "error"}, BuildReferenceExtractionArgs(candidate, cand, 0, candidateFirst, from, to)...)...).CombinedOutput(); err != nil {
+			t.Fatalf("window at %.1f s: candidate extract: %v %s", start, err, out)
+		}
+		refPTS, err := probeSamplePTS(ctx, ffprobe, ref)
+		if err != nil {
+			t.Fatalf("window at %.1f s: source extract: %v", start, err)
+		}
+		candPTS, err := probeSamplePTS(ctx, ffprobe, cand)
+		if err != nil {
+			t.Fatalf("window at %.1f s: %v", start, err)
+		}
+		if err := verifySampleAlignment(refPTS, candPTS, 25); err != nil {
+			t.Fatalf("window at %.1f s: %v", start, err)
+		}
+		if err := verifyContentAlignment(ctx, ffmpeg, cand, ref, 1); err != nil {
+			t.Fatalf("window at %.1f s: the source's pictures are not the encode's: %v", start, err)
+		}
+	}
+}

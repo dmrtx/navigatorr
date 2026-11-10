@@ -92,10 +92,15 @@ keyframe the packet scan found at or before the window; a source the scan
 kept no keyframe times for seeks 20 seconds before the window (the extract
 keeps the window's pictures by their times, so an earlier seek only decodes
 more). A seek that would land before zero or within half a second of the
-video's first or earliest packet is not made, even on a clock that
-restarted: the extract decodes from the file's start (an AVI cannot seek to
-or before its first packet, and an MPEG program stream whose clock restarted
-lower than it began seeks into the restarted part). A source extract that fails is tried once more, as is the
+video's first or earliest packet is not made: the extract decodes from the
+file's start (an AVI cannot seek to or before its first packet). A source
+whose clock restarted (a broadcast recording, or two joined) is no timeline
+to cut a window by: a time after the restart is one the source never has, or
+has twice, and a seek lands in the wrong part. Its extract decodes from the
+file's start without keeping the source's times, so ffmpeg joins the parts as
+the encode did, and the window is counted from the first picture; a decode
+that long costs more time per window, but a good encode is never refused for
+it. A source extract that fails is tried once more, as is the
 output's, and a source extract that comes back empty is a failed extract too
 when its seek was not aimed at a keyframe or the scan read a picture inside
 the window;

@@ -71,6 +71,43 @@ func buildExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameS
 		}
 		selection = fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", from, to)
 	}
+	return extractionTail(args, sourcePath, refPath, videoIndex, selection)
+}
+
+// sourceExtractionArgs is the source's extract of a final window, and
+// whether its seek reaches the keyframe the pictures are decoded from
+// (sourceVideoScan.windowSeek). A source whose clock restarted is decoded
+// from the file's start instead (buildRestartedExtractionArgs). Without a
+// scan the seek is the window's start, as for a container with a keyframe
+// index.
+func sourceExtractionArgs(scan *sourceVideoScan, sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) ([]string, bool) {
+	if scan != nil && scan.Discontinuous {
+		return buildRestartedExtractionArgs(sourcePath, refPath, videoIndex, fromSec, toSec), true
+	}
+	seek, keyed := firstFrameSec+fromSec, true
+	if scan != nil {
+		seek, keyed = scan.windowSeek(firstFrameSec + fromSec)
+	}
+	return buildExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec, seek), keyed
+}
+
+// buildRestartedExtractionArgs is the extract of a source whose clock
+// restarted (sourceVideoScan.Discontinuous). Its own timestamps are no
+// timeline: a window at firstFrame+from names a time the later part never
+// has, or one both parts have. Without -copyts ffmpeg moves each restart
+// onto the end of the picture before it, which is the timeline the encode
+// has, and setpts counts from the first picture the filter receives. The
+// decode starts at the file's start, because no seek aims at a time that
+// the file reaches twice, or never.
+func buildRestartedExtractionArgs(sourcePath, refPath string, videoIndex int, fromSec, toSec float64) []string {
+	selection := fmt.Sprintf("settb=AVTB,setpts=PTS-STARTPTS,trim=end=%.6f", toSec)
+	if fromSec > 0 {
+		selection = fmt.Sprintf("settb=AVTB,setpts=PTS-STARTPTS,trim=start=%.6f:end=%.6f", fromSec, toSec)
+	}
+	return extractionTail([]string{"-y", "-nostats"}, sourcePath, refPath, videoIndex, selection)
+}
+
+func extractionTail(args []string, sourcePath, refPath string, videoIndex int, selection string) []string {
 	return append(args,
 		"-i", sourcePath,
 		"-map", fmt.Sprintf("0:%d", videoIndex),
