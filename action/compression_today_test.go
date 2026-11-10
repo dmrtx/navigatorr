@@ -24,7 +24,7 @@ func TestCompressionPolicyTodayDescribesEachGoal(t *testing.T) {
 		t.Fatalf("goals %v", today.Goals)
 	}
 	size := byGoal["size"]
-	for _, want := range []string{"Apple media engine at quality 60, then 65, then 70", "x265 (medium preset) at CRF 22, then 19, then 16"} {
+	for _, want := range []string{"Apple media engine at quality 60, then 65, then 70", "x265 (medium preset) at CRF 24, then 22, then 19"} {
 		if !strings.Contains(size.Video, want) {
 			t.Fatalf("size video %q lacks %q", size.Video, want)
 		}

@@ -240,6 +240,9 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// A submit without a source digest is hashed while the worker stages the
 	// file, and the digest comes back in the job status.
 	caps.LearnSourceDigest = true
+	// Final validation may let the fresh windows decide the verdict with the
+	// grid (gate_fresh_samples); it measures nothing new.
+	caps.FreshSampleGate = true
 	// The audio-only goal (policy v7) is an audio-only plan at the bed levels,
 	// with or without a track selection.
 	caps.SizeAudioOnlyGoal = caps.SizeAudioOnly && caps.SizeAudioObjectBed && caps.TrackSelection
@@ -255,7 +258,7 @@ func probeWorkerCapabilitiesWithScratch(ctx context.Context, ffmpegPath, scratch
 	// quality-first verification, preset-ordered quality fallback).
 	caps.AutomaticSearchRules = true
 	// ...verified on the whole final validation grid, until a candidate passes
-	// or none is eligible, with fresh windows reported apart in final validation.
+	// or none is eligible, with fresh windows measured in final validation.
 	caps.AutomaticGridVerification = true
 	// ...walking the quality fallback one rung at a time per encoder, refining
 	// between a passing and a failing ladder rung, within the longer candidate

@@ -201,6 +201,10 @@ const (
 	// errCompactKeepHDRWorker is the failure of a keep-HDR compact plan on a
 	// worker without the compact_keep_hdr capability.
 	errCompactKeepHDRWorker = "worker does not run Shrink keeping HDR; upgrade the worker"
+	// errFreshSampleGateWorker is the failure of a plan whose fresh final
+	// validation windows decide the verdict on a worker without the
+	// fresh_sample_gate capability.
+	errFreshSampleGateWorker = "worker does not judge the fresh final validation windows; upgrade the worker"
 )
 
 // workerRunsPolicyVersion reports, as an error, a plan version newer workers

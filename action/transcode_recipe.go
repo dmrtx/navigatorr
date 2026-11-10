@@ -56,7 +56,7 @@ const (
 // better), VideoToolbox values constant quality (higher is better).
 var (
 	recipeSizeVTValues   = []int{60, 65, 70}
-	recipeSizeX265Values = []int{22, 19, 16}
+	recipeSizeX265Values = []int{24, 22, 19}
 	recipeQualityValues  = []int{20, 17, 14}
 	recipePreserveValues = []int{24, 21, 18}
 	recipeCompactValues  = []int{18, 16, 14}
@@ -365,7 +365,7 @@ func (e *Engine) qualityLadderPlan(ec *ExecutionContext, snapshot *ModePolicySna
 		sp.MaxCandidateBytes = 0
 		p.SizePolicy = &sp
 	}
-	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *request.Quality, BenchmarkRequestDigest: digest}
+	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, GateFreshSamples: freshWindowsGated(ec, freshWindows), Quality: *request.Quality, BenchmarkRequestDigest: digest}
 	p.PlanDigest = ""
 	d, err := transcode.DigestPlan(&p)
 	if err != nil {
@@ -601,7 +601,7 @@ const (
 // qualityLadderShortfall is how many VMAF points the rung's worst failed check
 // fell short of its limit. It reports false when a failed check is not scored
 // in VMAF points or has no score to go on: nothing then says how close it was.
-func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.FinalWindowScore) (float64, bool) {
+func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.FinalWindowScore, gated bool) (float64, bool) {
 	if final == nil || final.Limits == nil || len(final.FailedChecks) == 0 {
 		return 0, false
 	}
@@ -618,7 +618,7 @@ func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.Fina
 			now, limit = m.VMAFWorstWindow, l.VMAFWorstWindow
 		case "quality_vmaf_sample_below_minimum":
 			// Each scored window is held to the mean's limit.
-			now, limit = lowestGridWindowMean(windows), l.VMAFMean
+			now, limit = lowestVerdictWindowMean(windows, gated), l.VMAFMean
 		default:
 			return 0, false
 		}
@@ -630,12 +630,13 @@ func qualityLadderShortfall(final *FinalQualitySummary, windows []transcode.Fina
 	return worst, true
 }
 
-// lowestGridWindowMean is the lowest mean of the windows that decide the
-// verdict, nil without any.
-func lowestGridWindowMean(windows []transcode.FinalWindowScore) *float64 {
+// lowestVerdictWindowMean is the lowest mean of the windows that decide the
+// verdict, nil without any: the grid's, and the fresh windows' too when the
+// plan gated them (see verdictWindow).
+func lowestVerdictWindowMean(windows []transcode.FinalWindowScore, gated bool) *float64 {
 	var lowest *float64
 	for _, w := range windows {
-		if w.Role == "grid" && (lowest == nil || w.VMAFMean < *lowest) {
+		if verdictWindow(w, gated) && (lowest == nil || w.VMAFMean < *lowest) {
 			mean := w.VMAFMean
 			lowest = &mean
 		}
@@ -643,15 +644,27 @@ func lowestGridWindowMean(windows []transcode.FinalWindowScore) *float64 {
 	return lowest
 }
 
+// verdictWindow reports whether a final window decided the verdict: a grid
+// window always, a fresh one only on a plan that gated fresh windows.
+func verdictWindow(w transcode.FinalWindowScore, gated bool) bool {
+	return w.Role == "grid" || gated && w.Role == transcode.WindowRoleFresh
+}
+
+// planGatesFreshSamples reports whether a plan's final validation judged its
+// fresh windows with the grid (transcode.QualityValidationPlan.GateFreshSamples).
+func planGatesFreshSamples(p *transcode.Plan) bool {
+	return p != nil && p.QualityValidation != nil && p.QualityValidation.GateFreshSamples
+}
+
 // qualityLadderWithInsertedRung is the record's values with the setting a
 // narrow miss on the first rung adds after it, and false when none fits: the
 // ladder is not a size goal's x265 or is past its first rung, the miss is not
 // narrow, or the next frozen rung is as close as the shortfall calls for.
-func qualityLadderWithInsertedRung(mode string, rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore) ([]int, bool) {
+func qualityLadderWithInsertedRung(mode string, rec *QualityLadderRecord, final *FinalQualitySummary, windows []transcode.FinalWindowScore, gated bool) ([]int, bool) {
 	if !ladderAddsRungs(mode, rec.VideoCodec) || rec.Rung != 0 || len(rec.Values) < 2 {
 		return nil, false
 	}
-	shortfall, ok := qualityLadderShortfall(final, windows)
+	shortfall, ok := qualityLadderShortfall(final, windows, gated)
 	if !ok {
 		return nil, false
 	}
@@ -757,7 +770,7 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 			}
 		}
 	}
-	values, added := qualityLadderWithInsertedRung(snapshot.Mode, rec, tried.Final, st.QualityEvidence.Windows)
+	values, added := qualityLadderWithInsertedRung(snapshot.Mode, rec, tried.Final, st.QualityEvidence.Windows, planGatesFreshSamples(plan))
 	if !added {
 		values = rec.Values
 	}
@@ -884,18 +897,19 @@ func passQualityLadder(ec *ExecutionContext, candidateBytes int64) *QualityLadde
 		scores = fmt.Sprintf(" (VMAF %.1f, p5 %.1f)", *rec.Final.Measured.VMAFMean, *rec.Final.Measured.VMAFP5)
 	}
 	rec.Outcome = QualityLadderPassed
-	rec.Message = fmt.Sprintf("%s passed this goal's quality limits%s%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scoredWindowsWords(evidence.Windows), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
+	rec.Message = fmt.Sprintf("%s passed this goal's quality limits%s%s at %s (step %d of %d).", recipeRungName(rec.VideoCodec, rec.Values[rec.Rung]), scoredWindowsWords(evidence.Windows, planGatesFreshSamples(getPlan(ec.State["plan"]))), scores, formatBudgetBytes(candidateBytes), rec.Rung+1, len(rec.Values))
 	ec.State[qualityLadderKey] = rec
 	return rec
 }
 
 // scoredWindowsWords says what the verdict was measured on: the whole file is
-// encoded, but only the grid windows are scored and decide it ("on 5 windows,
-// 50 seconds in all"). Fresh windows only report and are not counted.
-func scoredWindowsWords(windows []transcode.FinalWindowScore) string {
+// encoded, but only the windows that decide it are scored ("on 5 windows, 50
+// seconds in all"): the grid, and the fresh windows of a gated plan. Fresh
+// windows of an ungated plan only report and are not counted.
+func scoredWindowsWords(windows []transcode.FinalWindowScore, gated bool) string {
 	n, seconds := 0, 0.0
 	for _, w := range windows {
-		if w.Role == "grid" {
+		if verdictWindow(w, gated) {
 			n, seconds = n+1, seconds+w.DurationSeconds
 		}
 	}

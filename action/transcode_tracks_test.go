@@ -190,7 +190,7 @@ func TestSnapshotsBeforeTrackSelectionKeepTheirDigestAndEveryTrack(t *testing.T)
 		budget *SizeBudgetPolicy
 		digest string
 	}{
-		"size":        {"size", nil, "sha256:4fd41a1c54c6224707e0639f01c01acc0d14673f8ff2bc260b6e3f2ad9ec0192"},
+		"size":        {"size", nil, "sha256:0528c26b86a62a2b24af6617033cbeedb24d5fc47ccc3aeb5c22b47a3afe41d9"},
 		"compact":     {"compact", nil, "sha256:c5393ccefe357b233249ce39261bf292a7fe093b9e1014f7110122733d5b35db"},
 		"quality":     {"quality", nil, "sha256:5e39369ea4c3f2f0469a74e1f5b2e909495cad724da3e92e872dff37516adede"},
 		"size budget": {"size", budget, "sha256:eb9335cee51de282049f16d1c5f6601319625474ed83ff90ca456f66306ac869"},

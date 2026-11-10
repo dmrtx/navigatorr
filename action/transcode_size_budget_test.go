@@ -131,8 +131,9 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	// The frozen budget, its encode settings, floor and audio levels are part of
 	// the identity. The audio levels changed it on purpose: a new goal freezes
 	// them, so its digest is not the one a budget frozen before them carried.
-	// The bed pair changed it again.
-	const pinned = "sha256:cdf7804030fe8930be7c85c9d7768762bc231f00930acd302070a6079fbe3a40"
+	// The bed pair changed it again, and so did gating the fresh final windows
+	// (from sha256:cdf78040...3a40, which budgets frozen before the gate keep).
+	const pinned = "sha256:06e0be4804d98e175a9af1ea2b7c0b587632d1146811dfdc9a004bf0ec1304ed"
 	if with.Digest != pinned {
 		t.Fatalf("size budget policy digest changed: %s", with.Digest)
 	}
@@ -146,6 +147,7 @@ func TestSizeBudgetPolicyDigest(t *testing.T) {
 	before := *budget
 	before.Audio = nil
 	legacy, err := legacyModePolicyWithBudget("size", false, 0, nil, false, &before)
+	legacy = preFreshGatePolicy(legacy)
 	if err != nil || legacy.Digest != pinnedBeforeLevels || legacy.workerVersion() != transcode.ModePolicyV3 || legacy.Profile.Audio.Mode != transcode.AudioModeCompactLossless {
 		t.Fatalf("a budget frozen before the audio levels changed: %s worker %s (%v)", legacy.Digest, legacy.workerVersion(), err)
 	}

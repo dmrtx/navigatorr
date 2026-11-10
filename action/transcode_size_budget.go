@@ -694,7 +694,7 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 		sp.MaxCandidateBytes = rec.BudgetBytes
 		p.SizePolicy = &sp
 	}
-	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, Quality: *floor, BenchmarkRequestDigest: digest}
+	p.QualityValidation = &transcode.QualityValidationPlan{Metric: request.Metric, Samples: samples, FreshSamples: freshWindows, GateFreshSamples: freshWindowsGated(ec, freshWindows), Quality: *floor, BenchmarkRequestDigest: digest}
 	p.PlanDigest = ""
 	d, err := transcode.DigestPlan(&p)
 	if err != nil {

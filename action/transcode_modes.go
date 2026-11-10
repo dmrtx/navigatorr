@@ -154,7 +154,9 @@ type ModeSizePolicy struct {
 const sizeEdgeSelectionMarginVMAF = 1.5
 
 // sizeFinalFreshWindows is how many windows final validation adds that the
-// search never measured. They are reported beside the grid and do not gate it.
+// search never measured. They are reported beside the grid, and a policy
+// frozen with GateFinalFreshWindows (every size goal frozen since) holds them
+// to the same limits; earlier snapshots keep them report-only.
 const sizeFinalFreshWindows = 2
 
 // sizeFallbackQualityValues are the quality fallback rungs, tried most
@@ -186,7 +188,7 @@ func sizeModeV3Policy(allowSlow bool) *ModeSizePolicy {
 		presets = append(presets, "slow")
 	}
 	return &ModeSizePolicy{EightBitMain10: true, FallbackQualityValues: slices.Clone(sizeFallbackQualityValues), FallbackSavingsValues: slices.Clone(sizeSavingsFallbackValues), FinalWindowSeconds: 10, FinalWindowEverySeconds: 600, FinalWindowsMinimum: 5, FinalWindowsMaximum: 12, AudioOnlyFallback: true, LosslessObjectAudioToAAC: true, SearchExtension: &transcode.SearchExtension{MaxSeconds: sizeSearchMaxSeconds, SteadySeconds: sizeSearchSteadySeconds, VerifySeconds: sizeSearchVerifySeconds},
-		AutomaticSearch: &transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
+		AutomaticSearch: &transcode.AutomaticSearchRules{HoldoutWindows: transcode.HoldoutWindowsFinalGrid, VerifyUntilExhausted: true, FinalFreshWindows: sizeFinalFreshWindows, GateFinalFreshWindows: true, QualityFallbackPresets: presets, QualityWalk: true, RefinementQualityValues: slices.Clone(sizeRefinementQualityValues), DeferBanding: true}}
 }
 
 // ModeCompactPolicy freezes the output shape of compact mode: SDR BT.709 no

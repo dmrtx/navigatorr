@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,7 +98,8 @@ func TestRealFinalValidationParallelMatchesSequential(t *testing.T) {
 
 // Final validation reports every window's scores, and measures fresh windows
 // (never seen by the search) beside the grid without letting them change the
-// verdict or the pooled statistics the limits are checked on.
+// verdict or the pooled statistics the limits are checked on, unless the plan
+// gates them.
 func TestRealFinalValidationReportsWindowsAndFreshWindowsDoNotGate(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -174,9 +176,25 @@ func TestRealFinalValidationReportsWindowsAndFreshWindowsDoNotGate(t *testing.T)
 	if roles["grid"] != 4 || roles["fresh"] != 2 {
 		t.Fatalf("roles %v", roles)
 	}
-	// A fresh window that cannot be measured is dropped, not a failure.
-	broken := run("broken", plan([]transcode.BenchmarkSampleWindow{{Index: 4, StartSeconds: 3.9, DurationSeconds: 0.5}}))
+	// A fresh window that cannot be measured is reported, not a failure.
+	brokenWindow := []transcode.BenchmarkSampleWindow{{Index: 4, StartSeconds: 3.9, DurationSeconds: 0.5}}
+	broken := run("broken", plan(brokenWindow))
 	if !reflect.DeepEqual(base.VMAF, broken.VMAF) || broken.FreshVMAF != nil || len(broken.Windows) != 4 {
 		t.Fatalf("an unmeasurable fresh window changed the result: %+v", broken)
+	}
+	if len(broken.FreshUnmeasured) != 1 || broken.FreshUnmeasured[0].StartSeconds != 3.9 || broken.FreshUnmeasured[0].ReasonCode != "quality_final_sample_misaligned" {
+		t.Fatalf("unmeasurable fresh window not reported: %+v", broken.FreshUnmeasured)
+	}
+	// A plan that gates fresh windows fails on it like a grid window.
+	gated := plan(brokenWindow)
+	gated.QualityValidation.GateFreshSamples = true
+	jobDir := filepath.Join(dir, "gated")
+	if err := os.MkdirAll(jobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state-gated"), AllowedRoots: []string{dir}, FFmpeg: ffmpeg, FFprobe: ffprobe, MaxParallelJobs: 1})
+	e, err := w.validateFinalPerceptual(ctx, jobDir, source, candidate, gated, "sha256:candidate", 1)
+	if err == nil || e == nil || e.Verdict == "pass" || !slices.Contains(e.ReasonCodes, "quality_final_sample_misaligned") {
+		t.Fatalf("gated plan passed an unmeasurable fresh window: %+v %v", e, err)
 	}
 }

@@ -295,6 +295,9 @@ func buildFinalValidationRequest(ec *ExecutionContext, cleanPath string, rep *me
 	if err := workerRunsPolicyVersion(caps, plan.ModePolicyVersion); err != nil {
 		return nil, fmt.Errorf("%w before encoding", err)
 	}
+	if frozenGateFreshWindows(ec) && !caps.FreshSampleGate {
+		return nil, fmt.Errorf("%s before encoding", errFreshSampleGateWorker)
+	}
 	return req, nil
 }
 
@@ -341,14 +344,37 @@ func sizeFinalWindowsWithFresh(ec *ExecutionContext, duration float64, fresh int
 }
 
 // frozenFinalFreshWindows is how many fresh windows the frozen size policy asks
-// its final gate to measure beside the grid, outside its verdict.
+// its final gate to measure beside the grid.
 func frozenFinalFreshWindows(ec *ExecutionContext) int {
-	p, err := freezeModePolicy(ec)
-	if err != nil || p == nil || p.Size == nil {
-		return 0
-	}
-	if r := p.Size.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+	if r := frozenFinalGridRules(ec); r != nil {
 		return r.FinalFreshWindows
 	}
 	return 0
+}
+
+// frozenGateFreshWindows reports whether the frozen size policy makes its fresh
+// windows decide the final verdict with the grid. Snapshots frozen before the
+// rule existed have none and keep their fresh windows report-only.
+func frozenGateFreshWindows(ec *ExecutionContext) bool {
+	r := frozenFinalGridRules(ec)
+	return r != nil && r.GateFinalFreshWindows && r.FinalFreshWindows > 0
+}
+
+// frozenFinalGridRules is the frozen size policy's search rules when they
+// verify on the final validation grid, which is where fresh windows come from.
+func frozenFinalGridRules(ec *ExecutionContext) *transcode.AutomaticSearchRules {
+	p, err := freezeModePolicy(ec)
+	if err != nil || p == nil || p.Size == nil {
+		return nil
+	}
+	if r := p.Size.AutomaticSearch; r != nil && r.HoldoutWindows == transcode.HoldoutWindowsFinalGrid {
+		return r
+	}
+	return nil
+}
+
+// freshWindowsGated is whether a plan with these fresh windows gates them:
+// only a policy frozen with the rule, and only when there are fresh windows.
+func freshWindowsGated(ec *ExecutionContext, fresh []transcode.BenchmarkSampleWindow) bool {
+	return len(fresh) > 0 && frozenGateFreshWindows(ec)
 }

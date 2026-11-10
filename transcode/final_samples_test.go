@@ -1,6 +1,10 @@
 package transcode
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestPlanFinalValidationWindows(t *testing.T) {
 	for _, tc := range []struct {
@@ -87,5 +91,28 @@ func TestFreshValidationWindowsAvoidTheGrid(t *testing.T) {
 	}
 	if FreshValidationWindows(grid, 3700, 10, 0) != nil || FreshValidationWindows(nil, 3700, 10, 2) != nil {
 		t.Fatal("fresh windows without a grid or a count")
+	}
+}
+
+// Gating fresh windows needs fresh windows, and leaves a policy frozen
+// without it serialising (and so digesting) exactly as before.
+func TestGateFinalFreshWindowsRule(t *testing.T) {
+	r := &AutomaticSearchRules{HoldoutWindows: HoldoutWindowsFinalGrid, FinalFreshWindows: 2}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := json.Marshal(r); err != nil || strings.Contains(string(data), "gate_final_fresh_windows") {
+		t.Fatalf("ungated rules serialise the gate: %s %v", data, err)
+	}
+	r.GateFinalFreshWindows = true
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if c := r.Clone(); !c.GateFinalFreshWindows {
+		t.Fatal("clone dropped the gate")
+	}
+	r.FinalFreshWindows = 0
+	if err := r.Validate(); err == nil {
+		t.Fatal("gate without fresh windows accepted")
 	}
 }
