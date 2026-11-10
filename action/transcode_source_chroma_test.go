@@ -57,6 +57,8 @@ func TestModeSourceChromaErrorMatchesTheWorker(t *testing.T) {
 		// staged copy itself.
 		{"no pixel format", pinned, sizeGoal, "h264", "", 8, false},
 		{"an unknown pixel format", open, sizeGoal, "h264", "unknown", 8, false},
+		{"pixel format none", open, sizeGoal, "h264", "none", 8, false},
+		{"pixel format n/a", pinned, sizeGoal, "h264", "N/A", 8, false},
 		{"no bit depth", pinned, sizeGoal, "h264", "gbrp", 0, false},
 		{"no bit depth on 4:2:0", pinned, sizeGoal, "h264", "yuv420p", 0, false},
 		{"a format that does not match the depth", pinned, nil, "h264", "yuv420p10le", 8, true},

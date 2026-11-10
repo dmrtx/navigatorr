@@ -915,7 +915,7 @@ func modeSourceChromaError(plan *transcode.Plan, snapshot *ModePolicySnapshot, r
 	if codec := strings.ToLower(strings.TrimSpace(v.Codec)); plan.Mode == "x265_preserve" && (codec == "hevc" || codec == "h265") {
 		return nil
 	}
-	if pixFmt := strings.ToLower(strings.TrimSpace(v.PixelFormat)); pixFmt == "" || pixFmt == "unknown" || pixFmt == "none" || v.BitDepth <= 0 {
+	if pixFmt := strings.ToLower(strings.TrimSpace(v.PixelFormat)); pixFmt == "" || pixFmt == "unknown" || pixFmt == "none" || pixFmt == "n/a" || v.BitDepth <= 0 {
 		return nil
 	}
 	if transcode.MeasurableSourceChroma(v.PixelFormat, v.BitDepth) {

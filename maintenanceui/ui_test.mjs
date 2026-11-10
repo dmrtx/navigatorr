@@ -5230,18 +5230,36 @@ test("phase cost detail shows measured worker CPU time and keeps an older worker
 
 test("phase cost detail lists final validation's steps under their phase", () => {
   const h = harness();
-  h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{worker_validation:{duration_ms:240000,attempts:1,active_compute_ms:1900000,steps:{vmaf:{duration_ms:250000,attempts:1,runs:7,active_compute_ms:900000},cambi:{duration_ms:260000,attempts:1,runs:7,active_compute_ms:700000}}}}});');
+  h.run('renderPhaseCosts($("detail-summary"),{phase_costs:{worker_validation:{duration_ms:240000,attempts:1,active_compute_ms:1900000,steps:{vmaf:{duration_ms:250000,attempts:1,runs:7,active_compute_ms:900000},cambi:{duration_ms:260000,attempts:1,runs:7,active_compute_ms:700000},chroma:{duration_ms:30000,attempts:1,runs:1},ssim:{duration_ms:40000,attempts:2},alignment:{duration_ms:8000,runs:0}}}}});');
   const rendered = JSON.stringify(h.elements.get("detail-summary").children);
   assert.match(rendered, /Worker · validation · vmaf/);
   assert.match(rendered, /Worker · validation · cambi/);
   assert.match(rendered, /900000 ms/);
-  // A step's wall time adds up overlapping windows: it never reads as elapsed
-  // time, and its invocations name their unit. The phase row is unchanged.
-  assert.match(rendered, /250000 ms added up over 7 windows/);
+  // A step's wall time over several windows adds up overlapping runs: it
+  // never reads as elapsed time, and its invocations are window runs (they
+  // add up across retried validations), not the window count. The phase row
+  // is unchanged.
+  assert.match(rendered, /250000 ms added up over 7 window runs/);
   assert.doesNotMatch(rendered, /"250000 ms"/);
-  assert.match(rendered, /"7 windows"/);
+  assert.match(rendered, /"7 window runs"/);
+  assert.doesNotMatch(rendered, /\d windows/);
   assert.match(rendered, /"240000 ms"/);
   assert.match(rendered, /"1"/);
+  // One run is plain wall time.
+  assert.match(rendered, /"30000 ms"/);
+  assert.match(rendered, /"1 window run"/);
+  assert.doesNotMatch(rendered, /30000 ms added up/);
+  // Without runs, the row falls back to its attempts (or Unknown) and plain
+  // wall time.
+  const rows = [...rendered.matchAll(/Worker · validation · (\w+)[^]*?(?=Worker · validation|$)/g)].map((m) => m[0]);
+  const ssim = rows.find((r) => r.startsWith("Worker · validation · ssim"));
+  assert.match(ssim, /"40000 ms"/);
+  assert.match(ssim, /"2"/);
+  assert.doesNotMatch(ssim, /window|added up/);
+  const alignment = rows.find((r) => r.startsWith("Worker · validation · alignment"));
+  assert.match(alignment, /"8000 ms"/);
+  assert.doesNotMatch(alignment, /window|added up/);
+  assert.match(alignment, /Unknown/);
 });
 
 test("an old worker-busy failure reads plainly and hides the worker URL", () => {

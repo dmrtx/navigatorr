@@ -215,7 +215,7 @@ func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
 		"vmaf":       {DurationMs: 250000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(500000)},
 		"cambi":      {DurationMs: 260000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(700000)},
 		"ssim":       {DurationMs: 40000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(90000)},
-		"chroma":     {DurationMs: 30000, Attempts: 1, Runs: 2, ActiveComputeMs: cpu(60000)},
+		"chroma":     {DurationMs: 30000, Attempts: 1, Runs: 1, ActiveComputeMs: cpu(60000)},
 	}
 	mirror := func(withSteps bool) map[string]map[string]any {
 		validation := transcode.PhaseCost{DurationMs: 240000, Attempts: 1, ActiveComputeMs: cpu(1900000)}
@@ -267,6 +267,14 @@ func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
 	for name, want := range steps {
 		c, _ := mirrored[name].(map[string]any)
 		if c["active_compute_ms"] != float64(*want.ActiveComputeMs) || c["attempts"] != float64(1) || c["runs"] != float64(want.Runs) || c["duration_ms"] != float64(want.DurationMs) || c["provenance"] != "worker_measured" {
+			t.Fatalf("%s: %v", name, c)
+		}
+		// Only a step that ran more than once adds up overlapping runs.
+		scope := "step_window_wall_sum; runs overlap"
+		if want.Runs <= 1 {
+			scope = "step_wall; inside its phase"
+		}
+		if c["timing_scope"] != scope {
 			t.Fatalf("%s: %v", name, c)
 		}
 	}

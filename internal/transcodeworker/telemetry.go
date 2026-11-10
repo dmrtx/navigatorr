@@ -315,15 +315,18 @@ func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost
 	return cost
 }
 
-// oneAttemptSteps is a copy of steps counted as one attempt each, for a phase
-// whose telemetry counts one attempt; the job's own record is not changed.
+// oneAttemptSteps is a copy of steps (every field) counted as one attempt
+// each, for a phase whose telemetry counts one attempt; the job's own record
+// is not changed. A step that recorded no attempt keeps none.
 func oneAttemptSteps(steps map[string]transcode.PhaseCost) map[string]transcode.PhaseCost {
 	if len(steps) == 0 {
 		return nil
 	}
 	out := make(map[string]transcode.PhaseCost, len(steps))
 	for name, step := range steps {
-		step.Attempts = 1
+		if step.Attempts > 0 {
+			step.Attempts = 1
+		}
 		out[name] = step
 	}
 	return out

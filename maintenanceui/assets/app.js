@@ -8007,9 +8007,10 @@ function renderPhaseCosts(host, job) {
   table.append(header);
   const labels = {coordinator_inventory:"Coordinator · Inventory",coordinator_preflight:"Coordinator · Preflight",coordinator_source_hash:"Coordinator · Source hash",coordinator_probe:"Coordinator · Probe",coordinator_promotion:"Coordinator · Promotion"};
   // A phase's steps (final validation's extract, VMAF, CAMBI...) are part of
-  // its cost: each follows its phase as a row of its own. A step's windows
-  // run side by side, so its wall time is theirs added up, never elapsed
-  // time, and its invocations are counted in windows.
+  // its cost: each follows its phase as a row of its own. A step that ran in
+  // more than one window adds up their wall times, which overlap, so it says
+  // so; its runs add up across retried validations, so they are window runs,
+  // not the window count. A step without runs shows its attempts.
   const costRow = (label, cost, wall, invocations) => {
     const row = node("tr");
     row.append(node("td", label), node("td", wall), node("td", Number.isFinite(cost.active_compute_ms) ? `${cost.active_compute_ms} ms` : "Unknown"), node("td", invocations), node("td", cost.nas_read_bytes == null ? "Unknown" : bytes(cost.nas_read_bytes)), node("td", cost.nas_written_bytes == null ? "Unknown" : bytes(cost.nas_written_bytes)), node("td", `${cost.cache_hits == null ? "Unknown" : cost.cache_hits} / ${cost.cache_misses == null ? "Unknown" : cost.cache_misses}`));
@@ -8019,9 +8020,10 @@ function renderPhaseCosts(host, job) {
     const label = labels[phase] || phase.replace(/^worker_benchmark_/, "Worker samples · ").replace(/^worker_/, "Worker · ").replaceAll("_", " ");
     costRow(label, cost, Number.isFinite(cost.duration_ms) ? `${cost.duration_ms} ms` : "Unknown", Number.isFinite(cost.attempts) ? String(cost.attempts) : "Unknown");
     for (const [step, stepCost] of Object.entries(cost.steps || {})) {
-      const windows = Number.isFinite(stepCost.runs) ? `${stepCost.runs} ${stepCost.runs === 1 ? "window" : "windows"}` : "";
-      const wall = Number.isFinite(stepCost.duration_ms) ? `${stepCost.duration_ms} ms added up${windows ? ` over ${windows}` : ""}` : "Unknown";
-      costRow(`${label} · ${step.replaceAll("_", " ")}`, stepCost, wall, windows || "Unknown");
+      const runs = Number.isFinite(stepCost.runs) && stepCost.runs > 0 ? `${stepCost.runs} ${stepCost.runs === 1 ? "window run" : "window runs"}` : "";
+      const ms = Number.isFinite(stepCost.duration_ms) ? `${stepCost.duration_ms} ms` : "";
+      const wall = !ms ? "Unknown" : stepCost.runs > 1 ? `${ms} added up over ${runs}` : ms;
+      costRow(`${label} · ${step.replaceAll("_", " ")}`, stepCost, wall, runs || (Number.isFinite(stepCost.attempts) ? String(stepCost.attempts) : "Unknown"));
     }
   }
   detail.append(table); host.append(detail);

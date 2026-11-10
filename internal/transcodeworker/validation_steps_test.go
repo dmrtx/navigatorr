@@ -292,3 +292,29 @@ func TestValidationStepsDoNotChangeTheJobsPhaseTotals(t *testing.T) {
 		t.Fatal("the in-memory job missed the stored costs")
 	}
 }
+
+// Telemetry counts a step as one attempt without dropping any of its fields,
+// and a step that recorded no attempt is not promoted to one. The job's own
+// record keeps its attempts.
+func TestOneAttemptStepsKeepsEveryField(t *testing.T) {
+	cpu := int64(900)
+	hits, misses := int64(3), int64(1)
+	steps := map[string]transcode.PhaseCost{
+		validationStepVMAF:   {DurationMs: 500, Attempts: 2, Runs: 14, CacheHits: &hits, CacheMisses: &misses, ActiveComputeMs: &cpu},
+		validationStepChroma: {DurationMs: 40, Runs: 1},
+	}
+	got := oneAttemptSteps(steps)
+	vmaf := got[validationStepVMAF]
+	if vmaf.Attempts != 1 || vmaf.DurationMs != 500 || vmaf.Runs != 14 || vmaf.CacheHits != &hits || vmaf.CacheMisses != &misses || vmaf.ActiveComputeMs != &cpu {
+		t.Fatalf("vmaf %+v", vmaf)
+	}
+	if chroma := got[validationStepChroma]; chroma.Attempts != 0 || chroma.DurationMs != 40 || chroma.Runs != 1 {
+		t.Fatalf("chroma %+v", chroma)
+	}
+	if steps[validationStepVMAF].Attempts != 2 {
+		t.Fatal("the job's own steps changed")
+	}
+	if oneAttemptSteps(nil) != nil {
+		t.Fatal("no steps became some")
+	}
+}
