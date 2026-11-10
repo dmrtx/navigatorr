@@ -128,11 +128,30 @@ func (s *sourceVideoScan) noPicturesFrom(at float64) bool {
 	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at > s.Last+0.001
 }
 
-// picturesFrom reports whether the scan read a picture after at, a time on
-// the source's own timeline, as surely as noPicturesFrom reads none: every
-// packet timed, and a clock that never restarted.
-func (s *sourceVideoScan) picturesFrom(at float64) bool {
-	return s != nil && s.timed && s.untimed == 0 && !s.Discontinuous && at < s.Last-0.001
+// picturesIn reports whether the scan read a picture a decoder shows inside
+// [from, to), times on the source's own timeline, as surely as
+// noPicturesFrom reads none: every packet timed, and a clock that never
+// restarted. It looks for a packet timed inside the window, between the
+// first and the last picture a decoder shows and not marked to be
+// discarded: a video with a gap longer than the window (a still slide, a
+// frozen screen capture) has pictures after the window but none in it, and
+// an extract of it is rightly empty. Without the packets' times (more than
+// the scan keeps) it can only tell pictures after from: that is all it
+// claims then.
+func (s *sourceVideoScan) picturesIn(from, to float64) bool {
+	if s == nil || !s.timed || s.untimed > 0 || s.Discontinuous {
+		return false
+	}
+	if s.timesOverflow || len(s.times) == 0 {
+		return from < s.Last-0.001
+	}
+	lo, hi := max(from, s.First-0.001), min(to, s.Last+0.001)
+	for _, t := range s.times {
+		if at := s.timesBase + float64(t.at)/1e4; !t.discard && at >= lo && at < hi {
+			return true
+		}
+	}
+	return false
 }
 
 // errorBytePattern finds the byte offset a demuxer error names ("at pos
@@ -408,7 +427,7 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 		scan.durations = map[int64]int{}
 	}
 	scan.durations[int64(math.Round(dur*1e6))]++
-	scan.addTime(pts, dur, key)
+	scan.addTime(pts, dur, key, discard)
 	if scan.anyTime && pts < scan.latest-timestampResetSeconds {
 		scan.Discontinuous = true
 	}
@@ -438,10 +457,11 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 
 // videoTime is one timed packet of the programme video: its time from the
 // scan's first, in tenths of a millisecond, the length the container states
-// for it in microseconds (0 for none) and whether it is a keyframe.
+// for it in microseconds (0 for none), whether it is a keyframe and whether
+// the container marks it to be discarded.
 type videoTime struct {
-	at, dur int32
-	key     bool
+	at, dur      int32
+	key, discard bool
 }
 
 // maxTimedPackets bounds the packets a scan keeps the times of: twelve bytes
@@ -449,7 +469,7 @@ type videoTime struct {
 const maxTimedPackets = 1 << 21
 
 // addTime keeps a timed packet's time (sourceVideoScan.times).
-func (s *sourceVideoScan) addTime(pts, dur float64, key bool) {
+func (s *sourceVideoScan) addTime(pts, dur float64, key, discard bool) {
 	if !s.sawTime || pts < s.earliest {
 		s.earliest, s.sawTime = pts, true
 	}
@@ -464,7 +484,7 @@ func (s *sourceVideoScan) addTime(pts, dur float64, key bool) {
 		s.times, s.timesOverflow = nil, true
 		return
 	}
-	s.times = append(s.times, videoTime{at: int32(at), dur: int32(min(math.Round(dur*1e6), math.MaxInt32)), key: key})
+	s.times = append(s.times, videoTime{at: int32(at), dur: int32(min(math.Round(dur*1e6), math.MaxInt32)), key: key, discard: discard})
 }
 
 // closePackets marks the timed packets that may be fields: those the
@@ -753,11 +773,15 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 // that restarted, no keyframe before at) it goes windowSeekFallback before
 // at, and is not known to reach a keyframe. The extract trims the window by
 // its times, so a seek earlier than needed keeps the same pictures and only
-// decodes more. A seek that would land at or near the video's first packet
-// is not made (math.Inf(-1)): the extract decodes from the file's start,
-// which reaches the first keyframe (an AVI cannot seek before its first
-// packet, and its extract would then start wherever its probe stopped
-// reading).
+// decodes more. A seek that would land before zero, or at or near the
+// earliest packet time the scan read, is not made (math.Inf(-1)): the
+// extract decodes from the file's start, which reaches the first keyframe
+// (an AVI cannot seek before its first packet, and its extract would then
+// start wherever its probe stopped reading). That holds for a clock that
+// restarted too: its earliest time is still the earliest any packet has, and
+// a seek before it aims at no packet. Decoding from the start is keyed: the
+// decoder shows every picture from the first keyframe on, and a picture
+// before it is shown by no decoder (picturesIn reads none there).
 func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
 	if indexedContainer(s.format) {
 		return at, true
@@ -774,8 +798,7 @@ func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
 			seek, keyed = keyAt-fieldSampleSeekBack, true
 		}
 	}
-	// A clock that restarted has no first time to measure from.
-	if s.sawTime && !s.Discontinuous && seek < s.earliest+windowSeekStartMargin {
+	if seek < 0 || s.sawTime && seek < s.earliest+windowSeekStartMargin {
 		return math.Inf(-1), true
 	}
 	return seek, keyed
@@ -826,8 +849,19 @@ func decodeFieldWindow(ctx context.Context, ffprobePath, path string, streamInde
 	if !sawKey || packets == 0 || near == 0 {
 		return false, false, nil
 	}
+	return fieldWindowVerdict(packets, pictures, near), true, nil
+}
+
+// fieldWindowVerdict reads one decoded sample: packets read and pictures
+// shown between its bounds, near of those packets close to another. A sample
+// of fields shows about one picture for every two close packets, so at least
+// a quarter of them must show none. The close packets must be at least a
+// quarter of the sample too: a frame-coded sample with one or two close
+// packets (a timing glitch) and one picture a decoder dropped is not fields,
+// and taking it for them would halve what a conversion must keep.
+func fieldWindowVerdict(packets, pictures, near int) bool {
 	missing := packets - pictures
-	return missing > 0 && 4*missing >= near, true, nil
+	return missing > 0 && 4*missing >= near && 4*near >= packets
 }
 
 // countFieldWindow reads decodeFieldWindow's ffprobe output: whether the

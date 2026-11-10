@@ -72,7 +72,7 @@ encoding otherwise. A goal frozen before the rule keeps its digest and its
 report-only fresh windows: a score miss there is only reported, but a fresh
 window whose output pictures do not line up with a good source extract
 (`quality_final_sample_misaligned`) fails the rung under any goal, since it
-means content is missing, and so does one whose output extract fails
+means content is missing, and so does one whose output extract fails twice
 (`quality_final_candidate_extract_failed`: the output cannot be read there);
 other unmeasurable report-only windows are listed as unmeasured rather than
 dropped. A window with no extent (a negative start, no length) fails under
@@ -80,9 +80,10 @@ any goal. A
 fresh window the source has no pictures for (past the source's end, starting
 after the video's last picture as the packet scan before the encode read it
 when every packet carries a time,
-or a source extract that comes back empty where the scan cannot say the video
-has pictures: windows are cut from the first decoded picture, and one past
-the video's last says nothing about the output) is listed as unmeasured under
+or a source extract that comes back empty where the scan read no picture
+inside the window, such as a still a variable-rate video holds for longer
+than the window: windows are cut from the first decoded picture, and one with
+no source picture says nothing about the output) is listed as unmeasured under
 every goal, gated or not, and a gated verdict is judged on the windows that
 were measured. A source with no keyframe index (MPEG transport and program
 streams, AVI) seeks to a packet near the time asked, and a decoder shows
@@ -90,11 +91,13 @@ nothing until the next keyframe, so its extract seeks a second before the
 keyframe the packet scan found at or before the window; a source the scan
 kept no keyframe times for seeks 20 seconds before the window (the extract
 keeps the window's pictures by their times, so an earlier seek only decodes
-more). A seek that would land within half a second of the video's first
-packet is not made: the extract decodes from the file's start (an AVI cannot
-seek to or before its first packet). A source extract that fails is tried
-once more, and one that comes back empty is a failed extract too when its
-seek was not aimed at a keyframe or the scan read pictures in the window;
+more). A seek that would land before zero or within half a second of the
+video's earliest packet is not made, even on a clock that restarted: the
+extract decodes from the file's start (an AVI cannot seek to or before its
+first packet). A source extract that fails is tried once more, as is the
+output's, and a source extract that comes back empty is a failed extract too
+when its seek was not aimed at a keyframe or the scan read a picture inside
+the window;
 then a gated goal fails the rung (`quality_final_sample_extract_failed`)
 rather than judge without it, and a report-only one lists the window as
 unmeasured. Other goals, and
@@ -140,7 +143,9 @@ when:
   a higher frame rate looks like (60 frames a second after a 30 or 24 frame
   head), so up to five places among them are decoded before the encode, a
   second each from the keyframe before it (at most 1,500 packets before the
-  place): a sample of fields shows about half as many pictures as packets.
+  place): a sample of fields shows about half as many pictures as packets,
+  and only a sample in which those packets are at least a quarter can show
+  fields (one dropped picture by a pair of close packets is not fields).
   When every sample read shows a picture per packet the source is counted
   exactly; a sample of fields, or no sample read, keeps the range. A sample
   ffprobe fails to read is a sample not read: it keeps the range and does not
@@ -161,7 +166,10 @@ when:
   .sup, has one packet per display set in Matroska: at least one per END
   segment carried alone, timed and kept, and at most one per source packet,
   since a set whose END shares a packet with its other segments, or a track
-  cut before its last END, adds one); a converted subtitle has a
+  cut before its last END, adds one; a track whose only END segments alone
+  come before its first other packet, a Matroska track ffmpeg merged from a
+  stream cut just before an END, is counted packet for packet); a converted
+  subtitle has a
   different number of lines than the conversion wrote when it was run on the
   source before the encode (a mov_text track's empty gap samples, merged ASS
   events), whatever the formats; a kept subtitle whose source track has lines

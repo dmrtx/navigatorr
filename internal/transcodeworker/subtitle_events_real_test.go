@@ -122,8 +122,13 @@ func pgsDisplaySet(pts uint32, number uint16, show bool) []byte {
 // comes out with that set's segments as one packet more, and one whose first
 // sets each sit in one packet (remuxed from Matroska) and the rest in a
 // packet per segment has as many packets as sets: both pass, the END
-// segments carried alone bounding the copy from below. A copy that lost
-// display sets is refused either way.
+// segments carried alone bounding the copy from below. A stream cut just
+// before an END segment starts with that END alone: in a transport stream it
+// is one display set more, and a Matroska copy of it by ffmpeg keeps it as a
+// packet of its own before the merged sets, a track still counted packet for
+// packet. A Matroska file with a packet per segment (as an older ffmpeg, with
+// no merge, wrote one) is counted by its sets. A copy that lost display sets
+// is refused either way.
 func TestRealCopiedPGSDisplaySets(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -154,6 +159,8 @@ func TestRealCopiedPGSDisplaySets(t *testing.T) {
 	supPath := write("lines.sup", full)
 	cutPath := write("cut.sup", full[:len(full)-13]) // the last set's END segment (a 13-byte header) is gone
 	headPath, tailPath := write("head.sup", lines(0, 5)), write("tail.sup", lines(5, 10))
+	firstSet := len(pgsDisplaySet(90000, 0, true))
+	endFirstPath := write("end-first.sup", full[firstSet-13:]) // cut just before the first set's END segment
 	run := func(args ...string) {
 		t.Helper()
 		if out, err := exec.Command(ffmpeg, append([]string{"-nostdin", "-v", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
@@ -182,6 +189,10 @@ func TestRealCopiedPGSDisplaySets(t *testing.T) {
 		joined = append(joined, data...)
 	}
 	mixed := write("mixed.m2ts", joined)
+	endFirst, endFirstMKV, split := filepath.Join(dir, "end-first.m2ts"), filepath.Join(dir, "end-first.mkv"), filepath.Join(dir, "split.mkv")
+	m2ts(endFirstPath, endFirst)
+	run("-i", endFirst, "-map", "0", "-c", "copy", endFirstMKV)
+	run("-f", "lavfi", "-i", "testsrc=d=22:s=64x48:r=10", "-i", supPath, "-map", "0", "-map", "1", "-c:v", "mpeg2video", "-c:s", "copy", "-fflags", "-autobsf", split)
 	scan := func(path string) map[int]subtitlePackets {
 		t.Helper()
 		got, err := scanFilePackets(context.Background(), ffprobe, path, packetScanRequest{video: 0, subtitles: map[int]bool{1: true}})
@@ -195,7 +206,7 @@ func TestRealCopiedPGSDisplaySets(t *testing.T) {
 	for _, tc := range []struct {
 		source string
 		least  int64 // the fewest packets a copy may have
-	}{{source, 20}, {mkv, 20}, {cut, 19}, {mixed, 10}} {
+	}{{source, 20}, {mkv, 20}, {cut, 19}, {mixed, 10}, {endFirst, 20}, {endFirstMKV, 20}, {split, 20}} {
 		name := filepath.Base(tc.source)
 		candidate := filepath.Join(dir, "candidate-"+name+".mkv")
 		// The worker's argument shape for a copied track.

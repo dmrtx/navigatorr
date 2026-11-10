@@ -143,13 +143,14 @@ func TestVideoTimesOverflowStaysLoose(t *testing.T) {
 // decoded from when the container has no keyframe index, and to the
 // window's start when it has one. With no keyframe times to aim at, the seek
 // goes windowSeekFallback before the start and is said not to reach a
-// keyframe. A seek at or near the video's first packet is not made: the
-// extract decodes from the file's start, which reaches the first keyframe.
+// keyframe. A seek before zero, or at or near the video's earliest packet,
+// is not made, whatever the clock did: the extract decodes from the file's
+// start, which reaches the first keyframe.
 func TestWindowSeek(t *testing.T) {
 	ts := func() *sourceVideoScan {
 		s := &sourceVideoScan{format: "mpegts"}
 		for i, at := range times(300, 1.5, 0.1) { // a keyframe every 50 packets: 1.5, 6.5, 11.5, ...
-			s.addTime(at, 0.1, i%50 == 0)
+			s.addTime(at, 0.1, i%50 == 0, false)
 		}
 		return s
 	}
@@ -169,13 +170,17 @@ func TestWindowSeek(t *testing.T) {
 		{"no keyframe before it", func() *sourceVideoScan {
 			s := &sourceVideoScan{format: "mpegts"}
 			for i, at := range times(300, 1.5, 0.1) { // a cut stream whose first keyframe is at 26.5
-				s.addTime(at, 0.1, i == 250)
+				s.addTime(at, 0.1, i == 250, false)
 			}
 			return s
 		}, 25.95, 5.95, false},
 		{"times overflowed", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 29.95, 9.95, false},
 		{"times overflowed, near the start", func() *sourceVideoScan { s := ts(); s.times, s.timesOverflow = nil, true; return s }, 9.95, start, true},
-		{"clock restarted", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 9.95, -10.05, false},
+		// A restarted clock has no keyframe times to aim at, but a seek
+		// before every packet's time, or before zero, is still not made.
+		{"clock restarted", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 9.95, start, true},
+		{"clock restarted, late", func() *sourceVideoScan { s := ts(); s.Discontinuous = true; return s }, 29.95, 9.95, false},
+		{"no timed packet", func() *sourceVideoScan { return &sourceVideoScan{format: "avi"} }, 9.95, start, true},
 	}
 	for _, tc := range cases {
 		seek, keyed := tc.scan().windowSeek(tc.at)
@@ -214,5 +219,28 @@ func TestCountFieldWindowDecodeTimes(t *testing.T) {
 	}
 	if _, _, _, ok := countFieldWindow("frame|best_effort_timestamp_time=N/A\n", 10, 10, 10.5); ok {
 		t.Fatal("a picture shown at no time was read")
+	}
+}
+
+// A decoded sample is fields when about half its close packets show no
+// picture, and only when close packets are a real share of it: a 24-frame
+// second with a pair of close packets (a timing glitch) and one picture a
+// decoder dropped is frame-coded, and counted exactly.
+func TestFieldWindowVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		packets, pictures, near int
+		fields                  bool
+	}{
+		{"fields", 60, 30, 60, true},
+		{"fields from mid-sample", 48, 36, 24, true},
+		{"frames", 60, 60, 60, false},
+		{"one dropped picture by two close packets", 24, 23, 2, false},
+		{"one dropped picture by one close packet", 24, 23, 1, false},
+		{"few close packets, half dropped", 24, 22, 4, false},
+	} {
+		if got := fieldWindowVerdict(tc.packets, tc.pictures, tc.near); got != tc.fields {
+			t.Errorf("%s: fields %v, want %v", tc.name, got, tc.fields)
+		}
 	}
 }

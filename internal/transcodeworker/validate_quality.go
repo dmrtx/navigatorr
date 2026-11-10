@@ -234,8 +234,8 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		// the window's start, as for a container with a keyframe index). One
 		// in which ffmpeg encodes no picture is a window past the source's
 		// video, unless the seek could not reach a keyframe (a decoder shows
-		// nothing until one) or the scan read pictures there: that extract
-		// failed. Any other failure (a read error, a killed process, an
+		// nothing until one) or the scan read a picture inside the window
+		// (sourceVideoScan.picturesIn): that extract failed. Any other failure (a read error, a killed process, an
 		// extract ffprobe cannot read) is retried once and then fails the
 		// window: it is not a window without pictures, and a gate must not
 		// pass on windows it never measured. A source extract that failed
@@ -256,8 +256,8 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 				switch {
 				case !keyed:
 					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
-				case scan.picturesFrom(sourceFirstFrame + from):
-					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures up to %.3fs after its first", where, scan.Last-sourceFirstFrame))
+				case scan.picturesIn(sourceFirstFrame+from, sourceFirstFrame+to):
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures inside the window", where))
 				}
 				return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))
 			}
@@ -275,13 +275,22 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 			candArgs = withReferenceChain(candArgs, compactCandidateChain)
 		}
 		// The candidate is the encode's own file: one that cannot be read
-		// there is a bad candidate, not a window left unmeasured.
-		if _, err := runQualityCommand(ctx, w.ffmpegPath, candArgs); err != nil {
-			return bad("quality_final_candidate_extract_failed", fmt.Errorf("%s, candidate extract: %w", where, err))
-		}
-		candPTS, err := probeSamplePTS(ctx, w.ffprobePath, candPath)
-		if err != nil {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract: %w", where, err))
+		// there is a bad candidate, not a window left unmeasured. Like the
+		// source's, its extract is retried once first: one failed read (a
+		// killed process, a busy disk) says nothing about the file.
+		var candPTS []float64
+		for attempt := 1; ; attempt++ {
+			_, err := runQualityCommand(ctx, w.ffmpegPath, candArgs)
+			code := "quality_final_candidate_extract_failed"
+			if err == nil {
+				if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err == nil {
+					break
+				}
+				code = "quality_final_sample_misaligned"
+			}
+			if attempt == 2 || ctx.Err() != nil {
+				return bad(code, fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt, err))
+			}
 		}
 		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
 			return bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))

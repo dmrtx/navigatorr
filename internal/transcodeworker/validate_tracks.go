@@ -261,12 +261,15 @@ func (s sourceVideoScan) headFrame() float64 {
 // many lines a conversion of the track writes (counted when it is converted,
 // see countSubtitleEvents). ends is how many packets are pgsEndSize bytes
 // long: in a PGS track, the END segments that close its display sets when
-// each segment is a packet of its own (see pgsDisplaySets).
+// each segment is a packet of its own (see pgsDisplaySets). leadEnds is how
+// many of them come before the track's first other timed, kept packet
+// (sawOther).
 type subtitlePackets struct {
 	packets, discarded, untimed int64
 	events                      int64
 	counted                     bool
-	ends                        int64
+	ends, leadEnds              int64
+	sawOther                    bool
 }
 
 // pgsEndSize is the size of a PGS END segment, the last of every display
@@ -284,6 +287,11 @@ func (c *subtitlePackets) add(fields map[string]string) {
 		c.untimed++
 	case fields["size"] == pgsEndSize:
 		c.ends++
+		if !c.sawOther {
+			c.leadEnds++
+		}
+	default:
+		c.sawOther = true
 	}
 }
 
@@ -578,12 +586,17 @@ func subtitleEvents(plan *transcode.Plan, src, cand []SourceStream, srcPackets, 
 // shares a packet with its other segments is a packet of its own, and a
 // track cut before its last END leaves that set's segments as one more
 // packet. Each packet of the source makes one packet of the copy at most. A
-// source that already carries display sets (Matroska) has no packet the size
-// of an END segment alone, and is counted by its packets.
+// source that already carries display sets (Matroska as the spec and
+// ffmpeg's merge write it) is counted by its packets: each is a set, and its
+// copy keeps them one to one. Such a track has an END segment alone only
+// before its first other packet, where a cut began with one (a merge has
+// nothing to join it to): the track is taken for one with a packet per
+// segment only when an END segment stands alone after it (an older ffmpeg's
+// Matroska copy of a Blu-ray track is one too).
 func pgsDisplaySets(codec string, x subtitlePackets) (int64, bool) {
 	switch strings.ToLower(codec) {
 	case "hdmv_pgs_subtitle", "pgs":
-		return x.ends, x.ends > 0
+		return x.ends, x.ends > x.leadEnds
 	}
 	return 0, false
 }
