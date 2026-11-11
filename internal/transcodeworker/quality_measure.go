@@ -74,21 +74,45 @@ func buildExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameS
 	return extractionTail(args, sourcePath, refPath, videoIndex, selection)
 }
 
-// sourceExtractionArgs is the source's extract of a final window, and
+// sourceExtraction is one way to cut a final window from the source, and
 // whether its seek reaches the keyframe the pictures are decoded from
-// (sourceVideoScan.windowSeek). A source whose clock restarted is decoded
-// from the file's start instead (buildRestartedExtractionArgs). Without a
-// scan the seek is the window's start, as for a container with a keyframe
-// index.
-func sourceExtractionArgs(scan *sourceVideoScan, sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) ([]string, bool) {
+// (sourceVideoScan.windowSeek).
+type sourceExtraction struct {
+	args  []string
+	keyed bool
+}
+
+// sourceExtractions are the source's extracts of a final window, the one to
+// try first and then what to fall back on if the first does not measure. A
+// source whose clock restarted has no timeline to seek by. Where its container
+// can be read from the middle (byteWindow) the first extract starts at the
+// keyframe before the window by its byte offset, on the clock of the part
+// holding the window: the decode is a few seconds of pictures, where
+// decoding from the file's start (the second extract, and the only one
+// otherwise, buildRestartedExtractionArgs) reaches the window after all the
+// pictures before it. Without a scan the seek is the window's start, as for a
+// container with a keyframe index.
+func sourceExtractions(scan *sourceVideoScan, sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) []sourceExtraction {
 	if scan != nil && scan.Discontinuous {
-		return buildRestartedExtractionArgs(sourcePath, refPath, videoIndex, fromSec, toSec), true
+		slow := sourceExtraction{buildRestartedExtractionArgs(sourcePath, refPath, videoIndex, fromSec, toSec), true}
+		if skip, lo, hi, ok := scan.byteWindow(firstFrameSec, fromSec, toSec); ok && fromSec > 0 {
+			return []sourceExtraction{{buildByteSeekExtractionArgs(sourcePath, refPath, videoIndex, skip, lo, hi), true}, slow}
+		}
+		return []sourceExtraction{slow}
 	}
 	seek, keyed := firstFrameSec+fromSec, true
 	if scan != nil {
 		seek, keyed = scan.windowSeek(firstFrameSec + fromSec)
 	}
-	return buildExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec, seek), keyed
+	return []sourceExtraction{{buildExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec, seek), keyed}}
+}
+
+// buildByteSeekExtractionArgs is buildExtractionArgs for a window on the
+// clock of one part of a restarted video (lo to hi), reading the file from
+// skip bytes in, the keyframe before the window.
+func buildByteSeekExtractionArgs(sourcePath, refPath string, videoIndex int, skip int64, lo, hi float64) []string {
+	args := []string{"-y", "-nostats", "-copyts", "-skip_initial_bytes", strconv.FormatInt(skip, 10)}
+	return extractionTail(args, sourcePath, refPath, videoIndex, fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", lo, hi))
 }
 
 // buildRestartedExtractionArgs is the extract of a source whose clock

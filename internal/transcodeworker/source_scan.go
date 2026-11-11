@@ -44,6 +44,18 @@ type sourceVideoScan struct {
 	Discontinuous bool
 	latest        float64
 	anyTime       bool
+	// segments are the stretches of the video between the restarts of its
+	// clock (the open one is seg, once segOpen), each from its
+	// earliest packet time to the latest end of a packet: their lengths
+	// add up to the video's real length (restartedSeconds). keys are the
+	// keyframes with a byte position in the file (byteWindow). Both are
+	// bounded, and overflow turns a lookup off.
+	segments     []videoSegment
+	seg          videoSegment
+	segOpen      bool
+	segOverflow  bool
+	keys         []segmentKey
+	keysOverflow bool
 	// LeadingNonKey counts the packets read before the first keyframe: a
 	// decoder has nothing to show them with. Discarded counts the packets the
 	// container marks to be dropped (an edit list that starts the video
@@ -95,6 +107,45 @@ type sourceVideoScan struct {
 	DemuxErrors    int
 	FirstError     string
 	FirstErrorByte int64
+}
+
+// videoSegment is one stretch of the video between restarts of its clock:
+// its earliest packet time, the latest end of a packet (a packet with no
+// stated length ends where it begins), its latest packet time and how many
+// packets it holds.
+type videoSegment struct {
+	min, max, maxPTS float64
+	n                int
+	// durSum is the sum of the packets' stated lengths, and durN how many
+	// state one.
+	durSum float64
+	durN   int
+}
+
+// span is the stretch's length: the packets' stated lengths added up when
+// every one states its own (a packet whose time the container leaves out
+// still lasts its length, which the last time seen does not count), which is
+// where ffmpeg puts the part that follows. A video that states none ends its
+// last picture one frame after its time, the frame being the stretch's
+// average.
+func (g videoSegment) span() float64 {
+	if g.durN == g.n && g.durSum > 0 {
+		return g.durSum
+	}
+	end := g.max
+	if g.n > 1 && g.max <= g.maxPTS {
+		end = g.maxPTS + (g.maxPTS-g.min)/float64(g.n-1)
+	}
+	return end - g.min
+}
+
+// segmentKey is a keyframe of the video: its time on its segment's clock,
+// the byte offset of its packet and the segment (index into the closed
+// segments, then the open one) it lies in.
+type segmentKey struct {
+	pts float64
+	pos int64
+	seg int32
 }
 
 // headPacket is one of the first packets of the programme video.
@@ -336,7 +387,7 @@ func scanFilePackets(ctx context.Context, ffprobePath, path string, req packetSc
 		// The video alone: the other streams' packets are not printed.
 		args = append(args, "-select_streams", strconv.Itoa(req.video))
 	}
-	args = append(args, "-show_entries", "packet=stream_index,pts_time,dts_time,duration_time,size,flags:format=format_name", "-of", "compact", path)
+	args = append(args, "-show_entries", "packet=stream_index,pts_time,dts_time,duration_time,size,pos,flags:format=format_name", "-of", "compact", path)
 	cmd := exec.CommandContext(ctx, ffprobePath, args...)
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := runCharged(ctx, cmd)
@@ -386,7 +437,8 @@ func scanFilePackets(ctx context.Context, ffprobePath, path string, req packetSc
 // addVideoPacket adds one programme video packet to the scan.
 func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 	var pts, dts, dur float64
-	hasPTS, hasDTS := false, false
+	var pos int64
+	hasPTS, hasDTS, hasPos := false, false, false
 	for name, value := range fields {
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
@@ -399,6 +451,10 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 			dts, hasDTS = v, true
 		case "duration_time":
 			dur = max(v, 0)
+		case "pos":
+			if v >= 0 && v < math.MaxInt64/2 {
+				pos, hasPos = int64(v), true
+			}
 		}
 	}
 	if !hasPTS && hasDTS {
@@ -435,6 +491,7 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 	}
 	scan.durations[int64(math.Round(dur*1e6))]++
 	scan.addTime(pts, dur, key, discard)
+	scan.addSegment(pts, dur, key && !discard, pos, hasPos)
 	if scan.anyTime && pts < scan.latest-timestampResetSeconds {
 		scan.Discontinuous = true
 	}
@@ -495,6 +552,113 @@ func (s *sourceVideoScan) addTime(pts, dur float64, key, discard bool) {
 		return
 	}
 	s.times = append(s.times, videoTime{at: int32(at), dur: int32(min(math.Round(dur*1e6), math.MaxInt32)), key: key, discard: discard})
+}
+
+func newVideoSegment(pts, dur float64) videoSegment {
+	g := videoSegment{min: pts, max: pts + dur, maxPTS: pts, n: 1}
+	if dur > 0 {
+		g.durSum, g.durN = dur, 1
+	}
+	return g
+}
+
+// maxSegments and maxSegmentKeys bound what a scan keeps of the restarts of
+// the clock and of the keyframes' byte offsets: a keyframe every half second
+// for nine hours.
+const (
+	maxSegments    = 1 << 12
+	maxSegmentKeys = 1 << 16
+)
+
+// addSegment places a timed packet in the stretch of video between restarts
+// of the clock: one whose time falls more than timestampResetSeconds behind
+// the stretch's latest end starts the next.
+func (s *sourceVideoScan) addSegment(pts, dur float64, key bool, pos int64, hasPos bool) {
+	switch {
+	case !s.segOpen:
+		s.seg, s.segOpen = newVideoSegment(pts, dur), true
+	case pts < s.seg.max-timestampResetSeconds:
+		if len(s.segments) >= maxSegments {
+			s.segOverflow = true
+		} else {
+			s.segments = append(s.segments, s.seg)
+		}
+		s.seg = newVideoSegment(pts, dur)
+	default:
+		g := &s.seg
+		g.min, g.max, g.maxPTS, g.n = min(g.min, pts), max(g.max, pts+dur), max(g.maxPTS, pts), g.n+1
+		if dur > 0 {
+			g.durSum, g.durN = g.durSum+dur, g.durN+1
+		}
+	}
+	if !key || !hasPos || s.keysOverflow {
+		return
+	}
+	if len(s.keys) >= maxSegmentKeys {
+		s.keys, s.keysOverflow = nil, true
+		return
+	}
+	s.keys = append(s.keys, segmentKey{pts: pts, pos: pos, seg: int32(len(s.segments))})
+}
+
+// allSegments are the closed segments and the open one.
+func (s *sourceVideoScan) allSegments() []videoSegment {
+	out := append([]videoSegment(nil), s.segments...)
+	if s.segOpen {
+		out = append(out, s.seg)
+	}
+	return out
+}
+
+// restartedSeconds is the length of a video whose clock restarted: the sum
+// of its segments' lengths, which is the length of the timeline ffmpeg makes
+// of it (each part follows the one before), where First to End would span the
+// gap or the overlap between them. It is 0 when the scan lost count of the
+// segments.
+func (s *sourceVideoScan) restartedSeconds() float64 {
+	if s.segOverflow {
+		return 0
+	}
+	total := 0.0
+	for _, g := range s.allSegments() {
+		total += g.span()
+	}
+	return total
+}
+
+// byteWindow maps a window on the continuous timeline (from and to seconds
+// after the first picture, which is at origin on the source's clock) to the
+// segment holding it, for a container a read can start in the middle of (an
+// MPEG program or transport stream, which resync on their own): the byte
+// offset of the last keyframe at least fieldSampleSeekBack before the window
+// and the window's bounds on that segment's own clock. ok is false when the
+// scan cannot say (a window across a restart, no such keyframe, counts lost).
+func (s *sourceVideoScan) byteWindow(origin, from, to float64) (skip int64, lo, hi float64, ok bool) {
+	if s.format != "mpegts" && s.format != "mpeg" || s.segOverflow || s.keysOverflow || !s.segOpen {
+		return 0, 0, 0, false
+	}
+	start := 0.0
+	for i, g := range s.allSegments() {
+		if i == 0 {
+			start = g.min - origin
+		}
+		span := g.span()
+		if from >= start && to <= start+span {
+			lo, hi = g.min+from-start, g.min+to-start
+			best := -1
+			for j, k := range s.keys {
+				if int(k.seg) == i && k.pts <= lo-fieldSampleSeekBack && (best < 0 || k.pts > s.keys[best].pts) {
+					best = j
+				}
+			}
+			if best < 0 {
+				return 0, 0, 0, false
+			}
+			return s.keys[best].pos, lo, hi, true
+		}
+		start += span
+	}
+	return 0, 0, 0, false
 }
 
 // closePackets marks the timed packets that may be fields: those the
@@ -822,7 +986,9 @@ func decodeFieldSample(ctx context.Context, ffprobePath, path string, streamInde
 // for a clock that restarted too: a seek before the first packet's time
 // aims at no packet before the window, and where the clock restarted lower
 // than it began, it finds the restarted part instead (an MPEG program
-// stream's seek lands there, and decodes nothing of the window). Decoding from the start is keyed: the
+// stream's seek lands there, and decodes nothing of the window; the final
+// gate does not use this seek for a clock that restarted, see
+// sourceExtractions). Decoding from the start is keyed: the
 // decoder shows every picture from the first keyframe on, and a picture
 // before it is shown by no decoder (picturesIn reads none there).
 func (s *sourceVideoScan) windowSeek(at float64) (float64, bool) {
@@ -994,7 +1160,7 @@ func (s sourceVideoScan) damage(sizeBytes int64) error {
 // video's end is left out of the verdict at the final gate, never a reason to
 // refuse the job.
 func finalWindowsFitVideo(plan *transcode.Plan, scan sourceVideoScan) error {
-	if plan == nil || plan.QualityValidation == nil || !scan.timed || scan.Discontinuous {
+	if plan == nil || plan.QualityValidation == nil || !scan.timed || scan.Discontinuous && scan.restartedSeconds() <= 0 {
 		return nil
 	}
 	origin := scan.start()
@@ -1004,6 +1170,11 @@ func finalWindowsFitVideo(plan *transcode.Plan, scan sourceVideoScan) error {
 		end, limit, what := window.StartSeconds+window.DurationSeconds, scan.End-origin, "ends"
 		if !scan.endKnown {
 			end, limit, what = window.StartSeconds, scan.Last-origin, "starts"
+		}
+		if scan.Discontinuous {
+			// The restarts' gaps and overlaps are no video: the encode's
+			// timeline is the parts one after the other.
+			limit = scan.restartedSeconds()
 		}
 		if end > limit+0.5 {
 			return &classedError{class: resilience.InternalInvariant, err: fmt.Errorf("quality_final_window_beyond_video: final window %d %s at %.1fs on the container's timeline, but the video ends at %.1fs while the container runs on; the windows were planned on the container's length",
