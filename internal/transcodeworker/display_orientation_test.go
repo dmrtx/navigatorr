@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/mediainspect"
@@ -49,5 +50,41 @@ func TestDisplayOrientationEquality(t *testing.T) {
 	}
 	if got := displayOrientation(rotMinus90); got.degrees != 270 || got.flipped {
 		t.Errorf("minus 90 = %+v, want 270 unflipped", got)
+	}
+}
+
+func videoWithMatrix(rows ...string) *SourceStream {
+	s := &SourceStream{Kind: "video"}
+	if len(rows) > 0 {
+		s.DisplayMatrix = streamWithMatrix(rows...).SideData
+	}
+	return s
+}
+
+func TestOrientationPreservedForEveryPlan(t *testing.T) {
+	identity := []string{"65536 0 0", "0 65536 0", "0 0 1073741824"}
+	rot90 := []string{"0 -65536 0", "65536 0 0", "0 0 1073741824"}
+	rot90Phone := []string{"0 -65536 0", "65536 0 0", "70778880 0 1073741824"}
+	for _, tc := range []struct {
+		name      string
+		src, cand *SourceStream
+		refused   bool
+	}{
+		{"rotated source, candidate lost the rotation", videoWithMatrix(rot90...), videoWithMatrix(), true},
+		{"rotated source, candidate shows identity", videoWithMatrix(rot90...), videoWithMatrix(identity...), true},
+		{"same rotation", videoWithMatrix(rot90...), videoWithMatrix(rot90...), false},
+		{"phone matrix with translation vs canonical", videoWithMatrix(rot90Phone...), videoWithMatrix(rot90...), false},
+		{"no matrix vs identity", videoWithMatrix(), videoWithMatrix(identity...), false},
+		{"identity vs no matrix", videoWithMatrix(identity...), videoWithMatrix(), false},
+		{"plain source, candidate gained a rotation", videoWithMatrix(), videoWithMatrix(rot90...), true},
+		{"no source video", nil, videoWithMatrix(rot90...), false},
+	} {
+		err := orientationPreserved(tc.src, tc.cand)
+		if (err != nil) != tc.refused {
+			t.Errorf("%s: err = %v, refused want %v", tc.name, err, tc.refused)
+		}
+		if err != nil && !errors.Is(err, ErrContentNotPreserved) {
+			t.Errorf("%s: %v is not a preservation error", tc.name, err)
+		}
 	}
 }

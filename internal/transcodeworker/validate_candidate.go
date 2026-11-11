@@ -142,6 +142,12 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 	if sc, cc := countCoverArt(srcProbe.Streams)-len(asAttachment), countCoverArt(candProbe.Streams); cc != sc {
 		return attest, checkInvalid("cover art", fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, cc, sc))
 	}
+	// The encode reads stored pictures and carries the source's display matrix
+	// as metadata: a lost or changed rotation or flip shows a different
+	// picture, whatever the plan measures.
+	if err := orientationPreserved(srcVideo, candVideo); err != nil {
+		return attest, checkInvalid("video", err)
+	}
 	// Codec: the candidate must actually be the requested target codec.
 	if expected := expectedWorkerVideoCodec(execPlan.Plan.VideoCodec); expected != "" {
 		if got := norm(candVideo.Codec); !codecMatches(expected, got) {
@@ -240,6 +246,18 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		PixelFormat: candVideo.PixelFormat,
 	}
 	return attest, nil
+}
+
+// orientationPreserved refuses a candidate whose display rotation or flip
+// differs from the source's. No matrix and an identity matrix agree.
+func orientationPreserved(src, cand *SourceStream) error {
+	if src == nil || cand == nil {
+		return nil
+	}
+	if a, b := src.Orientation(), cand.Orientation(); a != b {
+		return fmt.Errorf("%w: quality_final_orientation_changed: the source shows %+v, the local candidate %+v (fail closed, never publish)", ErrContentNotPreserved, a, b)
+	}
+	return nil
 }
 
 func firstStreamOfKind(streams []SourceStream, kind string) *SourceStream {

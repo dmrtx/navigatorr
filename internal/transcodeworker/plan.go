@@ -53,6 +53,14 @@ type SourceStream struct {
 	// StatisticsTags are the stream's muxer statistics tag names as the probe
 	// reports them, language-suffixed variants ("BPS-eng") included.
 	StatisticsTags []string `json:"-"`
+	// DisplayMatrix is a video stream's display-matrix side data as ffprobe
+	// reports it (nil when it has none); the orientation check reads it.
+	DisplayMatrix []mediainspect.SideDataRecord `json:"-"`
+}
+
+// Orientation is how the stream's display matrix turns and flips the picture.
+func (s SourceStream) Orientation() orientation {
+	return displayOrientation(mediainspect.DetailedStream{SideData: s.DisplayMatrix})
 }
 
 // AudioTrack is the stream as the audio policy reads it.
@@ -143,6 +151,7 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			AvgFrameRate     string            `json:"avg_frame_rate"`
 			RFrameRate       string            `json:"r_frame_rate"`
 			ExtradataSize    int64             `json:"extradata_size"`
+			SideDataList     []json.RawMessage `json:"side_data_list"`
 		} `json:"streams"`
 		Chapters []struct {
 			Index int `json:"index"`
@@ -197,10 +206,23 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if kind == "attachment" {
 			attachmentBytes = st.ExtradataSize
 		}
+		var displayMatrix []mediainspect.SideDataRecord
+		if kind == "video" {
+			for _, raw := range st.SideDataList {
+				var m map[string]any
+				if json.Unmarshal(raw, &m) != nil {
+					continue
+				}
+				if t, _ := m["side_data_type"].(string); strings.EqualFold(t, "Display Matrix") {
+					displayMatrix = append(displayMatrix, mediainspect.SideDataRecord{SideDataType: t, Data: m})
+				}
+			}
+		}
 		out = append(out, SourceStream{
-			FPS:        fps,
-			SampleRate: sampleRate,
-			Index:      st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
+			DisplayMatrix: displayMatrix,
+			FPS:           fps,
+			SampleRate:    sampleRate,
+			Index:         st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),

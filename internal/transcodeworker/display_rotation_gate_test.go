@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -112,6 +113,24 @@ func TestReencodeKeepsDisplayFlipAsMetadata(t *testing.T) {
 			// Control: the same encode without the flip shows another picture.
 			plain := filepath.Join(dir, "plain.mkv")
 			scanTestMedia(t, ffmpeg, "-display_rotation", "0", "-i", candidate, "-map", "0:v:0", "-c", "copy", plain)
+			// The candidate validation every plan goes through (no
+			// QualityValidation here) reads the same probes: the kept matrix
+			// passes, the lost one is refused.
+			candProbe, err := ProbeSourceDetails(context.Background(), ffprobe, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plainProbe, err := ProbeSourceDetails(context.Background(), ffprobe, plain)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srcV, candV, plainV := firstMainVideo(probe.Streams), firstMainVideo(candProbe.Streams), firstMainVideo(plainProbe.Streams)
+			if err := orientationPreserved(srcV, candV); err != nil {
+				t.Errorf("re-encode that kept the matrix was refused: %v", err)
+			}
+			if err := orientationPreserved(srcV, plainV); err == nil || !errors.Is(err, ErrContentNotPreserved) {
+				t.Errorf("re-encode that lost the matrix was not refused: %v", err)
+			}
 			if wrong, ok := tryDisplayPSNR(ffmpeg, source, plain); ok && wrong > psnr-8 {
 				t.Errorf("a candidate without the flip scores %.2f dB against %.2f: the comparison cannot tell them apart", wrong, psnr)
 			} else {
