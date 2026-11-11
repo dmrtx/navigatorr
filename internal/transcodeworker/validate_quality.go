@@ -114,6 +114,12 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 			e.ReasonCodes = append(e.ReasonCodes, e.CompactOutput.ReasonCodes...)
 			return e, compactOutputError(e.CompactOutput)
 		}
+		// The extracts below read stored pictures, so they cannot see a lost
+		// or changed display rotation or flip: compare it here.
+		if a, b := displayOrientation(sourceVideo), displayOrientation(candidateVideo); a != b {
+			e.ReasonCodes = append(e.ReasonCodes, "quality_final_orientation_changed")
+			return e, candidateInvalid(fmt.Errorf("quality_final_orientation_changed: the source shows %q, the candidate %q", a, b))
+		}
 		digest, err := ensureCompactLUT(plan.Compact)
 		if err != nil {
 			return fail("quality_compact_chain_unavailable", err)
@@ -249,6 +255,9 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		if compactChain != "" {
 			refArgs = withReferenceChain(refArgs, compactChain)
 		}
+		if plan.Compact != nil {
+			refArgs = withStoredPictures(refArgs)
+		}
 		var refPTS []float64
 		for attempt := 1; ; attempt++ {
 			output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
@@ -273,6 +282,9 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		candArgs := BuildReferenceExtractionArgs(candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame, from, to)
 		if compactCandidateChain != "" {
 			candArgs = withReferenceChain(candArgs, compactCandidateChain)
+		}
+		if plan.Compact != nil {
+			candArgs = withStoredPictures(candArgs)
 		}
 		// The candidate is the encode's own file: one that cannot be read
 		// there is a bad candidate, not a window left unmeasured. Like the

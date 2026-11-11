@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
@@ -448,6 +449,33 @@ func readMetricLogFile(logPath string) ([]byte, error) {
 		return nil, fmt.Errorf("metric log %s contained 0 bytes after read (fail closed)", logPath)
 	}
 	return data, nil
+}
+
+// withStoredPictures makes sample extraction read the stored pictures, not
+// the ones a display rotation turns. A compact plan sizes its chain, and the
+// encode runs it, on stored pixels (the encode keeps the rotation as
+// metadata), so both extracts must read them as stored for the reference's
+// scaled picture and the candidate to have one size.
+func withStoredPictures(args []string) []string {
+	out := make([]string, 0, len(args)+1)
+	for _, a := range args {
+		if a == "-i" {
+			out = append(out, "-noautorotate")
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// displayOrientation is a video stream's display matrix as ffprobe reports
+// it (rotation and flips), empty when it has none.
+func displayOrientation(v mediainspect.DetailedStream) string {
+	for _, sd := range v.SideData {
+		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			return strings.Join(strings.Fields(fmt.Sprint(sd.Data["displaymatrix"], " ", sd.Data["rotation"])), " ")
+		}
+	}
+	return ""
 }
 
 // withReferenceChain inserts a compact picture chain into sample extraction
