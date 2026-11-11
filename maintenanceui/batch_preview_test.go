@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/fsop"
@@ -217,6 +218,7 @@ func TestPreviewStartClearsAnArchiveRowLeftOnThePreview(t *testing.T) {
 	if err := st.SetMaintenanceArchived("preview", []string{"preview"}, true); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(10 * time.Millisecond) // the comparison is to the millisecond
 	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 202 {
 		t.Fatal(w.Code, w.Body.String())
 	}
@@ -278,6 +280,7 @@ func TestPreviewStartAgainKeepsALaterDeliberateArchive(t *testing.T) {
 	if err := st.UpdateActionInstance(*run); err != nil {
 		t.Fatal(err)
 	}
+	time.Sleep(10 * time.Millisecond)
 	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"`+receipt["id"]+`","archived":true}`, true); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

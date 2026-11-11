@@ -1,6 +1,9 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"time"
+)
 
 // QueueAction atomically records an action and its durable submission receipt.
 // Receipts survive terminal states, so a browser retry never duplicates work.
@@ -20,7 +23,8 @@ func (s *Store) QueueAction(inst ActionInstance, key string) (string, error) {
 	if err != sql.ErrNoRows {
 		return "", err
 	}
-	now := nowStr()
+	// Sub-second, like CreateActionInstance: the preview's archive rule compares this time with an archive's.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = tx.Exec(`INSERT INTO action_instances
 		(id,action_name,status,current_step,inputs_json,outputs_json,state_json,
 		waiting_reason,waiting_condition,waiting_options_json,error_json,idempotency_key,created_at,updated_at)

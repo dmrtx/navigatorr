@@ -2,7 +2,6 @@ package maintenanceui
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -12,7 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-const previewExecutionPrefix = "web-preview:"
+const previewExecutionPrefix = store.PreviewExecutionKeyPrefix
 
 type previewSetting struct {
 	Label string `json:"label"`
@@ -196,21 +195,10 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, err.Error())
 		return
 	}
-	// A row left on the preview would hide the batch started from it once that finishes, so it goes
-	// first: if that fails nothing has started and the person can simply try again.
-	if err := s.clearPreviewArchive(id); err != nil {
-		fail(w, 500, "could not prepare the batch; nothing was submitted")
-		return
-	}
 	result, err := s.engine.Enqueue(action.WithOrigin(r.Context(), "web"), "transcode_batch", inputs, previewExecutionPrefix+id)
 	if err != nil {
 		failAdmission(w, 409, err)
 		return
-	}
-	// Archive refuses a preview whose batch is running, so only a row written between the clear above
-	// and the enqueue is left. The batch has started either way: report a failure here, do not refuse.
-	if err := s.clearPreviewArchive(id); err != nil {
-		log.Printf("maintenanceui: clear the archive row of preview %s after starting its batch: %v", id, err)
 	}
 	writeJSON(w, 202, map[string]string{"id": result.ID})
 }
@@ -281,13 +269,4 @@ func (s *Server) pendingBatchItems(inst store.ActionInstance, items []store.Tran
 		items = append(items, item)
 	}
 	return items, len(items) > 0, nil
-}
-
-// clearPreviewArchive removes a manual archive row from the preview's workflow.
-func (s *Server) clearPreviewArchive(id string) error {
-	root, members, err := s.workflowMemberIDs(id)
-	if err != nil || root == "" {
-		return err
-	}
-	return s.engine.Deps().Store.SetMaintenanceArchived(root, members, false)
 }
