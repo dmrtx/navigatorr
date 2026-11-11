@@ -225,6 +225,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			if err := scan.damage(sourceInfo.Size()); err != nil {
 				return w.failJobTerminal(jobDir, jobFile, job, err)
 			}
+			if err := sourceClockRestarted(job.Plan, *scan); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
 			if err := finalWindowsFitVideo(job.Plan, *scan); err != nil {
 				return w.failJobTerminal(jobDir, jobFile, job, err)
 			}

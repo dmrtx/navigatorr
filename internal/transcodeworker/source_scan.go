@@ -42,8 +42,11 @@ type sourceVideoScan struct {
 	// First and Last then no longer measure the video's length. latest is
 	// the latest packet end seen, which a restart falls behind.
 	Discontinuous bool
-	latest        float64
-	anyTime       bool
+	// restartAfter is how far into the video (seconds from its first packet)
+	// the clock first jumped back.
+	restartAfter float64
+	latest       float64
+	anyTime      bool
 	// LeadingNonKey counts the packets read before the first keyframe: a
 	// decoder has nothing to show them with. Discarded counts the packets the
 	// container marks to be dropped (an edit list that starts the video
@@ -436,6 +439,9 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 	scan.durations[int64(math.Round(dur*1e6))]++
 	scan.addTime(pts, dur, key, discard)
 	if scan.anyTime && pts < scan.latest-timestampResetSeconds {
+		if !scan.Discontinuous {
+			scan.restartAfter = max(0, scan.latest-scan.firstTime)
+		}
 		scan.Discontinuous = true
 	}
 	if !scan.anyTime || pts+dur > scan.latest {
@@ -979,6 +985,20 @@ func (s sourceVideoScan) damage(sizeBytes int64) error {
 	}
 	return sourceDamaged(fmt.Errorf("%s: the source file is damaged: reading its video the demuxer reported %d %s%s (%s); download or remux the file again, a retry fails the same way",
 		resilience.FFmpegInputCorrupt, s.DemuxErrors, noun, where, truncateForLog(s.FirstError, 200)))
+}
+
+// sourceClockRestarted refuses, before any encode, a source whose video clock
+// restarts mid-file when the plan re-encodes the video. The final quality
+// windows, the container duration check and the audio length checks all
+// measure by first and last timestamps, which no longer describe such a
+// file's length, so the job would burn a whole encode and fail at the end.
+// A plan that copies the video is not refused: its check compares packets.
+func sourceClockRestarted(plan *transcode.Plan, scan sourceVideoScan) error {
+	if plan == nil || !scan.Discontinuous || strings.EqualFold(strings.TrimSpace(plan.VideoCodec), transcode.VideoCodecCopy) {
+		return nil
+	}
+	return sourceDamaged(fmt.Errorf("source_clock_restarted: the video's timestamps restart about %.0f s into the file, so the converted file cannot be validated against it; remux the source into a single continuous timeline, a retry fails the same way",
+		scan.restartAfter))
 }
 
 // finalWindowsFitVideo refuses final windows that run past the end of the

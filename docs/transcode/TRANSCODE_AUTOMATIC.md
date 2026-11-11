@@ -229,7 +229,10 @@ its table.
 A refusal before the encode (an audio-only plan whose source no longer
 matches it) is told as one: "The original was refused before anything was
 encoded: ...". Only the current attempt's refusal is told; a new attempt
-starts without the last one's detail.
+starts without the last one's detail. A source whose video clock restarts
+mid-file is refused before any video re-encode (`source_clock_restarted`, no
+retry): its timestamps no longer measure its length, so the converted file
+cannot be validated against it; remux it into one continuous timeline.
 
 The intentional changes stay allowed: a converted audio track's new title and
 the default flag a track selection moves. The server repeats the codec,
