@@ -56,3 +56,38 @@ func TestMaintenanceArchivePersistsWithoutChangingActions(t *testing.T) {
 		t.Fatal("restore did not clear archive")
 	}
 }
+
+func TestArchiveRefusesAnActionNamedByKeyThatIsStillActive(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, row := range []ActionInstance{
+		{ID: "preview", ActionName: "transcode_batch", Status: ActionStatusCompleted},
+		{ID: "run", ActionName: "transcode_batch", Status: ActionStatusRunning, IdempotencyKey: "web-preview:preview"},
+	} {
+		if err := s.CreateActionInstance(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := []string{"web-preview:preview"}
+	// The member list is the stale one from before the run existed.
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); !errors.Is(err, ErrArchiveActiveWorkflow) {
+		t.Fatal("a running action named by key was ignored", err)
+	}
+	if got, _ := s.MaintenanceArchives(); len(got) != 0 {
+		t.Fatal("a refused archive left a row", got)
+	}
+	run, _ := s.GetActionInstance("run")
+	run.Status = ActionStatusCompleted
+	if err := s.UpdateActionInstance(*run); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []string{"web-preview:none"}); err != nil {
+		t.Fatal("a key with no action must not block", err)
+	}
+}

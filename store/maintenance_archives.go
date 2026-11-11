@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 )
@@ -28,6 +29,13 @@ func (s *Store) MaintenanceArchives() (map[string]string, error) {
 }
 
 func (s *Store) SetMaintenanceArchived(root string, members []string, archived bool) error {
+	return s.SetMaintenanceArchivedWith(root, members, archived, nil)
+}
+
+// SetMaintenanceArchivedWith also refuses to archive while an action stored under one of
+// idempotencyKeys is still active. A caller whose member list may be stale (a batch started from
+// a preview an instant ago) names that action by key, and the check shares the archive's transaction.
+func (s *Store) SetMaintenanceArchivedWith(root string, members []string, archived bool, idempotencyKeys []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -41,6 +49,19 @@ func (s *Store) SetMaintenanceArchived(root string, members []string, archived b
 			containsRoot = containsRoot || id == root
 			var status string
 			if err := tx.QueryRow(`SELECT status FROM action_instances WHERE id = ?`, id).Scan(&status); err != nil {
+				return err
+			}
+			if status != ActionStatusCompleted && status != ActionStatusFailed && status != ActionStatusCancelled {
+				return ErrArchiveActiveWorkflow
+			}
+		}
+		for _, key := range idempotencyKeys {
+			var status string
+			err := tx.QueryRow(`SELECT status FROM action_instances WHERE idempotency_key = ?`, key).Scan(&status)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
 				return err
 			}
 			if status != ActionStatusCompleted && status != ActionStatusFailed && status != ActionStatusCancelled {

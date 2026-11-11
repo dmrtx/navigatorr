@@ -3,7 +3,6 @@ package maintenanceui
 import (
 	"errors"
 	"net/http"
-	"slices"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -48,14 +47,8 @@ func (s *Server) archive(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// A batch started from the preview a moment ago may not be in the member list yet:
-	// name it, so the store refuses to archive a workflow that is running.
-	if started, err := st.FindActionByIdempotencyKey("transcode_batch", previewExecutionPrefix+root); err != nil {
-		fail(w, 500, "read maintenance history")
-		return
-	} else if started != nil && !slices.Contains(ids, started.ID) {
-		ids = append(ids, started.ID)
-	}
-	if err := st.SetMaintenanceArchived(root, ids, *input.Archived); err != nil {
+	// the store checks it by key, in the archive's own transaction.
+	if err := st.SetMaintenanceArchivedWith(root, ids, *input.Archived, []string{previewExecutionPrefix + root}); err != nil {
 		if errors.Is(err, store.ErrArchiveActiveWorkflow) {
 			fail(w, 409, "finish or cancel active work before archiving")
 		} else {
