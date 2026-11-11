@@ -467,9 +467,10 @@ func withStoredPictures(args []string) []string {
 	return out
 }
 
-// orientation is how a stream's display matrix turns the picture: clockwise
-// counter-clockwise degrees in [0,360), as ffmpeg's rotation, and whether it is mirrored. raw is set only for a matrix
-// that could not be read, so two such streams match only when their text does.
+// orientation is how a stream's display matrix turns the picture: degrees in
+// [0,360), counted as ffmpeg's rotation, and whether it is mirrored. raw is set
+// only for a matrix that could not be read, so two such streams match only
+// when their text does.
 type orientation struct {
 	degrees int
 	flipped bool
