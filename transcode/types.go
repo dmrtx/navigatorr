@@ -362,6 +362,13 @@ type PhaseCost struct {
 	// ffmpeg/ffprobe children used, summed. Absent from older workers and for
 	// phases that do not measure it; consumers must treat absent as unknown.
 	ActiveComputeMs *int64 `json:"active_compute_ms,omitempty"`
+	// Runs counts the units of work inside one phase execution that a step
+	// repeats (final validation's windows); Attempts stays the executions.
+	Runs int `json:"runs,omitempty"`
+	// Steps break the phase down (final validation's extract, VMAF, CAMBI...).
+	// They are part of the phase's own cost, never phases of their own, so a
+	// sum over the phases counts them once, through their phase.
+	Steps map[string]PhaseCost `json:"steps,omitempty"`
 }
 
 type JobTelemetry struct {

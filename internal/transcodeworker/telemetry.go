@@ -165,11 +165,14 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 	}
 	for name, duration := range map[string]*int64{"queue": t.QueueDurationMs, "encode": t.EncodeDurationMs, "validation": t.ValidationDurationMs} {
 		if duration != nil {
-			// Timestamps own the duration; byte counters and CPU time a phase
-			// recorded (for example an encode reading an unstaged NAS source)
-			// survive.
+			// Timestamps own the duration and make the phase one attempt;
+			// byte counters, CPU time and steps a phase recorded (for example
+			// an encode reading an unstaged NAS source, or final validation's
+			// steps) survive. Its steps follow the same rule, one attempt
+			// each, while their runs, wall and CPU time keep every execution
+			// the phase's CPU time keeps.
 			cost := t.PhaseCosts[name]
-			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs}
+			t.PhaseCosts[name] = transcode.PhaseCost{DurationMs: *duration, Attempts: 1, NASReadBytes: cost.NASReadBytes, NASWrittenBytes: cost.NASWrittenBytes, ActiveComputeMs: cost.ActiveComputeMs, Steps: oneAttemptSteps(cost.Steps)}
 		}
 	}
 	t.WallDurationMs = durationMilliseconds(job.CreatedAt, end)
@@ -275,23 +278,74 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 		if latest.PhaseCosts == nil {
 			latest.PhaseCosts = map[string]transcode.PhaseCost{}
 		}
-		previous := latest.PhaseCosts[phase]
-		cost.DurationMs += previous.DurationMs
-		cost.Attempts += previous.Attempts
-		add := func(a, b *int64) *int64 {
-			if a == nil || b == nil {
-				return nil
-			}
-			return knownCount(*a + *b)
-		}
-		if previous.Attempts > 0 {
-			cost.NASReadBytes = add(previous.NASReadBytes, cost.NASReadBytes)
-			cost.NASWrittenBytes = add(previous.NASWrittenBytes, cost.NASWrittenBytes)
-			cost.CacheHits = add(previous.CacheHits, cost.CacheHits)
-			cost.CacheMisses = add(previous.CacheMisses, cost.CacheMisses)
-			cost.ActiveComputeMs = add(previous.ActiveComputeMs, cost.ActiveComputeMs)
+		if previous, ok := latest.PhaseCosts[phase]; ok {
+			cost = accumulatePhaseCost(previous, cost)
 		}
 		latest.PhaseCosts[phase] = cost
 	})
 	job.PhaseCosts = shadow.PhaseCosts
+}
+
+// accumulatePhaseCost adds a new execution of a phase (a retry, a resumed job)
+// to what earlier executions recorded. A counter is known only when every
+// execution measured it: unknown on either side makes it unknown, since the
+// measured part alone would be a floor, not a total. When previous recorded no
+// attempts, the new execution's counters pass through unchanged. Steps
+// accumulate the same way, by name.
+func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost {
+	cost.DurationMs += previous.DurationMs
+	cost.Attempts += previous.Attempts
+	cost.Runs += previous.Runs
+	if previous.Attempts > 0 {
+		cost.NASReadBytes = addKnown(previous.NASReadBytes, cost.NASReadBytes)
+		cost.NASWrittenBytes = addKnown(previous.NASWrittenBytes, cost.NASWrittenBytes)
+		cost.CacheHits = addKnown(previous.CacheHits, cost.CacheHits)
+		cost.CacheMisses = addKnown(previous.CacheMisses, cost.CacheMisses)
+		cost.ActiveComputeMs = addKnown(previous.ActiveComputeMs, cost.ActiveComputeMs)
+	}
+	if previous.Attempts > 0 && len(previous.Steps) == 0 {
+		// An earlier execution recorded no step breakdown (a worker that did
+		// not keep one): the new steps alone would read as the phase's whole
+		// breakdown, so none is kept.
+		cost.Steps = nil
+	} else if len(previous.Steps) > 0 {
+		steps := make(map[string]transcode.PhaseCost, len(previous.Steps)+len(cost.Steps))
+		for name, step := range previous.Steps {
+			steps[name] = step
+		}
+		for name, step := range cost.Steps {
+			if earlier, ok := steps[name]; ok {
+				step = accumulatePhaseCost(earlier, step)
+			}
+			steps[name] = step
+		}
+		cost.Steps = steps
+	}
+	return cost
+}
+
+// oneAttemptSteps is a copy of steps (every field) counted as one attempt
+// each, for a phase whose telemetry counts one attempt; the job's own record
+// is not changed. A step that recorded no attempt keeps none.
+func oneAttemptSteps(steps map[string]transcode.PhaseCost) map[string]transcode.PhaseCost {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make(map[string]transcode.PhaseCost, len(steps))
+	for name, step := range steps {
+		if step.Attempts > 0 {
+			step.Attempts = 1
+		}
+		out[name] = step
+	}
+	return out
+}
+
+// addKnown sums two counters and is known only when both are: an unknown on
+// either side makes the sum unknown (nil).
+func addKnown(a, b *int64) *int64 {
+	if a == nil || b == nil {
+		return nil
+	}
+	return knownCount(*a + *b)
 }

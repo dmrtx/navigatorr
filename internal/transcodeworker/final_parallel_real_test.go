@@ -16,8 +16,10 @@ import (
 
 // Parallel final validation reports exactly the sequential evidence: the same
 // per-window VMAF and CAMBI statistics in the same order, although windows run
-// concurrently with a different libvmaf thread count. Per-window extracts are
-// gone once validation returns.
+// concurrently with a different libvmaf thread count, which also changes from
+// pass to pass as the last windows take the threads the others freed
+// (windowThreads). Per-window extracts are gone once validation returns, and
+// each step's cost is reported.
 func TestRealFinalValidationParallelMatchesSequential(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -70,13 +72,30 @@ func TestRealFinalValidationParallelMatchesSequential(t *testing.T) {
 		}
 		w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state-"+name), AllowedRoots: []string{dir}, FFmpeg: ffmpeg, FFprobe: ffprobe, MaxParallelJobs: 1})
 		meter := &cpuMeter{}
-		e, err := w.validateFinalPerceptual(withCPUMeter(ctx, meter), jobDir, source, candidate, plan, "sha256:candidate", 1)
+		steps := &validationSteps{}
+		e, err := w.validateFinalPerceptual(withValidationSteps(withCPUMeter(ctx, meter), steps), jobDir, source, candidate, plan, "sha256:candidate", 1)
 		if err != nil || e == nil || e.Verdict != "pass" || e.VMAF == nil || e.CAMBI == nil {
 			t.Fatalf("%s: %+v %v", name, e, err)
 		}
 		// Extraction, VMAF and CAMBI children are all charged to the phase.
 		if ms := meter.activeComputeMs(); ms == nil || *ms <= 0 {
 			t.Fatalf("%s: final validation CPU not measured: %v", name, ms)
+		}
+		// And to their own step, summed over the four windows.
+		costs := steps.phaseSteps()
+		var stepCPU int64
+		for _, step := range []string{validationStepExtract, validationStepTimestamps, validationStepAlignment, validationStepVMAF, validationStepCAMBI} {
+			c, ok := costs[step]
+			if !ok || c.Attempts != 1 || c.Runs != 4 || c.ActiveComputeMs == nil {
+				t.Fatalf("%s: step %s cost %+v", name, step, c)
+			}
+			stepCPU += *c.ActiveComputeMs
+		}
+		if len(costs) != 5 {
+			t.Fatalf("%s: steps that did not run reported: %v", name, costs)
+		}
+		if stepCPU > *meter.activeComputeMs() {
+			t.Fatalf("%s: steps charged %d ms, more than the phase's %d ms", name, stepCPU, *meter.activeComputeMs())
 		}
 		if left, _ := filepath.Glob(filepath.Join(jobDir, "quality-samples-*")); len(left) != 0 {
 			t.Fatalf("%s left scratch behind: %v", name, left)
