@@ -161,7 +161,7 @@ func TestBuildFFmpegArgsPlacesTypedVideoOptionsDeterministically(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-y", "-progress", "/tmp/progress", "-nostats", "-i", "/media/source.mkv",
+		"-y", "-progress", "/tmp/progress", "-nostats", "-noautorotate", "-i", "/media/source.mkv",
 		"-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "hevc_videotoolbox", "-q:v", "65", "-profile:v", "main", "-pix_fmt", "yuv420p", "-prio_speed", "0", "-spatial_aq", "0", "-realtime", "0",
@@ -260,7 +260,7 @@ func TestBuildFFmpegArgsLibX265PreservesAudioSubtitlesMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"-y", "-progress", "/tmp/progress", "-nostats", "-i", "/media/source.mkv",
+		"-y", "-progress", "/tmp/progress", "-nostats", "-noautorotate", "-i", "/media/source.mkv",
 		"-map", "0:v?", "-map", "0:a?", "-map", "0:s?", "-map", "0:t?",
 		"-map_metadata", "0", "-map_chapters", "0",
 		"-c:v", "libx265", "-crf", "24", "-preset", "slow", "-profile:v", "main", "-pix_fmt", "yuv420p",

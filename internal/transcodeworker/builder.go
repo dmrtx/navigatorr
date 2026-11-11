@@ -392,6 +392,11 @@ func BuildFFmpegArgsWithCoverArt(execPlan *ExecutionPlan, sourcePath, candidateP
 		"-y",
 		"-progress", progressPath,
 		"-nostats",
+		// ffmpeg would turn the pictures by the source's display rotation
+		// and drop it, so the encode would be rotated pixels (swapped
+		// width and height) without the rotation. Keep the stored pictures;
+		// the rotation travels as the output's display matrix.
+		"-noautorotate",
 		"-i", sourcePath,
 		"-map", videoMap,
 	}
