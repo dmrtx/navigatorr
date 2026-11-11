@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -73,12 +74,15 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 		plan.Title = "Selected files"
 	}
 	paths, fileIDs := []string{}, []int{}
+	eligible, omitted := map[string]bool{}, map[string]bool{}
 	sonarr := inputs["service"] == "sonarr"
 	for _, item := range items {
 		if item.Status != "queued" || item.Decision != "transcode" {
 			plan.Other++
+			omitted[filepath.Clean(item.FilePath)] = true
 			continue
 		}
+		eligible[filepath.Clean(item.FilePath)] = true
 		paths = append(paths, item.FilePath)
 		if sonarr {
 			fileID, err := strconv.Atoi(strings.TrimPrefix(item.ItemKey, "epfile-"))
@@ -96,6 +100,18 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 		}
 	}
 	plan.Eligible = len(paths)
+	// Hand-picked tracks of a file the preview left out cannot start: the batch refuses a pick
+	// for a path it does not contain. A pick for an unknown path is kept so that refusal still says so.
+	if picks, ok := inputs["track_picks"].(map[string]any); ok {
+		for path := range picks {
+			if clean := filepath.Clean(path); omitted[clean] && !eligible[clean] {
+				delete(picks, path)
+			}
+		}
+		if len(picks) == 0 {
+			delete(inputs, "track_picks")
+		}
+	}
 	if sonarr {
 		inputs["episode_file_ids"] = fileIDs
 	} else {

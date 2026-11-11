@@ -180,3 +180,29 @@ func TestPreviewAccessRequiresAuthentication(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewStartDropsTrackPicksOfFilesTheCountLeftOut(t *testing.T) {
+	s, _ := testUI(t)
+	seedPreview(t, s, map[string]any{
+		"paths": []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv"}, "mode": "size", "media_type": "movie",
+		"track_picks": map[string]any{
+			"/media/one.mkv":  map[string]any{"audio": []int{1}},
+			"/media/two.mkv":  map[string]any{"audio": []int{2}},
+			"/media/gone.mkv": map[string]any{"audio": []int{3}},
+		},
+	})
+	_, inputs, err := s.previewPlan("preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	picks, _ := inputs["track_picks"].(map[string]any)
+	if _, kept := picks["/media/one.mkv"]; !kept || len(picks) != 2 {
+		t.Fatal("a pick of a skipped file blocks the start, or a good pick was lost", picks)
+	}
+	if _, unknown := picks["/media/gone.mkv"]; !unknown {
+		t.Fatal("a pick for an unknown path must reach the batch's own refusal", picks)
+	}
+	if _, skipped := picks["/media/two.mkv"]; skipped {
+		t.Fatal("the skipped file's pick was kept", picks)
+	}
+}

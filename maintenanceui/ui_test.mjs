@@ -3304,6 +3304,15 @@ test("a completed preview offers review and start, while active work retains can
   // A preview the server archived by itself has nothing to restore: it keeps its own controls, Start included.
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",archived:true,archived_automatically:true,can_archive:false,batch:{dry_run:true,queued:8}})').children.map(c=>c.textContent), ["Review preview", "Start batch"]);
   assert.match(h.run('queueOutcome({status:"completed",archived:true,archived_automatically:true,batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
+  // ...and none of its reasons tell a person to restore it: only a preview archived by hand does.
+  h.run('state.info={allow_destructive:true};');
+  assert.equal(h.run('batchReplaceReason({archived:true,archived_automatically:true,batch:{dry_run:true}}, 0)'), "A preview replaces nothing");
+  assert.equal(h.run('batchReplaceReason({archived:true,batch:{dry_run:true}}, 0)'), "Archived · restore it first");
+  assert.notEqual(h.run('unavailableReason({archived:true,archived_automatically:true}, "queued", "change")'), "Archived · restore it first");
+  assert.equal(h.run('unavailableReason({archived:true}, "queued", "change")'), "Archived · restore it first");
+  const change = (extra) => h.run(`batchActionBar({id:"p",status:"completed",archived:true,${extra}can_archive:false,batch:{dry_run:true,queued:8}})`)[1].children[0].dataset.unavailable;
+  assert.equal(change("archived_automatically:true,"), "Start the batch first");
+  assert.equal(change(""), "Archived · restore it first");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
   // A file's job is one page about that file: it does not loop back to its batch with a button.
   const child='{id:"c",action_name:"transcode_media",status:"waiting_external",parent_batch_id:"b"}';
