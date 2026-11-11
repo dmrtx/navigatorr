@@ -128,8 +128,18 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			return waitDecision(fmt.Sprintf("Video resolution mismatch: expected=%dx%d original=%dx%d output=%dx%d", wantWidth, wantHeight, origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil
 		}
 	}
-	if origCovers, outCovers := len(mediainspect.CoverArtStreams(origAllVideo)), len(outRep.CoverArt()); outCovers != origCovers {
+	// A BMP or WebP cover is re-attached as an attachment Matroska does not
+	// read back as a picture: it is held to the output's attachments below.
+	origCovers, coversAsFiles := coverCounts(mediainspect.CoverArtStreams(origAllVideo))
+	outAttachments := attachedFiles(outRep.Attachments)
+	if outCovers := len(outRep.CoverArt()); outCovers != origCovers {
 		return waitDecision(fmt.Sprintf("Cover art count mismatch: original=%d output=%d", origCovers, outCovers)), nil
+	}
+	if len(coversAsFiles) > 0 {
+		var missing string
+		if outAttachments, missing = transcode.TakeReattachedCovers(coversAsFiles, attachedFiles(getStreamsList(origMap, "attachments")), outAttachments); missing != "" {
+			return waitDecision(missing), nil
+		}
 	}
 	if len(outRep.Audio) != len(origAudio) {
 		missing := make([]string, 0)
@@ -391,7 +401,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		}
 	}
 	if plan.PreserveAttachments {
-		if change := transcode.AttachmentChange(attachedFiles(getStreamsList(origMap, "attachments")), attachedFiles(outRep.Attachments)); change != "" {
+		if change := transcode.AttachmentChange(attachedFiles(getStreamsList(origMap, "attachments")), outAttachments); change != "" {
 			return waitDecision(change), nil
 		}
 	}
@@ -470,6 +480,26 @@ func attachedFiles(streams []mediainspect.DetailedStream) []transcode.AttachedFi
 		out = append(out, transcode.AttachedFile{Name: streamTag(s, "filename"), MimeType: streamTag(s, "mimetype"), Size: s.ExtraDataSize})
 	}
 	return out
+}
+
+// coverCounts is how many of the source's covers the output must carry as
+// pictures, and the covers it must carry as attachments instead (the worker
+// re-attaches a BMP or WebP one as an attachment, which is read back as such).
+// A cover's type is its mimetype tag, else the one its codec gets; a name only
+// when the source gives one (the worker names the others itself).
+func coverCounts(covers []mediainspect.DetailedStream) (pictures int, asFiles []transcode.AttachedFile) {
+	for _, c := range covers {
+		mime := strings.ToLower(streamTag(c, "mimetype"))
+		if mime == "" {
+			mime = transcode.CoverMimeTypes[normCodec(c.Codec)]
+		}
+		if mime == "" || transcode.CoverReadsBackAsPicture(mime) {
+			pictures++
+			continue
+		}
+		asFiles = append(asFiles, transcode.AttachedFile{Name: streamTag(c, "filename"), MimeType: mime})
+	}
+	return pictures, asFiles
 }
 
 // streamTag is a stream's tag by name, whatever its case.

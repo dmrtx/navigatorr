@@ -647,14 +647,46 @@ func subtitleActionFor(plan *transcode.Plan, s SourceStream) (transcode.Subtitle
 // (transcode.AttachmentChange): as many, and every source file among them by
 // name, type and size.
 func attachmentsPreserved(src, cand []SourceStream) error {
-	files := func(streams []SourceStream) []transcode.AttachedFile {
-		var out []transcode.AttachedFile
-		for _, s := range streamsOfKind(streams, "attachment") {
-			out = append(out, transcode.AttachedFile{Name: s.Filename, MimeType: s.MimeType, Size: s.AttachmentBytes})
-		}
-		return out
+	return attachmentsWithCovers(src, cand, nil, true)
+}
+
+func attachedFilesOf(streams []SourceStream) []transcode.AttachedFile {
+	var out []transcode.AttachedFile
+	for _, s := range streamsOfKind(streams, "attachment") {
+		out = append(out, transcode.AttachedFile{Name: s.Filename, MimeType: s.MimeType, Size: s.AttachmentBytes})
 	}
-	if change := transcode.AttachmentChange(files(src), files(cand)); change != "" {
+	return out
+}
+
+// coversAsAttachments are the plan's covers that Matroska reads back as a
+// plain attachment, not a picture (BMP, WebP): the candidate must carry each
+// as an attachment of the name and type the encode gave it.
+func coversAsAttachments(execPlan *ExecutionPlan) []transcode.AttachedFile {
+	var out []transcode.AttachedFile
+	for _, c := range execPlan.CoverArt() {
+		if !transcode.CoverReadsBackAsPicture(c.MimeType) {
+			out = append(out, transcode.AttachedFile{Name: c.Filename, MimeType: c.MimeType})
+		}
+	}
+	return out
+}
+
+// attachmentsWithCovers is attachmentsPreserved for a plan whose covers
+// include some read back as attachments: each must be among the candidate's
+// attachments (always), and the rest must be the source's (when the plan
+// preserves attachments).
+func attachmentsWithCovers(src, cand []SourceStream, covers []transcode.AttachedFile, preserve bool) error {
+	srcFiles, candFiles := attachedFilesOf(src), attachedFilesOf(cand)
+	if len(covers) > 0 {
+		var missing string
+		if candFiles, missing = transcode.TakeReattachedCovers(covers, srcFiles, candFiles); missing != "" {
+			return candidateInvalid(fmt.Errorf("%w: %s (fail closed, never publish)", ErrContentNotPreserved, missing))
+		}
+	}
+	if !preserve {
+		return nil
+	}
+	if change := transcode.AttachmentChange(srcFiles, candFiles); change != "" {
 		return candidateInvalid(fmt.Errorf("%w: %s (fail closed, never publish)", ErrContentNotPreserved, change))
 	}
 	return nil

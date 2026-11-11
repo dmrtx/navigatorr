@@ -5,6 +5,41 @@ import (
 	"testing"
 )
 
+func TestTakeReattachedCovers(t *testing.T) {
+	f := func(name, mime string, size int64) AttachedFile { return AttachedFile{name, mime, size} }
+	font := f("a.ttf", "font/ttf", 10)
+	bmp := f("cover_0.bmp", "image/bmp", 900)
+	for _, tc := range []struct {
+		name            string
+		covers          []AttachedFile
+		source, output  []AttachedFile
+		wantRest        int
+		wantMissingPart string
+	}{
+		{"cover kept", []AttachedFile{f("cover_0.bmp", "image/bmp", 0)}, []AttachedFile{font}, []AttachedFile{font, bmp}, 1, ""},
+		{"unnamed cover kept, type compared without case", []AttachedFile{f("", "image/BMP", 0)}, nil, []AttachedFile{bmp}, 0, ""},
+		{"cover dropped", []AttachedFile{f("cover_0.bmp", "image/bmp", 0)}, []AttachedFile{font}, []AttachedFile{font}, 0, "is missing"},
+		{"cover renamed", []AttachedFile{f("cover_0.bmp", "image/bmp", 0)}, nil, []AttachedFile{f("x.bmp", "image/bmp", 900)}, 0, "is missing"},
+		{"cover of another type", []AttachedFile{f("", "image/webp", 0)}, nil, []AttachedFile{bmp}, 0, "is missing"},
+		// The source's own BMP attachment must not stand in for the cover.
+		{"source attachment is not the cover", []AttachedFile{f("", "image/bmp", 0)}, []AttachedFile{bmp}, []AttachedFile{bmp}, 0, "is missing"},
+		{"source attachment and cover both kept", []AttachedFile{f("", "image/bmp", 0)}, []AttachedFile{bmp}, []AttachedFile{bmp, f("cover_1.bmp", "image/bmp", 5)}, 1, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rest, missing := TakeReattachedCovers(tc.covers, tc.source, tc.output)
+			if tc.wantMissingPart == "" && (missing != "" || len(rest) != tc.wantRest) {
+				t.Fatalf("rest %v missing %q", rest, missing)
+			}
+			if tc.wantMissingPart != "" && !strings.Contains(missing, tc.wantMissingPart) {
+				t.Fatalf("missing %q, want %q", missing, tc.wantMissingPart)
+			}
+		})
+	}
+	if CoverReadsBackAsPicture("image/bmp") || CoverReadsBackAsPicture("image/webp") || !CoverReadsBackAsPicture("image/PNG") || !CoverReadsBackAsPicture("image/jpeg") {
+		t.Fatal("Matroska picture read-back types are wrong")
+	}
+}
+
 // The worker and the coordinator hold an output's attachments to the
 // source's by this one rule.
 func TestAttachmentChange(t *testing.T) {

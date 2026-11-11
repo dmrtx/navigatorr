@@ -199,6 +199,51 @@ func TestValidateCandidateDetailedRequiresCoverArtKept(t *testing.T) {
 	}
 }
 
+// The worker re-attaches a BMP cover as a Matroska attachment, which ffprobe
+// reads back as an attachment, not a picture: the same picture kept passes,
+// a dropped or different one does not.
+func TestValidateCandidateDetailedBMPCoverComesBackAsAttachment(t *testing.T) {
+	original := []mediainspect.DetailedStream{
+		{Index: 0, Kind: "video", Codec: "bmp", Width: 160, Height: 240, Disposition: map[string]int{"attached_pic": 1}},
+		{Index: 1, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8, FPS: 23.976, Disposition: map[string]int{"default": 1}},
+	}
+	for _, tc := range []struct {
+		name, attachment, decision string
+		wantStatus                 StepStatus
+		wantReason                 string
+	}{
+		{"kept", `,{"index": 2, "codec_type": "attachment", "codec_name": "none", "extradata_size": 76856, "tags": {"filename": "cover_0.bmp", "mimetype": "image/bmp"}}`, "", StepCompleted, ""},
+		{"dropped", "", "", StepWaitingDecision, "Cover art \"\" (image/bmp) is missing"},
+		{"replaced by another type", `,{"index": 2, "codec_type": "attachment", "codec_name": "ttf", "extradata_size": 10, "tags": {"filename": "font.ttf", "mimetype": "font/ttf"}}`, "", StepWaitingDecision, "Cover art"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			candidate := filepath.Join(dir, "candidate.mkv")
+			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			probe := `{"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"},{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2}` + tc.attachment + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
+			ffprobe := filepath.Join(dir, "ffprobe")
+			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
+			ec := &ExecutionContext{Decision: tc.decision, Inputs: map[string]any{}, State: map[string]any{
+				"candidate_path": candidate,
+				"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy", PreserveAttachments: true},
+				"original":       map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0, "video": original, "audio": []mediainspect.DetailedStream{{Index: 2, Kind: "audio", Codec: "aac", Channels: 2}}},
+			}}
+			result, err := e.validateCandidateDetailed(context.Background(), ec)
+			if err != nil || result.Status != tc.wantStatus {
+				t.Fatalf("status %s (%s%s): %v", result.Status, result.Error, result.WaitingReason, err)
+			}
+			if !strings.Contains(result.WaitingReason+result.Error, tc.wantReason) {
+				t.Fatalf("reason %q, want %q", result.WaitingReason+result.Error, tc.wantReason)
+			}
+		})
+	}
+}
+
 func TestModePreflightAdmitsCoverArtOnlyForCapableWorker(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

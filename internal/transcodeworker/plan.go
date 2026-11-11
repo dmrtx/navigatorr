@@ -320,7 +320,7 @@ func (ep *ExecutionPlan) CoverArt() []StreamAction {
 
 // coverArtMimeTypes maps attached-picture codecs to the MIME type Matroska
 // needs on the attachment. Other codecs fail closed.
-var coverArtMimeTypes = map[string]string{"mjpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "gif": "image/gif", "webp": "image/webp", "tiff": "image/tiff"}
+var coverArtMimeTypes = transcode.CoverMimeTypes
 
 var coverArtExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
 

@@ -136,7 +136,10 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 			return attest, checkInvalid("preview tracks", fmt.Errorf("%w: local candidate still carries %d preview image track(s) the plan leaves out (fail closed, never publish)", ErrContentNotPreserved, len(kept)))
 		}
 	}
-	if sc, cc := countCoverArt(srcProbe.Streams), countCoverArt(candProbe.Streams); cc != sc {
+	// A BMP or WebP cover is re-attached as an attachment Matroska does not
+	// read back as a picture: it is held to the attachments below instead.
+	asAttachment := coversAsAttachments(execPlan)
+	if sc, cc := countCoverArt(srcProbe.Streams)-len(asAttachment), countCoverArt(candProbe.Streams); cc != sc {
 		return attest, checkInvalid("cover art", fmt.Errorf("%w: local candidate cover art count %d != source %d (fail closed, never publish)", ErrContentNotPreserved, cc, sc))
 	}
 	// Codec: the candidate must actually be the requested target codec.
@@ -201,10 +204,8 @@ func (w *Worker) validateEncodedCandidateFull(ctx context.Context, localCandidat
 		}
 	}
 	// Attachment preservation policy: the same files, not just as many.
-	if execPlan.Plan.PreserveAttachments {
-		if err := attachmentsPreserved(srcProbe.Streams, candProbe.Streams); err != nil {
-			return attest, failedCheck("attachments", err)
-		}
+	if err := attachmentsWithCovers(srcProbe.Streams, candProbe.Streams, asAttachment, execPlan.Plan.PreserveAttachments); err != nil {
+		return attest, failedCheck("attachments", err)
 	}
 	// Chapter preservation policy (only when the probe could count chapters).
 	if execPlan.Plan.PreserveChapters && srcProbe.Chapters > 0 && candProbe.Chapters != srcProbe.Chapters {
