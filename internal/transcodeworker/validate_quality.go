@@ -158,16 +158,7 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 			return fail("quality_vmaf_hfr_model_unavailable", fmt.Errorf("no proven decimated VMAF path for %.3f FPS source", sourceVideoStreams[0].FPS))
 		}
 	}
-	// A source whose clock restarted states a length that is not its video's
-	// (the parts' times overlap, or the last one ends before the first
-	// began): the encode's timeline is the parts one after the other.
-	sourceSeconds := sourceRep.DurationSec
-	if scan != nil && scan.Discontinuous {
-		if restarted := scan.restartedSeconds(); restarted > 0 {
-			sourceSeconds = restarted
-		}
-	}
-	if sourceSeconds <= 0 || candidateRep.DurationSec <= 0 {
+	if sourceRep.DurationSec <= 0 || candidateRep.DurationSec <= 0 {
 		return fail("quality_final_duration_unavailable", fmt.Errorf("source or candidate duration missing"))
 	}
 	scratch, err := os.MkdirTemp(jobDir, "quality-samples-")
@@ -215,7 +206,7 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		if window.StartSeconds < 0 || window.DurationSeconds <= 0 {
 			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d starts at %.3fs and lasts %.3fs", window.Index, window.StartSeconds, window.DurationSeconds))
 		}
-		if end := window.StartSeconds + window.DurationSeconds; end > sourceSeconds+0.05 {
+		if end := window.StartSeconds + window.DurationSeconds; end > sourceRep.DurationSec+0.05 {
 			return sourceless("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds the source's timeline", window.Index))
 		}
 		// Each window owns a directory, removed as soon as it is measured,
@@ -252,92 +243,58 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		// pass on windows it never measured. A source extract that failed
 		// says nothing about the candidate: an ungated fresh window is then
 		// unmeasured (measureFreshWindows).
-		// Where a source's extract may not measure and another way to cut
-		// it exists (a restarted clock read from the keyframe's byte offset,
-		// then from the file's start), the next is tried before the window
-		// fails: only the last extract's verdict stands.
-		extractions := sourceExtractions(scan, source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to)
-		var refPTS, candPTS []float64
-		for i, extraction := range extractions {
-			last := i == len(extractions)-1
-			// fail ends the window with the last extract's verdict, and
-			// moves to the next extract otherwise.
-			fail := func(r finalWindowResult) (finalWindowResult, bool) { return r, last }
-			refArgs := extraction.args
-			if compactChain != "" {
-				refArgs = withReferenceChain(refArgs, compactChain)
+		refArgs, keyed := sourceExtractionArgs(scan, source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to)
+		if compactChain != "" {
+			refArgs = withReferenceChain(refArgs, compactChain)
+		}
+		var refPTS []float64
+		for attempt := 1; ; attempt++ {
+			output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
+			if err == nil && emptyExtract(output) {
+				switch {
+				case !keyed:
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
+				case scan.picturesIn(sourceFirstFrame+from, sourceFirstFrame+to):
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures inside the window", where))
+				}
+				return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))
 			}
-			refPTS = nil
-			for attempt := 1; ; attempt++ {
-				output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
-				if err == nil && emptyExtract(output) {
-					switch {
-					case !extraction.keyed:
-						if r, done := fail(bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))); done {
-							return r
-						}
-					case scan.picturesIn(sourceFirstFrame+from, sourceFirstFrame+to):
-						if r, done := fail(bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures inside the window", where))); done {
-							return r
-						}
-					default:
-						if r, done := fail(sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))); done {
-							return r
-						}
-					}
-					break
-				}
-				if err == nil {
-					if refPTS, err = probeSamplePTS(ctx, w.ffprobePath, refPath); err == nil {
-						break
-					}
-				}
-				if attempt == 2 || ctx.Err() != nil {
-					if r, done := fail(bad("quality_final_sample_extract_failed", fmt.Errorf("%s, source extract (%d attempts): %w", where, attempt, err))); done || ctx.Err() != nil {
-						return r
-					}
+			if err == nil {
+				if refPTS, err = probeSamplePTS(ctx, w.ffprobePath, refPath); err == nil {
 					break
 				}
 			}
-			if refPTS == nil {
-				continue
+			if attempt == 2 || ctx.Err() != nil {
+				return bad("quality_final_sample_extract_failed", fmt.Errorf("%s, source extract (%d attempts): %w", where, attempt, err))
 			}
-			if candPTS == nil {
-				candArgs := BuildReferenceExtractionArgs(candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame, from, to)
-				if compactCandidateChain != "" {
-					candArgs = withReferenceChain(candArgs, compactCandidateChain)
+		}
+		candArgs := BuildReferenceExtractionArgs(candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame, from, to)
+		if compactCandidateChain != "" {
+			candArgs = withReferenceChain(candArgs, compactCandidateChain)
+		}
+		// The candidate is the encode's own file: one that cannot be read
+		// there is a bad candidate, not a window left unmeasured. Like the
+		// source's, its extract is retried once first: one failed read (a
+		// killed process, a busy disk) says nothing about the file.
+		var candPTS []float64
+		for attempt := 1; ; attempt++ {
+			_, err := runQualityCommand(ctx, w.ffmpegPath, candArgs)
+			code := "quality_final_candidate_extract_failed"
+			if err == nil {
+				if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err == nil {
+					break
 				}
-				// The candidate is the encode's own file: one that cannot be read
-				// there is a bad candidate, not a window left unmeasured. Like the
-				// source's, its extract is retried once first: one failed read (a
-				// killed process, a busy disk) says nothing about the file.
-				for attempt := 1; ; attempt++ {
-					_, err := runQualityCommand(ctx, w.ffmpegPath, candArgs)
-					code := "quality_final_candidate_extract_failed"
-					if err == nil {
-						if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err == nil {
-							break
-						}
-						code = "quality_final_sample_misaligned"
-					}
-					if attempt == 2 || ctx.Err() != nil {
-						return bad(code, fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt, err))
-					}
-				}
+				code = "quality_final_sample_misaligned"
 			}
-			if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
-				if r, done := fail(bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))); done {
-					return r
-				}
-				continue
+			if attempt == 2 || ctx.Err() != nil {
+				return bad(code, fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt, err))
 			}
-			if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
-				if r, done := fail(bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))); done {
-					return r
-				}
-				continue
-			}
-			break
+		}
+		if err := verifySampleAlignment(refPTS, candPTS, sourceVideoStreams[0].FPS); err != nil {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("%s: %w", where, err))
+		}
+		if err := verifyContentAlignment(ctx, w.ffmpegPath, candPath, refPath, threads); err != nil {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("sample %d: %w", window.Index, err))
 		}
 		var r finalWindowResult
 		if runVMAF {

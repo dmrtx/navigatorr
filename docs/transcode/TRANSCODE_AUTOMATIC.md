@@ -96,20 +96,11 @@ video's first or earliest packet is not made: the extract decodes from the
 file's start (an AVI cannot seek to or before its first packet). A source
 whose clock restarted (a broadcast recording, or two joined) is no timeline
 to cut a window by: a time after the restart is one the source never has, or
-has twice, and a seek lands in the wrong part. The scan keeps the length of
-each part between restarts and the byte offset of its keyframes. Its video is
-as long as the parts end to end (the encode's timeline, ffmpeg joins them so),
-not the container's stated length: final windows past that length are refused
-before the encode, and the final gate holds the windows to it. For a program
-or transport stream (which a read can start in the middle of), the window is
-cut by reading the file from the keyframe at least a second before it
-(`-skip_initial_bytes`), on the clock of the part holding the window: a few
-seconds of decoding wherever the window lies. A window across a restart, any
-other container, and a window that does not measure that way (the encode is
-then compared again) decode from the file's start without keeping the source's
-times, which joins the parts as the encode did and counts the window from the
-first picture; that decode reaches the window after every picture before it,
-and costs minutes on a long 4K source. A source extract that fails is tried once more, as is the
+has twice, and a seek lands in the wrong part. Its extract decodes from the
+file's start without keeping the source's times, so ffmpeg joins the parts as
+the encode did, and the window is counted from the first picture; a decode
+that long costs more time per window, but a good encode is never refused for
+it. A source extract that fails is tried once more, as is the
 output's, and a source extract that comes back empty is a failed extract too
 when its seek was not aimed at a keyframe or the scan read a picture inside
 the window;

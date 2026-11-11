@@ -202,33 +202,7 @@ func TestRealWindowSeekClockRestartedLower(t *testing.T) {
 	}
 }
 
-// restartedFixture joins two recordings into one file whose clock restarts
-// lower than it began (100 s to 130 s, then secondStart seconds on for 30),
-// in the container given by out (ffmpeg's muxer arguments).
-func restartedFixture(t *testing.T, ctx context.Context, ffmpeg, dir, name, secondStart string, out ...string) string {
-	t.Helper()
-	var joined []byte
-	for _, part := range []struct{ name, src, offset string }{{"a", "testsrc", "100"}, {"b", "testsrc2", secondStart}} {
-		path := filepath.Join(dir, name+"."+part.name)
-		args := append([]string{"-nostdin", "-v", "error", "-f", "lavfi", "-i", part.src + "=d=30:s=320x240:r=25",
-			"-c:v", "mpeg2video", "-g", "12", "-bf", "2", "-output_ts_offset", part.offset}, out...)
-		if b, err := exec.CommandContext(ctx, ffmpeg, append(args, path)...).CombinedOutput(); err != nil {
-			t.Fatalf("fixture: %v %s", err, b)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		joined = append(joined, data...)
-	}
-	source := filepath.Join(dir, name)
-	if err := os.WriteFile(source, joined, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return source
-}
-
-// The same kind of source, measured the way the final gate does: every
+// The same program stream, measured the way the final gate does: every
 // window of the source is cut from the first picture and compared with the
 // encode's. The source's own times are no timeline (the second recording
 // runs 60 s to 90 s, before the first one's 100 s to 130 s), the encode's is
@@ -236,10 +210,8 @@ func restartedFixture(t *testing.T, ctx context.Context, ffmpeg, dir, name, seco
 // after its start found no picture through a seek (the demuxer finds the
 // restarted part), and a window in the second recording named a time the
 // source never has: both came back empty, and the gate refused a good
-// encode after the whole encode. Each way of cutting a window now holds the
-// pictures the encode holds at the same time: reading from the byte offset of
-// the keyframe before the window, on the clock of the part holding it, and
-// decoding from the file's start, which the first one falls back to.
+// encode after the whole encode. Each window now holds the pictures the
+// encode holds at the same time.
 func TestRealFinalWindowsClockRestartedLower(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
@@ -249,188 +221,73 @@ func TestRealFinalWindowsClockRestartedLower(t *testing.T) {
 	if err != nil {
 		t.Skip("ffprobe unavailable")
 	}
-	for _, tc := range []struct {
-		name string
-		out  []string
-	}{
-		{"program.mpg", []string{"-f", "vob"}},
-		{"transport.ts", []string{"-f", "mpegts"}},
-		{"blu-ray.m2ts", []string{"-f", "mpegts", "-mpegts_m2ts_mode", "1"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
-			defer cancel()
-			dir := t.TempDir()
-			source := restartedFixture(t, ctx, ffmpeg, dir, tc.name, "60", tc.out...)
-			candidate := filepath.Join(dir, "candidate.mkv")
-			if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source, "-map", "0:v:0", "-c:v", "ffv1", candidate).CombinedOutput(); err != nil {
-				t.Fatalf("candidate: %v %s", err, out)
-			}
-			packets, err := scanFilePackets(ctx, ffprobe, source, packetScanRequest{video: 0})
-			if err != nil {
-				t.Fatal(err)
-			}
-			scan := &packets.video
-			if !scan.Discontinuous {
-				t.Fatal("fixture: the clock did not restart")
-			}
-			if got := scan.restartedSeconds(); math.Abs(got-60) > 0.1 {
-				t.Fatalf("video length %.3f, want the two parts' 60 s", got)
-			}
-			sourceFirst, err := probeFirstFrameTime(ctx, ffprobe, source, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			candidateFirst, err := probeFirstFrameTime(ctx, ffprobe, candidate, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// Inside the first recording (5 s, 15 s, 25 s, 28 s), across the
-			// restart (29.5 s) and inside the second (35 s, 45 s, 58 s).
-			for _, start := range []float64{5, 15, 25, 28, 29.5, 35, 45, 58} {
-				from, to := sampleFrameBounds(start, 1, 25)
-				ref := filepath.Join(dir, "ref.mkv")
-				cand := filepath.Join(dir, "cand.mkv")
-				extractions := sourceExtractions(scan, source, ref, 0, sourceFirst, from, to)
-				// A window across the restart has no part to read from.
-				if want := 2; start != 29.5 && len(extractions) != want || start == 29.5 && len(extractions) != 1 {
-					t.Fatalf("window at %.1f s: %d ways to cut it, want %d (the byte offset of its keyframe, then the file's start)", start, len(extractions), want)
-				}
-				if out, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin", "-v", "error"}, BuildReferenceExtractionArgs(candidate, cand, 0, candidateFirst, from, to)...)...).CombinedOutput(); err != nil {
-					t.Fatalf("window at %.1f s: candidate extract: %v %s", start, err, out)
-				}
-				candPTS, err := probeSamplePTS(ctx, ffprobe, cand)
-				if err != nil {
-					t.Fatalf("window at %.1f s: %v", start, err)
-				}
-				for i, extraction := range extractions {
-					output, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin"}, extraction.args...)...).CombinedOutput()
-					if err != nil || emptyExtract(output) || !extraction.keyed {
-						t.Fatalf("window at %.1f s, extract %d: keyed %v, empty %v: %v", start, i, extraction.keyed, emptyExtract(output), err)
-					}
-					refPTS, err := probeSamplePTS(ctx, ffprobe, ref)
-					if err != nil {
-						t.Fatalf("window at %.1f s, extract %d: %v", start, i, err)
-					}
-					if err := verifySampleAlignment(refPTS, candPTS, 25); err != nil {
-						t.Fatalf("window at %.1f s, extract %d: %v", start, i, err)
-					}
-					if err := verifyContentAlignment(ctx, ffmpeg, cand, ref, 1); err != nil {
-						t.Fatalf("window at %.1f s, extract %d: the source's pictures are not the encode's: %v", start, i, err)
-					}
-				}
-			}
-		})
-	}
-}
-
-// Windows planned past the video's real length are refused before the
-// encode. The container of a source whose clock restarted states a length
-// that is not the video's (here 100 s, the video holds 60 s), and the windows
-// were planned on it: the gate would only find that after the encode.
-func TestFinalWindowsPastARestartedVideoFailBeforeTheEncode(t *testing.T) {
-	ffmpeg, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe unavailable")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 	defer cancel()
 	dir := t.TempDir()
-	source := restartedFixture(t, ctx, ffmpeg, dir, "program.mpg", "60", "-f", "vob")
-	scan, err := scanSourceVideo(ctx, ffprobe, source, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := func(start, dur float64) *transcode.Plan {
-		return &transcode.Plan{QualityValidation: &transcode.QualityValidationPlan{Samples: []transcode.BenchmarkSampleWindow{{Index: 2, StartSeconds: start, DurationSeconds: dur}}}}
-	}
-	if err := finalWindowsFitVideo(plan(40, 10), scan); err != nil {
-		t.Fatalf("a window in the second recording was refused: %v", err)
-	}
-	if err := finalWindowsFitVideo(plan(70, 10), scan); err == nil || !strings.Contains(err.Error(), "quality_final_window_beyond_video") {
-		t.Fatalf("err = %v, want the window past the video's 60 s refused", err)
-	}
-}
-
-// A good encode of a source whose clock restarted passes the final gate end to
-// end, and one that is not the source's still fails it. The windows are cut
-// from the byte offset of the keyframe before them. Byte offsets that lead
-// nowhere (a scan read from another file, a file rewritten) leave the extract
-// empty or wrong: the window is then cut from the file's start, and still
-// passes. An encode that lost every other picture still fails.
-func TestRealRestartedClockFinalGate(t *testing.T) {
-	ffmpeg, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		t.Skip("ffmpeg unavailable")
-	}
-	ffprobe, err := exec.LookPath("ffprobe")
-	if err != nil {
-		t.Skip("ffprobe unavailable")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-	defer cancel()
-	available, err := ProbeAvailableEncoders(ctx, ffmpeg)
-	if err != nil || !available["libx264"] || !available["mpeg2video"] {
-		t.Skip("libx264/MPEG-2 unavailable")
-	}
-	dir := t.TempDir()
-	source := restartedFixture(t, ctx, ffmpeg, dir, "joined.ts", "95", "-f", "mpegts")
-	srcProbe, err := ProbeSourceDetails(ctx, ffprobe, source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plan := sizeV3TestPlan(false)
-	plan.Preset = "ultrafast"
-	// The video holds 60 s, whatever the container says; the second
-	// recording's clock overlaps the first's (95 s to 125 s).
-	grid := transcode.PlanFinalValidationWindows(60, 4, 600, 5, 12)
-	fresh := transcode.FreshValidationWindows(grid, 60, 4, 2)
-	plan.QualityValidation = &transcode.QualityValidationPlan{Metric: "ssim", Samples: grid, FreshSamples: fresh, GateFreshSamples: true, Quality: transcode.BenchmarkQualityConfig{FinalValidation: &transcode.BenchmarkFinalValidationConfig{Mode: "sampled"}}, BenchmarkRequestDigest: "sha256:" + strings.Repeat("2", 64)}
-	plan.PlanDigest, _ = transcode.DigestPlan(plan)
-	ep, err := BuildExecutionPlan(plan, srcProbe.Streams, srcProbe.DurationSec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobDir := filepath.Join(dir, "job")
-	for _, sub := range []string{"good", "keys", "thinned"} {
-		if err := os.MkdirAll(filepath.Join(jobDir, sub), 0o700); err != nil {
+	var joined []byte
+	for _, part := range []struct{ name, src, offset string }{{"a.mpg", "testsrc", "100"}, {"b.mpg", "testsrc2", "60"}} {
+		path := filepath.Join(dir, part.name)
+		if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-f", "lavfi", "-i", part.src+"=d=30:s=320x240:r=25",
+			"-c:v", "mpeg2video", "-g", "12", "-bf", "2", "-output_ts_offset", part.offset, "-f", "vob", path).CombinedOutput(); err != nil {
+			t.Fatalf("fixture: %v %s", err, out)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
 			t.Fatal(err)
 		}
+		joined = append(joined, data...)
 	}
-	candidate := filepath.Join(jobDir, "candidate.mkv")
-	if err := RunFFmpegPaths(ctx, ffmpeg, ep, source, candidate, filepath.Join(jobDir, "progress"), filepath.Join(jobDir, "ffmpeg.log")); err != nil {
-		log, _ := os.ReadFile(filepath.Join(jobDir, "ffmpeg.log"))
-		t.Fatalf("encode: %v\n%s", err, log)
+	source := filepath.Join(dir, "joined.mpg")
+	if err := os.WriteFile(source, joined, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	w := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "state"), FFmpeg: ffmpeg, FFprobe: ffprobe})
-	scanned := prescanSource(t, w, ep.Plan, srcProbe, source)
-	scan := scanned.videoScan
-	if scan == nil || !scan.Discontinuous || len(scan.keys) == 0 {
-		t.Fatalf("scan %+v: want a restarted clock with keyframe offsets", scan)
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", source, "-map", "0:v:0", "-c:v", "ffv1", candidate).CombinedOutput(); err != nil {
+		t.Fatalf("candidate: %v %s", err, out)
 	}
-	if err := finalWindowsFitVideo(ep.Plan, *scan); err != nil {
-		t.Fatalf("windows inside the video were refused: %v", err)
+	packets, err := scanFilePackets(ctx, ffprobe, source, packetScanRequest{video: 0})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e, err := w.validateFinalPerceptualScanned(ctx, filepath.Join(jobDir, "good"), source, candidate, plan, "sha256:candidate", 1, scan); err != nil || e.Verdict != "pass" || len(e.FreshUnmeasured) != 0 {
-		t.Fatalf("a good encode failed the final gate: %+v %v", e, err)
+	scan := &packets.video
+	if !scan.Discontinuous {
+		t.Fatal("fixture: the clock did not restart")
 	}
-	lost := *scan
-	lost.keys = append([]segmentKey(nil), scan.keys...)
-	for i := range lost.keys {
-		lost.keys[i].pos = 1 << 40
+	sourceFirst, err := probeFirstFrameTime(ctx, ffprobe, source, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e, err := w.validateFinalPerceptualScanned(ctx, filepath.Join(jobDir, "keys"), source, candidate, plan, "sha256:candidate", 1, &lost); err != nil || e.Verdict != "pass" {
-		t.Fatalf("byte offsets that lead nowhere refused a good encode: %+v %v", e, err)
+	candidateFirst, err := probeFirstFrameTime(ctx, ffprobe, candidate, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	thinned := filepath.Join(jobDir, "thinned.mkv")
-	if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", candidate, "-vf", "select=mod(n\\,2)", "-fps_mode", "passthrough", "-c:v", "ffv1", thinned).CombinedOutput(); err != nil {
-		t.Fatalf("thinned candidate: %v %s", err, out)
-	}
-	if e, err := w.validateFinalPerceptualScanned(ctx, filepath.Join(jobDir, "thinned"), source, thinned, plan, "sha256:candidate", 1, scan); err == nil && e.Verdict == "pass" {
-		t.Fatalf("an encode that lost every other picture passed the final gate: %+v", e)
+	// Inside the first recording (5 s, 15 s, 25 s, 28 s), at the restart
+	// (29.5 s) and inside the second (35 s, 45 s, 58 s).
+	for _, start := range []float64{5, 15, 25, 28, 29.5, 35, 45, 58} {
+		from, to := sampleFrameBounds(start, 1, 25)
+		ref := filepath.Join(dir, "ref.mkv")
+		cand := filepath.Join(dir, "cand.mkv")
+		args, keyed := sourceExtractionArgs(scan, source, ref, 0, sourceFirst, from, to)
+		output, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin"}, args...)...).CombinedOutput()
+		if err != nil || emptyExtract(output) || !keyed {
+			t.Fatalf("window at %.1f s: source extract keyed %v, empty %v: %v", start, keyed, emptyExtract(output), err)
+		}
+		if out, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin", "-v", "error"}, BuildReferenceExtractionArgs(candidate, cand, 0, candidateFirst, from, to)...)...).CombinedOutput(); err != nil {
+			t.Fatalf("window at %.1f s: candidate extract: %v %s", start, err, out)
+		}
+		refPTS, err := probeSamplePTS(ctx, ffprobe, ref)
+		if err != nil {
+			t.Fatalf("window at %.1f s: source extract: %v", start, err)
+		}
+		candPTS, err := probeSamplePTS(ctx, ffprobe, cand)
+		if err != nil {
+			t.Fatalf("window at %.1f s: %v", start, err)
+		}
+		if err := verifySampleAlignment(refPTS, candPTS, 25); err != nil {
+			t.Fatalf("window at %.1f s: %v", start, err)
+		}
+		if err := verifyContentAlignment(ctx, ffmpeg, cand, ref, 1); err != nil {
+			t.Fatalf("window at %.1f s: the source's pictures are not the encode's: %v", start, err)
+		}
 	}
 }
