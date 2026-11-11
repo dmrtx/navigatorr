@@ -144,7 +144,20 @@ func canonicalParameterSets(codec string, data []byte) string {
 	var nals [][]byte
 	switch {
 	case len(data) >= 4 && (data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 0 && data[3] == 1)):
-		nals = splitAnnexB(data)
+		for _, n := range splitAnnexB(data) {
+			if len(n) == 0 {
+				continue
+			}
+			t := int(n[0] & 0x1f)
+			isSet := t == 7 || t == 8
+			if codec == "hevc" {
+				t = int(n[0]>>1) & 0x3f
+				isSet = t >= 32 && t <= 34
+			}
+			if isSet {
+				nals = append(nals, n)
+			}
+		}
 	case codec == "h264" && len(data) >= 7 && data[0] == 1:
 		pos := 5
 		for _, group := range []int{int(data[pos] & 0x1f), -1} {
