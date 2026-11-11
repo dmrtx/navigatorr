@@ -20,8 +20,17 @@ import (
 // played, and one with no time (Untimed) cannot be placed: both are counted
 // in Packets and left out of the span and its bytes, so a copy that drops
 // them measures as long as the source.
+//
+// Holes is the time inside the span no packet covers: for each pair of
+// consecutive timed packets, the distance between their times beyond the
+// first one's duration, when it is more than a hole's floor (a container's
+// timestamp rounding is not one). A packet with no duration (TrueHD in
+// Matroska) covers nothing it states, so only a distance of audioHoleLongFloor
+// or more counts for it. Start and End cannot see a hole in the middle; a
+// conversion that skipped an undecodable stretch of packets shows only here.
 type AudioPacketSpan struct {
 	Start, End float64
+	Holes      float64
 	Bytes      int64
 	Packets    int64
 	Timed      int64
@@ -173,9 +182,18 @@ type AudioPacketAccumulator struct {
 
 type audioSpanState struct {
 	AudioPacketSpan
-	lastPTS, gap float64
-	openEnd      bool
+	lastPTS, lastDuration, gap float64
+	openEnd                    bool
 }
+
+// audioHoleFloor is the smallest distance between a packet's end and the next
+// packet's time that counts as a hole: Matroska rounds times to a millisecond,
+// so two packets 21.33 ms apart can read 22 ms against a 21 ms duration.
+const audioHoleFloor = 0.01
+
+// audioHoleLongFloor is the smallest distance between two packets, the first
+// without a duration, that counts as a hole.
+const audioHoleLongFloor = 0.1
 
 // errAudioPacketTiming is every failure to measure a packet.
 var errAudioPacketTiming = errors.New("audio packet timing/size unavailable")
@@ -223,7 +241,15 @@ func (a *AudioPacketAccumulator) Add(fields map[string]string) error {
 		s.Start, s.End = pts, pts
 	} else if gap := pts - s.lastPTS; gap > 0 {
 		s.gap = gap
+		floor := audioHoleFloor
+		if s.lastDuration == 0 {
+			floor = audioHoleLongFloor
+		}
+		if hole := gap - s.lastDuration; hole >= floor {
+			s.Holes += hole
+		}
 	}
+	s.lastDuration = duration
 	s.Start = math.Min(s.Start, pts)
 	if end := pts + duration; end > s.End || (end == s.End && duration == 0) {
 		s.End, s.openEnd = end, duration == 0

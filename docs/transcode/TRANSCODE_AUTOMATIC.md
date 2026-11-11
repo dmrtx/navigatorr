@@ -181,6 +181,16 @@ when:
   0.25 s. A copied track's start is not compared with the video's: its
   packets keep their own timestamps. A converted track keeps the 0.25 s start
   check;
+- a converted audio track has more than 0.1 s more silence between its packets
+  than the source track. The scan sums, for each pair of consecutive packets,
+  the distance between their times beyond the first one's duration (a
+  millisecond of timestamp rounding is not counted; a packet with no duration,
+  TrueHD in Matroska, counts only a distance of 0.1 s or more). ffmpeg skips a
+  stretch of undecodable packets and exits 0, which leaves the track's first
+  and last times alone; the hole it opens is the dropped sound. A gap the
+  source itself has is kept by the conversion and is not counted. Real
+  conversions of AC-3, E-AC-3, DTS, TrueHD, FLAC and AAC in Matroska and
+  MPEG-TS measured at most a millisecond of difference;
 - a copied subtitle has a different packet count (only packets marked to be
   discarded or without a time may be missing; a PGS track whose source
   carries segments as packets of their own, a Blu-ray transport stream or a

@@ -14,13 +14,13 @@ import (
 // its timed packets, and how many packets it has in all, of which timed, how
 // many the container marks to be discarded and how many carry no time.
 type audioPacketSpan struct {
-	start, end                         float64
+	start, end, holes                  float64
 	bytes                              int64
 	packets, timed, discarded, untimed int64
 }
 
 func audioSpanOf(s mediainspect.AudioPacketSpan) audioPacketSpan {
-	return audioPacketSpan{start: s.Start, end: s.End, bytes: s.Bytes, packets: s.Packets, timed: s.Timed, discarded: s.Discarded, untimed: s.Untimed}
+	return audioPacketSpan{start: s.Start, end: s.End, holes: s.Holes, bytes: s.Bytes, packets: s.Packets, timed: s.Timed, discarded: s.Discarded, untimed: s.Untimed}
 }
 
 func (s audioPacketSpan) seconds() float64 { return s.end - s.start }
@@ -145,6 +145,13 @@ func validateAudioPackets(plan *transcode.Plan, src, dst SourceProbe, b map[int]
 // frame rounding.
 const audioLengthSlack = 0.25
 
+// audioHoleSlack is how much more silence between packets a converted track
+// may have than the source's track. Real conversions of AC-3, E-AC-3, DTS,
+// TrueHD, FLAC and AAC in Matroska and MPEG-TS measured no more than a
+// millisecond; an undecodable stretch ffmpeg skips (exit 0) leaves the
+// first and last times alone and opens a hole of its own length.
+const audioHoleSlack = 0.1
+
 // copiedAudioPackets holds a copied track to the source's packets. A copy
 // carries every packet unchanged, but for those the source's container marks
 // to be discarded (an edit list trimming the start), which the copy may leave
@@ -161,8 +168,10 @@ func copiedAudioPackets(i int, src, cand audioPacketSpan) error {
 	return audioLength(i, "copied", src, cand, float64(src.untimed+src.discarded)*src.packetSeconds())
 }
 
-// convertedAudioPackets holds a converted track to the source's length and
-// offset from the video, and its bitrate to the target's ceiling. Packets the
+// convertedAudioPackets holds a converted track to the source's length, to the
+// silence between the source's packets (a gap the source has stays; one the
+// conversion opened is sound it dropped), to its offset from the video, and
+// its bitrate to the target's ceiling. Packets the
 // source carries with no time are decoded too, so the conversion may run
 // longer by as many packets.
 func convertedAudioPackets(i, kbps int, src, cand audioPacketSpan, srcProbe, dst SourceProbe) error {
@@ -171,6 +180,9 @@ func convertedAudioPackets(i, kbps int, src, cand audioPacketSpan, srcProbe, dst
 	}
 	if err := audioLength(i, "converted", src, cand, float64(src.untimed)*src.packetSeconds()); err != nil {
 		return err
+	}
+	if opened := cand.holes - src.holes; opened > audioHoleSlack {
+		return candidateInvalid(fmt.Errorf("%w: converted audio stream %d has %.3fs of silence between its packets, the source track %.3fs; sound was dropped inside the track (fail closed, never publish)", ErrContentNotPreserved, i, cand.holes, src.holes))
 	}
 	sv, cv := firstMainVideo(srcProbe.Streams), firstMainVideo(dst.Streams)
 	if sv == nil || cv == nil || sv.StartTime == nil || cv.StartTime == nil {
