@@ -228,6 +228,12 @@ func TestFinishedMCPPreviewArchivesItselfButWebPreviewStays(t *testing.T) {
 		if w := request(h, "POST", "/api/maintenance/archive", body, true); w.Code != 200 {
 			t.Fatal(body, w.Code, w.Body.String())
 		}
+		if job := read("?id=web-preview").Jobs[0]; job["archived"] != want || job["archived_automatically"] != false {
+			t.Fatal("the web preview did not follow the archive request", want, job)
+		}
+		if got := ids(read("?group=workflow&status=archived"))["web-preview"]; got != want {
+			t.Fatal("the web preview is on the wrong tab", want)
+		}
 	}
 	// Archiving what is already archived by the rule stores nothing: a row would hide the batch started from it.
 	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":true}`, true); w.Code != 200 {

@@ -262,3 +262,36 @@ func TestPreviewStartMatchesTrackPicksThroughSymlinks(t *testing.T) {
 		t.Fatal("a pick written through a symlink to a skipped file would block the start", picks)
 	}
 }
+
+func TestPreviewStartAgainClearsARowThatReturned(t *testing.T) {
+	s, h := testUI(t)
+	seedPreview(t, s, map[string]any{"paths": []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv"}, "mode": "size", "media_type": "movie"})
+	st := s.engine.Deps().Store
+	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Whatever wrote the row after the first start, asking again removes it instead of answering early.
+	if err := st.SetMaintenanceArchived("preview", []string{"preview"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if rows, _ := st.MaintenanceArchives(); rows["preview"] != "" {
+		t.Fatal("the second start left the row", rows)
+	}
+}
+
+func TestArchivingAPreviewWhoseBatchIsRunningIsRefused(t *testing.T) {
+	s, h := testUI(t)
+	seedPreview(t, s, map[string]any{"paths": []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv"}, "mode": "size", "media_type": "movie"})
+	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"preview","archived":true}`, true); w.Code != 409 {
+		t.Fatal("a preview whose batch is running was archived", w.Code, w.Body.String())
+	}
+	if rows, _ := s.engine.Deps().Store.MaintenanceArchives(); len(rows) != 0 {
+		t.Fatal("a refused archive left a row", rows)
+	}
+}

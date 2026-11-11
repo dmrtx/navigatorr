@@ -3302,7 +3302,9 @@ test("a completed preview offers review and start, while active work retains can
   assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
   // A preview the server archived by itself has nothing to restore: it keeps its own controls, Start included.
-  assert.deepEqual(h.run('jobControls({id:"p",status:"completed",archived:true,archived_automatically:true,can_archive:false,batch:{dry_run:true,queued:8}})').children.map(c=>c.textContent), ["Review preview", "Start batch"]);
+  const autoControls = h.run('jobControls({id:"p",status:"completed",archived:true,archived_automatically:true,can_archive:false,batch:{dry_run:true,queued:8}})');
+  assert.deepEqual(autoControls.children.map(c=>c.textContent), ["Review preview", "Start batch"]);
+  assert.equal(autoControls.children[1].disabled, false);
   assert.match(h.run('queueOutcome({status:"completed",archived:true,archived_automatically:true,batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
   // ...and none of its reasons tell a person to restore it: only a preview archived by hand does.
   h.run('state.info={allow_destructive:true};');

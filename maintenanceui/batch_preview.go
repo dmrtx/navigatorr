@@ -184,6 +184,10 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if plan.ExecutionActionID != "" {
+		if err := s.clearPreviewArchive(id); err != nil {
+			fail(w, 500, "the batch started, but its archive row could not be cleared; start it again to retry")
+			return
+		}
 		writeJSON(w, 200, map[string]string{"id": plan.ExecutionActionID})
 		return
 	}
@@ -200,9 +204,9 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 		failAdmission(w, 409, err)
 		return
 	}
-	// A manual archive row left on the preview would hide the batch it just started once that finishes.
-	if root, members, err := s.workflowMemberIDs(id); err == nil && root != "" {
-		_ = s.engine.Deps().Store.SetMaintenanceArchived(root, members, false)
+	if err := s.clearPreviewArchive(id); err != nil {
+		fail(w, 500, "the batch started, but its archive row could not be cleared; start it again to retry")
+		return
 	}
 	writeJSON(w, 202, map[string]string{"id": result.ID})
 }
@@ -273,4 +277,14 @@ func (s *Server) pendingBatchItems(inst store.ActionInstance, items []store.Tran
 		items = append(items, item)
 	}
 	return items, len(items) > 0, nil
+}
+
+// A manual archive row left on the preview would hide the batch started from it once
+// that finishes, so starting removes it. Starting again repeats this, so a failure heals.
+func (s *Server) clearPreviewArchive(id string) error {
+	root, members, err := s.workflowMemberIDs(id)
+	if err != nil || root == "" {
+		return err
+	}
+	return s.engine.Deps().Store.SetMaintenanceArchived(root, members, false)
 }
