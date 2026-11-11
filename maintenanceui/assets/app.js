@@ -5612,7 +5612,7 @@ function jobControls(job, detail = false) {
     b.disabled = jobControlDisabled(b);
     actionRail.append(b);
   };
-  if (job.archived) {
+  if (job.archived && !job.archived_automatically) {
     add("Restore", () => archiveJob(job, false));
     return actionRail;
   }
@@ -6778,7 +6778,7 @@ function sizeModeNote(job) {
   return box;
 }
 function queueOutcome(job) {
-  if (job.archived) return "Archived · Restore to return to the queue";
+  if (job.archived && !job.archived_automatically) return "Archived · Restore to return to the queue";
   const bench = resultHeadline(job);
   if (bench) return bench;
   const batch = visibleBatch(job);
@@ -8828,7 +8828,7 @@ function actionSlot(b, kind) {
   return slot;
 }
 function unavailableReason(job, status, slot) {
-  if (job.archived) return "Archived · restore it first";
+  if (job.archived && !job.archived_automatically) return "Archived · restore it first";
   if (slot === "next") {
     if (status === "failed" && job.resolved_by) return `Resolved by #${job.resolved_by.number || "a later run"}`;
     return {queued: "Available when the encode finishes", encoding: "Available when the encode finishes", needs_decision: "Decide on the result first", replacing: "Replacing now", replaced: "Already replaced", kept_original: "The original was kept", no_result: "Running it again would end the same way", cancelled: "Running it again would end the same way", failed: "Running it again would end the same way", ready_to_replace: state.info?.allow_destructive ? "Not available right now" : "Replacing is off in server settings"}[status] || "Not available";
@@ -8962,7 +8962,7 @@ async function replaceBatchReadyNow(job, control) {
   return replaceAllReady(ids, {parentId: job.id, control});
 }
 function batchReplaceReason(job, n) {
-  if (job.archived) return "Archived · restore it first";
+  if (job.archived && !job.archived_automatically) return "Archived · restore it first";
   if (!state.info?.allow_destructive) return "Replacing is off in server settings";
   if (job.batch?.dry_run) return "A preview replaces nothing";
   if (job.batch?.promotion_plan_ready) return "Decide on the replacement plan first";
@@ -9009,7 +9009,7 @@ function batchActionBar(job) {
     change.querySelector?.("svg")?.remove?.();
     change.textContent = "Change goal";
   }
-  change ||= unavailableAction("Change goal", job.archived ? "Archived · restore it first" : job.batch?.dry_run ? "Start the batch first" : job.batch?.promotion_plan_ready ? "Decide on the replacement plan first" : job.replacement?.approved && operationIsActive(job.status) ? "Replacing now" : job.mode && onlyUnsupportedSources(job) ? "No file here can take another goal" : "Not available for this batch", "jd-secondary");
+  change ||= unavailableAction("Change goal", job.archived && !job.archived_automatically ? "Archived · restore it first" : job.batch?.dry_run ? "Start the batch first" : job.batch?.promotion_plan_ready ? "Decide on the replacement plan first" : job.replacement?.approved && operationIsActive(job.status) ? "Replacing now" : job.mode && onlyUnsupportedSources(job) ? "No file here can take another goal" : "Not available for this batch", "jd-secondary");
   const archive = take("Archive", "Restore");
   const cancel = take("Stop batch · keep originals", "Cancel");
   menu.push(...pool);

@@ -2107,6 +2107,28 @@ test("continuous jobs loading appends a page and refreshes the entire loaded win
   assert.equal(h.elements.get("jobs-more").hidden, true);
 });
 
+test("the Archived tab asks for archived jobs and its automatically archived preview keeps Start, not Restore", async () => {
+  const h = commandDom([]);
+  const asked = [];
+  const list = new FakeNode(h.document);
+  h.document.body.append(list);
+  h.elements.set("jobs-list", list);
+  h.context.request = (path) => {
+    if (!path.startsWith("operations?")) return {available: false};
+    asked.push(new URLSearchParams(path.split("?")[1]).get("status"));
+    return {jobs: [
+      {id: "auto", number: 1, action_name: "transcode_batch", status: "completed", archived: true, archived_automatically: true, can_archive: false, batch: {dry_run: true, queued: 8}},
+      {id: "hand", number: 2, action_name: "transcode_batch", status: "completed", archived: true, can_archive: true, batch: {dry_run: true, queued: 8}},
+    ], total: 2, has_more: false};
+  };
+  h.run('api=async(path)=>request(path);renderSavings=()=>{};state.workerInfo={ready:true};state.tab="jobs";$("job-filter").value="archived";');
+  await h.run("loadJobs()");
+  assert.deepEqual(asked, ["archived"]);
+  const labels = (id) => list.querySelectorAll("[data-operation-id]").find((r) => r.dataset.operationId === id).querySelectorAll("button").map((b) => b.textContent.trim());
+  assert.ok(labels("auto").includes("Start batch") && !labels("auto").includes("Restore"), labels("auto").join("|"));
+  assert.ok(labels("hand").includes("Restore") && !labels("hand").includes("Start batch"), labels("hand").join("|"));
+});
+
 // The phone layout's rows: a node opens onto its slots (the table is the wide-screen view of the same data).
 const slotRows=h=>h.elements.get("worker-slots").children[0].children.flatMap(details=>details.children[1].children);
 
@@ -3301,6 +3323,20 @@ test("a completed preview offers review and start, while active work retains can
   assert.match(h.run('queueOutcome({status:"completed",batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
   assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
+  // A preview the server archived by itself has nothing to restore: it keeps its own controls, Start included.
+  const autoControls = h.run('jobControls({id:"p",status:"completed",archived:true,archived_automatically:true,can_archive:false,batch:{dry_run:true,queued:8}})');
+  assert.deepEqual(autoControls.children.map(c=>c.textContent), ["Review preview", "Start batch"]);
+  assert.equal(autoControls.children[1].disabled, false);
+  assert.match(h.run('queueOutcome({status:"completed",archived:true,archived_automatically:true,batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
+  // ...and none of its reasons tell a person to restore it: only a preview archived by hand does.
+  h.run('state.info={allow_destructive:true};');
+  assert.equal(h.run('batchReplaceReason({archived:true,archived_automatically:true,batch:{dry_run:true}}, 0)'), "A preview replaces nothing");
+  assert.equal(h.run('batchReplaceReason({archived:true,batch:{dry_run:true}}, 0)'), "Archived · restore it first");
+  assert.notEqual(h.run('unavailableReason({archived:true,archived_automatically:true}, "queued", "change")'), "Archived · restore it first");
+  assert.equal(h.run('unavailableReason({archived:true}, "queued", "change")'), "Archived · restore it first");
+  const change = (extra) => h.run(`batchActionBar({id:"p",status:"completed",archived:true,${extra}can_archive:false,batch:{dry_run:true,queued:8}})`)[1].children[0].dataset.unavailable;
+  assert.equal(change("archived_automatically:true,"), "Start the batch first");
+  assert.equal(change(""), "Archived · restore it first");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
   // A file's job is one page about that file: it does not loop back to its batch with a button.
   const child='{id:"c",action_name:"transcode_media",status:"waiting_external",parent_batch_id:"b"}';

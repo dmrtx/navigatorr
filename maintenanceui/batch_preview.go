@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/store"
 )
 
-const previewExecutionPrefix = "web-preview:"
+const previewExecutionPrefix = store.PreviewExecutionKeyPrefix
 
 type previewSetting struct {
 	Label string `json:"label"`
@@ -73,12 +74,24 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 		plan.Title = "Selected files"
 	}
 	paths, fileIDs := []string{}, []int{}
+	eligible, omitted := map[string]bool{}, map[string]bool{}
+	// The batch compares resolved paths, so a pick written through a symlink must be matched the same way.
+	resolve := func(path string) string {
+		if fs := s.engine.Deps().Fs; fs != nil {
+			if clean, err := fs.ResolveRead(path); err == nil {
+				return clean
+			}
+		}
+		return filepath.Clean(path)
+	}
 	sonarr := inputs["service"] == "sonarr"
 	for _, item := range items {
 		if item.Status != "queued" || item.Decision != "transcode" {
 			plan.Other++
+			omitted[resolve(item.FilePath)] = true
 			continue
 		}
+		eligible[resolve(item.FilePath)] = true
 		paths = append(paths, item.FilePath)
 		if sonarr {
 			fileID, err := strconv.Atoi(strings.TrimPrefix(item.ItemKey, "epfile-"))
@@ -96,6 +109,18 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 		}
 	}
 	plan.Eligible = len(paths)
+	// Hand-picked tracks of a file the preview left out cannot start: the batch refuses a pick
+	// for a path it does not contain. A pick for an unknown path is kept so that refusal still says so.
+	if picks, ok := inputs["track_picks"].(map[string]any); ok {
+		for path := range picks {
+			if clean := resolve(path); omitted[clean] && !eligible[clean] {
+				delete(picks, path)
+			}
+		}
+		if len(picks) == 0 {
+			delete(inputs, "track_picks")
+		}
+	}
 	if sonarr {
 		inputs["episode_file_ids"] = fileIDs
 	} else {

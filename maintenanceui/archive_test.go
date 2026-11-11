@@ -156,3 +156,104 @@ func TestArchiveReadsTheKeptRecordsInsteadOfDecodingAgain(t *testing.T) {
 		t.Fatal("warming at start must fill the memo with every action", warmed, kept)
 	}
 }
+
+func TestFinishedMCPPreviewArchivesItselfButWebPreviewStays(t *testing.T) {
+	s, h := testUI(t)
+	st := s.engine.Deps().Store
+	dry := map[string]any{"dry_run": true}
+	seedOperation(t, st, "mcp-preview", "transcode_batch", "completed", dry, nil, map[string]any{"request_origin": "mcp"})
+	seedOperation(t, st, "web-preview", "transcode_batch", "completed", dry, nil, map[string]any{"request_origin": "web"})
+	seedOperation(t, st, "mcp-started", "transcode_batch", "completed", dry, nil, map[string]any{"request_origin": "mcp"})
+	seedOperation(t, st, "run", "transcode_batch", "waiting_external", map[string]any{"dry_run": false}, nil, nil)
+	run, _ := st.GetActionInstance("run")
+	run.IdempotencyKey = previewExecutionPrefix + "mcp-started"
+	if err := st.UpdateActionInstance(*run); err != nil {
+		t.Fatal(err)
+	}
+	read := func(path string) operationsPage {
+		t.Helper()
+		w := request(h, "GET", "/api/maintenance/operations"+path, "", true)
+		var page operationsPage
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &page) != nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return page
+	}
+	ids := func(page operationsPage) map[string]bool {
+		out := map[string]bool{}
+		for _, j := range page.Jobs {
+			out[j["id"].(string)] = true
+		}
+		return out
+	}
+	// A preview still running when the caches were filled is archived once it completes:
+	// the origin must survive the refresh of its row.
+	seedOperation(t, st, "late-preview", "transcode_batch", "running", dry, nil, map[string]any{"request_origin": "mcp"})
+	if !ids(read("?group=workflow&status=all"))["late-preview"] {
+		t.Fatal("an active preview must stay visible")
+	}
+	late, _ := st.GetActionInstance("late-preview")
+	late.Status = store.ActionStatusCompleted
+	if err := st.UpdateActionInstance(*late); err != nil {
+		t.Fatal(err)
+	}
+	if ids(read("?group=workflow&status=all"))["late-preview"] || !ids(read("?group=workflow&status=archived"))["late-preview"] {
+		t.Fatal("a refreshed row lost its origin")
+	}
+	main := ids(read("?group=workflow&status=all"))
+	if main["mcp-preview"] || !main["web-preview"] {
+		t.Fatal("only the finished MCP preview leaves the queue", main)
+	}
+	if !ids(read("?group=workflow&status=archived"))["mcp-preview"] {
+		t.Fatal("the MCP preview is not under Archived")
+	}
+	if main["mcp-started"] || !main["run"] {
+		t.Fatal("a started preview shows its run, not itself", main)
+	}
+	detail := read("?id=mcp-preview")
+	if len(detail.Jobs) != 1 {
+		t.Fatal("a direct link to the preview lost its history")
+	}
+	// Nothing to unarchive: the clients are told so, not offered a button that does nothing.
+	if job := detail.Jobs[0]; job["archived"] != true || job["archived_automatically"] != true || job["can_archive"] != false {
+		t.Fatal("an automatic archive is not reported as such", job)
+	}
+	// Restoring it would report success and be undone by the next read, so it is refused.
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":false}`, true); w.Code != 409 {
+		t.Fatal("an automatic archive was reported as restored", w.Code, w.Body.String())
+	}
+	// A web preview is still archived and restored by hand.
+	for _, want := range []bool{true, false} {
+		body := `{"id":"web-preview","archived":` + map[bool]string{true: "true", false: "false"}[want] + `}`
+		if w := request(h, "POST", "/api/maintenance/archive", body, true); w.Code != 200 {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+		if job := read("?id=web-preview").Jobs[0]; job["archived"] != want || job["archived_automatically"] != false {
+			t.Fatal("the web preview did not follow the archive request", want, job)
+		}
+		if got := ids(read("?group=workflow&status=archived"))["web-preview"]; got != want {
+			t.Fatal("the web preview is on the wrong tab", want)
+		}
+	}
+	// Archiving what is already archived by the rule stores nothing: a row would hide the batch started from it.
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":true}`, true); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if rows, _ := s.engine.Deps().Store.MaintenanceArchives(); rows["mcp-preview"] != "" {
+		t.Fatal("archiving an automatically archived preview left a row", rows)
+	}
+	// A row that is already there (from before the rule) does not override it either.
+	if err := s.engine.Deps().Store.SetMaintenanceArchived("mcp-preview", []string{"mcp-preview"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":false}`, true); w.Code != 409 {
+		t.Fatal("a manual row on an automatic archive was reported as restored", w.Code)
+	}
+	// With the manual row present the job still reads as automatic, so no client offers Restore.
+	if job := read("?id=mcp-preview").Jobs[0]; job["archived_automatically"] != true || job["can_archive"] != false || job["archived"] != true {
+		t.Fatal("a manual row hid the automatic archive", job)
+	}
+	if job := read("?id=web-preview").Jobs[0]; job["archived"] != false || job["archived_automatically"] != false || job["can_archive"] != true {
+		t.Fatal("a web preview must stay a normal job", job)
+	}
+}

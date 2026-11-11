@@ -56,3 +56,86 @@ func TestMaintenanceArchivePersistsWithoutChangingActions(t *testing.T) {
 		t.Fatal("restore did not clear archive")
 	}
 }
+
+func TestArchiveRefusesAnActionNamedByKeyThatIsStillActive(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, row := range []ActionInstance{
+		{ID: "preview", ActionName: "transcode_batch", Status: ActionStatusCompleted},
+		{ID: "run", ActionName: "transcode_batch", Status: ActionStatusRunning, IdempotencyKey: "web-preview:preview"},
+	} {
+		if err := s.CreateActionInstance(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := []ActionKey{{"transcode_batch", "web-preview:preview"}}
+	// The member list is the stale one from before the run existed.
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); !errors.Is(err, ErrArchiveActiveWorkflow) {
+		t.Fatal("a running action named by key was ignored", err)
+	}
+	if got, _ := s.MaintenanceArchives(); len(got) != 0 {
+		t.Fatal("a refused archive left a row", got)
+	}
+	run, _ := s.GetActionInstance("run")
+	run.Status = ActionStatusCompleted
+	if err := s.UpdateActionInstance(*run); err != nil {
+		t.Fatal(err)
+	}
+	// Another type of action under the same key, running, is not the batch: it must not block.
+	if err := s.CreateActionInstance(ActionInstance{ID: "other", ActionName: "promote_files", Status: ActionStatusRunning, IdempotencyKey: "web-preview:preview"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []ActionKey{{"transcode_batch", "web-preview:none"}}); err != nil {
+		t.Fatal("a key with no action must not block", err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []ActionKey{{"promote_files", "web-preview:preview"}}); !errors.Is(err, ErrArchiveActiveWorkflow) {
+		t.Fatal("the key is matched together with the action type", err)
+	}
+}
+
+func TestArchiveRowOlderThanThePreviewsBatchIsIgnored(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, row := range []ActionInstance{
+		{ID: "stale", ActionName: "transcode_batch", Status: ActionStatusCompleted},
+		{ID: "stale-run", ActionName: "transcode_batch", Status: ActionStatusCompleted, IdempotencyKey: "web-preview:stale"},
+		{ID: "later", ActionName: "transcode_batch", Status: ActionStatusCompleted},
+		{ID: "later-run", ActionName: "transcode_batch", Status: ActionStatusCompleted, IdempotencyKey: "web-preview:later"},
+		{ID: "plain", ActionName: "transcode_batch", Status: ActionStatusCompleted},
+	} {
+		if err := s.CreateActionInstance(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set := func(id, at string) {
+		if _, err := s.db.Exec(`INSERT INTO maintenance_ui_archives(action_id, archived_at) VALUES(?, ?)`, id, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	created := func(id, at string) {
+		if _, err := s.db.Exec(`UPDATE action_instances SET created_at = ? WHERE id = ?`, at, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	created("stale-run", "2026-11-11T10:00:05.250Z")
+	created("later-run", "2026-11-11T10:00:05.250Z")
+	set("stale", "2026-11-11T10:00:05Z")   // archived before the batch existed, within the same second
+	set("later", "2026-11-11T10:00:09.5Z") // archived by hand after the batch started
+	set("plain", "2026-11-11T09:00:00Z")   // no batch started from it
+	got, err := s.MaintenanceArchives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["stale"] != "" || got["later"] == "" || got["plain"] == "" {
+		t.Fatal("a row older than the preview's batch must be ignored, and only that one", got)
+	}
+}

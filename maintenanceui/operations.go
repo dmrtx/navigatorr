@@ -90,6 +90,14 @@ type operationRecord struct {
 	savings                operationSavings
 }
 
+// A finished preview that an MCP client ran only to look at its plan is
+// archived by itself: the client starts the real batch as a separate action,
+// so nobody opens the preview to press Start. A preview made in the web form
+// stays in the queue until it is started, because Start lives on that row.
+func autoArchivedPreview(r operationRecord, started bool) bool {
+	return r.inst.ActionName == "transcode_batch" && r.inst.Status == store.ActionStatusCompleted && r.inputs["dry_run"] == true && operationString(r.state["request_origin"]) == "mcp" && !started
+}
+
 func decodeOperationJSON(raw string) map[string]any {
 	var out map[string]any
 	_ = json.Unmarshal([]byte(raw), &out)
@@ -791,7 +799,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		if grouped && representatives[roots[r.inst.ID]] != r.inst.ID {
 			continue
 		}
-		archived := archives[roots[r.inst.ID]] != "" && !activeWorkflows[roots[r.inst.ID]]
+		archived := (archives[roots[r.inst.ID]] != "" || autoArchivedPreview(recordsByID[roots[r.inst.ID]], previewExecutions[roots[r.inst.ID]] != "")) && !activeWorkflows[roots[r.inst.ID]]
 		// An archived workflow that resumes through another client must remain
 		// visible while active. Direct detail links can always read its history.
 		if selectedID == "" && archived != (status == "archived") {
@@ -962,8 +970,14 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			job["workflow_id"] = root
 			job["archive_id"] = root
 			job["needs_decision"] = decisionWorkflows[root]
-			job["can_archive"] = !activeWorkflows[root]
-			job["archived"] = archives[root] != "" && !activeWorkflows[root]
+			// An archive that comes from the rule has no row to remove, so the
+			// clients must not offer Unarchive for it.
+			// The rule decides even when a manual row also exists, so the three fields agree
+			// with what a restore request answers.
+			auto := autoArchivedPreview(recordsByID[root], previewExecutions[root] != "")
+			job["can_archive"] = !activeWorkflows[root] && !auto
+			job["archived"] = (archives[root] != "" || auto) && !activeWorkflows[root]
+			job["archived_automatically"] = auto && !activeWorkflows[root]
 			if r.inst.ID != root && recordsByID[root].inputs["dry_run"] == true {
 				job["preview_action_id"] = root
 			}
