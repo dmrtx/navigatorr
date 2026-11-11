@@ -5,6 +5,33 @@ import (
 	"testing"
 )
 
+// The worker's plan and the coordinator's validation read a source cover's
+// type and name through these two functions.
+func TestCoverMIMEAndFilename(t *testing.T) {
+	for _, tc := range []struct {
+		codec, tag, want string
+		ok               bool
+	}{
+		{"mjpeg", "", "image/jpeg", true},
+		{" MJPEG ", " Image/JPEG ", "image/jpeg", true},
+		{"mjpeg", "image/bmp", "image/bmp", true},
+		{"bmp", "", "image/bmp", true},
+		{"mjpeg", "image/jpg", "", false},
+		{"h264", "", "", false},
+		{"h264", "image/jpeg", "", false},
+	} {
+		got, ok := CoverMIME(tc.codec, tc.tag)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("CoverMIME(%q, %q) = %q, %v; want %q, %v", tc.codec, tc.tag, got, ok, tc.want, tc.ok)
+		}
+	}
+	for in, want := range map[string]string{"front.bmp": "front.bmp", " front.bmp ": "front.bmp", "": "", "a/b.jpg": "", `a\b.jpg`: "", "..": ""} {
+		if got := CoverFilename(in); got != want {
+			t.Errorf("CoverFilename(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestTakeReattachedCovers(t *testing.T) {
 	f := func(name, mime string, size int64) AttachedFile { return AttachedFile{name, mime, size} }
 	font := f("a.ttf", "font/ttf", 10)

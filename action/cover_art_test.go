@@ -203,20 +203,27 @@ func TestValidateCandidateDetailedRequiresCoverArtKept(t *testing.T) {
 // reads back as an attachment, not a picture: the same picture kept passes,
 // a dropped or different one does not.
 func TestValidateCandidateDetailedBMPCoverComesBackAsAttachment(t *testing.T) {
-	original := []mediainspect.DetailedStream{
-		{Index: 0, Kind: "video", Codec: "bmp", Width: 160, Height: 240, Disposition: map[string]int{"attached_pic": 1}},
-		{Index: 1, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8, FPS: 23.976, Disposition: map[string]int{"default": 1}},
-	}
 	for _, tc := range []struct {
 		name, attachment, decision string
+		tags                       map[string]string
 		wantStatus                 StepStatus
 		wantReason                 string
 	}{
-		{"kept", `,{"index": 2, "codec_type": "attachment", "codec_name": "none", "extradata_size": 76856, "tags": {"filename": "cover_0.bmp", "mimetype": "image/bmp"}}`, "", StepCompleted, ""},
-		{"dropped", "", "", StepWaitingDecision, "Cover art \"\" (image/bmp) is missing"},
-		{"replaced by another type", `,{"index": 2, "codec_type": "attachment", "codec_name": "ttf", "extradata_size": 10, "tags": {"filename": "font.ttf", "mimetype": "font/ttf"}}`, "", StepWaitingDecision, "Cover art"},
+		{"kept", `,{"index": 2, "codec_type": "attachment", "codec_name": "none", "extradata_size": 76856, "tags": {"filename": "cover_0.bmp", "mimetype": "image/bmp"}}`, "", nil, StepCompleted, ""},
+		{"dropped", "", "", nil, StepWaitingDecision, "Cover art \"\" (image/bmp) is missing"},
+		{"replaced by another type", `,{"index": 2, "codec_type": "attachment", "codec_name": "ttf", "extradata_size": 10, "tags": {"filename": "font.ttf", "mimetype": "font/ttf"}}`, "", nil, StepWaitingDecision, "Cover art"},
+		// The worker names a cover whose source filename is unsafe or padded
+		// itself (cover_0.bmp, or the trimmed name) and the coordinator expects
+		// that name, not the raw tag.
+		{"unsafe source name kept under the worker's name", `,{"index": 2, "codec_type": "attachment", "codec_name": "none", "extradata_size": 76856, "tags": {"filename": "cover_0.bmp", "mimetype": "image/bmp"}}`, "", map[string]string{"filename": "../art/front.bmp", "mimetype": " IMAGE/BMP "}, StepCompleted, ""},
+		{"padded source name kept trimmed", `,{"index": 2, "codec_type": "attachment", "codec_name": "none", "extradata_size": 76856, "tags": {"filename": "front.bmp", "mimetype": "image/bmp"}}`, "", map[string]string{"filename": " front.bmp ", "mimetype": "image/bmp"}, StepCompleted, ""},
+		{"named cover dropped", "", "", map[string]string{"filename": "front.bmp", "mimetype": "image/bmp"}, StepWaitingDecision, "Cover art \"front.bmp\" (image/bmp) is missing"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			original := []mediainspect.DetailedStream{
+				{Index: 0, Kind: "video", Codec: "bmp", Width: 160, Height: 240, Disposition: map[string]int{"attached_pic": 1}, Tags: tc.tags},
+				{Index: 1, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8, FPS: 23.976, Disposition: map[string]int{"default": 1}},
+			}
 			dir := t.TempDir()
 			candidate := filepath.Join(dir, "candidate.mkv")
 			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
@@ -229,6 +236,50 @@ func TestValidateCandidateDetailedBMPCoverComesBackAsAttachment(t *testing.T) {
 			}
 			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
 			ec := &ExecutionContext{Decision: tc.decision, Inputs: map[string]any{}, State: map[string]any{
+				"candidate_path": candidate,
+				"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy", PreserveAttachments: true},
+				"original":       map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0, "video": original, "audio": []mediainspect.DetailedStream{{Index: 2, Kind: "audio", Codec: "aac", Channels: 2}}},
+			}}
+			result, err := e.validateCandidateDetailed(context.Background(), ec)
+			if err != nil || result.Status != tc.wantStatus {
+				t.Fatalf("status %s (%s%s): %v", result.Status, result.Error, result.WaitingReason, err)
+			}
+			if !strings.Contains(result.WaitingReason+result.Error, tc.wantReason) {
+				t.Fatalf("reason %q, want %q", result.WaitingReason+result.Error, tc.wantReason)
+			}
+		})
+	}
+}
+
+// A cover whose mimetype tag is not an image type the worker re-attaches
+// (the nonstandard image/jpg) is counted as the picture it is, by the same
+// rule the worker's plan uses: kept as a picture passes, lost does not.
+func TestValidateCandidateDetailedNonstandardCoverTagCountsAsPicture(t *testing.T) {
+	original := []mediainspect.DetailedStream{
+		{Index: 0, Kind: "video", Codec: "mjpeg", Width: 600, Height: 900, Disposition: map[string]int{"attached_pic": 1}, Tags: map[string]string{"mimetype": "image/jpg"}},
+		{Index: 1, Kind: "video", Codec: "h264", PixelFormat: "yuv420p", Width: 1920, Height: 1080, BitDepth: 8, FPS: 23.976, Disposition: map[string]int{"default": 1}},
+	}
+	for _, tc := range []struct {
+		name, coverStream string
+		wantStatus        StepStatus
+		wantReason        string
+	}{
+		{"kept", `,{"index": 2, "codec_type": "video", "codec_name": "mjpeg", "width": 600, "height": 900, "disposition": {"attached_pic": 1}}`, StepCompleted, ""},
+		{"dropped", "", StepWaitingDecision, "Cover art count mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			candidate := filepath.Join(dir, "candidate.mkv")
+			if err := os.WriteFile(candidate, []byte("candidate"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			probe := `{"streams": [{"index": 0, "codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080, "bits_per_raw_sample": "8"},{"index": 1, "codec_type": "audio", "codec_name": "aac", "channels": 2}` + tc.coverStream + `], "format": {"format_name": "matroska,webm", "duration": "1420"}}`
+			ffprobe := filepath.Join(dir, "ffprobe")
+			if err := os.WriteFile(ffprobe, []byte(probeScriptWithPackets(t, probe)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			e := NewEngine(EngineDeps{Ffprobe: ffprobe})
+			ec := &ExecutionContext{Inputs: map[string]any{}, State: map[string]any{
 				"candidate_path": candidate,
 				"plan":           &transcode.Plan{VideoCodec: "libx265", AudioMode: "copy", PreserveAttachments: true},
 				"original":       map[string]any{"size_bytes": int64(1 << 30), "duration_sec": 1420.0, "video": original, "audio": []mediainspect.DetailedStream{{Index: 2, Kind: "audio", Codec: "aac", Channels: 2}}},

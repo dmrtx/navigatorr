@@ -485,19 +485,17 @@ func attachedFiles(streams []mediainspect.DetailedStream) []transcode.AttachedFi
 // coverCounts is how many of the source's covers the output must carry as
 // pictures, and the covers it must carry as attachments instead (the worker
 // re-attaches a BMP or WebP one as an attachment, which is read back as such).
-// A cover's type is its mimetype tag, else the one its codec gets; a name only
-// when the source gives one (the worker names the others itself).
+// A cover's type and name come from transcode.CoverMIME and CoverFilename, the
+// worker's own rule; a cover the worker cannot keep is refused before the
+// encode, and counts as a picture here.
 func coverCounts(covers []mediainspect.DetailedStream) (pictures int, asFiles []transcode.AttachedFile) {
 	for _, c := range covers {
-		mime := strings.ToLower(streamTag(c, "mimetype"))
-		if mime == "" {
-			mime = transcode.CoverMimeTypes[normCodec(c.Codec)]
-		}
-		if mime == "" || transcode.CoverReadsBackAsPicture(mime) {
+		mime, ok := transcode.CoverMIME(c.Codec, streamTag(c, "mimetype"))
+		if !ok || transcode.CoverReadsBackAsPicture(mime) {
 			pictures++
 			continue
 		}
-		asFiles = append(asFiles, transcode.AttachedFile{Name: streamTag(c, "filename"), MimeType: mime})
+		asFiles = append(asFiles, transcode.AttachedFile{Name: transcode.CoverFilename(streamTag(c, "filename")), MimeType: mime})
 	}
 	return pictures, asFiles
 }

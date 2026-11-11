@@ -322,40 +322,29 @@ func (ep *ExecutionPlan) CoverArt() []StreamAction {
 // needs on the attachment. Other codecs fail closed.
 var coverArtMimeTypes = transcode.CoverMimeTypes
 
-var coverArtExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
+var coverArtExtensions = transcode.CoverExtensions
+
+func safeAttachmentFilename(name string) bool { return transcode.SafeAttachmentFilename(name) }
 
 // coverArtAction keeps an attached picture as an untouched cover. The
 // Matroska muxer writes a copied attached_pic stream as an ordinary one-frame
 // video track, so the cover is re-attached as an image attachment instead,
 // which ffprobe reads back as attached_pic=1.
 func coverArtAction(s SourceStream) (StreamAction, error) {
-	mimeType := coverArtMimeTypes[norm(s.Codec)]
-	if mimeType == "" {
-		return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported codec %q (fail closed)", s.Index, s.Codec)
-	}
-	if s.MimeType != "" {
-		if _, ok := coverArtExtensions[s.MimeType]; !ok {
-			return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported mimetype %q (fail closed)", s.Index, s.MimeType)
+	mimeType, ok := transcode.CoverMIME(s.Codec, s.MimeType)
+	if !ok {
+		if coverArtMimeTypes[norm(s.Codec)] == "" {
+			return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported codec %q (fail closed)", s.Index, s.Codec)
 		}
-		mimeType = s.MimeType
+		return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported mimetype %q (fail closed)", s.Index, s.MimeType)
 	}
-	filename := s.Filename
-	if !safeAttachmentFilename(filename) {
+	// The name and type follow transcode.CoverFilename and CoverMIME, which
+	// the coordinator applies to the same source too.
+	filename := transcode.CoverFilename(s.Filename)
+	if filename == "" {
 		filename = fmt.Sprintf("cover_%d%s", s.TypeIndex, coverArtExtensions[mimeType])
 	}
 	return StreamAction{Kind: "cover", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: "copy", Filename: filename, MimeType: mimeType}, nil
-}
-
-func safeAttachmentFilename(name string) bool {
-	if name == "" || len(name) > 255 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		return false
-	}
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration float64) (*ExecutionPlan, error) {

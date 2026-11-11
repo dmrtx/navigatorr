@@ -66,7 +66,11 @@ func TestVideoCopyRemuxFromTransportAndMP4(t *testing.T) {
 			reject := func(what, bad, wantCode string) {
 				t.Helper()
 				evidence, err := w.validateVideoCopy(ctx, source, bad, plan, "sha256:bad", mustSize(t, bad))
-				if err == nil || evidence == nil || evidence.Verdict == "pass" || len(evidence.VideoCopy.ReasonCodes) != 1 || (wantCode != "" && evidence.VideoCopy.ReasonCodes[0] != wantCode) {
+				if err == nil || evidence == nil {
+					t.Errorf("%s passed the copy check: %v %v", what, evidence, err)
+					return
+				}
+				if evidence.Verdict == "pass" || len(evidence.VideoCopy.ReasonCodes) != 1 || (wantCode != "" && evidence.VideoCopy.ReasonCodes[0] != wantCode) {
 					t.Errorf("%s passed the copy check: %v %v", what, evidence.VideoCopy.ReasonCodes, err)
 				}
 			}

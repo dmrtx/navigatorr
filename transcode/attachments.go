@@ -62,6 +62,55 @@ func AttachmentChange(source, output []AttachedFile) string {
 // is re-attached with. Other codecs are refused before the encode.
 var CoverMimeTypes = map[string]string{"mjpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "gif": "image/gif", "webp": "image/webp", "tiff": "image/tiff"}
 
+// CoverExtensions are the MIME types a cover may carry, with the file
+// extension a cover without a usable name is given.
+var CoverExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
+
+// CoverMIME is the MIME type a source cover is re-attached with: its mimetype
+// tag when it has one, else the one its codec gets. ok is false when the cover
+// cannot be kept (an unmapped codec, or a tag that is not a known image type
+// such as a nonstandard image/jpg): the worker refuses such a source before
+// the encode, and the coordinator reads it the same way. The worker's plan and
+// the coordinator's validation both use this one rule.
+func CoverMIME(codec, tag string) (mime string, ok bool) {
+	mime = CoverMimeTypes[strings.ToLower(strings.TrimSpace(codec))]
+	if mime == "" {
+		return "", false
+	}
+	if tag = strings.ToLower(strings.TrimSpace(tag)); tag != "" {
+		if _, known := CoverExtensions[tag]; !known {
+			return "", false
+		}
+		mime = tag
+	}
+	return mime, true
+}
+
+// SafeAttachmentFilename reports whether a source's filename tag can name the
+// attachment as is.
+func SafeAttachmentFilename(name string) bool {
+	if name == "" || len(name) > 255 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// CoverFilename is the name a re-attached cover keeps from its source's
+// filename tag (trimmed), or "" when the tag is empty or unsafe and the
+// worker names the cover itself.
+func CoverFilename(tag string) string {
+	tag = strings.TrimSpace(tag)
+	if SafeAttachmentFilename(tag) {
+		return tag
+	}
+	return ""
+}
+
 // CoverReadsBackAsPicture reports whether a cover re-attached to Matroska
 // with this MIME type is probed back as a picture (attached_pic). ffmpeg's
 // Matroska reader knows JPEG, PNG, GIF and TIFF; a BMP or WebP attachment
