@@ -420,6 +420,12 @@ func addVideoPacket(scan *sourceVideoScan, fields map[string]string) {
 		// The timeline starts at the first keyframe: what came before it
 		// stood for the timeline only while no keyframe was seen.
 		scan.sawKey, scan.firstKeyPTS, scan.timed = true, pts, false
+		if hasPTS {
+			// A stream cut mid-group can start with pictures stamped far
+			// ahead of the programme; no decoder shows them, so they must
+			// not make the real timeline look like a restart.
+			scan.anyTime, scan.latest, scan.firstTime = false, 0, pts
+		}
 	} else if leading {
 		scan.LeadingNonKey++
 	}

@@ -3,7 +3,9 @@ package transcodeworker
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -65,5 +67,68 @@ func TestSourceClockRestartedIsRefusedBeforeAVideoReencode(t *testing.T) {
 	}
 	if err := sourceClockRestarted(nil, restarted); err != nil {
 		t.Fatalf("a nil plan was refused: %v", err)
+	}
+}
+
+// A transport stream cut in the middle of a picture group starts with
+// pictures stamped far ahead of the programme (the tail of the previous
+// recording). No decoder shows them: the programme begins at the first
+// keyframe, so the clock does not count as restarted.
+func TestSourceClockIgnoresStalePicturesBeforeTheFirstKeyframe(t *testing.T) {
+	ffmpeg, ffprobe := scanTestTools(t)
+	dir := t.TempDir()
+	tail := filepath.Join(dir, "tail.ts")
+	scanTestMedia(t, ffmpeg, "-f", "lavfi", "-i", "testsrc=d=2:s=320x240:r=25", "-c:v", "mpeg2video", "-g", "12", "-bf", "0",
+		"-output_ts_offset", "20", "-f", "mpegts", "-y", tail)
+	main := filepath.Join(dir, "main.ts")
+	scanTestMedia(t, ffmpeg, "-f", "lavfi", "-i", "testsrc2=d=12:s=320x240:r=25", "-c:v", "mpeg2video", "-g", "12", "-bf", "0",
+		"-f", "mpegts", "-y", main)
+	out, err := exec.Command(ffprobe, "-v", "error", "-select_streams", "v", "-show_entries", "packet=pos,flags", "-of", "csv", tail).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var positions []int
+	keyAfterFirst := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Split(line, ",")
+		pos, perr := strconv.Atoi(fields[1])
+		if perr != nil {
+			t.Fatalf("packet line %q: %v", line, perr)
+		}
+		positions = append(positions, pos)
+		if len(positions) > 1 && keyAfterFirst == 0 && strings.Contains(fields[2], "K") {
+			keyAfterFirst = pos
+		}
+	}
+	tailData, err := os.ReadFile(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainData, err := os.ReadFile(main)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The tables, the tail's pictures between its first and second
+	// keyframes (none of them a keyframe), then the programme.
+	cut := append([]byte{}, tailData[:positions[0]]...)
+	cut = append(cut, tailData[positions[1]:keyAfterFirst]...)
+	cut = append(cut, mainData...)
+	joined := filepath.Join(dir, "cut.ts")
+	if err := os.WriteFile(joined, cut, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scan, err := scanSourceVideo(context.Background(), ffprobe, joined, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.LeadingNonKey == 0 {
+		t.Fatalf("fixture: no pictures before the first keyframe: %+v", scan)
+	}
+	if scan.Discontinuous {
+		t.Fatalf("stale pictures before the first keyframe marked the clock restarted: %+v", scan)
+	}
+	reencode := &transcode.Plan{Mode: "size", VideoCodec: "libx265"}
+	if err := sourceClockRestarted(reencode, scan); err != nil {
+		t.Fatalf("a convertible source was refused: %v", err)
 	}
 }
