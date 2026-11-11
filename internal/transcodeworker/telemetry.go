@@ -287,18 +287,22 @@ func (w *Worker) persistPhaseCost(jobDir, jobFile string, job *JobRecord, phase 
 }
 
 // accumulatePhaseCost adds a new execution of a phase (a retry, a resumed job)
-// to what earlier executions recorded. A counter one execution measured and
-// another did not stays known: the measured part is a floor, and it is unknown
-// only when no execution measured it. Steps accumulate the same way, by name.
+// to what earlier executions recorded. A counter is known only when every
+// execution measured it: unknown on either side makes it unknown, since the
+// measured part alone would be a floor, not a total. When previous recorded no
+// attempts, the new execution's counters pass through unchanged. Steps
+// accumulate the same way, by name.
 func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost {
 	cost.DurationMs += previous.DurationMs
 	cost.Attempts += previous.Attempts
 	cost.Runs += previous.Runs
-	cost.NASReadBytes = addKnown(previous.NASReadBytes, cost.NASReadBytes)
-	cost.NASWrittenBytes = addKnown(previous.NASWrittenBytes, cost.NASWrittenBytes)
-	cost.CacheHits = addKnown(previous.CacheHits, cost.CacheHits)
-	cost.CacheMisses = addKnown(previous.CacheMisses, cost.CacheMisses)
-	cost.ActiveComputeMs = addKnown(previous.ActiveComputeMs, cost.ActiveComputeMs)
+	if previous.Attempts > 0 {
+		cost.NASReadBytes = addKnown(previous.NASReadBytes, cost.NASReadBytes)
+		cost.NASWrittenBytes = addKnown(previous.NASWrittenBytes, cost.NASWrittenBytes)
+		cost.CacheHits = addKnown(previous.CacheHits, cost.CacheHits)
+		cost.CacheMisses = addKnown(previous.CacheMisses, cost.CacheMisses)
+		cost.ActiveComputeMs = addKnown(previous.ActiveComputeMs, cost.ActiveComputeMs)
+	}
 	if len(previous.Steps) > 0 {
 		steps := make(map[string]transcode.PhaseCost, len(previous.Steps)+len(cost.Steps))
 		for name, step := range previous.Steps {
@@ -332,16 +336,11 @@ func oneAttemptSteps(steps map[string]transcode.PhaseCost) map[string]transcode.
 	return out
 }
 
-// addKnown sums two counters, keeping whichever side is known: nil+x = x,
-// x+nil = x, nil+nil = nil.
+// addKnown sums two counters and is known only when both are: an unknown on
+// either side makes the sum unknown (nil).
 func addKnown(a, b *int64) *int64 {
-	switch {
-	case a == nil && b == nil:
+	if a == nil || b == nil {
 		return nil
-	case a == nil:
-		return knownCount(*b)
-	case b == nil:
-		return knownCount(*a)
 	}
 	return knownCount(*a + *b)
 }

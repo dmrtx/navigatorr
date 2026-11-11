@@ -172,11 +172,10 @@ func TestCPUTimeIsRoundedOnceNotPerChild(t *testing.T) {
 	}
 }
 
-// A new execution of a phase adds to the earlier ones. A counter only one
-// side measured stays known (nil+x = x, x+nil = x); it is unknown only when
-// neither measured it. Steps accumulate by name, Runs add up, and Attempts
-// count executions.
-func TestAccumulatePhaseCostKeepsTheKnownSide(t *testing.T) {
+// A new execution of a phase adds to the earlier ones. A counter is known only
+// when every execution measured it; unknown on either side makes it unknown.
+// Steps accumulate by name, Runs add up, and Attempts count executions.
+func TestAccumulatePhaseCostKnownOnlyWhenEveryExecutionMeasured(t *testing.T) {
 	n := func(v int64) *int64 { return &v }
 	value := func(p *int64) string {
 		if p == nil {
@@ -190,8 +189,8 @@ func TestAccumulatePhaseCostKeepsTheKnownSide(t *testing.T) {
 		want           string
 	}{
 		{"both unknown", nil, nil, "nil"},
-		{"only the retry measured", nil, n(300), "300"},
-		{"only the first attempt measured", n(200), nil, "200"},
+		{"only the retry measured", nil, n(300), "nil"},
+		{"only the first attempt measured", n(200), nil, "nil"},
 		{"both measured", n(200), n(300), "500"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -204,6 +203,23 @@ func TestAccumulatePhaseCostKeepsTheKnownSide(t *testing.T) {
 			}
 		})
 	}
+	t.Run("no previous attempts passes the new values through", func(t *testing.T) {
+		got := accumulatePhaseCost(transcode.PhaseCost{DurationMs: 10}, transcode.PhaseCost{DurationMs: 5, Attempts: 1, ActiveComputeMs: n(300)})
+		if value(got.ActiveComputeMs) != "300" {
+			t.Fatalf("got %+v", got)
+		}
+	})
+	t.Run("step known then unknown is unknown in both orders", func(t *testing.T) {
+		withStep := func(cpu *int64) transcode.PhaseCost {
+			return transcode.PhaseCost{Attempts: 1, Steps: map[string]transcode.PhaseCost{validationStepVMAF: {Attempts: 1, Runs: 1, ActiveComputeMs: cpu}}}
+		}
+		for _, order := range [][2]*int64{{n(200), nil}, {nil, n(200)}} {
+			got := accumulatePhaseCost(withStep(order[0]), withStep(order[1])).Steps[validationStepVMAF]
+			if got.ActiveComputeMs != nil || got.Runs != 2 || got.Attempts != 2 {
+				t.Fatalf("step %+v", got)
+			}
+		}
+	})
 	first := transcode.PhaseCost{DurationMs: 100, Attempts: 1, Steps: map[string]transcode.PhaseCost{
 		validationStepVMAF:    {DurationMs: 60, Attempts: 1, Runs: 7, ActiveComputeMs: n(500)},
 		validationStepExtract: {DurationMs: 30, Attempts: 1, Runs: 7},
