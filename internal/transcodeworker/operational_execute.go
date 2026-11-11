@@ -314,7 +314,10 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// CAMBI, SSIM). A phase that ran none reports unknown, never 0.
 	validationCPU := &cpuMeter{}
 	validationStart := time.Now()
-	validationCtx := withCPUMeter(ctx, validationCPU)
+	// Final validation also reports each step's wall and CPU time, summed over
+	// its windows, as the steps of its validation phase cost.
+	validationSteps := &validationSteps{}
+	validationCtx := withValidationSteps(withCPUMeter(ctx, validationCPU), validationSteps)
 	attest, verr := w.validateEncodedCandidateFull(validationCtx, r.localCandidate, execPlan, srcProbe, 0)
 	if verr == nil {
 		verr = transcode.ValidateFinalSize(job.SourceSizeBytes, attest.SizeBytes, job.Plan.SizePolicy)
@@ -359,9 +362,9 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			}
 		}
 	}
-	if cpu := validationCPU.activeComputeMs(); cpu != nil {
+	if cpu, steps := validationCPU.activeComputeMs(), validationSteps.phaseSteps(); cpu != nil || steps != nil {
 		// A rejected candidate still spent its CPU time.
-		w.persistPhaseCost(jobDir, jobFile, job, "validation", validationStart, transcode.PhaseCost{ActiveComputeMs: cpu})
+		w.persistPhaseCost(jobDir, jobFile, job, "validation", validationStart, transcode.PhaseCost{ActiveComputeMs: cpu, Steps: steps})
 	}
 	if verr != nil {
 		var rejected *transcode.PolicyRejectionError

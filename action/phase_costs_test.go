@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -197,5 +198,90 @@ func TestCoordinatorMeasurementPreservesPolicySkipOutputs(t *testing.T) {
 	}
 	if _, ok := result.Outputs["phase_costs"]; !ok {
 		t.Fatal("skipped policy lost phase measurement outputs")
+	}
+}
+
+// The worker's per-step final validation costs (extract, timestamps,
+// alignment, VMAF, CAMBI, SSIM, chroma) reach the action nested under its
+// validation phase, with their wall time, attempts (validations), runs
+// (windows) and CPU time. The phases beside each other are the same, and add
+// up to the same CPU time, with or without the steps.
+func TestWorkerValidationStepCostsAreMirrored(t *testing.T) {
+	cpu := func(n int64) *int64 { return &n }
+	steps := map[string]transcode.PhaseCost{
+		"extract":    {DurationMs: 61000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(300000)},
+		"timestamps": {DurationMs: 900, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(700)},
+		"alignment":  {DurationMs: 8000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(30000)},
+		"vmaf":       {DurationMs: 250000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(500000)},
+		"cambi":      {DurationMs: 260000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(700000)},
+		"ssim":       {DurationMs: 40000, Attempts: 1, Runs: 7, ActiveComputeMs: cpu(90000)},
+		"chroma":     {DurationMs: 30000, Attempts: 1, Runs: 1, ActiveComputeMs: cpu(60000)},
+	}
+	mirror := func(withSteps bool) map[string]map[string]any {
+		validation := transcode.PhaseCost{DurationMs: 240000, Attempts: 1, ActiveComputeMs: cpu(1900000)}
+		if withSteps {
+			validation.Steps = steps
+		}
+		ec := &ExecutionContext{State: map[string]any{}, Outputs: map[string]any{}}
+		e := NewEngine(EngineDeps{Config: &config.Config{}})
+		e.observeTranscodeStatus(ec, transcode.JobStatus{Status: transcode.StatusCompleted, JobTelemetry: transcode.JobTelemetry{PhaseCosts: map[string]transcode.PhaseCost{
+			"encode":     {DurationMs: 900000, Attempts: 1, ActiveComputeMs: cpu(7000000)},
+			"validation": validation,
+		}}})
+		raw, _ := json.Marshal(ec.State["phase_costs"])
+		var costs map[string]map[string]any
+		if err := json.Unmarshal(raw, &costs); err != nil {
+			t.Fatal(err)
+		}
+		return costs
+	}
+	total := func(costs map[string]map[string]any) (sum float64, phases []string) {
+		for phase, c := range costs {
+			phases = append(phases, phase)
+			if v, ok := c["active_compute_ms"].(float64); ok {
+				sum += v
+			}
+		}
+		slices.Sort(phases)
+		return sum, phases
+	}
+	with, without := mirror(true), mirror(false)
+	withCPU, withPhases := total(with)
+	withoutCPU, withoutPhases := total(without)
+	if withCPU != withoutCPU || withCPU != 8900000 || !slices.Equal(withPhases, withoutPhases) {
+		t.Fatalf("steps changed the phases: %v %v vs %v %v", withPhases, withCPU, withoutPhases, withoutCPU)
+	}
+	validation := with["worker_validation"]
+	if validation["attempts"] != float64(1) || validation["active_compute_ms"] != float64(1900000) || validation["timing_scope"] != "phase_wall; phases may overlap" {
+		t.Fatalf("validation %v", validation)
+	}
+	// A step's duration adds up its windows, which overlap: it says so, and
+	// is never labelled as the phase's elapsed wall time.
+	if cambi, _ := validation["steps"].(map[string]any)["cambi"].(map[string]any); cambi["timing_scope"] != "step_window_wall_sum; runs overlap" || cambi["duration_ms"].(float64) <= validation["duration_ms"].(float64) {
+		t.Fatalf("cambi step %v", cambi)
+	}
+	mirrored, _ := validation["steps"].(map[string]any)
+	if len(mirrored) != len(steps) {
+		t.Fatalf("steps %v", mirrored)
+	}
+	for name, want := range steps {
+		c, _ := mirrored[name].(map[string]any)
+		if c["active_compute_ms"] != float64(*want.ActiveComputeMs) || c["attempts"] != float64(1) || c["runs"] != float64(want.Runs) || c["duration_ms"] != float64(want.DurationMs) || c["provenance"] != "worker_measured" {
+			t.Fatalf("%s: %v", name, c)
+		}
+		// Only a step that ran more than once adds up overlapping runs.
+		scope := "step_window_wall_sum; runs overlap"
+		if want.Runs <= 1 {
+			scope = "step_wall; inside its phase"
+		}
+		if c["timing_scope"] != scope {
+			t.Fatalf("%s: %v", name, c)
+		}
+	}
+	if _, ok := without["worker_validation"]["steps"]; ok {
+		t.Fatal("a validation without steps mirrored some")
+	}
+	if _, ok := with["worker_encode"]["runs"]; ok {
+		t.Fatal("a phase without runs mirrored them")
 	}
 }

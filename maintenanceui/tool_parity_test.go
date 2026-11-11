@@ -88,3 +88,78 @@ func TestPhaseCostsShareTheActionStatusProjection(t *testing.T) {
 		t.Fatalf("UI/MCP measured costs differ: UI=%s MCP=%s", ui, mcpCosts)
 	}
 }
+
+// The worker's per-step final validation costs survive the operations
+// snapshot of a conversion: the page and action_status both list them, nested
+// under the validation phase in the shape the coordinator mirrors them
+// (TestWorkerValidationStepCostsAreMirrored), with wall time, attempts, runs
+// and CPU time, and never as phases of their own.
+func TestValidationStepCostsReachTheOperationsPage(t *testing.T) {
+	s, h := testUI(t)
+	cost := func(duration, attempts, runs, cpu int) map[string]any {
+		c := map[string]any{"duration_ms": duration, "attempts": attempts, "active_compute_ms": cpu, "nas_read_bytes": nil, "nas_written_bytes": nil, "cache_hits": nil, "cache_misses": nil, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+		if runs > 0 {
+			c["runs"] = runs
+		}
+		return c
+	}
+	stepNames := []string{"extract", "timestamps", "alignment", "vmaf", "cambi", "ssim", "chroma"}
+	steps := map[string]any{}
+	for i, name := range stepNames {
+		step := cost(1000*(i+1), 1, 7, 2000*(i+1))
+		step["timing_scope"] = "step_window_wall_sum; runs overlap"
+		steps[name] = step
+	}
+	validation := cost(240000, 1, 0, 1900000)
+	validation["steps"] = steps
+	costs := map[string]any{"worker_encode": cost(900000, 1, 0, 7000000), "worker_validation": validation}
+	seedOperation(t, s.engine.Deps().Store, "validated", "transcode_media", "completed", map[string]any{"path": "/media/a.mkv"}, map[string]any{"phase_costs": costs}, map[string]any{"phase_costs": costs})
+	w := request(h, "GET", "/api/maintenance/operations?id=validated", "", true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	var page operationsPage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Jobs) != 1 {
+		t.Fatalf("unexpected jobs: %+v", page)
+	}
+	shown, _ := page.Jobs[0]["phase_costs"].(map[string]any)
+	if len(shown) != 2 {
+		t.Fatalf("steps listed as phases of their own: %v", shown)
+	}
+	shownValidation, _ := shown["worker_validation"].(map[string]any)
+	shownSteps, _ := shownValidation["steps"].(map[string]any)
+	for _, name := range stepNames {
+		c, _ := shownSteps[name].(map[string]any)
+		if c["attempts"] != float64(1) || c["runs"] != float64(7) || c["active_compute_ms"] == nil || c["duration_ms"] == nil || c["timing_scope"] != "step_window_wall_sum; runs overlap" {
+			t.Fatalf("%s missing from the operations page: %v", name, shownValidation)
+		}
+	}
+	response := request(h, "POST", "/api/maintenance/tool", `{"name":"action_status","arguments":{"id":"validated"}}`, true)
+	if response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	var mcpResult struct {
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &mcpResult); err != nil || len(mcpResult.Content) == 0 {
+		t.Fatal(err, response.Body.String())
+	}
+	var summary struct {
+		Action struct {
+			PhaseCosts map[string]any `json:"phase_costs"`
+		} `json:"action"`
+	}
+	if err := json.Unmarshal([]byte(mcpResult.Content[0].Text), &summary); err != nil {
+		t.Fatal(err)
+	}
+	ui, _ := json.Marshal(shown)
+	mcp, _ := json.Marshal(summary.Action.PhaseCosts)
+	if string(ui) != string(mcp) {
+		t.Fatalf("UI/MCP validation step costs differ: UI=%s MCP=%s", ui, mcp)
+	}
+}

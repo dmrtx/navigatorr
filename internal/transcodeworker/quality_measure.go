@@ -103,70 +103,21 @@ func sampleFrameBounds(startSec, durationSec, fps float64) (from, to float64) {
 	return (first - 0.5) / fps, (first + frames - 0.5) / fps
 }
 
-// isSupportedSourceChroma returns true if the pixel format has safe 4:2:0
-// chroma subsampling. yuvj420p is 4:2:0 at full range: an encode of a
-// full-range source keeps that range (libx265 and VideoToolbox alike), so
-// its candidate reports yuvj420p, and the metric graph's format conversion
-// reads both inputs by their own range.
+// isSupportedSourceChroma, isMeasurableSourceChroma and sourceChromaAdmitted
+// are the shared admission rules (transcode.SupportedSourceChroma and its
+// siblings). The coordinator's preflight refuses, before any worker stages
+// it, a library file whose picture no output could make admissible
+// (transcode.MeasurableSourceChroma); the rest stays this check's.
 func isSupportedSourceChroma(pixFmt string, bitDepth int) bool {
-	p := strings.ToLower(strings.TrimSpace(pixFmt))
-	if bitDepth == 8 {
-		switch p {
-		case "yuv420p", "yuvj420p", "nv12":
-			return true
-		}
-		return false
-	}
-	if bitDepth == 10 {
-		switch p {
-		case "yuv420p10le", "p010le":
-			return true
-		}
-		return false
-	}
-	return false
+	return transcode.SupportedSourceChroma(pixFmt, bitDepth)
 }
 
-// isMeasurableSourceChroma reports whether a source can be encoded and
-// measured. Every encode writes 4:2:0 (yuv420p or p010le), and both metric
-// inputs are converted to yuv420p10le before libvmaf, whose features (and
-// CAMBI) read luma only; a 4:2:2 or 4:4:4 source is therefore measured
-// exactly as a 4:2:0 one, and its chroma is subsampled the way every encode
-// already subsamples it. The candidate itself must still be 4:2:0
-// (isSupportedSourceChroma).
-// sourceChromaAdmitted is isMeasurableSourceChroma for a plan: a source
-// beyond 4:2:0 is admitted only when the plan pins a 4:2:0 output pixel
-// format, since an encode without -pix_fmt would keep the source's chroma
-// and its candidate would fail validation after the whole encode.
 func sourceChromaAdmitted(plan *transcode.Plan, pixFmt string, bitDepth int) bool {
-	if isSupportedSourceChroma(pixFmt, bitDepth) {
-		return true
-	}
-	if plan == nil {
-		return false
-	}
-	out := norm(plan.PixelFormat)
-	return (isSupportedSourceChroma(out, 8) || isSupportedSourceChroma(out, 10)) && isMeasurableSourceChroma(pixFmt, bitDepth)
+	return transcode.SourceChromaAdmitted(plan, pixFmt, bitDepth)
 }
 
 func isMeasurableSourceChroma(pixFmt string, bitDepth int) bool {
-	if isSupportedSourceChroma(pixFmt, bitDepth) {
-		return true
-	}
-	p := strings.ToLower(strings.TrimSpace(pixFmt))
-	switch bitDepth {
-	case 8:
-		switch p {
-		case "yuv422p", "yuvj422p", "yuv444p", "yuvj444p":
-			return true
-		}
-	case 10:
-		switch p {
-		case "yuv422p10le", "yuv444p10le":
-			return true
-		}
-	}
-	return false
+	return transcode.MeasurableSourceChroma(pixFmt, bitDepth)
 }
 
 // tailBuffer retains up to maxBytes of trailing output.

@@ -444,6 +444,15 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		// validation holds every rung to (see transcode_final_validation.go).
 		ec.State["optimization_policy"] = recipeProfile.Optimization
 	}
+	// The worker refuses a picture no measurement class covers only after
+	// staging and scanning the whole file; whatever output a later step pins,
+	// it cannot admit one. It is checked once the plan's own parameters are,
+	// so a bad parameter is never recorded as a permanent source rejection.
+	if modeSnapshot != nil {
+		if err := modeSourceChromaError(plan, modeSnapshot, &rep); err != nil {
+			return StepResult{Status: StepFailed, Error: err.Error()}, nil
+		}
+	}
 
 	// The early check has found nothing wrong with the file for its goal; the
 	// baseline and the plan are made by the real preflight, on its worker.
