@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 )
@@ -32,10 +31,13 @@ func (s *Store) SetMaintenanceArchived(root string, members []string, archived b
 	return s.SetMaintenanceArchivedWith(root, members, archived, nil)
 }
 
-// SetMaintenanceArchivedWith also refuses to archive while an action stored under one of
-// idempotencyKeys is still active. A caller whose member list may be stale (a batch started from
-// a preview an instant ago) names that action by key, and the check shares the archive's transaction.
-func (s *Store) SetMaintenanceArchivedWith(root string, members []string, archived bool, idempotencyKeys []string) error {
+// ActionKey names an action by its type and idempotency key.
+type ActionKey struct{ ActionName, IdempotencyKey string }
+
+// SetMaintenanceArchivedWith also refuses to archive while an action named in keys is still
+// active. A caller whose member list may be stale (a batch started from a preview an instant
+// ago) names that action by key, and the check shares the archive's transaction.
+func (s *Store) SetMaintenanceArchivedWith(root string, members []string, archived bool, keys []ActionKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -55,16 +57,13 @@ func (s *Store) SetMaintenanceArchivedWith(root string, members []string, archiv
 				return ErrArchiveActiveWorkflow
 			}
 		}
-		for _, key := range idempotencyKeys {
-			var status string
-			err := tx.QueryRow(`SELECT status FROM action_instances WHERE idempotency_key = ?`, key).Scan(&status)
-			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
+		for _, key := range keys {
+			var active int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM action_instances WHERE action_name = ? AND idempotency_key = ? AND status NOT IN (?, ?, ?)`,
+				key.ActionName, key.IdempotencyKey, ActionStatusCompleted, ActionStatusFailed, ActionStatusCancelled).Scan(&active); err != nil {
 				return err
 			}
-			if status != ActionStatusCompleted && status != ActionStatusFailed && status != ActionStatusCancelled {
+			if active > 0 {
 				return ErrArchiveActiveWorkflow
 			}
 		}

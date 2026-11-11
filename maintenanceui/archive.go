@@ -48,7 +48,7 @@ func (s *Server) archive(w http.ResponseWriter, req *http.Request) {
 	}
 	// A batch started from the preview a moment ago may not be in the member list yet:
 	// the store checks it by key, in the archive's own transaction.
-	if err := st.SetMaintenanceArchivedWith(root, ids, *input.Archived, []string{previewExecutionPrefix + root}); err != nil {
+	if err := st.SetMaintenanceArchivedWith(root, ids, *input.Archived, []store.ActionKey{{ActionName: "transcode_batch", IdempotencyKey: previewExecutionPrefix + root}}); err != nil {
 		if errors.Is(err, store.ErrArchiveActiveWorkflow) {
 			fail(w, 409, "finish or cancel active work before archiving")
 		} else {

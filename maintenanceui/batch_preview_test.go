@@ -263,22 +263,29 @@ func TestPreviewStartMatchesTrackPicksThroughSymlinks(t *testing.T) {
 	}
 }
 
-func TestPreviewStartAgainClearsARowThatReturned(t *testing.T) {
+func TestPreviewStartAgainKeepsALaterDeliberateArchive(t *testing.T) {
 	s, h := testUI(t)
 	seedPreview(t, s, map[string]any{"paths": []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv"}, "mode": "size", "media_type": "movie"})
 	st := s.engine.Deps().Store
-	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 202 {
+	w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true)
+	var receipt map[string]string
+	if w.Code != 202 || json.Unmarshal(w.Body.Bytes(), &receipt) != nil {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	// Whatever wrote the row after the first start, asking again removes it instead of answering early.
-	if err := st.SetMaintenanceArchived("preview", []string{"preview"}, true); err != nil {
+	// The batch finishes and the person archives it by hand; a repeated Start (a late or doubled request) must not undo that.
+	run, _ := st.GetActionInstance(receipt["id"])
+	run.Status = store.ActionStatusCompleted
+	if err := st.UpdateActionInstance(*run); err != nil {
 		t.Fatal(err)
+	}
+	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"`+receipt["id"]+`","archived":true}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
 	}
 	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if rows, _ := st.MaintenanceArchives(); rows["preview"] != "" {
-		t.Fatal("the second start left the row", rows)
+	if rows, _ := st.MaintenanceArchives(); rows["preview"] == "" {
+		t.Fatal("a repeated Start reopened a batch the person archived", rows)
 	}
 }
 

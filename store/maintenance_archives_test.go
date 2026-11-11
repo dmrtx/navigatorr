@@ -71,7 +71,7 @@ func TestArchiveRefusesAnActionNamedByKeyThatIsStillActive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	keys := []string{"web-preview:preview"}
+	keys := []ActionKey{{"transcode_batch", "web-preview:preview"}}
 	// The member list is the stale one from before the run existed.
 	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); !errors.Is(err, ErrArchiveActiveWorkflow) {
 		t.Fatal("a running action named by key was ignored", err)
@@ -84,10 +84,17 @@ func TestArchiveRefusesAnActionNamedByKeyThatIsStillActive(t *testing.T) {
 	if err := s.UpdateActionInstance(*run); err != nil {
 		t.Fatal(err)
 	}
+	// Another type of action under the same key, running, is not the batch: it must not block.
+	if err := s.CreateActionInstance(ActionInstance{ID: "other", ActionName: "promote_files", Status: ActionStatusRunning, IdempotencyKey: "web-preview:preview"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, keys); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []string{"web-preview:none"}); err != nil {
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []ActionKey{{"transcode_batch", "web-preview:none"}}); err != nil {
 		t.Fatal("a key with no action must not block", err)
+	}
+	if err := s.SetMaintenanceArchivedWith("preview", []string{"preview"}, true, []ActionKey{{"promote_files", "web-preview:preview"}}); !errors.Is(err, ErrArchiveActiveWorkflow) {
+		t.Fatal("the key is matched together with the action type", err)
 	}
 }
