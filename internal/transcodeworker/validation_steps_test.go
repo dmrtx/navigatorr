@@ -209,6 +209,15 @@ func TestAccumulatePhaseCostKnownOnlyWhenEveryExecutionMeasured(t *testing.T) {
 			t.Fatalf("got %+v", got)
 		}
 	})
+	t.Run("an earlier execution without steps leaves no partial breakdown", func(t *testing.T) {
+		got := accumulatePhaseCost(
+			transcode.PhaseCost{DurationMs: 10, Attempts: 1},
+			transcode.PhaseCost{DurationMs: 5, Attempts: 1, Steps: map[string]transcode.PhaseCost{validationStepVMAF: {Attempts: 1, Runs: 1}}},
+		)
+		if got.Steps != nil || got.Attempts != 2 || got.DurationMs != 15 {
+			t.Fatalf("got %+v, want no steps", got)
+		}
+	})
 	t.Run("step known then unknown is unknown in both orders", func(t *testing.T) {
 		withStep := func(cpu *int64) transcode.PhaseCost {
 			return transcode.PhaseCost{Attempts: 1, Steps: map[string]transcode.PhaseCost{validationStepVMAF: {Attempts: 1, Runs: 1, ActiveComputeMs: cpu}}}

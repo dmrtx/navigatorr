@@ -303,7 +303,12 @@ func accumulatePhaseCost(previous, cost transcode.PhaseCost) transcode.PhaseCost
 		cost.CacheMisses = addKnown(previous.CacheMisses, cost.CacheMisses)
 		cost.ActiveComputeMs = addKnown(previous.ActiveComputeMs, cost.ActiveComputeMs)
 	}
-	if len(previous.Steps) > 0 {
+	if previous.Attempts > 0 && len(previous.Steps) == 0 {
+		// An earlier execution recorded no step breakdown (a worker that did
+		// not keep one): the new steps alone would read as the phase's whole
+		// breakdown, so none is kept.
+		cost.Steps = nil
+	} else if len(previous.Steps) > 0 {
 		steps := make(map[string]transcode.PhaseCost, len(previous.Steps)+len(cost.Steps))
 		for name, step := range previous.Steps {
 			steps[name] = step
