@@ -118,7 +118,7 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		// or changed display rotation or flip: compare it here.
 		if a, b := displayOrientation(sourceVideo), displayOrientation(candidateVideo); a != b {
 			e.ReasonCodes = append(e.ReasonCodes, "quality_final_orientation_changed")
-			return e, candidateInvalid(fmt.Errorf("quality_final_orientation_changed: the source shows %q, the candidate %q", a, b))
+			return e, candidateInvalid(fmt.Errorf("quality_final_orientation_changed: the source shows %+v, the candidate %+v", a, b))
 		}
 		digest, err := ensureCompactLUT(plan.Compact)
 		if err != nil {

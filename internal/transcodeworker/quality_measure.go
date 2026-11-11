@@ -467,15 +467,61 @@ func withStoredPictures(args []string) []string {
 	return out
 }
 
-// displayOrientation is a video stream's display matrix as ffprobe reports
-// it (rotation and flips), empty when it has none.
-func displayOrientation(v mediainspect.DetailedStream) string {
+// orientation is how a stream's display matrix turns the picture: clockwise
+// counter-clockwise degrees in [0,360), as ffmpeg's rotation, and whether it is mirrored. raw is set only for a matrix
+// that could not be read, so two such streams match only when their text does.
+type orientation struct {
+	degrees int
+	flipped bool
+	raw     string
+}
+
+// displayOrientation reads a video stream's display matrix as ffprobe reports
+// it. Only the rotation and flip count: a phone MOV stores the matrix with a
+// translation (the picture size) that the encoded file's canonical matrix
+// lacks, and no matrix at all shows the same picture as an identity one.
+func displayOrientation(v mediainspect.DetailedStream) orientation {
 	for _, sd := range v.SideData {
-		if strings.EqualFold(sd.SideDataType, "Display Matrix") {
-			return strings.Join(strings.Fields(fmt.Sprint(sd.Data["displaymatrix"], " ", sd.Data["rotation"])), " ")
+		if !strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			continue
 		}
+		if o, ok := parseDisplayMatrix(fmt.Sprint(sd.Data["displaymatrix"])); ok {
+			return o
+		}
+		// An unreadable matrix must not compare equal to a lost rotation, so
+		// it keeps its text and matches only the same text.
+		return orientation{raw: strings.Join(strings.Fields(fmt.Sprint(sd.Data["displaymatrix"], " ", sd.Data["rotation"])), " ")}
 	}
-	return ""
+	return orientation{}
+}
+
+// parseDisplayMatrix reads the first two columns of the first two rows of
+// ffprobe's "00000000:  a  b  c" lines, the part that rotates and flips.
+func parseDisplayMatrix(text string) (orientation, bool) {
+	var m [2][2]float64
+	rows := 0
+	for _, line := range strings.Split(text, "\n") {
+		_, vals, found := strings.Cut(line, ":")
+		f := strings.Fields(vals)
+		if !found || len(f) != 3 || rows >= 2 {
+			continue
+		}
+		for c := 0; c < 2; c++ {
+			x, err := strconv.ParseFloat(f[c], 64)
+			if err != nil {
+				return orientation{}, false
+			}
+			m[rows][c] = x
+		}
+		rows++
+	}
+	scale0, scale1 := math.Hypot(m[0][0], m[1][0]), math.Hypot(m[0][1], m[1][1])
+	if rows < 2 || scale0 == 0 || scale1 == 0 {
+		return orientation{}, false
+	}
+	// The angle ffmpeg reports as "rotation".
+	deg := int(math.Round(-math.Atan2(m[0][1]/scale1, m[0][0]/scale0) * 180 / math.Pi))
+	return orientation{degrees: (deg%360 + 360) % 360, flipped: m[0][0]*m[1][1]-m[0][1]*m[1][0] < 0}, true
 }
 
 // withReferenceChain inserts a compact picture chain into sample extraction
