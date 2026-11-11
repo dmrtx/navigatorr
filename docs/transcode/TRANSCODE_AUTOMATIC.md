@@ -198,7 +198,7 @@ when:
   its target codec exactly (`srt` is `subrip`,
   `transcode.SameConvertedSubtitleCodec`); a codec the probe did not name is
   no match;
-- a kept track loses its language tag. Tags are compared exactly: Matroska
+- a kept track loses its language tag. Tags are compared trimmed and without case: Matroska
   keeps codes outside ISO 639-2 (`pob`, `en`, `pt-BR`) as they are; `und` is
   the absence of a tag;
 - an audio or subtitle track, copied or converted, changes its title or any
