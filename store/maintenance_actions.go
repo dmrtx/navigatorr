@@ -86,7 +86,7 @@ func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
 // maintenanceOutputKeys; submitted_source_bytes, a transcode job's file size
 // from its submission until its preflight records the original; and skipped,
 // which says a job's candidate_size_bytes is not a result to list.
-var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped")
+var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped", "request_origin")
 
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage

@@ -3301,6 +3301,9 @@ test("a completed preview offers review and start, while active work retains can
   assert.match(h.run('queueOutcome({status:"completed",batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
   assert.equal(h.run('queuePresentation({status:"completed",batch:{dry_run:true,outcome:"preview"}}).status'), "Preview");
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:0}})').children.map(c=>c.textContent), ["Review preview"]);
+  // A preview the server archived by itself has nothing to restore: it keeps its own controls, Start included.
+  assert.deepEqual(h.run('jobControls({id:"p",status:"completed",archived:true,archived_automatically:true,can_archive:false,batch:{dry_run:true,queued:8}})').children.map(c=>c.textContent), ["Review preview", "Start batch"]);
+  assert.match(h.run('queueOutcome({status:"completed",archived:true,archived_automatically:true,batch:{dry_run:true,queued:8}})'), /Nothing starts automatically/);
   assert.deepEqual(h.run('jobControls({id:"p",status:"completed",batch:{dry_run:true,queued:8},preview_execution_action_id:"encode"})').children.map(c=>c.textContent), ["View batch"]);
   // A file's job is one page about that file: it does not loop back to its batch with a button.
   const child='{id:"c",action_name:"transcode_media",status:"waiting_external",parent_batch_id:"b"}';
