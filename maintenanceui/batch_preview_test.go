@@ -2,10 +2,13 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/store"
 )
 
@@ -204,5 +207,58 @@ func TestPreviewStartDropsTrackPicksOfFilesTheCountLeftOut(t *testing.T) {
 	}
 	if _, skipped := picks["/media/two.mkv"]; skipped {
 		t.Fatal("the skipped file's pick was kept", picks)
+	}
+}
+
+func TestPreviewStartClearsAnArchiveRowLeftOnThePreview(t *testing.T) {
+	s, h := testUI(t)
+	seedPreview(t, s, map[string]any{"paths": []string{"/media/one.mkv", "/media/two.mkv", "/media/three.mkv"}, "mode": "size", "media_type": "movie"})
+	st := s.engine.Deps().Store
+	if err := st.SetMaintenanceArchived("preview", []string{"preview"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if w := request(h, "POST", "/api/maintenance/batch-preview", `{"id":"preview"}`, true); w.Code != 202 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if rows, _ := st.MaintenanceArchives(); rows["preview"] != "" {
+		t.Fatal("the batch started from the preview would land in Archived", rows)
+	}
+}
+
+func TestPreviewStartMatchesTrackPicksThroughSymlinks(t *testing.T) {
+	s, _ := testUI(t)
+	root := t.TempDir()
+	for _, name := range []string{"left.mkv", "keep.mkv"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "link.mkv")
+	if err := os.Symlink(filepath.Join(root, "left.mkv"), link); err != nil {
+		t.Fatal(err)
+	}
+	deps := s.engine.Deps()
+	deps.Fs, _ = fsop.NewResolver([]string{root}, nil)
+	s.engine = action.NewEngine(deps)
+	keep := filepath.Join(root, "keep.mkv")
+	seedOperation(t, s.engine.Deps().Store, "preview", "transcode_batch", "completed", map[string]any{
+		"dry_run": true, "mode": "size", "media_type": "movie", "paths": []string{keep, filepath.Join(root, "left.mkv")},
+		"track_picks": map[string]any{link: map[string]any{"audio": []int{1}}, keep: map[string]any{"audio": []int{1}}},
+	}, map[string]any{"dry_run": true}, nil)
+	for _, item := range []store.TranscodeBatchItem{
+		{BatchID: "preview", ItemKey: "k", FilePath: keep, Status: "queued", Decision: "transcode", DisplayLabel: "Keep"},
+		{BatchID: "preview", ItemKey: "l", FilePath: filepath.Join(root, "left.mkv"), Status: "skip", Decision: "skip", DisplayLabel: "Left"},
+	} {
+		if err := s.engine.Deps().Store.CreateTranscodeBatchItem(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, inputs, err := s.previewPlan("preview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	picks, _ := inputs["track_picks"].(map[string]any)
+	if _, stale := picks[link]; stale || len(picks) != 1 {
+		t.Fatal("a pick written through a symlink to a skipped file would block the start", picks)
 	}
 }

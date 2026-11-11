@@ -229,9 +229,16 @@ func TestFinishedMCPPreviewArchivesItselfButWebPreviewStays(t *testing.T) {
 			t.Fatal(body, w.Code, w.Body.String())
 		}
 	}
-	// The row of a manual archive does not override the rule once it is removed.
+	// Archiving what is already archived by the rule stores nothing: a row would hide the batch started from it.
 	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":true}`, true); w.Code != 200 {
 		t.Fatal(w.Code)
+	}
+	if rows, _ := s.engine.Deps().Store.MaintenanceArchives(); rows["mcp-preview"] != "" {
+		t.Fatal("archiving an automatically archived preview left a row", rows)
+	}
+	// A row that is already there (from before the rule) does not override it either.
+	if err := s.engine.Deps().Store.SetMaintenanceArchived("mcp-preview", []string{"mcp-preview"}, true); err != nil {
+		t.Fatal(err)
 	}
 	if w := request(h, "POST", "/api/maintenance/archive", `{"id":"mcp-preview","archived":false}`, true); w.Code != 409 {
 		t.Fatal("a manual row on an automatic archive was reported as restored", w.Code)

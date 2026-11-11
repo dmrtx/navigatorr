@@ -75,14 +75,23 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 	}
 	paths, fileIDs := []string{}, []int{}
 	eligible, omitted := map[string]bool{}, map[string]bool{}
+	// The batch compares resolved paths, so a pick written through a symlink must be matched the same way.
+	resolve := func(path string) string {
+		if fs := s.engine.Deps().Fs; fs != nil {
+			if clean, err := fs.ResolveRead(path); err == nil {
+				return clean
+			}
+		}
+		return filepath.Clean(path)
+	}
 	sonarr := inputs["service"] == "sonarr"
 	for _, item := range items {
 		if item.Status != "queued" || item.Decision != "transcode" {
 			plan.Other++
-			omitted[filepath.Clean(item.FilePath)] = true
+			omitted[resolve(item.FilePath)] = true
 			continue
 		}
-		eligible[filepath.Clean(item.FilePath)] = true
+		eligible[resolve(item.FilePath)] = true
 		paths = append(paths, item.FilePath)
 		if sonarr {
 			fileID, err := strconv.Atoi(strings.TrimPrefix(item.ItemKey, "epfile-"))
@@ -104,7 +113,7 @@ func (s *Server) previewPlan(id string) (batchPreviewPlan, map[string]any, error
 	// for a path it does not contain. A pick for an unknown path is kept so that refusal still says so.
 	if picks, ok := inputs["track_picks"].(map[string]any); ok {
 		for path := range picks {
-			if clean := filepath.Clean(path); omitted[clean] && !eligible[clean] {
+			if clean := resolve(path); omitted[clean] && !eligible[clean] {
 				delete(picks, path)
 			}
 		}
@@ -190,6 +199,10 @@ func (s *Server) batchPreview(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		failAdmission(w, 409, err)
 		return
+	}
+	// A manual archive row left on the preview would hide the batch it just started once that finishes.
+	if root, members, err := s.workflowMemberIDs(id); err == nil && root != "" {
+		_ = s.engine.Deps().Store.SetMaintenanceArchived(root, members, false)
 	}
 	writeJSON(w, 202, map[string]string{"id": result.ID})
 }
