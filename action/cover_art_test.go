@@ -251,9 +251,9 @@ func TestValidateCandidateDetailedBMPCoverComesBackAsAttachment(t *testing.T) {
 	}
 }
 
-// A cover whose mimetype tag is not an image type the worker re-attaches
-// (the nonstandard image/jpg) is counted as the picture it is, by the same
-// rule the worker's plan uses: kept as a picture passes, lost does not.
+// A mjpeg cover tagged with the nonstandard image/jpg is a JPEG: the worker's
+// plan keeps it as image/jpeg (a picture when read back), and the coordinator
+// counts it the same way, by the shared rule. Kept passes, lost does not.
 func TestValidateCandidateDetailedNonstandardCoverTagCountsAsPicture(t *testing.T) {
 	original := []mediainspect.DetailedStream{
 		{Index: 0, Kind: "video", Codec: "mjpeg", Width: 600, Height: 900, Disposition: map[string]int{"attached_pic": 1}, Tags: map[string]string{"mimetype": "image/jpg"}},

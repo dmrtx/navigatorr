@@ -66,10 +66,14 @@ var CoverMimeTypes = map[string]string{"mjpeg": "image/jpeg", "png": "image/png"
 // extension a cover without a usable name is given.
 var CoverExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
 
+// coverMIMEAliases are nonstandard tags real files carry for a JPEG, kept as
+// image/jpeg on both sides.
+var coverMIMEAliases = map[string]string{"image/jpg": "image/jpeg", "image/pjpeg": "image/jpeg"}
+
 // CoverMIME is the MIME type a source cover is re-attached with: its mimetype
 // tag when it has one, else the one its codec gets. ok is false when the cover
-// cannot be kept (an unmapped codec, or a tag that is not a known image type
-// such as a nonstandard image/jpg): the worker refuses such a source before
+// cannot be kept (an unmapped codec, or a tag that is not a known image type):
+// the worker refuses such a source before
 // the encode, and the coordinator reads it the same way. The worker's plan and
 // the coordinator's validation both use this one rule.
 func CoverMIME(codec, tag string) (mime string, ok bool) {
@@ -78,6 +82,9 @@ func CoverMIME(codec, tag string) (mime string, ok bool) {
 		return "", false
 	}
 	if tag = strings.ToLower(strings.TrimSpace(tag)); tag != "" {
+		if canonical, aliased := coverMIMEAliases[tag]; aliased {
+			tag = canonical
+		}
 		if _, known := CoverExtensions[tag]; !known {
 			return "", false
 		}

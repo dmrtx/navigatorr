@@ -16,7 +16,9 @@ func TestCoverMIMEAndFilename(t *testing.T) {
 		{" MJPEG ", " Image/JPEG ", "image/jpeg", true},
 		{"mjpeg", "image/bmp", "image/bmp", true},
 		{"bmp", "", "image/bmp", true},
-		{"mjpeg", "image/jpg", "", false},
+		{"mjpeg", "image/jpg", "image/jpeg", true},
+		{"mjpeg", "IMAGE/PJPEG", "image/jpeg", true},
+		{"mjpeg", "image/x-unknown", "", false},
 		{"h264", "", "", false},
 		{"h264", "image/jpeg", "", false},
 	} {
