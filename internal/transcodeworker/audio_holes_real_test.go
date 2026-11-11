@@ -23,7 +23,9 @@ type holeSource struct {
 	codec, container string
 	channels         int
 	corruptFrom, to  int // packet numbers whose bytes are replaced
-	gapAt, gapLen    float64
+	// stretches are further packet ranges (from, to) replaced the same way.
+	stretches     [][2]int
+	gapAt, gapLen float64
 }
 
 type holeTools struct{ ffmpeg, ffprobe string }
@@ -68,8 +70,16 @@ func (h holeTools) build(t *testing.T, dir string, s holeSource, seconds int) st
 	case "ac3", "eac3":
 		audio = append(audio, "-b:a", "384k")
 	}
+	ranges := s.stretches
 	if s.corruptFrom < s.to {
-		audio = append(audio, "-bsf:a", fmt.Sprintf("noise=amount='if(between(n,%d,%d),1,0)'", s.corruptFrom, s.to))
+		ranges = append([][2]int{{s.corruptFrom, s.to}}, ranges...)
+	}
+	if len(ranges) > 0 {
+		terms := make([]string, len(ranges))
+		for i, r := range ranges {
+			terms[i] = fmt.Sprintf("between(n,%d,%d)", r[0], r[1])
+		}
+		audio = append(audio, "-bsf:a", fmt.Sprintf("noise=amount='if(%s,1,0)'", strings.Join(terms, "+")))
 	}
 	whole := filepath.Join(dir, "whole-"+filepath.Base(path))
 	if s.gapLen == 0 {
@@ -154,9 +164,12 @@ func TestConvertedAudioHolesRealConversions(t *testing.T) {
 		{holeSource: holeSource{codec: "ac3", container: "mkv", channels: 6, corruptFrom: 150, to: 250}, wantLost: true},
 		{holeSource: holeSource{codec: "flac", container: "mkv", channels: 2, corruptFrom: 100, to: 130}, wantLost: true},
 		{holeSource: holeSource{codec: "dca", container: "mkv", channels: 6, corruptFrom: 300, to: 600}, wantLost: true},
+		// TrueHD in Matroska has no packet durations and ~1 ms packets: many
+		// short skipped stretches (20-90 ms each, 0.6 s in all) must still show.
+		{holeSource: holeSource{codec: "truehd", container: "mkv", channels: 2, stretches: [][2]int{{1000, 1040}, {2000, 2060}, {3000, 3020}, {4000, 4090}, {5000, 5050}, {6000, 6030}, {7000, 7080}, {8000, 8050}, {9000, 9070}, {10000, 10060}}}, wantLost: true},
 	}
 	for _, c := range cases {
-		name := fmt.Sprintf("%s-%s-corrupt%d-gap%.0f", c.codec, c.container, c.to-c.corruptFrom, c.gapLen)
+		name := fmt.Sprintf("%s-%s-corrupt%d-%d-gap%.0f", c.codec, c.container, c.to-c.corruptFrom, len(c.stretches), c.gapLen)
 		t.Run(name, func(t *testing.T) {
 			h := holeToolsOrSkip(t, c.codec)
 			dir := t.TempDir()
@@ -175,6 +188,7 @@ func TestConvertedAudioHolesRealConversions(t *testing.T) {
 				t.Fatalf("the length moved (%.3fs against %.3fs): the case no longer shows what only the holes see", y.seconds(), x.seconds())
 			}
 			probe.audioSpans = src
+			t.Logf("holes: source %.3fs (%d packets), candidate %.3fs", x.holes, x.packets, y.holes)
 			if c.wantLost && y.holes-x.holes < 0.5 {
 				t.Fatalf("the conversion opened %.3fs of silence, want the skipped stretch", y.holes-x.holes)
 			}
