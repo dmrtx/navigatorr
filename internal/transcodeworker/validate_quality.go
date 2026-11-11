@@ -231,9 +231,7 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		}
 		// The source's extract comes first, decoded from the keyframe before
 		// the window (sourceVideoScan.windowSeek; without a scan the seek is
-		// the window's start, as for a container with a keyframe index; a
-		// source whose clock restarted is decoded from its start, see
-		// sourceExtractionArgs). One
+		// the window's start, as for a container with a keyframe index). One
 		// in which ffmpeg encodes no picture is a window past the source's
 		// video, unless the seek could not reach a keyframe (a decoder shows
 		// nothing until one) or the scan read a picture inside the window
@@ -243,7 +241,11 @@ func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, sou
 		// pass on windows it never measured. A source extract that failed
 		// says nothing about the candidate: an ungated fresh window is then
 		// unmeasured (measureFreshWindows).
-		refArgs, keyed := sourceExtractionArgs(scan, source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to)
+		seek, keyed := sourceFirstFrame+from, true
+		if scan != nil {
+			seek, keyed = scan.windowSeek(sourceFirstFrame + from)
+		}
+		refArgs := buildExtractionArgs(source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to, seek)
 		if compactChain != "" {
 			refArgs = withReferenceChain(refArgs, compactChain)
 		}
