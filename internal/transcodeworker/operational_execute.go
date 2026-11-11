@@ -202,7 +202,8 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	// the source is never read again for these checks. The phase also
 	// decodes a few seconds of the video and, when a kept subtitle is
 	// converted, runs that conversion over the whole source to count its
-	// lines; the NAS read bytes count the source's size once.
+	// lines; the NAS read bytes count the source's size once for the packet
+	// read and once more when that conversion ran, as it reads the whole file.
 	if req := w.packetScanFor(job.Plan, srcProbe); req.any() {
 		scanStart := time.Now()
 		scanCPU := &cpuMeter{}
@@ -210,7 +211,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		srcProbe, scanErr = w.scanSourcePackets(withCPUMeter(ctx, scanCPU), job.Plan, srcProbe, r.effectiveInput)
 		scanCost := transcode.PhaseCost{ActiveComputeMs: scanCPU.activeComputeMs()}
 		if inputOnNAS {
-			scanCost.NASReadBytes = knownCount(sourceInfo.Size())
+			scanCost.NASReadBytes = knownCount(sourceInfo.Size() * sourceScanFullReads(srcProbe))
 		}
 		w.persistPhaseCost(jobDir, jobFile, job, "source_scan", scanStart, scanCost)
 		if scanErr != nil {

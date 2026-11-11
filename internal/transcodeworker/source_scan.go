@@ -201,6 +201,18 @@ func (r packetScanRequest) any() bool {
 	return r.video >= 0 || len(r.audio) > 0 || len(r.subtitles) > 0
 }
 
+// sourceScanFullReads is how many times the source scan read the whole file:
+// the packet read, plus one for the conversion count (countSubtitleEvents)
+// when it ran for a kept subtitle.
+func sourceScanFullReads(probe SourceProbe) int64 {
+	for _, p := range probe.subtitlePackets {
+		if p.counted {
+			return 2
+		}
+	}
+	return 1
+}
+
 // wants reports whether the request measures stream index.
 func (r packetScanRequest) wants(index int) bool {
 	return (r.video >= 0 && index == r.video) || r.audio[index] || r.subtitles[index]
