@@ -1,6 +1,9 @@
 package transcodeworker
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestCanonicalParameterSetsAnnexBKeepsOnlyParameterSets(t *testing.T) {
 	sc := []byte{0, 0, 0, 1}
@@ -41,5 +44,14 @@ func TestCanonicalParameterSetsAnnexBKeepsOnlyParameterSets(t *testing.T) {
 	}
 	if got := canonicalParameterSets("hevc", join(vps, hsps, hpps, hsei)); got != hwant {
 		t.Errorf("hevc Annex-B with SEI = %q, want %q", got, hwant)
+	}
+	// An hvcC record with an SEI array besides its parameter sets digests
+	// the same: only VPS, SPS and PPS count.
+	withSEI := slices.Clone(hvcC)
+	withSEI[22] = 4
+	withSEI = append(withSEI, hsei[0]>>1&0x3f, 0, 1, 0, byte(len(hsei)))
+	withSEI = append(withSEI, hsei...)
+	if got := canonicalParameterSets("hevc", withSEI); got != hwant {
+		t.Errorf("hvcC with an SEI array = %q, want %q", got, hwant)
 	}
 }

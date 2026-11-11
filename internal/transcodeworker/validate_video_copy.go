@@ -187,6 +187,7 @@ func canonicalParameterSets(codec string, data []byte) string {
 			if pos+3 > len(data) {
 				return ""
 			}
+			kind := int(data[pos] & 0x3f)
 			count := int(data[pos+1])<<8 | int(data[pos+2])
 			pos += 3
 			for range count {
@@ -198,7 +199,11 @@ func canonicalParameterSets(codec string, data []byte) string {
 				if pos+n > len(data) {
 					return ""
 				}
-				nals = append(nals, data[pos:pos+n])
+				// Only VPS, SPS and PPS, as from Annex-B: an SEI array in
+				// the record is not a parameter set.
+				if kind >= 32 && kind <= 34 {
+					nals = append(nals, data[pos:pos+n])
+				}
 				pos += n
 			}
 		}
