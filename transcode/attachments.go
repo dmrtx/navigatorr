@@ -148,7 +148,20 @@ func TakeReattachedCovers(covers, source, output []AttachedFile) (rest []Attache
 		}
 	}
 	covered := make([]bool, len(output))
+	// Named covers match first: a nameless one takes any file of its type and
+	// could otherwise use up the file a named cover needs.
+	ordered := make([]AttachedFile, 0, len(covers))
 	for _, c := range covers {
+		if c.Name != "" {
+			ordered = append(ordered, c)
+		}
+	}
+	for _, c := range covers {
+		if c.Name == "" {
+			ordered = append(ordered, c)
+		}
+	}
+	for _, c := range ordered {
 		found := false
 		for i, o := range output {
 			if taken[i] || covered[i] || !strings.EqualFold(o.MimeType, c.MimeType) || (c.Name != "" && o.Name != c.Name) {

@@ -53,6 +53,8 @@ func TestTakeReattachedCovers(t *testing.T) {
 		// The source's own BMP attachment must not stand in for the cover.
 		{"source attachment is not the cover", []AttachedFile{f("", "image/bmp", 0)}, []AttachedFile{bmp}, []AttachedFile{bmp}, 0, "is missing"},
 		{"source attachment and cover both kept", []AttachedFile{f("", "image/bmp", 0)}, []AttachedFile{bmp}, []AttachedFile{bmp, f("cover_1.bmp", "image/bmp", 5)}, 1, ""},
+		{"nameless cover first, named file first", []AttachedFile{f("", "image/webp", 0), f("cover.webp", "image/webp", 0)}, nil, []AttachedFile{f("cover.webp", "image/webp", 5), f("cover_1.webp", "image/webp", 6)}, 0, ""},
+		{"nameless cover first, named file last", []AttachedFile{f("", "image/webp", 0), f("cover.webp", "image/webp", 0)}, nil, []AttachedFile{f("cover_1.webp", "image/webp", 6), f("cover.webp", "image/webp", 5)}, 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rest, missing := TakeReattachedCovers(tc.covers, tc.source, tc.output)
