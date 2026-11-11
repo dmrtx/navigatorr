@@ -25,6 +25,7 @@ Without `NAVIGATORR_ACCEPTANCE=1` the package skips in well under a second, so
 | `NAVIGATORR_ACCEPTANCE_FFMPEG`, `NAVIGATORR_ACCEPTANCE_FFPROBE` | ffmpeg and ffprobe to use; default is `PATH`. |
 | `NAVIGATORR_ACCEPTANCE_ALLOW_MISSING` | `1` turns "the worker lacks a needed capability" from a failure into a skip (development machines). |
 | `NAVIGATORR_ACCEPTANCE_REPORT` | Path for a JSON report of the table. |
+| `NAVIGATORR_ACCEPTANCE_CLIPS` | A directory of real short `*.mkv` clips; each becomes a subtest `clip_<name>` (see Real clips). Unset: no clip runs. |
 | `NAVIGATORR_ACCEPTANCE_KEEP` | `1` keeps the temporary tree (media, worker state) for inspection. |
 
 When the suite is enabled and the worker lacks something a case needs (an
@@ -54,6 +55,28 @@ Candidate cases also check: the candidate sits under `.navigatorr-candidates`,
 decodes end to end, keeps the audio track count and duration, the original's
 SHA-256 is unchanged and equals the hash the action recorded, and a VMAF mean
 is present and sane.
+
+## Real clips
+
+Set `NAVIGATORR_ACCEPTANCE_CLIPS` (with `NAVIGATORR_ACCEPTANCE=1`) to a directory
+of short real clips to check a pipeline change on representative content in
+minutes. Build each clip as one continuous stream-copied cut, never a concat
+join (open-GOP joins break decoding):
+
+```
+ffmpeg -ss X -i SRC -t 150 -map 0 -c copy clip.mkv
+```
+
+Every `*.mkv` runs as `clip_<name>` with goal `size`, hardware off, no
+replacement. It must end in a candidate or in a documented skip or refusal
+(`insufficient_savings`, `quality_not_met`, ...); `preservation_not_met` or any
+track-loss code fails the case, as does any other failure. A candidate gets the
+usual checks (decodes, original hash unchanged, quality evidence) and a
+per-stream comparison with the source: the audio and subtitle streams the
+plan keeps (its track selection, or all of them) match in count; language and
+title match, and Matroska dispositions for copied tracks; copied subtitles keep
+every packet; attachments (filename, type, size), chapters and video packets are
+equal. The table adds the validation phase's wall time.
 
 ## Output
 

@@ -82,8 +82,12 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	// no more and no fewer. That is a hard invariant like the video count, not
 	// a discrepancy anyone may accept.
 	origAudio, origSubs := getStreamsList(origMap, "audio"), getStreamsList(origMap, "subtitles")
-	sourceSubtitles := origSubs
+	sourceAudio, sourceSubtitles := origAudio, origSubs
 	origAudio, origSubs = keptStreams(origAudio, origSubs, plan.Tracks)
+	// ffmpeg marks a track default on its own only when the worker's command
+	// set no track's flags; the command set them as the plan says
+	// (transcode.WrittenDisposition), which is read the same way here.
+	written := dispositionsWritten("audio", sourceAudio, origAudio) || dispositionsWritten("subtitle", sourceSubtitles, origSubs)
 	if plan.Tracks != nil && (len(outRep.Audio) != len(origAudio) || len(outRep.Subtitles) != len(origSubs)) {
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("Track selection mismatch: the plan keeps %d audio and %d subtitle tracks, the output has %d and %d (fail closed)", len(origAudio), len(origSubs), len(outRep.Audio), len(outRep.Subtitles))}, nil
 	}
@@ -124,8 +128,18 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			return waitDecision(fmt.Sprintf("Video resolution mismatch: expected=%dx%d original=%dx%d output=%dx%d", wantWidth, wantHeight, origVideo[0].Width, origVideo[0].Height, outVideo[0].Width, outVideo[0].Height)), nil
 		}
 	}
-	if origCovers, outCovers := len(mediainspect.CoverArtStreams(origAllVideo)), len(outRep.CoverArt()); outCovers != origCovers {
+	// A BMP or WebP cover is re-attached as an attachment Matroska does not
+	// read back as a picture: it is held to the output's attachments below.
+	origCovers, coversAsFiles := coverCounts(mediainspect.CoverArtStreams(origAllVideo))
+	outAttachments := attachedFiles(outRep.Attachments)
+	if outCovers := len(outRep.CoverArt()); outCovers != origCovers {
 		return waitDecision(fmt.Sprintf("Cover art count mismatch: original=%d output=%d", origCovers, outCovers)), nil
+	}
+	if len(coversAsFiles) > 0 {
+		var missing string
+		if outAttachments, missing = transcode.TakeReattachedCovers(coversAsFiles, attachedFiles(getStreamsList(origMap, "attachments")), outAttachments); missing != "" {
+			return waitDecision(missing), nil
+		}
 	}
 	if len(outRep.Audio) != len(origAudio) {
 		missing := make([]string, 0)
@@ -177,6 +191,11 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 			r := waitDecision(fmt.Sprintf("Audio stream %d has no measurable packets", i))
 			return span, &r, nil
 		}
+		if span.Timed == 0 {
+			// Packets with no timestamps measure neither a rate nor a length.
+			r := waitDecision(fmt.Sprintf("Audio %s not measured at stream %d: none of its %d packets has a timestamp", what, i, span.Packets))
+			return span, &r, nil
+		}
 		return span, nil, nil
 	}
 	// The source's own tracks are read at most once per validation, and only
@@ -196,8 +215,14 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if !ok {
 			return span, fmt.Errorf("original stream %d has no measurable packets", streamIndex)
 		}
+		if span.Timed == 0 {
+			// Packets with no time say nothing of where the track ends: its
+			// length is not measured, which is not a truncation.
+			return span, fmt.Errorf("original stream %d has %d packets and none states a time", streamIndex, span.Packets)
+		}
 		return span, nil
 	}
+	plannedAudioDispositions := plannedDispositions(origAudio)
 	for i, a := range origAudio {
 		b := outRep.Audio[i]
 		out := transcode.AudioOutputFor(plan.AudioMode, audioTrackOf(a, origDur))
@@ -205,10 +230,11 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		// Only an AAC conversion can remap the layout; a copied track (PCM in
 		// Matroska reports none) is checked by codec and channels.
 		checkLayout := target != "copy"
+		matches := target == normCodec(b.Codec)
 		if target == "copy" {
-			target = normCodec(a.Codec)
+			target, matches = normCodec(a.Codec), transcode.SameCopiedCodec(a.Codec, b.Codec)
 		}
-		if target != normCodec(b.Codec) {
+		if !matches {
 			return waitDecision(fmt.Sprintf("Audio codec mismatch at stream %d: original=%s output=%s", i, a.Codec, b.Codec)), nil
 		}
 		if transcode.IsAudioLevelMode(plan.AudioMode) && checkLayout {
@@ -298,6 +324,19 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if plan.Tracks != nil && a.Disposition["default"] > 0 && b.Disposition["default"] == 0 {
 			return waitDecision(fmt.Sprintf("Default audio disposition lost at stream %d", i)), nil
 		}
+		// A copied track is the source's track: its name and flags too. A
+		// converted one keeps the flags and carries the name the conversion
+		// gives it (transcode.ConvertedAudioTitle), as the worker checked.
+		how, want := "Copied", a.Title
+		if out.Codec != "copy" {
+			how, want = "Converted", transcode.ConvertedAudioTitle(a.Title, a.ChannelLayout, a.Channels)
+		}
+		if b.Title != want {
+			return waitDecision(fmt.Sprintf("%s audio track %d was renamed: the plan calls it %q, the output %q", how, i, want, b.Title)), nil
+		}
+		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.InferredDefault(i, plannedAudioDispositions, written)); d != "" {
+			return waitDecision(fmt.Sprintf("%s audio track %d changed its %s flag", how, i, d)), nil
+		}
 		if a.Channels > 0 && b.Channels != a.Channels {
 			return waitDecision(fmt.Sprintf("Audio channel mismatch at stream %d: original=%d output=%d", i, a.Channels, b.Channels)), nil
 		}
@@ -318,6 +357,7 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 	for i, s := range sourceSubtitles {
 		position[s.Index] = i
 	}
+	plannedSubDispositions := plannedDispositions(origSubs)
 	for i, a := range origSubs {
 		b := outRep.Subtitles[i]
 		at := i
@@ -328,10 +368,10 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 		if !ok {
 			return StepResult{Status: StepFailed, Error: fmt.Sprintf("plan missing subtitle action %d during validation", i)}, nil
 		}
-		if act.Operation == "copy" && normCodec(a.Codec) != normCodec(b.Codec) {
+		if act.Operation == "copy" && !transcode.SameCopiedCodec(a.Codec, b.Codec) {
 			return waitDecision(fmt.Sprintf("Copied subtitle codec changed at stream %d: original=%s output=%s", i, a.Codec, b.Codec)), nil
 		}
-		if act.Operation == "transcode" && normCodec(b.Codec) != normCodec(act.Codec) {
+		if act.Operation == "transcode" && !transcode.SameConvertedSubtitleCodec(act.Codec, b.Codec) {
 			return waitDecision(fmt.Sprintf("Converted subtitle codec mismatch at stream %d: expected=%s output=%s", i, act.Codec, b.Codec)), nil
 		}
 		if !sameLanguage(a.Language, b.Language) {
@@ -346,10 +386,24 @@ func (e *Engine) validateCandidateDetailed(ctx context.Context, ec *ExecutionCon
 				return waitDecision(fmt.Sprintf("%s subtitle disposition lost at stream %d", label, i)), nil
 			}
 		}
+		// ffmpeg carries a subtitle's name and flags over whether it copies
+		// or converts it, and the command names no subtitle: a track keeps
+		// both, save ffmpeg's own default (transcode.InferredDefault).
+		how := "Copied"
+		if act.Operation != "copy" {
+			how = "Converted"
+		}
+		if a.Title != b.Title {
+			return waitDecision(fmt.Sprintf("%s subtitle track %d was renamed: the source calls it %q, the output %q", how, i, a.Title, b.Title)), nil
+		}
+		if d := transcode.DispositionChange(a.Disposition, b.Disposition, transcode.InferredDefault(i, plannedSubDispositions, written)); d != "" {
+			return waitDecision(fmt.Sprintf("%s subtitle track %d changed its %s flag", how, i, d)), nil
+		}
 	}
-	origAttachments := getStreamsList(origMap, "attachments")
-	if plan.PreserveAttachments && len(outRep.Attachments) != len(origAttachments) {
-		return waitDecision(fmt.Sprintf("Attachment count mismatch: original=%d output=%d", len(origAttachments), len(outRep.Attachments))), nil
+	if plan.PreserveAttachments {
+		if change := transcode.AttachmentChange(attachedFiles(getStreamsList(origMap, "attachments")), outAttachments); change != "" {
+			return waitDecision(change), nil
+		}
 	}
 	origChapters := getInt(origMap, "chapters")
 	if plan.PreserveChapters && outRep.Chapters != origChapters {
@@ -414,15 +468,46 @@ func expectedVideoCodec(codec string) string {
 
 func normCodec(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// sameLanguage reports whether an output track keeps its source track's
-// language. A source with no language has nothing to keep. "und" is the
-// absence of one, and the muxer writes no tag for it, so an output with no
-// language keeps it: the worker's own check accepts the same.
-func sameLanguage(source, output string) bool {
-	if source == "" || (normCodec(source) == "und" && output == "") {
-		return true
+// sameLanguage is transcode.SameLanguage, the worker's rule too.
+func sameLanguage(source, output string) bool { return transcode.SameLanguage(source, output) }
+
+// attachedFiles are attachment streams as transcode.AttachmentChange, the
+// worker's rule too, compares them. A source record made before attachment
+// sizes were kept carries none.
+func attachedFiles(streams []mediainspect.DetailedStream) []transcode.AttachedFile {
+	var out []transcode.AttachedFile
+	for _, s := range streams {
+		out = append(out, transcode.AttachedFile{Name: streamTag(s, "filename"), MimeType: streamTag(s, "mimetype"), Size: s.ExtraDataSize})
 	}
-	return normCodec(source) == normCodec(output)
+	return out
+}
+
+// coverCounts is how many of the source's covers the output must carry as
+// pictures, and the covers it must carry as attachments instead (the worker
+// re-attaches a BMP or WebP one as an attachment, which is read back as such).
+// A cover's type and name come from transcode.CoverMIME and CoverFilename, the
+// worker's own rule; a cover the worker cannot keep is refused before the
+// encode, and counts as a picture here.
+func coverCounts(covers []mediainspect.DetailedStream) (pictures int, asFiles []transcode.AttachedFile) {
+	for _, c := range covers {
+		mime, ok := transcode.CoverMIME(c.Codec, streamTag(c, "mimetype"))
+		if !ok || transcode.CoverReadsBackAsPicture(mime) {
+			pictures++
+			continue
+		}
+		asFiles = append(asFiles, transcode.AttachedFile{Name: transcode.CoverFilename(streamTag(c, "filename")), MimeType: mime})
+	}
+	return pictures, asFiles
+}
+
+// streamTag is a stream's tag by name, whatever its case.
+func streamTag(s mediainspect.DetailedStream, name string) string {
+	for k, v := range s.Tags {
+		if strings.EqualFold(k, name) {
+			return v
+		}
+	}
+	return ""
 }
 
 // sourceTrackTolerance is how much shorter than the source track's own packets

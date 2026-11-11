@@ -310,6 +310,8 @@ type Worker struct {
 	probeSource           func(ctx context.Context, path string) ([]SourceStream, float64, error)
 	probeDetails          func(ctx context.Context, path string) (SourceProbe, error)
 	scanVideo             func(ctx context.Context, path string, streamIndex int) (sourceVideoScan, error)
+	scanAudio             func(ctx context.Context, path string) (map[int]audioPacketSpan, error)
+	scanSubtitles         func(ctx context.Context, path string) (map[int]subtitlePackets, error)
 	finalizeOutput        func(ctx context.Context, localCandidate, destination, jobID string) error
 	afterEncodeCheckpoint func(jobDir string, job *JobRecord)
 	// leaseManager is optional: when set, external staging sources and external

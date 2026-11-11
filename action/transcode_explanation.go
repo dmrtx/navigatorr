@@ -28,6 +28,9 @@ type TranscodeExplanation struct {
 	// winner's sample score and its final score side by side per window.
 	Verification *transcode.BenchmarkVerificationEvidence `json:"verification,omitempty"`
 	Windows      []transcode.WindowComparison             `json:"windows,omitempty"`
+	// FreshUnmeasured lists the final check's fresh windows that were not
+	// measured and why: the verdict was reached without them.
+	FreshUnmeasured []transcode.UnmeasuredWindow `json:"fresh_unmeasured,omitempty"`
 	// FinalQuality is the full-file quality check of a result that failed it:
 	// which checks failed, by how much, and the numbers behind them.
 	FinalQuality *FinalQualitySummary `json:"final_quality,omitempty"`
@@ -46,6 +49,9 @@ type TranscodeExplanation struct {
 	// ladder of fixed settings instead of searching: the rungs, the one
 	// encoding or kept, and what each earlier rung measured.
 	QualityLadder *QualityLadderRecord `json:"quality_ladder,omitempty"`
+	// PreservationFailure is the check that refused a candidate for losing
+	// part of the original, with its numbers (preservation_rejected).
+	PreservationFailure string `json:"preservation_failure,omitempty"`
 }
 
 func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
@@ -110,6 +116,7 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	data, _ = json.Marshal(read("quality_evidence"))
 	if json.Unmarshal(data, &evidence) == nil {
 		e.Windows = transcode.CompareWindows(automatic.WinnerWindows, evidence.Windows)
+		e.FreshUnmeasured = evidence.FreshUnmeasured
 	}
 	reason := getString(res.State, "reason_code")
 	if reason == "" {
@@ -192,6 +199,13 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 	case reason == "preservation_not_met":
 		e.Outcome = "preservation_rejected"
 		e.Message = "The encoded result did not preserve the required tracks or video properties. Original preserved."
+		if detail, _ := read(preservationFailureKey).(string); detail != "" {
+			e.PreservationFailure = detail
+			e.Message = "The encoded result did not keep everything the original has: " + detail + ". Original preserved."
+		} else if detail, _ := read(preservationBeforeEncodeKey).(string); detail != "" {
+			e.PreservationFailure = detail
+			e.Message = "The original was refused before anything was encoded: " + detail + ". Original preserved."
+		}
 	case reason == "audio_compaction_insufficient":
 		e.Outcome = "size_rejected"
 		e.Message = "No video encode met this goal, and compacting the lossless audio alone would not save enough. Original preserved."

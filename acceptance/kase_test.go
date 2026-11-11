@@ -182,6 +182,7 @@ func (k *kase) fill(src string, r *result) {
 	}
 	if r.goal != nil {
 		k.row.Encoder = r.goal.Encoder
+		k.row.PreservationFailure = r.goal.PreservationFailure
 	}
 	if r.ladder != nil {
 		k.row.LadderStep = r.ladder.Rung + 1

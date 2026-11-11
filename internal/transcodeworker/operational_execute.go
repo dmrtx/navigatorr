@@ -187,14 +187,6 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	probeStart := time.Now()
 	probeCPU := &cpuMeter{}
 	srcProbe, probeErr := w.probeSourceDetailsForJob(withCPUMeter(ctx, probeCPU), r.effectiveInput)
-	if probeErr == nil && needsAudioPacketValidation(job.Plan, srcProbe) {
-		// Measured before the encode: a source whose audio cannot be timed
-		// fails in minutes instead of after hours of encoding, and the
-		// candidate check reuses the measurement.
-		if srcProbe.audioSpans, probeErr = audioPacketSpans(withCPUMeter(ctx, probeCPU), w.ffprobePath, r.effectiveInput); probeErr != nil {
-			probeErr = fmt.Errorf("source audio validation: %w", probeErr)
-		}
-	}
 	w.persistPhaseCost(jobDir, jobFile, job, "probe", probeStart, transcode.PhaseCost{ActiveComputeMs: probeCPU.activeComputeMs()})
 	if srcProbe.DurationSec > 0 {
 		job.DurationSec = srcProbe.DurationSec
@@ -202,15 +194,24 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 	if probeErr != nil {
 		return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("probing source streams: %w", probeErr))
 	}
-	// A damaged container, or final windows past the end of the video, fail
-	// in seconds here instead of at the final gate after the whole encode.
-	if videoIndex := programmeVideoIndex(srcProbe.Streams); videoIndex >= 0 {
+	// One read of the source's packets, before the encode: the programme
+	// video's frames and damage, and the kept audio and subtitle tracks'
+	// packets, which the candidate's are held to after it. A damaged
+	// container, audio that cannot be timed or final windows past the end of
+	// the video fail in minutes here instead of after hours of encoding, and
+	// the source is never read again for these checks. The phase also
+	// decodes a few seconds of the video and, when a kept subtitle is
+	// converted, runs that conversion over the whole source to count its
+	// lines; the NAS read bytes count the source's size once for the packet
+	// read and once more when that conversion ran, as it reads the whole file.
+	if req := w.packetScanFor(job.Plan, srcProbe); req.any() {
 		scanStart := time.Now()
 		scanCPU := &cpuMeter{}
-		scan, scanErr := w.scanSourceVideoForJob(withCPUMeter(ctx, scanCPU), r.effectiveInput, videoIndex)
+		var scanErr error
+		srcProbe, scanErr = w.scanSourcePackets(withCPUMeter(ctx, scanCPU), job.Plan, srcProbe, r.effectiveInput)
 		scanCost := transcode.PhaseCost{ActiveComputeMs: scanCPU.activeComputeMs()}
 		if inputOnNAS {
-			scanCost.NASReadBytes = knownCount(sourceInfo.Size())
+			scanCost.NASReadBytes = knownCount(sourceInfo.Size() * sourceScanFullReads(srcProbe))
 		}
 		w.persistPhaseCost(jobDir, jobFile, job, "source_scan", scanStart, scanCost)
 		if scanErr != nil {
@@ -219,13 +220,18 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 				// resumable instead of failing it as killed.
 				return ctx.Err()
 			}
-			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source video packets: %w", scanErr))
+			return w.failJobTerminal(jobDir, jobFile, job, fmt.Errorf("scanning source packets: %w", scanErr))
 		}
-		if err := scan.damage(sourceInfo.Size()); err != nil {
-			return w.failJobTerminal(jobDir, jobFile, job, err)
-		}
-		if err := finalWindowsFitVideo(job.Plan, scan); err != nil {
-			return w.failJobTerminal(jobDir, jobFile, job, err)
+		if scan := srcProbe.videoScan; scan != nil {
+			if err := scan.damage(sourceInfo.Size()); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
+			if err := sourceClockRestarted(job.Plan, *scan); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
+			if err := finalWindowsFitVideo(job.Plan, *scan); err != nil {
+				return w.failJobTerminal(jobDir, jobFile, job, err)
+			}
 		}
 	}
 
@@ -340,7 +346,7 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 			if audioOnly {
 				qualityEvidence, verr = w.validateVideoCopy(validationCtx, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
 			} else {
-				qualityEvidence, verr = w.validateFinalPerceptual(validationCtx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes)
+				qualityEvidence, verr = w.validateFinalPerceptualScanned(validationCtx, jobDir, r.effectiveInput, r.localCandidate, job.Plan, attest.SHA256, attest.SizeBytes, srcProbe.videoScan)
 			}
 			job.QualityEvidence = qualityEvidence
 			if verr == nil {
@@ -1473,16 +1479,19 @@ func (w *Worker) probeSourceDetailsForJob(ctx context.Context, path string) (Sou
 }
 
 // scanSourceVideoForJob uses the injected scan when present. A test that
-// injects the probe describes a file it never wrote, so without an injected
-// scan there is nothing to scan and the scan finds nothing.
+// injects the probe without it measures no video (packetScanFor).
 func (w *Worker) scanSourceVideoForJob(ctx context.Context, path string, streamIndex int) (sourceVideoScan, error) {
 	if w.scanVideo != nil {
 		return w.scanVideo(ctx, path, streamIndex)
 	}
-	if w.probeDetails != nil || w.probeSource != nil {
-		return sourceVideoScan{FirstErrorByte: -1}, nil
-	}
 	return scanSourceVideo(ctx, w.ffprobePath, path, streamIndex)
+}
+
+// probeInjected reports whether a test injected the probe: it then describes
+// files it never wrote, and a packet scan has nothing to read unless the test
+// injects that too.
+func (w *Worker) probeInjected() bool {
+	return w.probeDetails != nil || w.probeSource != nil
 }
 
 // runOperationalFFmpeg uses the injected encoder when present, else the

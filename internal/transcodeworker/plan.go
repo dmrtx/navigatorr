@@ -48,9 +48,19 @@ type SourceStream struct {
 	// carries both; they are reused when the cover is re-attached.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// AttachmentBytes is an attachment's size (ffprobe's extradata_size).
+	AttachmentBytes int64 `json:"attachment_bytes,omitempty"`
 	// StatisticsTags are the stream's muxer statistics tag names as the probe
 	// reports them, language-suffixed variants ("BPS-eng") included.
 	StatisticsTags []string `json:"-"`
+	// DisplayMatrix is a video stream's display-matrix side data as ffprobe
+	// reports it (nil when it has none); the orientation check reads it.
+	DisplayMatrix []mediainspect.SideDataRecord `json:"-"`
+}
+
+// Orientation is how the stream's display matrix turns and flips the picture.
+func (s SourceStream) Orientation() orientation {
+	return displayOrientation(mediainspect.DetailedStream{SideData: s.DisplayMatrix})
 }
 
 // AudioTrack is the stream as the audio policy reads it.
@@ -92,8 +102,12 @@ type SourceProbe struct {
 	DurationSec float64
 	Chapters    int
 	// audioSpans is the source's measured audio packet timing, taken before
-	// the encode when the plan re-encodes audio.
+	// the encode.
 	audioSpans map[int]audioPacketSpan
+	// subtitlePackets are the source's subtitle packet counts and videoScan
+	// its programme video's packet scan, both taken before the encode.
+	subtitlePackets map[int]subtitlePackets
+	videoScan       *sourceVideoScan
 }
 
 func ProbeSourceStreams(ctx context.Context, ffprobePath, filePath string) ([]SourceStream, float64, error) {
@@ -136,6 +150,8 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 			StartTime        string            `json:"start_time"`
 			AvgFrameRate     string            `json:"avg_frame_rate"`
 			RFrameRate       string            `json:"r_frame_rate"`
+			ExtradataSize    int64             `json:"extradata_size"`
+			SideDataList     []json.RawMessage `json:"side_data_list"`
 		} `json:"streams"`
 		Chapters []struct {
 			Index int `json:"index"`
@@ -186,14 +202,31 @@ func ProbeSourceDetails(ctx context.Context, ffprobePath, filePath string) (Sour
 		if kind == "video" {
 			_, fps = mediainspect.ParseFrameRate(st.RFrameRate, st.AvgFrameRate)
 		}
+		var attachmentBytes int64
+		if kind == "attachment" {
+			attachmentBytes = st.ExtradataSize
+		}
+		var displayMatrix []mediainspect.SideDataRecord
+		if kind == "video" {
+			for _, raw := range st.SideDataList {
+				var m map[string]any
+				if json.Unmarshal(raw, &m) != nil {
+					continue
+				}
+				if t, _ := m["side_data_type"].(string); strings.EqualFold(t, "Display Matrix") {
+					displayMatrix = append(displayMatrix, mediainspect.SideDataRecord{SideDataType: t, Data: m})
+				}
+			}
+		}
 		out = append(out, SourceStream{
-			FPS:        fps,
-			SampleRate: sampleRate,
-			Index:      st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
+			DisplayMatrix: displayMatrix,
+			FPS:           fps,
+			SampleRate:    sampleRate,
+			Index:         st.Index, TypeIndex: typeIdx, Kind: kind, Codec: norm(st.CodecName),
 			Language: lang, Title: title, Handler: transcode.AudioHandler(st.Tags), Channels: st.Channels, Layout: st.ChannelLayout, Disposition: st.Disposition,
 			StartTime: startTime,
 			Width:     st.Width, Height: st.Height, BitDepth: bitDepth, PixelFormat: norm(st.PixFmt), Profile: strings.TrimSpace(st.Profile),
-			Filename: filename, MimeType: mimeType, BitrateKbps: bitrateKbps,
+			Filename: filename, MimeType: mimeType, AttachmentBytes: attachmentBytes, BitrateKbps: bitrateKbps,
 			StatisticsTags: statisticsTagKeys(st.Tags),
 		})
 	}
@@ -242,6 +275,8 @@ func anyToString(v any) string {
 }
 
 type StreamAction struct {
+	// Disposition is the flags the command sets on the output track, nil
+	// when it sets none (transcode.WrittenDisposition).
 	Disposition map[string]int `json:"disposition,omitempty"`
 	Kind        string         `json:"kind"`
 	SourceIndex int            `json:"source_index"`
@@ -270,6 +305,8 @@ type StreamAction struct {
 	// Cover art only: the attachment name and MIME type it is re-attached with.
 	Filename string `json:"filename,omitempty"`
 	MimeType string `json:"mime_type,omitempty"`
+	// AttachmentBytes is an attachment's size (ffprobe's extradata_size).
+	AttachmentBytes int64 `json:"attachment_bytes,omitempty"`
 	// StatisticsTags are the source stream's statistics tag names, cleared on
 	// a re-encoded stream (see clearStatisticsTags).
 	StatisticsTags []string `json:"-"`
@@ -305,42 +342,31 @@ func (ep *ExecutionPlan) CoverArt() []StreamAction {
 
 // coverArtMimeTypes maps attached-picture codecs to the MIME type Matroska
 // needs on the attachment. Other codecs fail closed.
-var coverArtMimeTypes = map[string]string{"mjpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "gif": "image/gif", "webp": "image/webp", "tiff": "image/tiff"}
+var coverArtMimeTypes = transcode.CoverMimeTypes
 
-var coverArtExtensions = map[string]string{"image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/gif": ".gif", "image/webp": ".webp", "image/tiff": ".tiff"}
+var coverArtExtensions = transcode.CoverExtensions
+
+func safeAttachmentFilename(name string) bool { return transcode.SafeAttachmentFilename(name) }
 
 // coverArtAction keeps an attached picture as an untouched cover. The
 // Matroska muxer writes a copied attached_pic stream as an ordinary one-frame
 // video track, so the cover is re-attached as an image attachment instead,
 // which ffprobe reads back as attached_pic=1.
 func coverArtAction(s SourceStream) (StreamAction, error) {
-	mimeType := coverArtMimeTypes[norm(s.Codec)]
-	if mimeType == "" {
-		return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported codec %q (fail closed)", s.Index, s.Codec)
-	}
-	if s.MimeType != "" {
-		if _, ok := coverArtExtensions[s.MimeType]; !ok {
-			return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported mimetype %q (fail closed)", s.Index, s.MimeType)
+	mimeType, ok := transcode.CoverMIME(s.Codec, s.MimeType)
+	if !ok {
+		if coverArtMimeTypes[norm(s.Codec)] == "" {
+			return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported codec %q (fail closed)", s.Index, s.Codec)
 		}
-		mimeType = s.MimeType
+		return StreamAction{}, fmt.Errorf("cover art stream %d has unsupported mimetype %q (fail closed)", s.Index, s.MimeType)
 	}
-	filename := s.Filename
-	if !safeAttachmentFilename(filename) {
+	// The name and type follow transcode.CoverFilename and CoverMIME, which
+	// the coordinator applies to the same source too.
+	filename := transcode.CoverFilename(s.Filename)
+	if filename == "" {
 		filename = fmt.Sprintf("cover_%d%s", s.TypeIndex, coverArtExtensions[mimeType])
 	}
 	return StreamAction{Kind: "cover", SourceIndex: s.Index, TypeIndex: s.TypeIndex, Codec: s.Codec, TargetCodec: "copy", Filename: filename, MimeType: mimeType}, nil
-}
-
-func safeAttachmentFilename(name string) bool {
-	if name == "" || len(name) > 255 || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		return false
-	}
-	for _, r := range name {
-		if r < 0x20 || r == 0x7f {
-			return false
-		}
-	}
-	return true
 }
 
 func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration float64) (*ExecutionPlan, error) {
@@ -425,10 +451,11 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 		case "audio":
 			out := transcode.AudioOutputFor(plan.AudioMode, s.AudioTrack())
 			target, bitrate := out.Codec, out.Kbps
-			disposition := s.Disposition
+			planned := s.Disposition
 			if plan.Tracks != nil {
-				disposition, seenKept[s.Index] = kept[s.Index], true
+				planned, seenKept[s.Index] = kept[s.Index], true
 			}
+			disposition := transcode.WrittenDisposition("audio", planned, s.Disposition)
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "audio", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outAudio, Codec: s.Codec, TargetCodec: target, BitrateKbps: bitrate, HEAAC: out.HEAAC, AudioToolbox: out.AudioToolbox, Disposition: disposition, Title: s.Title, Handler: s.Handler, Channels: s.Channels, Layout: s.Layout, SampleRate: s.SampleRate, StatisticsTags: s.StatisticsTags})
 			outAudio++
 			if target != "copy" {
@@ -467,9 +494,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 				seenKept[s.Index] = true
 				// Subtitle dispositions are copied with the stream; only a
 				// default that moved to this track is written.
-				if kept[s.Index]["default"] > 0 && s.Disposition["default"] == 0 {
-					disposition = kept[s.Index]
-				}
+				disposition = transcode.WrittenDisposition("subtitle", kept[s.Index], s.Disposition)
 			}
 			ep.Streams = append(ep.Streams, StreamAction{Kind: "subtitle", SourceIndex: s.Index, TypeIndex: s.TypeIndex, OutputIndex: outSubtitle, Codec: s.Codec, TargetCodec: target, Disposition: disposition, StatisticsTags: s.StatisticsTags})
 			outSubtitle++

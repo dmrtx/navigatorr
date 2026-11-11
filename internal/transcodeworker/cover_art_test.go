@@ -70,6 +70,9 @@ func TestCoverArtActionTypeAndName(t *testing.T) {
 		{SourceStream{Index: 3, TypeIndex: 1, Kind: "video", Codec: "png", Disposition: map[string]int{"attached_pic": 1}}, "cover_1.png", "image/png"},
 		{SourceStream{Index: 3, TypeIndex: 1, Kind: "video", Codec: "mjpeg", Disposition: map[string]int{"attached_pic": 1}, Filename: "../cover.jpg"}, "cover_1.jpg", "image/jpeg"},
 		{SourceStream{Index: 3, TypeIndex: 1, Kind: "video", Codec: "mjpeg", Disposition: map[string]int{"attached_pic": 1}, Filename: "folder.jpg", MimeType: "image/jpeg"}, "folder.jpg", "image/jpeg"},
+		// A nonstandard JPEG tag is kept, normalized to image/jpeg.
+		{SourceStream{Index: 3, TypeIndex: 1, Kind: "video", Codec: "mjpeg", Disposition: map[string]int{"attached_pic": 1}, Filename: "folder.jpg", MimeType: "image/jpg"}, "folder.jpg", "image/jpeg"},
+		{SourceStream{Index: 3, TypeIndex: 1, Kind: "video", Codec: "mjpeg", Disposition: map[string]int{"attached_pic": 1}, MimeType: "image/pjpeg"}, "cover_1.jpg", "image/jpeg"},
 	} {
 		a, err := coverArtAction(tc.stream)
 		if err != nil || a.Filename != tc.wantName || a.MimeType != tc.wantMimeType {
@@ -80,6 +83,9 @@ func TestCoverArtActionTypeAndName(t *testing.T) {
 		{Index: 3, Kind: "video", Codec: "h264", Disposition: map[string]int{"attached_pic": 1}},
 		{Index: 3, Kind: "video", Codec: "png", Disposition: map[string]int{"attached_pic": 1}, MimeType: "text/html"},
 	} {
+		if _, err := coverArtAction(bad); err == nil || strings.Contains(err.Error(), "unsupported mimetype") != (bad.Codec == "png") {
+			t.Fatalf("cover %+v: error %v", bad, err)
+		}
 		if _, err := BuildExecutionPlan(coverArtPlan(), []SourceStream{{Index: 0, Kind: "video", Codec: "h264"}, bad}, 60); err == nil {
 			t.Fatalf("accepted unsupported cover %+v", bad)
 		}
@@ -239,7 +245,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 			if err := w.validateModeSourceQuality(ctx, source, plan); err == nil || !strings.Contains(err.Error(), "quality_model_unavailable") {
 				t.Fatalf("mode preflight: %v", err)
 			}
-			if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
+			if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err != nil {
 				t.Fatalf("pre-publish validation: %v", err)
 			}
 			info, err := os.Stat(candidate)
@@ -256,7 +262,7 @@ func TestCoverArtRealEncode(t *testing.T) {
 			if out, err := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-i", candidate, "-map", "0:V", "-map", "0:a", "-map", "0:t", "-c", "copy", lost).CombinedOutput(); err != nil {
 				t.Fatalf("lost-cover fixture: %v %s", err, out)
 			}
-			if _, err := w.validateEncodedCandidateFull(ctx, lost, ep, srcProbe, 0); err == nil || !strings.Contains(err.Error(), "cover art count") {
+			if _, err := w.validateEncodedCandidateFull(ctx, lost, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err == nil || !strings.Contains(err.Error(), "cover art count") {
 				t.Fatalf("accepted a candidate without its cover: %v", err)
 			}
 		})

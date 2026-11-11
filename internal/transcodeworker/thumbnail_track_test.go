@@ -321,7 +321,7 @@ func TestPreviewTrackRealEncode(t *testing.T) {
 func TestCandidateKeepingPreviewTrackFailsValidation(t *testing.T) {
 	enc := runPreviewTrackEncode(t, coverArtPlan())
 	w := NewWorker(&WorkerConfig{StateDir: enc.dir, FFmpeg: enc.ffmpeg, FFprobe: enc.ffprobe})
-	if _, err := w.validateEncodedCandidateFull(enc.ctx, enc.candidate, enc.execPlan, enc.srcProbe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(enc.ctx, enc.candidate, enc.execPlan, prescanSource(t, w, enc.execPlan.Plan, enc.srcProbe, enc.source), 0); err != nil {
 		t.Fatalf("clean candidate rejected: %v", err)
 	}
 	kept := filepath.Join(enc.dir, "kept-preview.mkv")
@@ -336,7 +336,7 @@ func TestCandidateKeepingPreviewTrackFailsValidation(t *testing.T) {
 	if _, previews := splitProgrammeVideo(keptProbe.Streams); len(previews) != 1 || countMainVideo(keptProbe.Streams) != 1 {
 		t.Fatalf("fixture does not carry the preview track beside one programme video: %+v", keptProbe.Streams)
 	}
-	if _, err := w.validateEncodedCandidateFull(enc.ctx, kept, enc.execPlan, enc.srcProbe, 0); err == nil || !strings.Contains(err.Error(), "preview image track") {
+	if _, err := w.validateEncodedCandidateFull(enc.ctx, kept, enc.execPlan, prescanSource(t, w, enc.execPlan.Plan, enc.srcProbe, enc.source), 0); err == nil || !strings.Contains(err.Error(), "preview image track") {
 		t.Fatalf("accepted a candidate that kept the preview track: %v", err)
 	}
 }

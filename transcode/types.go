@@ -170,9 +170,11 @@ type FinalQualityEvidence struct {
 	// on their own. Whether they also decide the verdict, and so are pooled
 	// into VMAF too, is the plan's GateFreshSamples.
 	FreshVMAF *quality.VMAFStats `json:"fresh_vmaf,omitempty"`
-	// FreshUnmeasured lists the fresh windows of an ungated plan that could not
-	// be measured, with the reason a grid window would have failed on. A gated
-	// plan fails instead, so this is empty for it.
+	// FreshUnmeasured lists the fresh windows that could not be measured, with
+	// the reason a grid window would have failed on: any such window of an
+	// ungated plan, and, gated or not, one the source has no pictures for
+	// (past the end of its video), which says nothing about the candidate. Any
+	// other failure of a gated plan's fresh window fails validation instead.
 	FreshUnmeasured []UnmeasuredWindow     `json:"fresh_unmeasured,omitempty"`
 	CAMBI           *quality.CAMBIStats    `json:"cambi,omitempty"`
 	SSIMMean        *float64               `json:"ssim_mean,omitempty"`

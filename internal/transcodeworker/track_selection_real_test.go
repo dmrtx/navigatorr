@@ -249,7 +249,7 @@ func TestTrackSelectionRealEncode(t *testing.T) {
 		t.Fatalf("selection %+v", plan.Tracks)
 	}
 	ep, candidate := f.encode(t, ctx, dir, "selected", plan)
-	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, f.probe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, f.probe, f.path), 0); err != nil {
 		t.Fatalf("pre-publish validation of the selected output: %v", err)
 	}
 	cand, err := ProbeSourceDetails(ctx, f.ffprobe, candidate)
@@ -287,7 +287,7 @@ func TestTrackSelectionRealEncode(t *testing.T) {
 		t.Fatal("an empty selection planned tracks")
 	}
 	_, everything := f.encode(t, ctx, dir, "everything", allPlan)
-	if _, err := w.validateEncodedCandidateFull(ctx, everything, ep, f.probe, 0); err == nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, everything, ep, prescanSource(t, w, ep.Plan, f.probe, f.path), 0); err == nil {
 		t.Error("an output with every track passed validation against the selection")
 	} else {
 		t.Logf("whole file against the selection: %v", err)
@@ -301,7 +301,7 @@ func TestTrackSelectionRealEncode(t *testing.T) {
 		t.Fatal("manual picks planned no selection")
 	}
 	_, swapped := f.encode(t, ctx, dir, "swapped", wrong)
-	if _, err := w.validateEncodedCandidateFull(ctx, swapped, ep, f.probe, 0); err == nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, swapped, ep, prescanSource(t, w, ep.Plan, f.probe, f.path), 0); err == nil {
 		t.Error("an output with the wrong audio track passed validation against the selection")
 	} else {
 		t.Logf("wrong audio track against the selection: %v", err)
@@ -312,14 +312,14 @@ func TestTrackSelectionRealEncode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.validateEncodedCandidateFull(ctx, swapped, wrongEP, f.probe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, swapped, wrongEP, prescanSource(t, w, wrongEP.Plan, f.probe, f.path), 0); err != nil {
 		t.Errorf("the manual pick does not validate against its own plan: %v", err)
 	}
 	allEP, err := BuildExecutionPlan(allPlan, f.probe.Streams, f.probe.DurationSec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.validateEncodedCandidateFull(ctx, everything, allEP, f.probe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, everything, allEP, prescanSource(t, w, allEP.Plan, f.probe, f.path), 0); err != nil {
 		t.Errorf("the whole file does not validate against the plan that keeps it: %v", err)
 	}
 }
@@ -351,7 +351,7 @@ func TestTrackSelectionRealEncodeWithoutAudio(t *testing.T) {
 		t.Fatalf("selection %+v", plan.Tracks)
 	}
 	ep, candidate := quiet.encode(t, ctx, dir, "silent", plan)
-	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, probe, 0); err != nil {
+	if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, probe, silent), 0); err != nil {
 		t.Fatalf("validation of the silent output: %v", err)
 	}
 	cand, err := ProbeSourceDetails(ctx, f.ffprobe, candidate)

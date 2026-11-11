@@ -63,6 +63,16 @@ func TestTranscodeAcceptance(t *testing.T) {
 			c.run(k)
 		})
 	}
+	for _, clip := range clipFiles(t) {
+		name := "clip_" + strings.TrimSuffix(filepath.Base(clip), filepath.Ext(clip))
+		t.Run(name, func(t *testing.T) {
+			row := &caseReport{Case: name}
+			rep.add(row)
+			k := &kase{T: t, s: s, row: row}
+			defer func() { row.Passed = !t.Failed() && !t.Skipped() }()
+			caseClip(k, clip)
+		})
+	}
 }
 
 // sha is the original's hash before any action touches it.

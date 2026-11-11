@@ -303,7 +303,7 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		if transcode.IsHEAACAudioLevelMode(mode) && (audio[0].Profile != "HE-AAC" || audio[1].Profile != "HE-AAC") {
 			t.Fatalf("level 2 profiles %q %q", audio[0].Profile, audio[1].Profile)
 		}
-		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0); err != nil {
+		if _, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err != nil {
 			t.Fatalf("%s: pre-publish validation: %v", mode, err)
 		}
 		// No source statistics on a re-encoded stream (the muxer writes a
@@ -330,7 +330,7 @@ func TestSizeAudioLevelsRealEncode(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.validateEncodedCandidateFull(ctx, candidates[mode], ep, srcProbe, 0); err == nil {
+		if _, err := w.validateEncodedCandidateFull(ctx, candidates[mode], ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0); err == nil {
 			t.Errorf("the %s candidate passed the %s plan", mode, other)
 		}
 	}

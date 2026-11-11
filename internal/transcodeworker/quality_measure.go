@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/quality"
 )
@@ -35,7 +36,10 @@ import (
 //     while the encode's 1 ms Matroska time base does not, so the source kept
 //     a picture its encode did not. `-copyts` keeps the decoded timestamps
 //     untouched; `-seek_timestamp` makes `-ss` that same absolute time, and
-//     `-noaccurate_seek` only seeks to the keyframe at or before it.
+//     `-noaccurate_seek` only seeks to the keyframe at or before it. A
+//     transport stream's demuxer has no keyframe index and seeks to a packet
+//     near the time instead; that source's extract seeks before its keyframe
+//     (buildExtractionArgs, sourceVideoScan.windowSeek).
 //  2. Exact selection: `settb=AVTB,trim` keeps the pictures between the bounds,
 //     compared in microseconds, and ends the decode at the end bound. The
 //     bounds lie halfway between frames of a constant-rate source, so there
@@ -48,12 +52,24 @@ import (
 //     Source timestamps pass through unchanged (sourceTimestampArgs).
 //  5. Clean elementary stream: `-an -sn -dn` strips audio, subtitles, and data streams.
 func BuildReferenceExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec float64) []string {
+	return buildExtractionArgs(sourcePath, refPath, videoIndex, firstFrameSec, fromSec, toSec, firstFrameSec+fromSec)
+}
+
+// buildExtractionArgs is BuildReferenceExtractionArgs seeking to seekSec, a
+// time on the file's own timeline at or before the window's start, instead
+// of the start itself: the pictures the trim keeps are the same, and the
+// decode starts from a keyframe where the demuxer cannot find one itself. A
+// seekSec of math.Inf(-1) makes no seek: the decode starts at the file's
+// start.
+func buildExtractionArgs(sourcePath, refPath string, videoIndex int, firstFrameSec, fromSec, toSec, seekSec float64) []string {
 	from, to := firstFrameSec+fromSec, firstFrameSec+toSec
 	args := []string{"-y", "-nostats", "-copyts", "-noaccurate_seek"}
 	selection := fmt.Sprintf("settb=AVTB,trim=end=%.6f", to)
 	// A window from the first picture needs neither a seek nor a start bound.
 	if fromSec > 0 {
-		args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", from))
+		if seek := min(seekSec, from); !math.IsInf(seek, -1) {
+			args = append(args, "-seek_timestamp", "1", "-ss", fmt.Sprintf("%.6f", seek))
+		}
 		selection = fmt.Sprintf("settb=AVTB,trim=start=%.6f:end=%.6f", from, to)
 	}
 	return append(args,
@@ -384,6 +400,80 @@ func readMetricLogFile(logPath string) ([]byte, error) {
 		return nil, fmt.Errorf("metric log %s contained 0 bytes after read (fail closed)", logPath)
 	}
 	return data, nil
+}
+
+// withStoredPictures makes sample extraction read the stored pictures, not
+// the ones a display rotation turns. A compact plan sizes its chain, and the
+// encode runs it, on stored pixels (the encode keeps the rotation as
+// metadata), so both extracts must read them as stored for the reference's
+// scaled picture and the candidate to have one size.
+func withStoredPictures(args []string) []string {
+	out := make([]string, 0, len(args)+1)
+	for _, a := range args {
+		if a == "-i" {
+			out = append(out, "-noautorotate")
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// orientation is how a stream's display matrix turns the picture: degrees in
+// [0,360), counted as ffmpeg's rotation, and whether it is mirrored. raw is set
+// only for a matrix that could not be read, so two such streams match only
+// when their text does.
+type orientation struct {
+	degrees int
+	flipped bool
+	raw     string
+}
+
+// displayOrientation reads a video stream's display matrix as ffprobe reports
+// it. Only the rotation and flip count: a phone MOV stores the matrix with a
+// translation (the picture size) that the encoded file's canonical matrix
+// lacks, and no matrix at all shows the same picture as an identity one.
+func displayOrientation(v mediainspect.DetailedStream) orientation {
+	for _, sd := range v.SideData {
+		if !strings.EqualFold(sd.SideDataType, "Display Matrix") {
+			continue
+		}
+		if o, ok := parseDisplayMatrix(fmt.Sprint(sd.Data["displaymatrix"])); ok {
+			return o
+		}
+		// An unreadable matrix must not compare equal to a lost rotation, so
+		// it keeps its text and matches only the same text.
+		return orientation{raw: strings.Join(strings.Fields(fmt.Sprint(sd.Data["displaymatrix"], " ", sd.Data["rotation"])), " ")}
+	}
+	return orientation{}
+}
+
+// parseDisplayMatrix reads the first two columns of the first two rows of
+// ffprobe's "00000000:  a  b  c" lines, the part that rotates and flips.
+func parseDisplayMatrix(text string) (orientation, bool) {
+	var m [2][2]float64
+	rows := 0
+	for _, line := range strings.Split(text, "\n") {
+		_, vals, found := strings.Cut(line, ":")
+		f := strings.Fields(vals)
+		if !found || len(f) != 3 || rows >= 2 {
+			continue
+		}
+		for c := 0; c < 2; c++ {
+			x, err := strconv.ParseFloat(f[c], 64)
+			if err != nil {
+				return orientation{}, false
+			}
+			m[rows][c] = x
+		}
+		rows++
+	}
+	scale0, scale1 := math.Hypot(m[0][0], m[1][0]), math.Hypot(m[0][1], m[1][1])
+	if rows < 2 || scale0 == 0 || scale1 == 0 {
+		return orientation{}, false
+	}
+	// The angle ffmpeg reports as "rotation".
+	deg := int(math.Round(-math.Atan2(m[0][1]/scale1, m[0][0]/scale0) * 180 / math.Pi))
+	return orientation{degrees: (deg%360 + 360) % 360, flipped: m[0][0]*m[1][1]-m[0][1]*m[1][0] < 0}, true
 }
 
 // withReferenceChain inserts a compact picture chain into sample extraction

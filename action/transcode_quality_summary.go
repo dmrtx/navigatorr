@@ -206,6 +206,7 @@ var transcodeAttemptKeys = []string{
 	"failure_classification", "error_class", "queue_duration_ms", "encode_duration_ms", "validation_duration_ms", "worker_validation_duration_ms", "coordinator_validation_duration_ms",
 	"worker_wall_duration_ms", "quality_evidence", "conversions", "applied_fallbacks", "phase", "progress_is_stale",
 	candidateLocationKey, publishPolicyKey, publishPolicyFallbackKey, publishRetentionWaitKey, candidateRetainedAtKey, candidateRetainedUntilKey,
+	preservationFailureKey, preservationBeforeEncodeKey,
 }
 
 func continuationNote(c *HardwareContinuation) string {

@@ -69,12 +69,177 @@ frozen since that rule) judges the fresh windows with the grid, so a fresh
 window that misses a limit, or cannot be measured, fails the rung; such a goal
 only runs on a worker that reports `fresh_sample_gate` and stops before
 encoding otherwise. A goal frozen before the rule keeps its digest and its
-report-only fresh windows; one of those that cannot be measured is listed as
-unmeasured rather than dropped. Other goals, and
+report-only fresh windows: a score miss there is only reported, but a fresh
+window whose output pictures do not line up with a good source extract
+(`quality_final_sample_misaligned`) fails the rung under any goal, since it
+means content is missing, and so does one whose output extract fails twice
+(`quality_final_candidate_extract_failed`: the output cannot be read there);
+other unmeasurable report-only windows are listed as unmeasured rather than
+dropped. A window with no extent (a negative start, no length) fails under
+any goal. A
+fresh window the source has no pictures for (past the source's end, starting
+after the video's last picture as the packet scan before the encode read it
+when every packet carries a time,
+or a source extract that comes back empty where the scan read no picture
+inside the window, such as a still a variable-rate video holds for longer
+than the window: windows are cut from the first decoded picture, and one with
+no source picture says nothing about the output) is listed as unmeasured under
+every goal, gated or not, and a gated verdict is judged on the windows that
+were measured. A source with no keyframe index (MPEG transport and program
+streams, AVI) seeks to a packet near the time asked, and a decoder shows
+nothing until the next keyframe, so its extract seeks a second before the
+keyframe the packet scan found at or before the window; a source the scan
+kept no keyframe times for seeks 20 seconds before the window (the extract
+keeps the window's pictures by their times, so an earlier seek only decodes
+more). A seek that would land before zero or within half a second of the
+video's first or earliest packet is not made, even on a clock that
+restarted: the extract decodes from the file's start (an AVI cannot seek to
+or before its first packet, and an MPEG program stream whose clock restarted
+lower than it began seeks into the restarted part). A source extract that fails is tried once more, as is the
+output's, and a source extract that comes back empty is a failed extract too
+when its seek was not aimed at a keyframe or the scan read a picture inside
+the window;
+then a gated goal fails the rung (`quality_final_sample_extract_failed`)
+rather than judge without it, and a report-only one lists the window as
+unmeasured. Other goals, and
 sources too short for that grid, measure five windows (the 20%, 50% and 80%
 positions plus 35% and 65%); a source under 50 seconds keeps its three planned
 windows. A quality miss moves the ladder to the next rung and a pass keeps the
 file; the verdict names the failed metric and its limit.
+
+**Nothing kept may lose content.** Before the encode the worker reads the
+packets of the source's programme video and of every kept audio and subtitle
+track in one pass, without decoding them (a damaged source, untimed audio or
+final grid windows past the video's end fail there, in minutes). It also
+decodes a few seconds of the video: its first picture group and, for a field
+codec, up to five one-second samples (see below). When a kept subtitle is
+converted, the conversion is run once over the source to count its lines: a
+second read of the whole file, which the `source_scan` phase's NAS read bytes
+do not count (they count the source's size once). After the encode the
+worker reads the candidate's packets the same way and never reads the source
+again for these checks. It refuses the candidate (`preservation_not_met`)
+when:
+
+- the programme video has fewer frames than the source (a plan that copies
+  the video, the audio-only shape, keeps every packet and is held to the
+  source's packets one for one; otherwise only the packets a
+  decoder shows no picture for may be missing, each counted once: those
+  marked to be discarded and those it drops at the start), more frames, or
+  its last frame is more than one frame away from the source's. The start's
+  dropped packets are measured before the encode by decoding the source's
+  head (the packets up to 300 past its first keyframe that are not marked to
+  be discarded, so an MP4 cut by an edit list inside a long picture group is
+  decoded past the packets it hides):
+  packets before the first keyframe, and the leading pictures of an open
+  group (an HEVC CRA's RASL pictures, an H.264 recovery point's leading
+  B-frames) whose references a stream-copy cut removed, and the pictures
+  after a recovery point the decoder shows none of until the picture is
+  whole again (an x264 intra-refresh stream cut anywhere: they are timed
+  before the head's first shown picture, where the output's video then
+  starts). The count is held to
+  the packets that can be dropped there, so leading pictures that do decode
+  (RADL) excuse nothing. Pictures a decoder drops later in the file (an HEVC
+  BLA picture or end of sequence mid-file) are not counted, and such a rare
+  source is refused. A field-coded source (PAFF or adaptive field/frame
+  coding) may carry a field per packet, so its pictures lie between its whole
+  packets plus half its possible fields and all its packets; fewer frames
+  than that fail, and more are judged by where the last frame lands. Its head
+  shows it (half its packets decode to no picture), or, past a frame-coded
+  head, packets of H.264, MPEG-2 or VC-1 shorter than 0.6 of a head picture
+  or whose times lie closer than that. Such packets are also what a section at
+  a higher frame rate looks like (60 frames a second after a 30 or 24 frame
+  head), so up to five places among them are decoded before the encode, a
+  second each from the keyframe before it (at most 1,500 packets before the
+  place): a sample of fields shows about half as many pictures as packets,
+  and only a sample in which those packets are at least a quarter can show
+  fields (one dropped picture by a pair of close packets is not fields).
+  When every sample read shows a picture per packet the source is counted
+  exactly; a sample of fields, or no sample read, keeps the range. A sample
+  ffprobe fails to read is a sample not read: it keeps the range and does not
+  fail the job (damage in the packets themselves is the packet scan's to
+  report). Packets with no presentation time (AVI) are timed by their decode
+  time, as the scan times them. A video
+  of more than about two million timed packets keeps no times and keeps the
+  range;
+- a copied audio track has more packets than the source track, or fewer than
+  it has without the packets the source marks to be discarded, or its codec
+  differs at all (E-AC-3 is not AC-3), or its length moves by more than
+  0.25 s. A copied track's start is not compared with the video's: its
+  packets keep their own timestamps. A converted track keeps the 0.25 s start
+  check;
+- a converted audio track has more than 0.1 s more silence between its packets
+  than the source track. The scan sums, for each pair of consecutive packets,
+  the distance between their times beyond the first one's duration (up to
+  10 ms of timestamp rounding is not counted; a packet with no duration,
+  TrueHD in Matroska, counts only a distance of 0.1 s or more). ffmpeg skips a
+  stretch of undecodable packets and exits 0, which leaves the track's first
+  and last times alone; the hole it opens is the dropped sound. A gap the
+  source itself has is kept by the conversion and is not counted. Real
+  conversions of AC-3, E-AC-3, DTS, TrueHD, FLAC and AAC in Matroska and
+  MPEG-TS measured at most a millisecond of difference;
+- a copied subtitle has a different packet count (only packets marked to be
+  discarded or without a time may be missing; a PGS track whose source
+  carries segments as packets of their own, a Blu-ray transport stream or a
+  .sup, has one packet per display set in Matroska: at least one per END
+  segment carried alone, timed and kept, and at most one per source packet,
+  since a set whose END shares a packet with its other segments, or a track
+  cut before its last END, adds one; a track whose only END segments alone
+  come before its first other packet, a Matroska track ffmpeg merged from a
+  stream cut just before an END, is counted packet for packet); a converted
+  subtitle has a
+  different number of lines than the conversion wrote when it was run on the
+  source before the encode (a mov_text track's empty gap samples, merged ASS
+  events), whatever the formats; a kept subtitle whose source track has lines
+  comes out empty (an empty source track may give an empty one), or a kept
+  subtitle has no planned action;
+- a kept track's codec differs from the plan's. A copy keeps the source's
+  codec exactly, save the names Matroska gives back for the same bitstream
+  (`text` reads back as `subrip`, `ssa` as `ass`); a converted subtitle is in
+  its target codec exactly (`srt` is `subrip`,
+  `transcode.SameConvertedSubtitleCodec`); a codec the probe did not name is
+  no match;
+- a kept track loses its language tag. Tags are compared trimmed and without case: Matroska
+  keeps codes outside ISO 639-2 (`pob`, `en`, `pt-BR`) as they are; `und` is
+  the absence of a tag;
+- an audio or subtitle track, copied or converted, changes its title or any
+  flag Matroska stores. A converted audio track carries the title its
+  conversion gives it ("AAC 5.1"). The worker writes an audio track's flags
+  whenever the probe reported them, and a subtitle's only when a track
+  selection moves the default onto it; ffmpeg marks the first track of a kind
+  default on its own only when the command sets no flags at all, there are
+  two or more tracks of that kind and none is default, and only there is that
+  default allowed (`transcode.WrittenDisposition`, `transcode.InferredDefault`).
+  A record whose source flags were never probed has none to compare, worker
+  and coordinator alike;
+- the attachments are not the source's files by name, type and size: as many,
+  and none of the source's missing. ffmpeg copies an attachment's name and
+  type as they are, an empty type included. A cover is not an attachment:
+  Matroska reads a re-attached JPEG, PNG, GIF or TIFF cover back as a
+  picture, which the cover art count checks.
+
+The refusal names the check that failed (video completeness, audio packets,
+subtitle events, attachments, a track's disposition or title...) with its
+numbers ("video completeness check failed: the converted file lost content:
+the converted video has 3660 frames, the source 3662 ..."); the job's
+explanation shows it ("did not keep everything the
+original has: audio packets check failed: copied audio stream 1 has 310
+packets, the source track 313 ..."), and the acceptance report prints it under
+its table.
+
+A refusal before the encode (an audio-only plan whose source no longer
+matches it) is told as one: "The original was refused before anything was
+encoded: ...". Only the current attempt's refusal is told; a new attempt
+starts without the last one's detail. A source whose video clock restarts
+mid-file is refused before any video re-encode (`source_clock_restarted`, no
+retry): its timestamps no longer measure its length, so the converted file
+cannot be validated against it; remux it into one continuous timeline.
+
+The intentional changes stay allowed: a converted audio track's new title and
+the default flag a track selection moves. The server repeats the codec,
+language, title, flag and attachment checks on the finished file with the same
+functions (`transcode.SameCopiedCodec`, `SameLanguage`, `DispositionChange`,
+`AttachmentChange`) and asks for a decision on any difference; it does not
+repeat the packet counts, which need a full read of both files.
 
 When a size goal's ladder ends with no candidate and the policy allows it
 (`audio_only_fallback`, on for size), navigatorr copies the video unchanged and

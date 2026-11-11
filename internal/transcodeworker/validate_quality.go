@@ -25,6 +25,14 @@ import (
 // benchmark plan against the exact completed local candidate before publish.
 // Both extracted windows are FFV1 (lossless), then checked frame-for-frame.
 func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, candidate string, plan *transcode.Plan, candidateSHA string, candidateSize int64) (*transcode.FinalQualityEvidence, error) {
+	return w.validateFinalPerceptualScanned(ctx, jobDir, source, candidate, plan, candidateSHA, candidateSize, nil)
+}
+
+// validateFinalPerceptualScanned is validateFinalPerceptual with the source's
+// packet scan read before the encode (nil when none was read). A window that
+// starts after the source's last picture on it has no source pictures,
+// whatever the source's extract exits with or prints.
+func (w *Worker) validateFinalPerceptualScanned(ctx context.Context, jobDir, source, candidate string, plan *transcode.Plan, candidateSHA string, candidateSize int64, scan *sourceVideoScan) (*transcode.FinalQualityEvidence, error) {
 	if plan == nil || plan.QualityValidation == nil {
 		return nil, nil
 	}
@@ -106,6 +114,12 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			e.ReasonCodes = append(e.ReasonCodes, e.CompactOutput.ReasonCodes...)
 			return e, compactOutputError(e.CompactOutput)
 		}
+		// The extracts below read stored pictures, so they cannot see a lost
+		// or changed display rotation or flip: compare it here.
+		if a, b := displayOrientation(sourceVideo), displayOrientation(candidateVideo); a != b {
+			e.ReasonCodes = append(e.ReasonCodes, "quality_final_orientation_changed")
+			return e, candidateInvalid(fmt.Errorf("quality_final_orientation_changed: the source shows %+v, the candidate %+v", a, b))
+		}
 		digest, err := ensureCompactLUT(plan.Compact)
 		if err != nil {
 			return fail("quality_compact_chain_unavailable", err)
@@ -158,7 +172,6 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		return fail("quality_final_scratch_unavailable", err)
 	}
 	defer os.RemoveAll(scratch)
-	timeline := math.Min(sourceRep.DurationSec, candidateRep.DurationSec)
 	// Windows are cut from each file's first picture, which the encode keeps
 	// as its own first picture whatever the containers say their streams start at.
 	sourceFirstFrame, err := probeFirstFrameTime(ctx, w.ffprobePath, source, sourceVideoStreams[0].Index)
@@ -185,6 +198,16 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		bad := func(code string, cause error) finalWindowResult {
 			return finalWindowResult{code: code, err: cause}
 		}
+		// A fresh window the source has no pictures for (past the end of its
+		// container, past its last picture as the packet scan read it, or an
+		// extract in which ffmpeg encodes nothing, aimed at a keyframe, where
+		// the scan cannot say there are pictures) has nothing to hold the
+		// candidate to: it is unmeasured, never a refusal (noSource). Only
+		// the source's own packets or extract say so: the containers'
+		// durations follow their longest stream, not their video.
+		sourceless := func(code string, cause error) finalWindowResult {
+			return finalWindowResult{code: code, err: cause, noSource: pos >= grid}
+		}
 		// step runs one step of the window, timed and charged on its own
 		// (validationSteps); a result with a code fails the window.
 		step := func(name string, run func(context.Context) finalWindowResult) finalWindowResult {
@@ -192,8 +215,13 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 			defer end()
 			return run(stepCtx)
 		}
-		if window.StartSeconds < 0 || window.DurationSeconds <= 0 || window.StartSeconds+window.DurationSeconds > timeline+0.05 {
-			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds source/candidate timeline", window.Index))
+		// A window with no extent is the plan's error, not the source's: it
+		// fails, gated or not.
+		if window.StartSeconds < 0 || window.DurationSeconds <= 0 {
+			return bad("quality_final_sample_misaligned", fmt.Errorf("window %d starts at %.3fs and lasts %.3fs", window.Index, window.StartSeconds, window.DurationSeconds))
+		}
+		if end := window.StartSeconds + window.DurationSeconds; end > sourceRep.DurationSec+0.05 {
+			return sourceless("quality_final_sample_misaligned", fmt.Errorf("window %d exceeds the source's timeline", window.Index))
 		}
 		// Each window owns a directory, removed as soon as it is measured,
 		// so at most `concurrency` windows of lossless extracts exist at once.
@@ -206,38 +234,100 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 		candPath := filepath.Join(dir, fmt.Sprintf("candidate_%d.mkv", window.Index))
 		// One set of bounds, on the source's frame grid, for both files.
 		from, to := sampleFrameBounds(window.StartSeconds, window.DurationSeconds, sourceVideoStreams[0].FPS)
+		// Which window failed and where it sits tells a gap in the source's
+		// timeline from a shifted encode.
+		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
+		// A window that starts after the source's last picture has none:
+		// the scan read every packet's time before the encode, so this does
+		// not rest on the extract's exit status or its wording.
+		if scan.noPicturesFrom(sourceFirstFrame + from) {
+			return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source's last picture, %.3fs after its first, comes before it", where, scan.Last-sourceFirstFrame))
+		}
+		var refPTS, candPTS []float64
+		// The source's extract comes first, decoded from the keyframe before
+		// the window (sourceVideoScan.windowSeek; without a scan the seek is
+		// the window's start, as for a container with a keyframe index). One
+		// in which ffmpeg encodes no picture is a window past the source's
+		// video, unless the seek could not reach a keyframe (a decoder shows
+		// nothing until one) or the scan read a picture inside the window
+		// (sourceVideoScan.picturesIn): that extract failed. Any other failure (a read error, a killed process, an
+		// extract ffprobe cannot read) is retried once and then fails the
+		// window: it is not a window without pictures, and a gate must not
+		// pass on windows it never measured. A source extract that failed
+		// says nothing about the candidate: an ungated fresh window is then
+		// unmeasured (measureFreshWindows). Reading the source extract's
+		// timestamps is part of that check, so it is charged to the extract
+		// step.
+		seek, keyed := sourceFirstFrame+from, true
+		if scan != nil {
+			seek, keyed = scan.windowSeek(sourceFirstFrame + from)
+		}
+		candArgs := BuildReferenceExtractionArgs(candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame, from, to)
+		if compactCandidateChain != "" {
+			candArgs = withReferenceChain(candArgs, compactCandidateChain)
+		}
+		if plan.Compact != nil {
+			candArgs = withStoredPictures(candArgs)
+		}
 		if r := step(validationStepExtract, func(ctx context.Context) finalWindowResult {
-			for _, item := range []struct {
-				source, out string
-				videoIndex  int
-				firstFrame  float64
-			}{{source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame}, {candidate, candPath, candidateVideoStreams[0].Index, candidateFirstFrame}} {
-				args := BuildReferenceExtractionArgs(item.source, item.out, item.videoIndex, item.firstFrame, from, to)
-				if compactChain != "" && item.out == refPath {
-					args = withReferenceChain(args, compactChain)
+			refArgs := buildExtractionArgs(source, refPath, sourceVideoStreams[0].Index, sourceFirstFrame, from, to, seek)
+			if compactChain != "" {
+				refArgs = withReferenceChain(refArgs, compactChain)
+			}
+			if plan.Compact != nil {
+				refArgs = withStoredPictures(refArgs)
+			}
+			for attempt := 1; ; attempt++ {
+				output, err := runQualityCommand(ctx, w.ffmpegPath, refArgs)
+				if err == nil && emptyExtract(output) {
+					switch {
+					case !keyed:
+						return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, and its seek could not aim at a keyframe (no keyframe times from the source's scan)", where))
+					case scan.picturesIn(sourceFirstFrame+from, sourceFirstFrame+to):
+						return bad("quality_final_sample_extract_failed", fmt.Errorf("%s: the source's extract holds no picture, but its packet scan read pictures inside the window", where))
+					}
+					return sourceless("quality_final_sample_misaligned", fmt.Errorf("%s: the source has no pictures there", where))
 				}
-				if compactCandidateChain != "" && item.out == candPath {
-					args = withReferenceChain(args, compactCandidateChain)
+				if err == nil {
+					if refPTS, err = probeSamplePTS(ctx, w.ffprobePath, refPath); err == nil {
+						break
+					}
 				}
-				if _, err := runQualityCommand(ctx, w.ffmpegPath, args); err != nil {
-					return bad("quality_final_sample_extract_failed", err)
+				if attempt == 2 || ctx.Err() != nil {
+					return bad("quality_final_sample_extract_failed", fmt.Errorf("%s, source extract (%d attempts): %w", where, attempt, err))
+				}
+			}
+			// The candidate is the encode's own file: one that cannot be read
+			// there is a bad candidate, not a window left unmeasured. Like the
+			// source's, its extract is retried once first: one failed read (a
+			// killed process, a busy disk) says nothing about the file.
+			for attempt := 1; ; attempt++ {
+				_, err := runQualityCommand(ctx, w.ffmpegPath, candArgs)
+				if err == nil {
+					break
+				}
+				if attempt == 2 || ctx.Err() != nil {
+					return bad("quality_final_candidate_extract_failed", fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt, err))
 				}
 			}
 			return finalWindowResult{}
 		}); r.code != "" {
 			return r
 		}
-		// Which window failed and where it sits tells a gap in the source's
-		// timeline from a shifted encode.
-		where := fmt.Sprintf("window %d (starts %.3fs after the first picture, %.0fs long)", window.Index, window.StartSeconds, window.DurationSeconds)
-		var refPTS, candPTS []float64
 		if r := step(validationStepTimestamps, func(ctx context.Context) finalWindowResult {
-			var err error
-			if refPTS, err = probeSamplePTS(ctx, w.ffprobePath, refPath); err != nil {
-				return bad("quality_final_sample_misaligned", fmt.Errorf("%s, source extract: %w", where, err))
-			}
-			if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err != nil {
-				return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract: %w", where, err))
+			// An extract ffprobe cannot read is extracted again once, as in
+			// the source's loop; the second extract is charged here.
+			for attempt := 1; ; attempt++ {
+				var err error
+				if candPTS, err = probeSamplePTS(ctx, w.ffprobePath, candPath); err == nil {
+					break
+				}
+				if attempt == 2 || ctx.Err() != nil {
+					return bad("quality_final_sample_misaligned", fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt, err))
+				}
+				if _, err := runQualityCommand(ctx, w.ffmpegPath, candArgs); err != nil {
+					return bad("quality_final_candidate_extract_failed", fmt.Errorf("%s, candidate extract (%d attempts): %w", where, attempt+1, err))
+				}
 			}
 			return finalWindowResult{}
 		}); r.code != "" {
@@ -332,8 +422,8 @@ func (w *Worker) validateFinalPerceptual(ctx context.Context, jobDir, source, ca
 	if err != nil {
 		return e, err
 	}
-	// Only a verdict window fails here: an ungated fresh window's failure was
-	// turned into a report by measureFreshWindows.
+	// Only a verdict window fails here: a fresh window measureFreshWindows
+	// marked unmeasured is reported, not failed.
 	if failed >= 0 {
 		return fail(results[failed].code, results[failed].err)
 	}
@@ -454,19 +544,44 @@ func judgeFinalWindows(e *transcode.FinalQualityEvidence, q *transcode.QualityVa
 // fails final validation as the lowest failing window. An ungated fresh window
 // that cannot be measured is marked unmeasured instead: it does not stop the
 // windows after it, and splitFinalWindowResults reports it with its reason.
+// Its scores never decide the verdict, but the candidate's pictures there
+// do: a window whose candidate pictures do not line up with the source's, or
+// cannot be read (freshWindowContentCodes), fails like a grid one. Fresh windows come from the
+// plan's verification, not from the grid the source was checked against
+// before the encode, so one the source has no pictures for (noSource) is
+// unmeasured whether or not the plan gates them: it says nothing about the
+// candidate, and refusing on it would throw the encode away. Any other
+// failure of a gated window, the source's extract included, fails: a gate
+// never passes on a window it could not measure.
 func measureFreshWindows(q *transcode.QualityValidationPlan, measure func(context.Context, int) finalWindowResult) func(context.Context, int) finalWindowResult {
 	grid := len(q.Samples)
 	return func(ctx context.Context, pos int) finalWindowResult {
 		r := measure(ctx, pos)
-		if pos >= grid && !q.GateFreshSamples && r.code != "" {
+		if pos < grid || r.code == "" {
+			return r
+		}
+		if r.noSource || (!q.GateFreshSamples && !freshWindowContentCodes[r.code]) {
 			return finalWindowResult{unmeasured: r.code}
 		}
 		return r
 	}
 }
 
+// freshWindowContentCodes are the window failures that say the candidate's
+// pictures are out of place or unreadable, not that a score could not be
+// taken. A misalignment counts only once the source's extract is known good:
+// a source with no pictures there is noSource, and a source extract that
+// failed (twice, or empty where it should not be) is
+// quality_final_sample_extract_failed, which fails a gated plan and leaves an
+// ungated window unmeasured.
+var freshWindowContentCodes = map[string]bool{
+	"quality_final_sample_misaligned":        true,
+	"quality_final_candidate_extract_failed": true,
+}
+
 // splitFinalWindowResults separates the results that decide the verdict (the
-// grid's, and the fresh windows' when the plan gates them) from the report.
+// grid's, and the measured fresh windows' when the plan gates them) from the
+// report.
 // Every window was measured or, for an ungated fresh window, marked
 // unmeasured. It returns the verdict results, every measured window's scores
 // in time order, the fresh windows' VMAF statistics and the ungated fresh
@@ -500,9 +615,13 @@ func splitFinalWindowResults(q *transcode.QualityValidationPlan, results []final
 		windows = append(windows, score)
 	}
 	sort.SliceStable(windows, func(i, j int) bool { return windows[i].StartSeconds < windows[j].StartSeconds })
-	verdict := results[:grid]
+	verdict := results[:grid:grid]
 	if q.GateFreshSamples {
-		verdict = results
+		for _, r := range results[grid:] {
+			if r.unmeasured == "" {
+				verdict = append(verdict, r)
+			}
+		}
 	}
 	return verdict, windows, freshVMAF, unmeasured
 }
@@ -525,9 +644,12 @@ type finalWindowResult struct {
 	chroma *[2]float64
 	code   string
 	err    error
-	// unmeasured is the reason code of an ungated fresh window that could not
-	// be measured (measureFreshWindows); such a result carries nothing else.
+	// unmeasured is the reason code of a fresh window that could not be
+	// measured (measureFreshWindows); such a result carries nothing else.
 	unmeasured string
+	// noSource marks a fresh window's failure on the source's side: no
+	// source pictures there to compare the candidate with.
+	noSource bool
 }
 
 // minMetricThreadsPerPass is the fewest libvmaf threads a concurrent metric
@@ -632,6 +754,13 @@ func runQualityCommand(ctx context.Context, ffmpegPath string, args []string) ([
 	}
 	output := []byte(tail.String())
 	return output, nil
+}
+
+// emptyExtract reports whether an extract that ffmpeg finished without an
+// error holds no picture: a window placed past the file's video, where the
+// trim filter lets nothing through. ffmpeg says so in these words.
+func emptyExtract(output []byte) bool {
+	return strings.Contains(string(output), "Output file is empty, nothing was encoded")
 }
 
 // probeSamplePTS is the presentation timestamp of every picture of a lossless

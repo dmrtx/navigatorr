@@ -145,7 +145,7 @@ func TestSizeAudioOnlyRealCopyWithLosslessAudio(t *testing.T) {
 		audio[1].Codec != "aac" || audio[1].Channels != 2 || audio[1].Language != "spa" || audio[2].Codec != "ac3" || audio[2].Language != "jpn" {
 		t.Fatalf("audio policy mismatch: %+v", audio)
 	}
-	attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, srcProbe, 0)
+	attest, err := w.validateEncodedCandidateFull(ctx, candidate, ep, prescanSource(t, w, ep.Plan, srcProbe, source), 0)
 	if err != nil {
 		t.Fatalf("pre-publish validation: %v", err)
 	}
@@ -444,5 +444,66 @@ func TestSameDynamicRangeIgnoresOnlyTheFramesRead(t *testing.T) {
 	b.DolbyVision, b.MasteringDisplay = a.DolbyVision, &mediainspect.MasteringDisplayMetadata{}
 	if sameDynamicRange(a, b) {
 		t.Fatal("added mastering metadata passed")
+	}
+}
+
+// A copied video keeps every packet, those a decoder shows no picture for
+// included (-copyinkf): an HEVC open-GOP source cut at a CRA keeps its RASL
+// pictures, which no decoder shows, and the audio-only remux copies them.
+// The completeness check holds a copy to the source's packets one for one,
+// not to the pictures the source shows, so the faithful remux passes it and
+// the copy proof; a copy that lost its last second is still refused.
+func TestVideoCopyCompletenessCountsPackets(t *testing.T) {
+	ffmpeg, ffprobe, ctx := videoCopyTools(t)
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.CommandContext(ctx, ffmpeg, append([]string{"-nostdin", "-v", "error", "-y"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("ffmpeg %v: %v\n%s", args, err, out)
+		}
+	}
+	full, source := filepath.Join(dir, "full.mkv"), filepath.Join(dir, "cut.mkv")
+	run("-f", "lavfi", "-i", "testsrc2=size=320x240:rate=24:duration=10",
+		"-f", "lavfi", "-i", "aevalsrc=sin(440*2*PI*t)|sin(550*2*PI*t):s=48000:c=stereo:d=10",
+		"-map", "0:v", "-map", "1:a", "-c:v", "libx265", "-preset", "ultrafast",
+		"-x265-params", "log-level=error:keyint=48:min-keyint=48:open-gop=1:bframes=4:scenecut=0", "-pix_fmt", "yuv420p", "-c:a", "pcm_s24le", full)
+	run("-ss", "3.3", "-i", full, "-map", "0", "-c", "copy", source) // starts at the CRA at 2 s
+	w := NewWorker(&WorkerConfig{StateDir: dir, FFmpeg: ffmpeg, FFprobe: ffprobe})
+	plan := sizeAudioOnlyTestPlan(t, 8)
+	probe, err := ProbeSourceDetails(ctx, ffprobe, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := prescanSource(t, w, plan, probe, source)
+	if p := sourcePictures(*src.videoScan, "hevc", 24); p.most >= src.videoScan.Packets {
+		t.Fatalf("the cut shows %d of %d packets: no RASL picture to exercise the copy", p.most, src.videoScan.Packets)
+	}
+	ep, err := BuildExecutionPlan(plan, probe.Streams, probe.DurationSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(dir, "candidate.mkv")
+	if err := RunFFmpegPaths(ctx, ffmpeg, ep, source, candidate, filepath.Join(dir, "progress"), filepath.Join(dir, "ffmpeg.log")); err != nil {
+		log, _ := os.ReadFile(filepath.Join(dir, "ffmpeg.log"))
+		t.Fatalf("remux: %v\n%s", err, log)
+	}
+	scan := func(path string) sourceVideoScan {
+		t.Helper()
+		got, err := scanFilePackets(ctx, ffprobe, path, packetScanRequest{video: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.video
+	}
+	if err := validateVideoCompleteness(plan, src, scan(candidate)); err != nil {
+		t.Fatalf("the worker's own remux of an open-GOP cut was refused: %v", err)
+	}
+	if e, err := w.validateVideoCopy(ctx, source, candidate, plan, "sha256:c", mustSize(t, candidate)); err != nil || e.Verdict != "pass" {
+		t.Fatalf("copy proof: %+v %v", e, err)
+	}
+	short := filepath.Join(dir, "short.mkv")
+	run("-i", candidate, "-map", "0", "-t", "5", "-c", "copy", short)
+	if err := validateVideoCompleteness(plan, src, scan(short)); err == nil || !strings.Contains(err.Error(), "the copied video has") {
+		t.Fatalf("a copy that lost its last second: %v, want refused", err)
 	}
 }
