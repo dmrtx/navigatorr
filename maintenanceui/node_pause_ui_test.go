@@ -47,3 +47,28 @@ func TestNodePauseControlsOfferSuspendInTheOneActionsRow(t *testing.T) {
 		t.Fatal("only sending files back needs the second tap")
 	}
 }
+
+// Confirming the request says only that it was requested: a suspend promises
+// neither a time nor that the files are frozen, which a failed signal can
+// still prevent. The workers dialog shows the freeze once the worker reports it.
+func TestSuspendNoticePromisesNeitherATimeNorAFreeze(t *testing.T) {
+	data, err := os.ReadFile("assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(data)
+	start := strings.Index(src, "function setNodePause(")
+	if start < 0 {
+		t.Fatal("setNodePause not found")
+	}
+	end := strings.Index(src[start:], "\n}\n")
+	body := src[start : start+end]
+	if !strings.Contains(body, "suspend requested.`") {
+		t.Fatal("the suspend notice must say the suspend was requested")
+	}
+	for _, banned := range []string{"within a second", "are frozen", "frozen and"} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("the suspend notice must not promise %q", banned)
+		}
+	}
+}

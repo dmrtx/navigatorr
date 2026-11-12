@@ -125,6 +125,43 @@ func TestSuspendIsNotIdleUntilTheWorkerReportsFrozen(t *testing.T) {
 	}
 }
 
+// The worker reports counts, not job ids. With two active jobs and one frozen,
+// the server's single row (the other job is not in its rows) must not be
+// credited with the other job's freeze: the node is not idle.
+func TestSuspendDoesNotAttributeAnotherJobsFreezeToARow(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 2
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	pauseNode(t, e, "m1", store.WorkerPauseSuspend)
+
+	m1.frozen = 1 // one job (not among the rows) is frozen; the registered one still runs
+	e.syncWorkerSuspend(context.Background(), mustWorker(t, e, "m1"))
+	status := e.NodePauseStatuses(context.Background())["m1"]
+	if status.Idle || status.Suspended != 0 || status.Running != 1 {
+		t.Fatalf("one frozen job out of two must not make the node idle or freeze the row: %+v", status)
+	}
+
+	// The worker runs a job the rows do not show and has not frozen it: no
+	// rows are running at all, yet the node cannot be called idle.
+	m1b := newSuspendingM1(transcode.StatusRunning)
+	m1b.active = 1
+	e2 := pauseEngine(t, m1b, &mockTranscodeExecutor{})
+	pauseNode(t, e2, "m1", store.WorkerPauseSuspend)
+	m1b.frozen = 0
+	e2.syncWorkerSuspend(context.Background(), mustWorker(t, e2, "m1"))
+	if st := e2.NodePauseStatuses(context.Background())["m1"]; st.Idle || st.Running < 1 {
+		t.Fatalf("an unfrozen worker job without a row still keeps the node busy: %+v", st)
+	}
+
+	// When every job the worker runs is frozen the node is idle.
+	m1.frozen = 2
+	e.syncWorkerSuspend(context.Background(), mustWorker(t, e, "m1"))
+	if st := e.NodePauseStatuses(context.Background())["m1"]; !st.Idle || st.Running != 0 {
+		t.Fatalf("all active jobs frozen: %+v", st)
+	}
+}
+
 // Resume continues the frozen encode where it was: the job is the same one on
 // the same node, and the worker is told to continue.
 func TestResumeContinuesASuspendedEncode(t *testing.T) {

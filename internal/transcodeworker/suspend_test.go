@@ -629,3 +629,75 @@ func TestFrozenCountsBelongToTheCurrentSuspension(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Between admit and track a process may already run while the registry holds
+// no child. A suspension that lands there must not be announced as frozen until
+// that child is registered and stopped.
+func TestSuspendNeverReportsFrozenWhileAChildIsStarting(t *testing.T) {
+	ctl := newSuspendControl()
+	var mu sync.Mutex
+	var reported []int64
+	ctl.onChange = func(g int64) { mu.Lock(); reported = append(reported, g); mu.Unlock() }
+	last := func() int64 {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(reported) == 0 {
+			return 0
+		}
+		return reported[len(reported)-1]
+	}
+
+	if err := ctl.admit(context.Background()); err != nil { // admitted, not started yet
+		t.Fatal(err)
+	}
+	ctl.applyGeneration(true, 7) // the suspension lands before cmd.Start
+	if ctl.isFrozen() || last() != 0 {
+		t.Fatalf("frozen reported with a child starting (frozen=%t, notified=%v)", ctl.isFrozen(), reported)
+	}
+
+	cmd := exec.Command("sleep", "30") // the process now runs, unregistered
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	if ctl.isFrozen() || last() != 0 {
+		t.Fatalf("frozen reported while the started process is not registered (notified=%v)", reported)
+	}
+
+	untrack := ctl.track(cmd)
+	defer untrack()
+	if !ctl.isFrozen() || last() != 7 {
+		t.Fatalf("the registered, stopped child must make the job frozen (notified=%v)", reported)
+	}
+	waitFor(t, "the child to be stopped", func() bool {
+		out, _ := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(cmd.Process.Pid)).Output()
+		return strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+	})
+}
+
+// A start that fails or is cancelled after admit must not leave the counter
+// hanging, or the node would never be reported frozen again.
+func TestSuspendStartingCounterIsNotLeftHanging(t *testing.T) {
+	ctl := newSuspendControl()
+	ctx := withSuspendControl(context.Background(), ctl)
+
+	bad := exec.Command("/nonexistent/definitely-not-a-binary")
+	if _, err := startGated(ctx, bad); err == nil {
+		t.Fatal("starting a missing binary must fail")
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := startGated(cancelled, exec.Command("sleep", "30")); err == nil {
+		t.Fatal("a cancelled context must not start a child")
+	}
+	ctl.mu.Lock()
+	starting := ctl.starting
+	ctl.mu.Unlock()
+	if starting != 0 {
+		t.Fatalf("starting = %d after a failed and a cancelled start", starting)
+	}
+	ctl.applyGeneration(true, 3)
+	if !ctl.isFrozen() {
+		t.Fatal("an idle runner must be reported frozen once nothing is starting")
+	}
+}

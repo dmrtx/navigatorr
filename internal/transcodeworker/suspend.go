@@ -207,6 +207,10 @@ type suspendControl struct {
 	frozen   bool  // the gate is closed: nothing new starts
 	gen      int64 // generation of the suspend being applied; 0 when not frozen
 	children map[int]*suspendChild
+	// starting counts children admitted but not yet registered (between admit
+	// and track): a process may already be running there, so the job is not
+	// reported frozen while any is starting.
+	starting int
 	resume   chan struct{}
 	// onChange runs after the reported state changes, outside mu, one delivery
 	// at a time (see deliver).
@@ -249,7 +253,7 @@ func suspendControlFrom(ctx context.Context) *suspendControl {
 // signalled keeps the job from being reported frozen, so the server never
 // treats the CPU as free while an encode may still run.
 func (c *suspendControl) reportedLocked() bool {
-	if !c.frozen {
+	if !c.frozen || c.starting > 0 {
 		return false
 	}
 	for _, ch := range c.children {
@@ -376,13 +380,19 @@ func (c *suspendControl) applyGeneration(frozen bool, generation int64) {
 	})
 }
 
-// admit blocks while frozen, so no child starts during a suspend.
+// admit blocks while frozen, so no child starts during a suspend. A child it
+// lets through counts as starting until track or abortStart settles it.
 func (c *suspendControl) admit(ctx context.Context) error {
 	for {
 		c.mu.Lock()
 		if !c.frozen {
+			if err := ctx.Err(); err != nil {
+				c.mu.Unlock()
+				return err
+			}
+			c.starting++
 			c.mu.Unlock()
-			return ctx.Err()
+			return nil
 		}
 		ch := c.resume
 		c.mu.Unlock()
@@ -394,16 +404,29 @@ func (c *suspendControl) admit(ctx context.Context) error {
 	}
 }
 
+// abortStart settles a child that admit let through but that never started.
+func (c *suspendControl) abortStart() {
+	c.mutate(func() {
+		if c.starting > 0 {
+			c.starting--
+		}
+	})
+}
+
 // track registers a started child. A suspend that landed between admit and
 // here freezes it at once. The returned func unregisters it; call it right
 // after Wait returns.
 func (c *suspendControl) track(cmd *exec.Cmd) func() {
 	if cmd == nil || cmd.Process == nil {
+		c.abortStart()
 		return func() {}
 	}
 	pid := cmd.Process.Pid
 	ch := &suspendChild{ownGroup: cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid}
 	c.mutate(func() {
+		if c.starting > 0 {
+			c.starting--
+		}
 		c.children[pid] = ch
 		if c.frozen {
 			c.signalOneLocked(pid, ch, syscall.SIGSTOP)
@@ -426,6 +449,7 @@ func startGated(ctx context.Context, cmd *exec.Cmd) (func(), error) {
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		c.abortStart()
 		return nil, err
 	}
 	return c.track(cmd), nil

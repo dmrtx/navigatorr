@@ -511,15 +511,22 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		if at, err := time.Parse(time.RFC3339, pause.Since); err == nil && time.Since(at) < e.pauseSettleWindow() {
 			settling = true
 		}
-		// A suspended node's frozen encodes are not running: the worker says
-		// how many of its jobs are frozen, and only that many of the recorded
-		// ones count as frozen.
+		// A suspended node's frozen encodes are not running. The worker gives
+		// counts, not job ids, so a frozen job cannot be attributed to a row:
+		// the node counts as frozen only when every job the worker runs is
+		// (frozen == active). Otherwise nothing is attributed and at least the
+		// unfrozen remainder keeps the node from being reported idle, even if
+		// the rows show fewer running jobs than the worker has.
 		confirmed := false
 		if pause.Mode == store.WorkerPauseSuspend {
-			if _, frozen, ok := e.workerFrozen(name); ok {
+			if active, frozen, ok := e.workerFrozen(name); ok {
 				confirmed = true
-				st.Suspended = min(st.Running, frozen)
-				st.Running -= st.Suspended
+				if frozen == active {
+					st.Suspended = min(st.Running, frozen)
+					st.Running -= st.Suspended
+				} else {
+					st.Running = max(st.Running, active-frozen, 1)
+				}
 			}
 		}
 		switch {
