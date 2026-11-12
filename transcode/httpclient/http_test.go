@@ -1002,3 +1002,39 @@ func TestHTTPExecutor_DigestlessSubmitCarriesSizeAndStatusReportsLearnedDigest(t
 		t.Errorf("status without the field = %q err=%v", st.SourceSHA256, err)
 	}
 }
+
+func TestSetSuspendAndOldWorker(t *testing.T) {
+	var suspended bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/suspend" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method == http.MethodPut {
+			var in struct{ Suspend bool }
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			suspended = in.Suspend
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"suspend": suspended, "active": 2, "frozen": 1})
+	}))
+	defer srv.Close()
+	e, err := NewHTTPExecutor(HTTPConfig{BaseURL: srv.URL, Token: "tok", RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.SetSuspend(context.Background(), true); err != nil || !got.Suspend || !got.CountsKnown || got.Active != 2 || got.Frozen != 1 {
+		t.Fatalf("set: %+v %v", got, err)
+	}
+	if got, err := e.Suspend(context.Background()); err != nil || !got.Suspend {
+		t.Fatalf("get: %+v %v", got, err)
+	}
+	old := httptest.NewServer(http.NotFoundHandler())
+	defer old.Close()
+	oldExec, err := NewHTTPExecutor(HTTPConfig{BaseURL: old.URL, Token: "tok", RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldExec.SetSuspend(context.Background(), true); !errors.Is(err, ErrSuspendUnsupported) {
+		t.Fatalf("an old worker must read as unsupported: %v", err)
+	}
+}

@@ -64,6 +64,8 @@ func (e *Engine) workerHoldWanted(name string) bool {
 // first and only sends a change when it differs, so a confirmation is always
 // a fresh one.
 func (e *Engine) syncWorkerHold(ctx context.Context, w transcode.NamedWorker) {
+	// The suspend follows the same triggers as the hold, after it.
+	defer e.syncWorkerSuspend(ctx, w)
 	holder, ok := w.Executor.(workerHolder)
 	if !ok {
 		return

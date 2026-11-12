@@ -21,7 +21,7 @@ import (
 // see workerVideoCapacity), a file already assigned to it that has not been
 // sent is released back to the queue, and the node holds the jobs it has
 // accepted but not started (the same /v1/hold the drain uses). There are two
-// modes for what is encoding on the node:
+// modes for what is encoding on the node (worker_suspend.go has the third):
 //
 //   - graceful: it finishes and publishes as usual. The node is idle when the
 //     last one ends.
@@ -30,6 +30,8 @@ import (
 //     queue. It is not a cancellation: the action stays active, a batch keeps
 //     counting the file, and another node (or this one once resumed) encodes
 //     it from the start.
+//   - suspend: it is frozen where it is and continues on resume; it stays
+//     assigned to the node and nothing is requeued or cancelled.
 //
 // Podcast work follows the pause of the podcast node for new jobs only; a
 // podcast job already running is left to finish in both modes. A pause is one
@@ -138,10 +140,12 @@ func pauseBlockedResult(phase, reason string) StepResult {
 	}
 }
 
-// SetNodePause pauses a node in a mode ("graceful" or "immediate"), or resumes
-// it with an empty mode, and returns the node's status afterwards. Repeating a
-// request changes nothing. An immediate pause starts sending the node's
-// encodes back to the queue at once, in the background.
+// SetNodePause pauses a node in a mode ("graceful", "immediate" or "suspend"),
+// or resumes it with an empty mode, and returns the node's status afterwards.
+// Repeating a request changes nothing. An immediate pause starts sending the
+// node's encodes back to the queue at once, in the background. A suspend
+// returns transcode.ErrSuspendUnavailable, with nothing changed, when the node
+// does not confirm the freeze.
 func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode.NodePauseStatus, error) {
 	if e.deps.Store == nil {
 		return transcode.NodePauseStatus{}, errors.New("store is required for worker pause")
@@ -149,6 +153,23 @@ func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode
 	w, ok := e.deps.Workers.Get(node)
 	if !ok {
 		return transcode.NodePauseStatus{}, &transcode.WorkerNotConfiguredError{Name: node}
+	}
+	// One request per node at a time: a suspend that is written, synced,
+	// confirmed and possibly undone must not be interleaved with another
+	// request, or its undo would overwrite what that request set.
+	lock := &e.workerStateFor(w.Name).pauseMu
+	lock.Lock()
+	defer lock.Unlock()
+	if mode == store.WorkerPauseSuspend {
+		pauses, err := e.workerPauses()
+		if err != nil {
+			return transcode.NodePauseStatus{}, err
+		}
+		if _, err := e.suspendNode(ctx, w, pauses[w.Name].Mode); err != nil {
+			return transcode.NodePauseStatus{}, err
+		}
+		e.WakeReconciler()
+		return e.NodePauseStatuses(ctx)[w.Name], nil
 	}
 	if _, err := e.deps.Store.SetWorkerPause(w.Name, mode); err != nil {
 		return transcode.NodePauseStatus{}, err
@@ -490,6 +511,24 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		if at, err := time.Parse(time.RFC3339, pause.Since); err == nil && time.Since(at) < e.pauseSettleWindow() {
 			settling = true
 		}
+		// A suspended node's frozen encodes are not running. The worker gives
+		// counts, not job ids, so a frozen job cannot be attributed to a row:
+		// the node counts as frozen only when every job the worker runs is
+		// (frozen == active). Otherwise nothing is attributed and at least the
+		// unfrozen remainder keeps the node from being reported idle, even if
+		// the rows show fewer running jobs than the worker has.
+		confirmed := false
+		if pause.Mode == store.WorkerPauseSuspend {
+			if active, frozen, ok := e.workerFrozen(name); ok {
+				confirmed = true
+				if frozen == active {
+					st.Suspended = min(st.Running, frozen)
+					st.Running -= st.Suspended
+				} else {
+					st.Running = max(st.Running, active-frozen, 1)
+				}
+			}
+		}
 		switch {
 		case settling:
 			st.Message = "Paused just now; checking for admissions in flight."
@@ -497,6 +536,13 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 			st.Message = "Paused, but the node is unreachable so its jobs cannot be confirmed."
 		case st.PublicationPending > 0:
 			st.Message = fmt.Sprintf("Paused: %d finished encode(s) not saved yet. Use Try again once storage is reachable.", st.PublicationPending)
+		case pause.Mode == store.WorkerPauseSuspend && !confirmed:
+			st.Message = "Suspended, but the node has not confirmed that its encodes are frozen."
+		case pause.Mode == store.WorkerPauseSuspend && st.Running > 0:
+			st.Message = fmt.Sprintf("Suspended: %d job(s) not frozen yet.", st.Running)
+		case st.Suspended > 0:
+			st.Idle = true
+			st.Message = fmt.Sprintf("Suspended: %d encode(s) frozen where they were. The CPU is free; they continue when the node is resumed.", st.Suspended)
 		case st.Running > 0 && pause.Mode == store.WorkerPauseImmediate:
 			st.Message = fmt.Sprintf("Paused: %d job(s) still active. Encoding jobs return to the queue; encoded files finish publishing.", st.Running)
 		case st.Running > 0:

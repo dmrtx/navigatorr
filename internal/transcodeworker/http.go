@@ -182,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/activity", s.handleActivity)
 	mux.HandleFunc("/v1/slots", s.handleSlots)
 	mux.HandleFunc("/v1/hold", s.handleHold)
+	mux.HandleFunc("/v1/suspend", s.handleSuspend)
 	// Auth applies first so the documented invariant holds: when a token is
 	// configured it protects ALL /v1/* including malformed/traversal paths
 	// (unauthenticated traversal -> 401). rejectTraversal still runs before
@@ -915,6 +916,46 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 	// job that already started from one still waiting.
 	if active, err := s.worker.countActiveJobs(""); err == nil {
 		reply["active"] = active
+	}
+	writeHTTPJSON(w, http.StatusOK, reply)
+}
+
+// handleSuspend serves GET /v1/suspend and PUT /v1/suspend {"suspend": bool}:
+// while suspended, every runner freezes its encoder processes and the worker
+// starts no queued job (see suspend.go). The reply says how many jobs run and
+// how many of them their runners report frozen, which is how the server knows
+// the freeze took effect.
+func (s *Server) handleSuspend(w http.ResponseWriter, r *http.Request) {
+	if s.worker == nil {
+		writeHTTPError(w, http.StatusServiceUnavailable, "worker unavailable")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+	case http.MethodPut:
+		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPHoldBodyBytes)
+		var body struct {
+			Suspend *bool `json:"suspend"`
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil || body.Suspend == nil {
+			writeHTTPError(w, http.StatusBadRequest, `invalid suspend: send {"suspend": true|false}`)
+			return
+		}
+		if err := s.worker.SetSuspend(*body.Suspend); err != nil {
+			log.Printf("suspend not stored: %v", err)
+			writeHTTPError(w, http.StatusInternalServerError, "the worker could not store the suspend")
+			return
+		}
+	default:
+		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET or PUT")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	reply := map[string]any{"suspend": s.worker.Suspended()}
+	if active, frozen, err := s.worker.suspendCounts(); err == nil {
+		reply["active"], reply["frozen"] = active, frozen
 	}
 	writeHTTPJSON(w, http.StatusOK, reply)
 }

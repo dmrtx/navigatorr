@@ -767,12 +767,18 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		mergeMap(meta, transcodeTelemetryOutputs(ec))
 		meta["job_id"] = jobID
 		meta["external_reference"] = jobID
+		meta["worker_suspended"] = st.Suspended
 		reason := fmt.Sprintf("Transcoding media (%s, progress: %.1f%%, speed: %.1fx, fps: %.1f)", st.Status, st.Progress, st.Speed, st.FPS)
 		if getBool(ec.State, "progress_is_stale") {
 			reason = fmt.Sprintf("Transcoding media (%s; progress temporarily stale)", st.Status)
 			if p := getFloat(ec.State, "progress"); p > 0 {
 				reason += fmt.Sprintf("; last known: %.1f%%", p)
 			}
+		}
+		if st.Suspended {
+			// Frozen on purpose by a suspend of its node: still assigned, not
+			// stalled, and it continues where it was on resume.
+			reason = fmt.Sprintf("Transcoding media (suspended: its node is paused and the encode continues on resume; progress: %.1f%%)", st.Progress)
 		}
 		if st.Phase != "" {
 			reason += "; phase: " + st.Phase

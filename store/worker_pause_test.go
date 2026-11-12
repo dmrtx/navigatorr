@@ -26,6 +26,13 @@ func TestWorkerPauseSetListResume(t *testing.T) {
 	if moved.Mode != WorkerPauseImmediate || moved.Since != first.Since || moved.Revision != 2 {
 		t.Fatalf("a mode change keeps the start and moves the revision: %+v", moved)
 	}
+	frozen, err := s.SetWorkerPause("m1", WorkerPauseSuspend)
+	if err != nil || frozen.Mode != WorkerPauseSuspend || frozen.Since != first.Since || frozen.Revision != 3 {
+		t.Fatalf("suspend is a mode of the same pause: %+v %v", frozen, err)
+	}
+	if _, err := s.SetWorkerPause("m1", WorkerPauseImmediate); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.SetWorkerPause("m4", WorkerPauseGraceful); err != nil {
 		t.Fatal(err)
 	}

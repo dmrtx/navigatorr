@@ -377,21 +377,28 @@ type JobTelemetry struct {
 	PhaseCosts map[string]PhaseCost `json:"phase_costs,omitempty"`
 	ExitReason string               `json:"exit_reason,omitempty"`
 
-	Phase                  string            `json:"phase,omitempty"`
-	CreatedAt              time.Time         `json:"created_at,omitzero"`
-	StartedAt              time.Time         `json:"started_at,omitzero"`
-	FinishedAt             time.Time         `json:"finished_at,omitzero"`
-	EncodeStartedAt        time.Time         `json:"encode_started_at,omitzero"`
-	EncodeFinishedAt       time.Time         `json:"encode_finished_at,omitzero"`
-	ValidationStartedAt    time.Time         `json:"validation_started_at,omitzero"`
-	ValidationFinishedAt   time.Time         `json:"validation_finished_at,omitzero"`
-	QueueDurationMs        *int64            `json:"queue_duration_ms,omitempty"`
-	EncodeDurationMs       *int64            `json:"encode_duration_ms,omitempty"`
-	ValidationDurationMs   *int64            `json:"validation_duration_ms,omitempty"`
-	WallDurationMs         *int64            `json:"wall_duration_ms,omitempty"`
-	LastProgressAt         time.Time         `json:"last_progress_at,omitzero"`
-	WorkerHeartbeatAt      time.Time         `json:"worker_heartbeat_at,omitzero"`
-	ProgressIsStale        bool              `json:"progress_is_stale"`
+	Phase                string    `json:"phase,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitzero"`
+	StartedAt            time.Time `json:"started_at,omitzero"`
+	FinishedAt           time.Time `json:"finished_at,omitzero"`
+	EncodeStartedAt      time.Time `json:"encode_started_at,omitzero"`
+	EncodeFinishedAt     time.Time `json:"encode_finished_at,omitzero"`
+	ValidationStartedAt  time.Time `json:"validation_started_at,omitzero"`
+	ValidationFinishedAt time.Time `json:"validation_finished_at,omitzero"`
+	QueueDurationMs      *int64    `json:"queue_duration_ms,omitempty"`
+	EncodeDurationMs     *int64    `json:"encode_duration_ms,omitempty"`
+	ValidationDurationMs *int64    `json:"validation_duration_ms,omitempty"`
+	WallDurationMs       *int64    `json:"wall_duration_ms,omitempty"`
+	LastProgressAt       time.Time `json:"last_progress_at,omitzero"`
+	WorkerHeartbeatAt    time.Time `json:"worker_heartbeat_at,omitzero"`
+	ProgressIsStale      bool      `json:"progress_is_stale"`
+	// Suspended is true while the node is suspended and the runner has frozen
+	// the job's encoder processes; they continue where they were on resume.
+	Suspended bool `json:"suspended,omitempty"`
+	// SuspendGeneration identifies the suspension the runner froze under: the
+	// worker counts a job frozen only when it matches the current suspend, so a
+	// heartbeat from an earlier suspension proves nothing about this one.
+	SuspendGeneration      int64             `json:"suspend_generation,omitempty"`
 	LastKnownProgress      *ProgressSnapshot `json:"last_known_progress,omitempty"`
 	WorkerSlotsTotal       int               `json:"worker_slots_total,omitempty"`
 	WorkerSlotsUsed        int               `json:"worker_slots_used"`
