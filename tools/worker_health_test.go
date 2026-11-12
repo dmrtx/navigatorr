@@ -174,3 +174,67 @@ func TestWorkerDrainMCPFailsClosedWhenStateIsUnreadable(t *testing.T) {
 		t.Fatalf("an unreadable store must report not ready and keep holding: %+v", status)
 	}
 }
+
+func TestWorkerPauseMCPReadsPausesAndResumesOneNode(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "pause.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: "m1", Executor: &observedHealthWorker{}},
+		{Name: "m4", Executor: &observedHealthWorker{}, Podcast: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	s := server.NewMCPServer("test", "0")
+	registerWorkerPause(s, engine)
+	call := func(args map[string]any) map[string]transcode.NodePauseStatus {
+		t.Helper()
+		var out struct {
+			Nodes []transcode.NodePauseStatus `json:"nodes"`
+		}
+		if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "worker_pause", args))), &out); err != nil {
+			t.Fatal(err)
+		}
+		byName := map[string]transcode.NodePauseStatus{}
+		for _, n := range out.Nodes {
+			byName[n.Node] = n
+		}
+		return byName
+	}
+	if got := call(map[string]any{}); len(got) != 2 || got["m1"].Paused || got["m4"].Paused {
+		t.Fatalf("reading must pause nothing: %+v", got)
+	}
+	if got := call(map[string]any{"node": "m1", "mode": "graceful"}); len(got) != 1 || !got["m1"].Paused || got["m1"].Mode != store.WorkerPauseGraceful {
+		t.Fatalf("graceful pause: %+v", got)
+	}
+	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 1 || pauses["m1"].Mode != store.WorkerPauseGraceful {
+		t.Fatalf("the pause must be stored for m1 only: %+v", pauses)
+	}
+	if got := call(map[string]any{"node": "m1", "mode": "graceful"}); !got["m1"].Paused {
+		t.Fatalf("repeating a pause must change nothing: %+v", got)
+	}
+	if got := call(map[string]any{}); !got["m1"].Paused || got["m4"].Paused {
+		t.Fatalf("m4 must keep taking jobs: %+v", got)
+	}
+	if got := call(map[string]any{"node": "m4"}); len(got) != 1 || got["m4"].Paused {
+		t.Fatalf("reading one node: %+v", got)
+	}
+	if got := call(map[string]any{"node": "m1", "mode": "off"}); got["m1"].Paused {
+		t.Fatalf("off must resume: %+v", got)
+	}
+	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 0 {
+		t.Fatalf("resume must clear the stored pause: %+v", pauses)
+	}
+	for _, bad := range []map[string]any{{"node": "m9", "mode": "graceful"}, {"node": "m9"}, {"mode": "graceful"}, {"node": "m1", "mode": "sideways"}} {
+		if res := callTool(t, s, "worker_pause", bad); !res.IsError {
+			t.Fatalf("%v must be refused", bad)
+		}
+	}
+	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 0 {
+		t.Fatalf("a refused call must pause nothing: %+v", pauses)
+	}
+}
