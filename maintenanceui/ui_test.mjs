@@ -10311,13 +10311,13 @@ test("an unread default still sends the switch off; one Replace at a time; the s
 
 // A node's own pause: its card names what is left, offers the pause or the
 // resume, and sending encodes back needs a second tap.
-test("a node card offers pause after current files and pause now, and Resume once paused", async () => {
+test("a node card offers pause after current files, pause now and suspend now, and Resume once paused", async () => {
   const h = harness();
   const nodes = (pause) => [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause }];
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: false, mode: "", message: "Not paused. The node takes new jobs." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   const buttons = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent);
-  assert.deepEqual(buttons(), ["Pause after current files", "Pause now"]);
+  assert.deepEqual(buttons(), ["Pause after current files", "Pause now", "Suspend now"]);
 
   h.context.calls = [];
   h.run('api = async (...args) => { calls.push(args); return {}; }; refreshWorkers = async () => {};');
@@ -10334,12 +10334,27 @@ test("a node card offers pause after current files and pause now, and Resume onc
   await now.listeners.get("click")();
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])), ["worker-pause", { node: "m1", mode: "immediate" }]);
 
+  // Suspend now keeps the encode, so it needs no second tap: one tap sends it,
+  // and the notice only says it was requested.
+  h.context.calls = [];
+  h.context.notices = [];
+  h.run("notify = (t) => notices.push(t);");
+  await press("Suspend now").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)), [["worker-pause", { node: "m1", mode: "suspend" }]]);
+  assert.deepEqual(plain(h.context.notices), ["m1 suspend requested."]);
+
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "graceful", idle: false, message: "Paused: 1 job(s) still finishing. Nothing new starts here." }) };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.deepEqual(buttons(), ["Resume", "Send running files back"]);
+  assert.deepEqual(buttons(), ["Resume", "Suspend now", "Send running files back"]);
   const badges = flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "badge").map((e) => e.textContent);
   assert.deepEqual(badges, ["Pausing", "Reachable · Ready"]);
   h.context.calls = [];
   await press("Resume").listeners.get("click")();
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls[0])), ["worker-pause", { node: "m1", mode: "off" }]);
+
+  // A suspended node offers Resume and sending the frozen files back, not
+  // another Suspend.
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Suspended: 1 encode(s) frozen where they were." }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.deepEqual(buttons(), ["Resume", "Send running files back"]);
 });
