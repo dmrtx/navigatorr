@@ -9,6 +9,11 @@ import (
 // unreachable, or its worker predates the suspend. Nothing was changed.
 var ErrSuspendUnavailable = errors.New("suspend unavailable")
 
+// ErrSuspendNotUndone is a suspend the node did not confirm and whose undo
+// also failed: unlike ErrSuspendUnavailable, the pause IS stored, as suspend.
+// The node keeps its queue held, and a Resume (or another mode) lifts it.
+var ErrSuspendNotUndone = errors.New("suspend not confirmed and not undone")
+
 // NodePauseStatus is one node's pause: the operator's switch that takes the
 // node out of service so its CPU is free for other work, and what is left
 // before it is. It is shared by the maintenance UI and the workers list.

@@ -51,11 +51,21 @@ type workerHoldState struct {
 
 // workerHoldWanted is whether the worker should hold its queue now: drain is
 // on, or the node is paused. An unreadable state holds, as drainHold does.
+//
+// A node in suspend mode that has confirmed its suspend does not get the hold:
+// the suspend already keeps its queue closed (internal/transcodeworker
+// queueHeld), and the hold would also refuse PublishRetained, which a finished
+// encode must be able to do while the node is suspended. The drain still holds
+// it, so a drain on a suspended node keeps refusing publications. Until the
+// suspend is confirmed the hold stays, so the queue is never open.
 func (e *Engine) workerHoldWanted(name string) bool {
 	if held, _ := e.drainHold(); held {
 		return true
 	}
 	held, _ := e.pauseHold(name)
+	if held && e.suspendKeepsTheQueue(name) {
+		return false
+	}
 	return held
 }
 
@@ -64,8 +74,15 @@ func (e *Engine) workerHoldWanted(name string) bool {
 // first and only sends a change when it differs, so a confirmation is always
 // a fresh one.
 func (e *Engine) syncWorkerHold(ctx context.Context, w transcode.NamedWorker) {
-	// The suspend follows the same triggers as the hold, after it.
-	defer e.syncWorkerSuspend(ctx, w)
+	// The suspend follows the same triggers as the hold. Taking a suspend, it
+	// goes first: the hold is only released once the suspend is confirmed, so
+	// the queue is never open in between. Every other change lifts the freeze
+	// after the hold is in place.
+	if intent, ok := e.workerSuspendIntent(w.Name); ok && intent == suspendHold {
+		e.syncWorkerSuspend(ctx, w)
+	} else {
+		defer e.syncWorkerSuspend(ctx, w)
+	}
 	holder, ok := w.Executor.(workerHolder)
 	if !ok {
 		return
@@ -129,9 +146,14 @@ func (e *Engine) startWorkerHoldSync(ctx context.Context) {
 func (e *Engine) workerHolding(name string) (active int, ok bool) {
 	st := &e.workerStateFor(name).hold
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	if !st.known || !st.on || !st.activeKnown {
-		return 0, false
+	known, on, activeKnown, count := st.known, st.on, st.activeKnown, st.active
+	st.mu.Unlock()
+	if known && on && activeKnown {
+		return count, true
 	}
-	return st.active, true
+	// A confirmed suspend closes the queue as the hold does.
+	if running, _, ok := e.workerFrozen(name); ok {
+		return running, true
+	}
+	return 0, false
 }

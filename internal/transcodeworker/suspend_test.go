@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -460,5 +462,61 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 			}
 			ctl.apply(false)
 		})
+	}
+}
+
+// Two transitions racing must not leave a stale "frozen" in the heartbeat: a
+// freeze reported true is overtaken by a child whose SIGSTOP fails, and the
+// callback of the first is still in flight when the second is computed. The
+// last value delivered is the latest state.
+func TestSuspendDeliversTheLatestStateWhenTransitionsRace(t *testing.T) {
+	ctl := newSuspendControl()
+	var latest atomic.Bool
+	var calls []bool
+	var callsMu sync.Mutex
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	first := true
+	ctl.onChange = func(frozen bool) {
+		callsMu.Lock()
+		calls = append(calls, frozen)
+		block := first
+		first = false
+		callsMu.Unlock()
+		if block {
+			close(entered)
+			<-release // the first callback is slow
+		}
+		latest.Store(frozen)
+	}
+
+	applied := make(chan struct{})
+	go func() { ctl.apply(true); close(applied) }()
+	<-entered // reported true is computed and its callback is in flight
+
+	real := killProcess
+	defer func() { killProcess = real }()
+	killProcess = func(int, syscall.Signal) error { return syscall.EPERM }
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	tracked := make(chan func(), 1)
+	go func() { tracked <- ctl.track(cmd) }() // frozen: its SIGSTOP fails -> reported false
+
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	<-applied
+	untrack := <-tracked
+	_ = untrack
+
+	if latest.Load() {
+		t.Fatalf("the heartbeat kept a stale frozen=true after a failed freeze (callbacks %v)", calls)
+	}
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("callbacks = %v, want [true false] in order", calls)
 	}
 }

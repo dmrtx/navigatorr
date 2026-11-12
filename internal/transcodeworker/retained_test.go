@@ -493,6 +493,20 @@ func TestRetained_PublishRefusals(t *testing.T) {
 			t.Fatalf("destination = %q err=%v, want the encoded candidate saved while suspended", b, err)
 		}
 	})
+	t.Run("drain still refuses on a suspended node", func(t *testing.T) {
+		f := newRetainedFixture(t, nil)
+		f.retain("job-drain-suspended-1")
+		if err := f.w.SetSuspend(true); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.w.SetHold(true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.w.PublishRetained(ctx, "job-drain-suspended-1"); !errors.Is(err, ErrPublishHeld) {
+			t.Fatalf("err = %v, want ErrPublishHeld", err)
+		}
+		f.assertRetained("job-drain-suspended-1")
+	})
 	t.Run("candidate changed", func(t *testing.T) {
 		f := newRetainedFixture(t, nil)
 		f.retain("job-changed-1")

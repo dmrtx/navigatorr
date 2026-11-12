@@ -176,8 +176,11 @@ type suspendControl struct {
 	frozen   bool // the gate is closed: nothing new starts
 	children map[int]*suspendChild
 	resume   chan struct{}
-	// onChange runs after the reported state changes, outside the lock.
-	onChange func(frozen bool)
+	// onChange runs after the reported state changes, outside mu, one delivery
+	// at a time (see deliver).
+	onChange  func(frozen bool)
+	notifyMu  sync.Mutex
+	delivered bool // last value handed to onChange; guarded by mu
 }
 
 type suspendChild struct {
@@ -223,16 +226,31 @@ func (c *suspendControl) reportedLocked() bool {
 	return true
 }
 
-// mutate runs fn under the lock and notifies when the reported state changed.
+// mutate runs fn under the lock and then tells onChange what the reported
+// state is.
 func (c *suspendControl) mutate(fn func()) {
 	c.mu.Lock()
-	before := c.reportedLocked()
 	fn()
-	after := c.reportedLocked()
-	notify := c.onChange
 	c.mu.Unlock()
-	if after != before && notify != nil {
-		notify(after)
+	c.deliver()
+}
+
+// deliver hands the reported state to onChange. Deliveries are serialised and
+// each reads the state when its turn comes, not when its mutation ended, so
+// the last value onChange sees is always the latest state: two transitions
+// racing cannot leave a stale "frozen" behind a freeze that failed. It only
+// calls onChange when the value differs from the last one delivered.
+func (c *suspendControl) deliver() {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	c.mu.Lock()
+	reported := c.reportedLocked()
+	notify := c.onChange
+	changed := reported != c.delivered
+	c.delivered = reported
+	c.mu.Unlock()
+	if changed && notify != nil {
+		notify(reported)
 	}
 }
 

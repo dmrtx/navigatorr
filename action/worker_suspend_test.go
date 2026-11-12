@@ -2,11 +2,14 @@ package action
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcode/httpclient"
@@ -410,5 +413,58 @@ func TestSuspendIntentFor(t *testing.T) {
 		if got := suspendIntentFor(c.paused, c.mode, c.busy); got != c.want {
 			t.Errorf("paused=%t mode=%q busy=%t: got %v want %v", c.paused, c.mode, c.busy, got, c.want)
 		}
+	}
+}
+
+// breakPauseWrites makes every change to a stored pause fail, like a database
+// that went read-only after the first write.
+func breakPauseWrites(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, op := range []string{"UPDATE", "DELETE"} {
+		if _, err := db.Exec(`CREATE TRIGGER no_pause_` + op + ` BEFORE ` + op + ` ON worker_pauses BEGIN SELECT RAISE(ABORT, 'read-only'); END`); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// An unconfirmed suspend whose undo also fails is not a refusal that changed
+// nothing: the pause stays stored as suspend, and the error says so (the web
+// handler and the MCP tool pass its text on). The status shows the same.
+func TestSuspendWhoseUndoFailsSaysThePauseStaysInSuspend(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "pause.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	m1.failTurnOn = true
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}, Workers: twoWorkers(t, m1, &mockTranscodeExecutor{}, 0), DrainSettle: -1})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+	m1.beforeSet = func(bool) { // after the suspend was stored
+		m1.beforeSet = nil
+		breakPauseWrites(t, dbPath)
+	}
+
+	_, err = e.SetNodePause(context.Background(), "m1", store.WorkerPauseSuspend)
+	if !errors.Is(err, transcode.ErrSuspendNotUndone) || errors.Is(err, transcode.ErrSuspendUnavailable) {
+		t.Fatalf("err = %v, want ErrSuspendNotUndone and not the nothing-changed refusal", err)
+	}
+	if !strings.Contains(err.Error(), "stays in suspend") {
+		t.Fatalf("the message must say where the pause is: %v", err)
+	}
+	status := e.NodePauseStatuses(context.Background())["m1"]
+	if status.Mode != store.WorkerPauseSuspend || status.Idle || !strings.Contains(status.Message, "not confirmed") {
+		t.Fatalf("the stored state and its message must match the error: %+v", status)
+	}
+	if m1.suspend {
+		t.Fatal("the worker never confirmed, so nothing is frozen")
 	}
 }

@@ -2,7 +2,9 @@ package tools
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -291,5 +293,60 @@ func TestWorkerPauseMCPSuspendsAndRefusesWhatCannotFreeze(t *testing.T) {
 	}
 	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 0 {
 		t.Fatalf("nothing may stay paused: %+v", pauses)
+	}
+}
+
+type unconfirmingHealthWorker struct {
+	*suspendableHealthWorker
+	onTurnOn func()
+}
+
+func (w *unconfirmingHealthWorker) SetSuspend(context.Context, bool) (httpclient.SuspendStatus, error) {
+	if w.onTurnOn != nil {
+		w.onTurnOn()
+	}
+	return httpclient.SuspendStatus{}, errors.New("worker went away")
+}
+
+// An unconfirmed suspend whose undo fails must not read as "nothing changed":
+// the pause is stored as suspend and the tool says so.
+func TestWorkerPauseMCPSaysWhenAFailedSuspendCouldNotBeUndone(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "suspend.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m1 := &unconfirmingHealthWorker{suspendableHealthWorker: &suspendableHealthWorker{observedHealthWorker: &observedHealthWorker{}}}
+	m1.onTurnOn = func() {
+		m1.onTurnOn = nil
+		db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)")
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer db.Close()
+		for _, op := range []string{"UPDATE", "DELETE"} {
+			if _, err := db.Exec(`CREATE TRIGGER no_pause_` + op + ` BEFORE ` + op + ` ON worker_pauses BEGIN SELECT RAISE(ABORT, 'read-only'); END`); err != nil {
+				t.Error(err)
+			}
+		}
+	}
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "m1", Executor: m1}, {Name: "m4", Executor: &observedHealthWorker{}, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	s := server.NewMCPServer("test", "0")
+	registerWorkerPause(s, engine)
+	if res := callTool(t, s, "worker_pause", map[string]any{"node": "m1", "mode": "graceful"}); res.IsError {
+		t.Fatal(resultText(t, res))
+	}
+	res := callTool(t, s, "worker_pause", map[string]any{"node": "m1", "mode": "suspend"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "stays in suspend") || strings.Contains(resultText(t, res), "nothing changed") {
+		t.Fatalf("the tool must say the pause stays in suspend: error=%v %s", res.IsError, resultText(t, res))
+	}
+	if pauses, _ := st.ListWorkerPauses(); pauses["m1"].Mode != store.WorkerPauseSuspend {
+		t.Fatalf("the stored pause is what the error says: %+v", pauses)
 	}
 }

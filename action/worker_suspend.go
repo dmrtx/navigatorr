@@ -153,6 +153,13 @@ func (e *Engine) workerSuspendConfirmed(name string) bool {
 	return st.known && st.on
 }
 
+// suspendKeepsTheQueue is whether the node is in suspend mode and its worker
+// confirmed the suspend, which holds the worker's queue by itself.
+func (e *Engine) suspendKeepsTheQueue(name string) bool {
+	intent, ok := e.workerSuspendIntent(name)
+	return ok && intent == suspendHold && e.workerSuspendConfirmed(name)
+}
+
 // workerFrozen is how many running jobs the suspended worker says are frozen
 // out of the ones it runs. ok is false unless the worker confirmed a suspend
 // and reports the counts.
@@ -180,7 +187,12 @@ func (e *Engine) suspendNode(ctx context.Context, w transcode.NamedWorker, previ
 	if !e.workerSuspendConfirmed(w.Name) {
 		// Back to what it was, and the worker told so.
 		if _, err := e.deps.Store.SetWorkerPause(w.Name, previous); err != nil {
+			// The pause stays stored as suspend, which is what the status
+			// shows ("suspended, not confirmed"), so say exactly that: this is
+			// not a refusal that changed nothing.
 			log.Printf("worker %s: undoing an unconfirmed suspend: %v", w.Name, err)
+			e.syncWorkerHold(ctx, w)
+			return transcode.NodePauseStatus{}, fmt.Errorf("%w: node %s did not confirm the suspend and the pause could not be restored, so it stays in suspend (its queue is held and the worker may still be running its encodes); resume the node or choose another mode to lift it", transcode.ErrSuspendNotUndone, w.Name)
 		}
 		e.syncWorkerHold(ctx, w)
 		return transcode.NodePauseStatus{}, fmt.Errorf("%w: node %s did not confirm the suspend (unreachable, or its worker is not updated); nothing changed", transcode.ErrSuspendUnavailable, w.Name)

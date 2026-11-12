@@ -43,6 +43,9 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 			fail(w, 404, "that node is not configured")
 		case errors.Is(err, transcode.ErrSuspendUnavailable):
 			fail(w, 409, err.Error())
+		case errors.Is(err, transcode.ErrSuspendNotUndone):
+			// The pause is stored, as suspend: not "not saved".
+			fail(w, 500, err.Error())
 		case err != nil:
 			fail(w, 500, "node pause not saved")
 		default:
