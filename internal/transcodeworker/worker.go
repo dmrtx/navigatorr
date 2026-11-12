@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -281,6 +282,8 @@ type Worker struct {
 	slotSplit       slotSplitCache
 	slotWrite       sync.Mutex
 	holdWrite       sync.Mutex
+	suspendWrite    sync.Mutex
+	suspendedNow    atomic.Bool // this runner has frozen its children (heartbeat input)
 	x265Recheck     sync.Mutex
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache
@@ -1442,7 +1445,7 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 			return started, errors.Join(append(errs, err)...)
 		}
 		// Pause all: queued jobs stay queued; only running ones finish.
-		if w.Held() {
+		if w.queueHeld() {
 			return started, errors.Join(errs...)
 		}
 		limits := w.slotLimits()
@@ -1676,6 +1679,15 @@ func (w *Worker) InternalRun(ctx context.Context, jobID string) error {
 	if !claimed {
 		// Cancellation wins over a concurrently claimed runner.
 		return nil
+	}
+	// A suspended node freezes this runner's encoder children (see suspend.go).
+	// Podcast jobs are not frozen: they follow the pause for new jobs only.
+	if job.Plan == nil || job.Plan.Podcast == nil {
+		suspendCtl := newSuspendControl()
+		watchCtx, stopWatch := context.WithCancel(ctx)
+		defer stopWatch()
+		w.watchSuspend(watchCtx, suspendCtl)
+		ctx = withSuspendControl(ctx, suspendCtl)
 	}
 	stopHeartbeat := w.startJobHeartbeat(ctx, jobDir, jobFile, jobHeartbeatInterval)
 	defer stopHeartbeat()

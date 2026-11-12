@@ -62,6 +62,16 @@ func TestWorkerPauseEndpointPausesAndResumesANode(t *testing.T) {
 		t.Fatal("the pause list must name the paused node", w.Body.String())
 	}
 
+	// Suspend is a valid mode; this node's worker predates it, so the change is
+	// refused as a conflict and the pause stays what it was.
+	w = request(h, "POST", path, `{"node":"`+node+`","mode":"suspend"}`, true)
+	if w.Code != 409 {
+		t.Fatal("a node that cannot suspend must be a 409", w.Code, w.Body.String())
+	}
+	if pauses, _ := s.engine.Deps().Store.ListWorkerPauses(); pauses[node].Mode != "immediate" {
+		t.Fatal("a refused suspend must leave the pause as it was", pauses)
+	}
+
 	w = request(h, "POST", path, `{"node":"`+node+`","mode":"off"}`, true)
 	if st := read(w.Body.Bytes()); w.Code != 200 || st.Paused || st.Mode != "" {
 		t.Fatal("resume", w.Code, w.Body.String())

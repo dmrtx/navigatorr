@@ -47,8 +47,15 @@ func chargeCPU(ctx context.Context, cmd *exec.Cmd) {
 }
 
 // runCharged runs cmd and charges its CPU time to the meter on ctx.
+//
+// Under a runner whose node is suspended (see suspend.go) the child is not
+// started until the resume, and a running one is frozen with it.
 func runCharged(ctx context.Context, cmd *exec.Cmd) error {
-	err := cmd.Run()
+	untrack, err := startGated(ctx, cmd)
+	if err == nil {
+		err = cmd.Wait()
+		untrack()
+	}
 	chargeCPU(ctx, cmd)
 	return err
 }

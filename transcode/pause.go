@@ -1,6 +1,13 @@
 package transcode
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrSuspendUnavailable is a suspend the node could not take: it is
+// unreachable, or its worker predates the suspend. Nothing was changed.
+var ErrSuspendUnavailable = errors.New("suspend unavailable")
 
 // NodePauseStatus is one node's pause: the operator's switch that takes the
 // node out of service so its CPU is free for other work, and what is left
@@ -8,7 +15,8 @@ import "time"
 type NodePauseStatus struct {
 	Node string `json:"node"`
 	// Mode is "graceful" (the encodes already running finish), "immediate"
-	// (they go back to the transcode queue now) or "" when the node is not
+	// (they go back to the transcode queue now), "suspend" (they are frozen
+	// where they are and continue on resume) or "" when the node is not
 	// paused.
 	Mode      string `json:"mode"`
 	Paused    bool   `json:"paused"`
@@ -17,6 +25,9 @@ type NodePauseStatus struct {
 	// Running counts the jobs still on the node: encoding there, or sent and
 	// not started yet. Immediate mode brings it to zero by itself.
 	Running int `json:"running"`
+	// Suspended counts the encodes frozen on the node by a suspend. They are
+	// not in Running: the node's CPU is free while they wait.
+	Suspended int `json:"suspended,omitempty"`
 	// PublicationPending counts finished encodes the node could not save yet;
 	// they keep the node busy until they are saved.
 	PublicationPending int `json:"publication_pending"`

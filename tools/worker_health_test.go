@@ -11,6 +11,7 @@ import (
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -236,5 +237,59 @@ func TestWorkerPauseMCPReadsPausesAndResumesOneNode(t *testing.T) {
 	}
 	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 0 {
 		t.Fatalf("a refused call must pause nothing: %+v", pauses)
+	}
+}
+
+type suspendableHealthWorker struct {
+	*observedHealthWorker
+	suspend bool
+}
+
+func (w *suspendableHealthWorker) Suspend(context.Context) (httpclient.SuspendStatus, error) {
+	return httpclient.SuspendStatus{Suspend: w.suspend, CountsKnown: true}, nil
+}
+
+func (w *suspendableHealthWorker) SetSuspend(_ context.Context, suspend bool) (httpclient.SuspendStatus, error) {
+	w.suspend = suspend
+	return httpclient.SuspendStatus{Suspend: w.suspend, CountsKnown: true}, nil
+}
+
+func TestWorkerPauseMCPSuspendsAndRefusesWhatCannotFreeze(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "suspend.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	m1 := &suspendableHealthWorker{observedHealthWorker: &observedHealthWorker{}}
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: "m1", Executor: m1},
+		{Name: "m4", Executor: &observedHealthWorker{}, Podcast: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	s := server.NewMCPServer("test", "0")
+	registerWorkerPause(s, engine)
+
+	res := callTool(t, s, "worker_pause", map[string]any{"node": "m1", "mode": "suspend"})
+	if res.IsError {
+		t.Fatalf("suspend: %s", resultText(t, res))
+	}
+	var out struct {
+		Nodes []transcode.NodePauseStatus `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil || len(out.Nodes) != 1 || out.Nodes[0].Mode != store.WorkerPauseSuspend || !m1.suspend {
+		t.Fatalf("suspend result: %+v suspended=%v (%v)", out, m1.suspend, err)
+	}
+	if res := callTool(t, s, "worker_pause", map[string]any{"node": "m1", "mode": "off"}); res.IsError || m1.suspend {
+		t.Fatalf("resume must continue the encodes: %s", resultText(t, res))
+	}
+	// m4 has no way to freeze: refused, and nothing is paused.
+	if res := callTool(t, s, "worker_pause", map[string]any{"node": "m4", "mode": "suspend"}); !res.IsError {
+		t.Fatal("a node that cannot suspend must be refused")
+	}
+	if pauses, _ := st.ListWorkerPauses(); len(pauses) != 0 {
+		t.Fatalf("nothing may stay paused: %+v", pauses)
 	}
 }

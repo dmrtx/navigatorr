@@ -950,6 +950,7 @@ function renderWorkerDetails(host, info) {
 // A node's own pause, to free its CPU for other work while the others keep
 // encoding. "After current files" lets what is encoding finish; "Now" sends it
 // back to the queue to start again on another node (nothing is cancelled).
+// "Suspend now" freezes what is encoding where it is; it continues on Resume.
 function nodePauseControls(worker) {
   const pause = worker.pause;
   if (!pause || !worker.worker) return null;
@@ -981,9 +982,11 @@ function nodePauseControls(worker) {
   if (!pause.paused) {
     add("Pause after current files", "graceful", "Nothing new starts on this node; what is encoding finishes.");
     add("Pause now", "immediate", "Encodes on this node go back to the queue and start again on another node.");
+    add("Suspend now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
   } else {
-    add("Resume", "off", "This node takes files again.");
-    if (pause.mode === "graceful") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
+    add("Resume", "off", pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes files again.");
+    if (pause.mode === "graceful") add("Suspend now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
+    if (pause.mode === "graceful" || pause.mode === "suspend") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
   }
   box.append(buttons);
   return box;
@@ -991,7 +994,7 @@ function nodePauseControls(worker) {
 function setNodePause(worker, mode) {
   return safe(async () => {
     await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? `${worker.name} resumed.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
+    notify(mode === "off" ? `${worker.name} resumed.` : mode === "suspend" ? `${worker.name} suspended. Running files are frozen and continue on resume.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }

@@ -488,7 +488,7 @@ func projectOperationSavings(r operationRecord, now time.Time) operationSavings 
 		s.EstimatedSavedBytes = &saved
 	}
 	phase := operationString(operationValue(r, "transcode_phase"))
-	if phase == "encoding" && operationActive(r.inst.Status) && operationValue(r, "progress_is_stale") != true {
+	if phase == "encoding" && operationActive(r.inst.Status) && operationValue(r, "progress_is_stale") != true && operationValue(r, "worker_suspended") != true {
 		progress := operationNumber(operationValue(r, "progress"))
 		speed := operationNumber(operationValue(r, "speed"))
 		duration := operationNumber(original["duration_sec"])

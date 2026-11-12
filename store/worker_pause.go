@@ -8,10 +8,14 @@ import (
 
 // Worker pause modes. A paused node admits no new job. Graceful lets the
 // encodes already running finish; immediate sends them back to the transcode
-// queue (see action/worker_pause.go).
+// queue; suspend freezes them in place (see action/worker_pause.go and
+// action/worker_suspend.go).
 const (
 	WorkerPauseGraceful  = "graceful"
 	WorkerPauseImmediate = "immediate"
+	// WorkerPauseSuspend freezes the encodes that are running on the node and
+	// continues them where they were on resume.
+	WorkerPauseSuspend = "suspend"
 )
 
 // WorkerPause is the operator's switch that takes one node out of service so
@@ -52,7 +56,7 @@ func (s *Store) SetWorkerPause(worker, mode string) (WorkerPause, error) {
 	if worker == "" {
 		return WorkerPause{}, errors.New("worker name is required")
 	}
-	if mode != "" && mode != WorkerPauseGraceful && mode != WorkerPauseImmediate {
+	if mode != "" && mode != WorkerPauseGraceful && mode != WorkerPauseImmediate && mode != WorkerPauseSuspend {
 		return WorkerPause{}, fmt.Errorf("unknown pause mode %q", mode)
 	}
 	s.mu.Lock()

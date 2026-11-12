@@ -52,7 +52,8 @@ type workerState struct {
 	poolMu sync.Mutex
 	pool   workerPoolReading
 
-	hold workerHoldState
+	hold    workerHoldState
+	suspend workerSuspendState
 }
 
 func (e *Engine) workerStateFor(name string) *workerState {

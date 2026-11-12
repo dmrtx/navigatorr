@@ -215,7 +215,8 @@ func runWatchedEncode(ctx context.Context, cmd *exec.Cmd) error {
 		// Bounds Wait when a killed ffmpeg leaves its output pipes open.
 		cmd.WaitDelay = 2 * time.Second
 	}
-	if err := cmd.Start(); err != nil {
+	untrack, err := startGated(ctx, cmd)
+	if err != nil {
 		return err
 	}
 	var (
@@ -245,7 +246,8 @@ func runWatchedEncode(ctx context.Context, cmd *exec.Cmd) error {
 			}
 		}
 	}()
-	err := cmd.Wait()
+	err = cmd.Wait()
+	untrack()
 	close(done)
 	wg.Wait()
 	chargeCPU(ctx, cmd)

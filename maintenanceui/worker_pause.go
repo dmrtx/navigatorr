@@ -11,8 +11,9 @@ import (
 // workerPause serves GET (every node's pause, or one with ?node=) and POST
 // (pause or resume one node). A paused node takes no new job so its CPU is free
 // for other work: "graceful" lets what is encoding finish, "immediate" sends it
-// back to the transcode queue without cancelling the conversion, and "off"
-// resumes the node. Repeating a request changes nothing.
+// back to the transcode queue without cancelling the conversion, "suspend"
+// freezes what is encoding so it continues where it was, and "off" resumes the
+// node. Repeating a request changes nothing.
 func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body struct {
@@ -22,7 +23,7 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		mode := ""
 		if decode(w, r, &body) == nil {
 			switch body.Mode {
-			case store.WorkerPauseGraceful, store.WorkerPauseImmediate:
+			case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
 				mode = body.Mode
 			case "off":
 			default:
@@ -32,7 +33,7 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 			body.Node = ""
 		}
 		if body.Node == "" {
-			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"off"}`)
+			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"suspend"|"off"}`)
 			return
 		}
 		status, err := s.engine.SetNodePause(r.Context(), body.Node, mode)
@@ -40,6 +41,8 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.As(err, &unknown):
 			fail(w, 404, "that node is not configured")
+		case errors.Is(err, transcode.ErrSuspendUnavailable):
+			fail(w, 409, err.Error())
 		case err != nil:
 			fail(w, 500, "node pause not saved")
 		default:

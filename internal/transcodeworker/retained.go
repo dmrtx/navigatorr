@@ -355,7 +355,7 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 	default:
 		return refuse(fmt.Errorf("%w: job %q has not finished encoding", ErrNotRetained, jobID))
 	}
-	if w.Held() {
+	if w.queueHeld() {
 		return refuse(ErrPublishHeld)
 	}
 	if err := verifyCheckpointCandidate(w.withJobDigestMemo(ctx), job, job.LocalCandidatePath); err != nil {

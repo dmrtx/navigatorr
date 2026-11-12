@@ -96,6 +96,10 @@ func (w *Worker) persistJobHeartbeat(jobDir, jobFile string, now time.Time) erro
 	}
 	job.WorkerHeartbeatAt = now
 	observeJobProgress(jobDir, job, now)
+	// A frozen encode makes no progress on purpose: it is not stale.
+	if job.Suspended = w.suspendedNow.Load(); job.Suspended {
+		job.ProgressIsStale = false
+	}
 	return SaveJobAtomic(jobFile, job)
 }
 
@@ -148,6 +152,7 @@ func telemetryFor(job *JobRecord, now time.Time) transcode.JobTelemetry {
 			t.Phase = "publishing"
 		}
 	}
+	t.Suspended = job.Suspended && job.Status == "running"
 	t.WorkerResolvedPath = job.Source
 	t.FinalizationRetryCount, t.NextFinalizationAt = job.FinalizationRetryCount, job.NextFinalizationAt
 	t.ErrorClass = job.FailureClassification

@@ -45,9 +45,9 @@ func registerWorkerDrain(s *server.MCPServer, engine *action.Engine) {
 // console offers in its workers dialog: one node stops taking jobs so the
 // machine is free for something else, while the others keep encoding.
 func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
-	s.AddTool(mcp.NewTool("worker_pause", mcp.WithDescription("Take ONE worker node out of rotation so its machine is free for other work; the other nodes keep encoding (worker_drain is the all-nodes switch for deploys). A paused node takes no new job: the queue assigns files to the other nodes, files assigned to it but not sent go back to the queue, and new podcast work is held if it is the podcast node (a podcast job already running finishes). Calls, all idempotent: no arguments = read every node's pause; node only = read that node; node + mode = change it. mode=graceful: what is encoding finishes and publishes, the node is idle when the last one ends. mode=immediate: running encodes are cancelled on the node and go back to the queue to start again from the start on another node (progress is lost; nothing is cancelled for the action or its batch). mode=off: resume. graceful can later be raised to immediate. Returns each node's status: paused, mode, since, running files still on it, idle (true when the machine is free), message. Immediate sends files back in the background, so read again until running is 0."),
+	s.AddTool(mcp.NewTool("worker_pause", mcp.WithDescription("Take ONE worker node out of rotation so its machine is free for other work; the other nodes keep encoding (worker_drain is the all-nodes switch for deploys). A paused node takes no new job: the queue assigns files to the other nodes, files assigned to it but not sent go back to the queue, and new podcast work is held if it is the podcast node (a podcast job already running finishes). Calls, all idempotent: no arguments = read every node's pause; node only = read that node; node + mode = change it. mode=graceful: what is encoding finishes and publishes, the node is idle when the last one ends. mode=immediate: running encodes are cancelled on the node and go back to the queue to start again from the start on another node (progress is lost; nothing is cancelled for the action or its batch). mode=suspend: running encodes are frozen where they are (SIGSTOP) and continue from the same point on resume, nothing is lost or requeued; the node's CPU is free but each frozen encode keeps its RAM and its open file on the share, and a worker restart or reboot while suspended loses the encode; it fails with an error, changing nothing, if the node is unreachable or its worker is not updated. mode=off: resume (frozen encodes continue). graceful can be raised to immediate or suspend, suspend can be raised to immediate (frozen files go back to the queue) or lowered to graceful (they continue and finish). Returns each node's status: paused, mode, since, running files still on it, suspended (frozen encodes, not counted in running), idle (true when the machine is free), message. Immediate sends files back in the background, so read again until running is 0."),
 		mcp.WithString("node", mcp.Description("Node name, for example m1. Omit to read every node.")),
-		mcp.WithString("mode", mcp.Description("graceful, immediate or off. Needs node. Omit to only read.")),
+		mcp.WithString("mode", mcp.Description("graceful, immediate, suspend or off. Needs node. Omit to only read.")),
 	), func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		args := req.GetArguments()
 		node, _ := args["node"].(string)
@@ -59,17 +59,19 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 		case hasMode && mode != "":
 			stored := ""
 			switch mode {
-			case store.WorkerPauseGraceful, store.WorkerPauseImmediate:
+			case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
 				stored = mode
 			case "off":
 			default:
-				return mcp.NewToolResultError(`mode must be "graceful", "immediate" or "off"`), nil
+				return mcp.NewToolResultError(`mode must be "graceful", "immediate", "suspend" or "off"`), nil
 			}
 			status, err := engine.SetNodePause(ctx, node, stored)
 			var unknown *transcode.WorkerNotConfiguredError
 			switch {
 			case errors.As(err, &unknown):
 				return mcp.NewToolResultError("node " + node + " is not configured"), nil
+			case errors.Is(err, transcode.ErrSuspendUnavailable):
+				return mcp.NewToolResultError(err.Error()), nil
 			case err != nil:
 				return mcp.NewToolResultError("node pause not saved: " + err.Error()), nil
 			}

@@ -67,7 +67,8 @@ func probeVideoPackets(ctx context.Context, ffprobePath, path string, stream int
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	untrack, err := startGated(ctx, cmd)
+	if err != nil {
 		return nil, fmt.Errorf("listing video packets: %w", err)
 	}
 	var packets []videoPacket
@@ -91,6 +92,7 @@ func probeVideoPackets(ctx context.Context, ffprobePath, path string, stream int
 		parseErr = fmt.Errorf("listing video packets: %w", err)
 	}
 	err = cmd.Wait()
+	untrack()
 	chargeCPU(ctx, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("listing video packets: %w (%s)", err, strings.TrimSpace(stderr.String()))
