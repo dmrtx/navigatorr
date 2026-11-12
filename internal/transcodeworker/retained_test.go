@@ -477,6 +477,22 @@ func TestRetained_PublishRefusals(t *testing.T) {
 			t.Fatalf("after the freeze: %v", err)
 		}
 	})
+	// A suspended node still saves a finished encode ("Try again" must work):
+	// only the drain hold refuses a publish.
+	t.Run("suspend does not refuse", func(t *testing.T) {
+		f := newRetainedFixture(t, nil)
+		f.retain("job-suspended-1")
+		if err := f.w.SetSuspend(true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.w.PublishRetained(ctx, "job-suspended-1"); err != nil {
+			t.Fatalf("publishing while suspended: %v", err)
+		}
+		f.runSweepAndRunner("job-suspended-1")
+		if b, err := os.ReadFile(f.dest("job-suspended-1")); err != nil || string(b) != "encoded-media" {
+			t.Fatalf("destination = %q err=%v, want the encoded candidate saved while suspended", b, err)
+		}
+	})
 	t.Run("candidate changed", func(t *testing.T) {
 		f := newRetainedFixture(t, nil)
 		f.retain("job-changed-1")

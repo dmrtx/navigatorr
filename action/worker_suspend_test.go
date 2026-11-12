@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -20,6 +21,13 @@ type suspendingExecutor struct {
 	calls   []bool
 	err     error
 	missing bool // answers like a worker that predates the suspend
+
+	// beforeSet runs when a change arrives, before it is applied.
+	beforeSet func(suspend bool)
+	// failTurnOn makes SetSuspend(true) fail without applying it.
+	failTurnOn bool
+	// loseTurnOnReply applies SetSuspend(true) but loses the answer, once.
+	loseTurnOnReply bool
 }
 
 func (s *suspendingExecutor) status() (httpclient.SuspendStatus, error) {
@@ -38,14 +46,27 @@ func (s *suspendingExecutor) Suspend(ctx context.Context) (httpclient.SuspendSta
 
 func (s *suspendingExecutor) SetSuspend(ctx context.Context, suspend bool) (httpclient.SuspendStatus, error) {
 	s.calls = append(s.calls, suspend)
+	if s.beforeSet != nil {
+		s.beforeSet(suspend)
+	}
 	if s.err != nil || s.missing {
 		return s.status()
+	}
+	if suspend && s.failTurnOn {
+		return httpclient.SuspendStatus{}, errors.New("worker went away")
+	}
+	lost := suspend && s.loseTurnOnReply
+	if lost {
+		s.loseTurnOnReply = false
 	}
 	s.suspend = suspend
 	if suspend {
 		s.frozen = s.active // the runners freeze their encodes
 	} else {
 		s.frozen = 0
+	}
+	if lost {
+		return httpclient.SuspendStatus{}, errors.New("reply lost")
 	}
 	return s.status()
 }
@@ -276,4 +297,118 @@ func mustWorker(t *testing.T, e *Engine, name string) transcode.NamedWorker {
 		t.Fatalf("no worker %s", name)
 	}
 	return w
+}
+
+// A suspend that the worker does not confirm is undone, but only the suspend's
+// own write: a request for the same node that arrives meanwhile (resume, a
+// graceful pause) is queued behind the whole sequence and wins, instead of
+// being overwritten by the undo.
+func TestSuspendNotConfirmedDoesNotOverwriteAConcurrentRequest(t *testing.T) {
+	for _, mode := range []string{"", store.WorkerPauseGraceful} {
+		t.Run("concurrent "+mode, func(t *testing.T) {
+			m1 := newSuspendingM1(transcode.StatusRunning)
+			m1.active = 1
+			m1.failTurnOn = true
+			e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+			seedEncoding(t, e, "enc", "m1", "job-enc")
+			pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+
+			other := make(chan error, 1)
+			started := make(chan struct{})
+			m1.beforeSet = func(bool) {
+				m1.beforeSet = nil
+				go func() {
+					close(started)
+					_, err := e.SetNodePause(context.Background(), "m1", mode)
+					other <- err
+				}()
+				<-started
+				// Long enough for an unserialised request to write its mode.
+				time.Sleep(150 * time.Millisecond)
+			}
+			if _, err := e.SetNodePause(context.Background(), "m1", store.WorkerPauseSuspend); !errors.Is(err, transcode.ErrSuspendUnavailable) {
+				t.Fatalf("err = %v", err)
+			}
+			if err := <-other; err != nil {
+				t.Fatal(err)
+			}
+			st := e.NodePauseStatuses(context.Background())["m1"]
+			wantPaused := mode != ""
+			if st.Paused != wantPaused || st.Mode != mode {
+				t.Fatalf("the concurrent request must win: %+v, want mode %q", st, mode)
+			}
+			if m1.suspend {
+				t.Fatal("the worker must not be left suspended")
+			}
+		})
+	}
+}
+
+// A worker that applied the suspend but whose answer was lost is not left
+// frozen: the refusal undoes the pause and tells the worker so.
+func TestSuspendWithALostReplyIsUndoneOnTheWorker(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	m1.loseTurnOnReply = true
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+
+	if _, err := e.SetNodePause(context.Background(), "m1", store.WorkerPauseSuspend); !errors.Is(err, transcode.ErrSuspendUnavailable) {
+		t.Fatalf("err = %v", err)
+	}
+	if m1.suspend {
+		t.Fatal("the worker applied the suspend and must be told to release it")
+	}
+	if st := e.NodePauseStatuses(context.Background())["m1"]; st.Mode != store.WorkerPauseGraceful {
+		t.Fatalf("the pause must be back to graceful: %+v", st)
+	}
+}
+
+// Going to immediate freezes nothing: only suspend -> immediate keeps a freeze
+// that is already on, until the node is empty.
+func TestDirectTransitionsToImmediateDoNotFreeze(t *testing.T) {
+	for _, from := range []string{"", store.WorkerPauseGraceful} {
+		t.Run("from "+from, func(t *testing.T) {
+			m1 := newSuspendingM1(transcode.StatusRunning)
+			m1.active = 1
+			e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+			seedEncoding(t, e, "enc", "m1", "job-enc")
+			if from != "" {
+				pauseNode(t, e, "m1", from)
+			}
+			pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+			e.syncWorkerSuspend(context.Background(), mustWorker(t, e, "m1"))
+			if m1.suspend {
+				t.Fatal("an immediate pause must not freeze the encode it is about to cancel")
+			}
+			for _, c := range m1.calls {
+				if c {
+					t.Fatalf("the worker was told to suspend: %v", m1.calls)
+				}
+			}
+		})
+	}
+}
+
+// The intent is a pure function of the pause: pinned for every mode.
+func TestSuspendIntentFor(t *testing.T) {
+	cases := []struct {
+		paused bool
+		mode   string
+		busy   bool
+		want   suspendIntent
+	}{
+		{false, "", true, suspendRelease},
+		{true, store.WorkerPauseGraceful, true, suspendRelease},
+		{true, store.WorkerPauseSuspend, false, suspendHold},
+		{true, store.WorkerPauseSuspend, true, suspendHold},
+		{true, store.WorkerPauseImmediate, true, suspendKeep},
+		{true, store.WorkerPauseImmediate, false, suspendRelease},
+	}
+	for _, c := range cases {
+		if got := suspendIntentFor(c.paused, c.mode, c.busy); got != c.want {
+			t.Errorf("paused=%t mode=%q busy=%t: got %v want %v", c.paused, c.mode, c.busy, got, c.want)
+		}
+	}
 }

@@ -45,34 +45,57 @@ type workerSuspendState struct {
 	unsupported time.Time
 }
 
-// workerSuspendWanted is whether the worker should have its encodes frozen
-// now. ok is false when that cannot be decided (the pause state or the open
-// jobs could not be read): the worker is then left as it is, because freezing
-// or releasing on a guess is the worse mistake either way.
-func (e *Engine) workerSuspendWanted(name string) (want, ok bool) {
-	pauses, err := e.workerPauses()
-	if err != nil {
-		return false, false
-	}
-	pause, paused := pauses[e.resolveWorker(name)]
+// suspendIntent is what the server wants of a worker's suspend flag.
+type suspendIntent int
+
+const (
+	suspendRelease suspendIntent = iota // the encodes run
+	suspendHold                         // the encodes are frozen
+	suspendKeep                         // leave the flag as the worker has it
+)
+
+// suspendIntentFor decides the flag from the node's pause mode and whether
+// encodes still run on the node. An immediate pause never freezes anything by
+// itself: it only keeps a freeze that is already there (suspend -> immediate),
+// until the cancels have emptied the node, so an encode does not run again
+// for the moments before it is moved. Off -> immediate and graceful ->
+// immediate find the flag off and leave it off.
+func suspendIntentFor(paused bool, mode string, encodesOnNode bool) suspendIntent {
 	switch {
 	case !paused:
-		return false, true
-	case pause.Mode == store.WorkerPauseSuspend:
-		return true, true
-	case pause.Mode == store.WorkerPauseImmediate:
-		// Until the cancels have emptied the node.
+		return suspendRelease
+	case mode == store.WorkerPauseSuspend:
+		return suspendHold
+	case mode == store.WorkerPauseImmediate && encodesOnNode:
+		return suspendKeep
+	}
+	return suspendRelease
+}
+
+// workerSuspendIntent reads the node's pause and open jobs and decides. ok is
+// false when that cannot be decided (the pause state or the open jobs could
+// not be read): the worker is then left as it is, because freezing or
+// releasing on a guess is the worse mistake either way.
+func (e *Engine) workerSuspendIntent(name string) (intent suspendIntent, ok bool) {
+	pauses, err := e.workerPauses()
+	if err != nil {
+		return suspendRelease, false
+	}
+	pause, paused := pauses[e.resolveWorker(name)]
+	encodes := false
+	if paused && pause.Mode == store.WorkerPauseImmediate {
 		rows, err := e.deps.Store.ListDrainActions()
 		if err != nil {
-			return false, false
+			return suspendRelease, false
 		}
 		for _, r := range rows {
 			if e.resolveWorker(r.Worker) == e.resolveWorker(name) && classifyDrainRow(r) == transcode.DrainJobRunning && !r.WorkerQueued {
-				return true, true
+				encodes = true
+				break
 			}
 		}
 	}
-	return false, true
+	return suspendIntentFor(paused, pause.Mode, encodes), true
 }
 
 // syncWorkerSuspend brings one worker's suspend in line with its node's pause.
@@ -87,16 +110,20 @@ func (e *Engine) syncWorkerSuspend(ctx context.Context, w transcode.NamedWorker)
 	st := &e.workerStateFor(w.Name).suspend
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	want, decided := e.workerSuspendWanted(w.Name)
+	intent, decided := e.workerSuspendIntent(w.Name)
 	if !decided {
 		return
 	}
-	if !want && !st.unsupported.IsZero() && time.Since(st.unsupported) < holdUnsupportedRecheck {
+	want := intent == suspendHold
+	if intent == suspendRelease && !st.unsupported.IsZero() && time.Since(st.unsupported) < holdUnsupportedRecheck {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), holdCallTimeout)
 	defer cancel()
 	got, err := suspender.Suspend(ctx)
+	if err == nil && intent == suspendKeep {
+		want = got.Suspend
+	}
 	if err == nil && got.Suspend != want {
 		got, err = suspender.SetSuspend(ctx, want)
 		if err == nil && got.Suspend != want {

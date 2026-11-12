@@ -355,7 +355,10 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 	default:
 		return refuse(fmt.Errorf("%w: job %q has not finished encoding", ErrNotRetained, jobID))
 	}
-	if w.queueHeld() {
+	// Only the drain holds a publish. A suspended node still saves a finished
+	// encode: it uses none of the CPU the suspend frees, and "Try again" must
+	// keep working.
+	if w.Held() {
 		return refuse(ErrPublishHeld)
 	}
 	if err := verifyCheckpointCandidate(w.withJobDigestMemo(ctx), job, job.LocalCandidatePath); err != nil {

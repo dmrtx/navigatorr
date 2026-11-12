@@ -345,3 +345,120 @@ func TestSuspendEndpoint(t *testing.T) {
 		t.Fatalf("auth: %d", resp.Code)
 	}
 }
+
+// A signal that cannot be delivered must not be reported as a freeze: the node
+// would be shown idle while the encode may still be running. The gate is
+// closed anyway, and the next poll retries the child.
+func TestSuspendDoesNotReportFrozenWhenASignalFails(t *testing.T) {
+	ctl := newSuspendControl()
+	var reported []bool
+	ctl.onChange = func(frozen bool) { reported = append(reported, frozen) }
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := withSuspendControl(parent, ctl)
+	file := filepath.Join(t.TempDir(), "count")
+	cmd := counterCmd(ctx, file)
+	done := make(chan error, 1)
+	go func() { done <- runCharged(ctx, cmd) }()
+	waitFor(t, "the child to count", func() bool { return readCount(t, file) > 3 })
+
+	real := killProcess
+	defer func() { killProcess = real }()
+	killProcess = func(int, syscall.Signal) error { return syscall.EPERM }
+
+	ctl.apply(true)
+	if ctl.isFrozen() || len(reported) != 0 {
+		t.Fatalf("a freeze that failed was reported (frozen=%t, notified=%v)", ctl.isFrozen(), reported)
+	}
+	// The gate still holds new children back.
+	held := make(chan error, 1)
+	go func() { held <- ctl.admit(parent) }()
+	select {
+	case <-held:
+		t.Fatal("a child was admitted while the freeze was pending")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The signal can be delivered again: the next poll freezes and reports.
+	killProcess = real
+	ctl.apply(true)
+	if !ctl.isFrozen() || len(reported) != 1 || !reported[0] {
+		t.Fatalf("the retry must freeze and report it (notified=%v)", reported)
+	}
+	time.Sleep(100 * time.Millisecond)
+	frozenFor(t, file)
+
+	ctl.apply(false)
+	cancel()
+	<-done
+}
+
+// A child that is already gone is not a failure: the freeze is moot for it.
+func TestSuspendTreatsAGoneProcessAsFrozen(t *testing.T) {
+	ctl := newSuspendControl()
+	ctx := withSuspendControl(context.Background(), ctl)
+	cmd := exec.CommandContext(ctx, "sleep", "30")
+	untrack, err := startGated(ctx, cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); untrack() }()
+
+	real := killProcess
+	defer func() { killProcess = real }()
+	killProcess = func(int, syscall.Signal) error { return syscall.ESRCH }
+	ctl.apply(true)
+	if !ctl.isFrozen() {
+		t.Fatal("a process that no longer exists must not keep the node from being frozen")
+	}
+}
+
+// Descendants: a child that leads its group freezes with everything it
+// started; one that does not is signalled alone and its descendants keep
+// running. That limit is documented on suspendControl.
+func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ownGroup  bool
+		wantState string // of the grandchild while the child is frozen
+	}{
+		{"group leader", true, "T"},
+		{"not a leader", false, "S"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctl := newSuspendControl()
+			ctx := withSuspendControl(context.Background(), ctl)
+			pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+			cmd := exec.CommandContext(ctx, "sh", "-c", `sleep 60 & echo $! > "`+pidFile+`"; wait`)
+			if tc.ownGroup {
+				cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			}
+			untrack, err := startGated(ctx, cmd)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var grandchild int
+			waitFor(t, "the grandchild to start", func() bool {
+				data, _ := os.ReadFile(pidFile)
+				grandchild, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+				return grandchild > 1
+			})
+			defer func() {
+				_ = syscall.Kill(grandchild, syscall.SIGKILL)
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				untrack()
+			}()
+
+			ctl.apply(true)
+			if !ctl.isFrozen() {
+				t.Fatal("the child must be reported frozen")
+			}
+			waitFor(t, "the child to stop", func() bool { return strings.HasPrefix(procState(cmd.Process.Pid), "T") })
+			if got := procState(grandchild); !strings.HasPrefix(got, tc.wantState) {
+				t.Fatalf("grandchild state = %q, want %q", got, tc.wantState)
+			}
+			ctl.apply(false)
+		})
+	}
+}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,19 +163,36 @@ func (w *Worker) suspendCounts() (active, frozen int, err error) {
 
 // suspendControl is one runner's registry of the children it may freeze, and
 // the gate that keeps it from starting new ones while frozen.
+//
+// Descendants. A child that leads its own process group (Setpgid) is signalled
+// as a group, so whatever it spawned freezes with it. A child that does not is
+// signalled alone: its descendants, if it had any, keep running. That is the
+// accepted limit, because the runner's own group holds the runner, which must
+// keep running, and no gated command spawns long-lived descendants (ffmpeg,
+// ffprobe and x265 are single processes). A command that did would have to
+// start in its own group to be frozen whole.
 type suspendControl struct {
 	mu       sync.Mutex
-	frozen   bool
-	children map[int]bool // pid -> leads its own process group
+	frozen   bool // the gate is closed: nothing new starts
+	children map[int]*suspendChild
 	resume   chan struct{}
-	// onChange runs after the state changes, outside the lock.
+	// onChange runs after the reported state changes, outside the lock.
 	onChange func(frozen bool)
+}
+
+type suspendChild struct {
+	ownGroup bool // leads its own process group
+	failed   bool // the last signal to it failed for a reason other than "gone"
 }
 
 type suspendControlKey struct{}
 
+// killProcess is syscall.Kill; tests replace it to make a process impossible
+// to signal.
+var killProcess = syscall.Kill
+
 func newSuspendControl() *suspendControl {
-	return &suspendControl{children: map[int]bool{}}
+	return &suspendControl{children: map[int]*suspendChild{}}
 }
 
 func withSuspendControl(ctx context.Context, c *suspendControl) context.Context {
@@ -188,54 +207,99 @@ func suspendControlFrom(ctx context.Context) *suspendControl {
 	return c
 }
 
+// reportedLocked is what the heartbeat tells the server: the gate is closed
+// and no child is known to have escaped the freeze. A child that cannot be
+// signalled keeps the job from being reported frozen, so the server never
+// treats the CPU as free while an encode may still run.
+func (c *suspendControl) reportedLocked() bool {
+	if !c.frozen {
+		return false
+	}
+	for _, ch := range c.children {
+		if ch.failed {
+			return false
+		}
+	}
+	return true
+}
+
+// mutate runs fn under the lock and notifies when the reported state changed.
+func (c *suspendControl) mutate(fn func()) {
+	c.mu.Lock()
+	before := c.reportedLocked()
+	fn()
+	after := c.reportedLocked()
+	notify := c.onChange
+	c.mu.Unlock()
+	if after != before && notify != nil {
+		notify(after)
+	}
+}
+
 func (c *suspendControl) isFrozen() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.frozen
+	return c.reportedLocked()
 }
 
-// signalLocked signals every registered child: its whole group when it leads
-// one, else the process alone (the runner's own group holds the runner, which
-// must keep running).
-func (c *suspendControl) signalLocked(sig syscall.Signal) {
-	for pid, ownGroup := range c.children {
-		signalChild(pid, ownGroup, sig)
-	}
-}
-
-func signalChild(pid int, ownGroup bool, sig syscall.Signal) {
+// signalChild signals a child: its whole group when it leads one, else the
+// process alone. A process that is already gone (ESRCH) is not an error: the
+// signal's purpose is moot. Anything else (EPERM, say) is returned.
+func signalChild(pid int, ownGroup bool, sig syscall.Signal) error {
 	if pid <= 1 {
-		return
+		return nil
 	}
+	target := pid
 	if ownGroup {
-		_ = syscall.Kill(-pid, sig)
-		return
+		target = -pid
 	}
-	_ = syscall.Kill(pid, sig)
+	if err := killProcess(target, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("signal %d to %d: %w", sig, target, err)
+	}
+	return nil
+}
+
+// signalLocked signals the registered children and records which could not be
+// reached. With onlyFailed it retries just the ones whose last signal failed.
+func (c *suspendControl) signalLocked(sig syscall.Signal, onlyFailed bool) {
+	for pid, ch := range c.children {
+		if onlyFailed && !ch.failed {
+			continue
+		}
+		c.signalOneLocked(pid, ch, sig)
+	}
+}
+
+func (c *suspendControl) signalOneLocked(pid int, ch *suspendChild, sig syscall.Signal) {
+	err := signalChild(pid, ch.ownGroup, sig)
+	if err != nil && !ch.failed {
+		log.Printf("suspend: %v", err)
+	}
+	ch.failed = err != nil
 }
 
 // apply freezes or continues every registered child. Repeating a state does
-// nothing.
+// nothing except retry the children that could not be signalled the last time.
 func (c *suspendControl) apply(frozen bool) {
-	c.mu.Lock()
-	if c.frozen == frozen {
-		c.mu.Unlock()
-		return
-	}
-	c.frozen = frozen
-	if frozen {
-		c.resume = make(chan struct{})
-		c.signalLocked(syscall.SIGSTOP)
-	} else {
-		c.signalLocked(syscall.SIGCONT)
+	c.mutate(func() {
+		sig := syscall.SIGCONT
+		if frozen {
+			sig = syscall.SIGSTOP
+		}
+		if c.frozen == frozen {
+			c.signalLocked(sig, true)
+			return
+		}
+		c.frozen = frozen
+		if frozen {
+			c.resume = make(chan struct{})
+			c.signalLocked(sig, false)
+			return
+		}
+		c.signalLocked(sig, false)
 		close(c.resume)
 		c.resume = nil
-	}
-	notify := c.onChange
-	c.mu.Unlock()
-	if notify != nil {
-		notify(frozen)
-	}
+	})
 }
 
 // admit blocks while frozen, so no child starts during a suspend.
@@ -264,17 +328,15 @@ func (c *suspendControl) track(cmd *exec.Cmd) func() {
 		return func() {}
 	}
 	pid := cmd.Process.Pid
-	ownGroup := cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid
-	c.mu.Lock()
-	c.children[pid] = ownGroup
-	if c.frozen {
-		signalChild(pid, ownGroup, syscall.SIGSTOP)
-	}
-	c.mu.Unlock()
+	ch := &suspendChild{ownGroup: cmd.SysProcAttr != nil && cmd.SysProcAttr.Setpgid}
+	c.mutate(func() {
+		c.children[pid] = ch
+		if c.frozen {
+			c.signalOneLocked(pid, ch, syscall.SIGSTOP)
+		}
+	})
 	return func() {
-		c.mu.Lock()
-		delete(c.children, pid)
-		c.mu.Unlock()
+		c.mutate(func() { delete(c.children, pid) })
 	}
 }
 

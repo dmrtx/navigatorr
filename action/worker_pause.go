@@ -154,6 +154,12 @@ func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode
 	if !ok {
 		return transcode.NodePauseStatus{}, &transcode.WorkerNotConfiguredError{Name: node}
 	}
+	// One request per node at a time: a suspend that is written, synced,
+	// confirmed and possibly undone must not be interleaved with another
+	// request, or its undo would overwrite what that request set.
+	lock := &e.workerStateFor(w.Name).pauseMu
+	lock.Lock()
+	defer lock.Unlock()
 	if mode == store.WorkerPauseSuspend {
 		pauses, err := e.workerPauses()
 		if err != nil {

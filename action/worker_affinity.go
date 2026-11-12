@@ -54,6 +54,11 @@ type workerState struct {
 
 	hold    workerHoldState
 	suspend workerSuspendState
+
+	// pauseMu serialises SetNodePause for the node, so a suspend that is
+	// written, synced, confirmed and possibly undone is never interleaved with
+	// another request for the same node.
+	pauseMu sync.Mutex
 }
 
 func (e *Engine) workerStateFor(name string) *workerState {
