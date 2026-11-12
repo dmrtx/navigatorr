@@ -97,6 +97,7 @@ func RegisterMaintenance(s *server.MCPServer, cfg *config.Config, registry *arrs
 	registerPodcastTools(s, actEngine)
 	registerWorkerHealth(s, actEngine)
 	registerWorkerDrain(s, actEngine)
+	registerWorkerPause(s, actEngine)
 	return actEngine
 }
 
