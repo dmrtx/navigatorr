@@ -394,7 +394,11 @@ type JobTelemetry struct {
 	ProgressIsStale      bool      `json:"progress_is_stale"`
 	// Suspended is true while the node is suspended and the runner has frozen
 	// the job's encoder processes; they continue where they were on resume.
-	Suspended              bool              `json:"suspended,omitempty"`
+	Suspended bool `json:"suspended,omitempty"`
+	// SuspendGeneration identifies the suspension the runner froze under: the
+	// worker counts a job frozen only when it matches the current suspend, so a
+	// heartbeat from an earlier suspension proves nothing about this one.
+	SuspendGeneration      int64             `json:"suspend_generation,omitempty"`
 	LastKnownProgress      *ProgressSnapshot `json:"last_known_progress,omitempty"`
 	WorkerSlotsTotal       int               `json:"worker_slots_total,omitempty"`
 	WorkerSlotsUsed        int               `json:"worker_slots_used"`

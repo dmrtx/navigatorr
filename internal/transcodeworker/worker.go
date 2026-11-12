@@ -283,7 +283,7 @@ type Worker struct {
 	slotWrite       sync.Mutex
 	holdWrite       sync.Mutex
 	suspendWrite    sync.Mutex
-	suspendedNow    atomic.Bool // this runner has frozen its children (heartbeat input)
+	suspendedGen    atomic.Int64 // generation of the suspend this runner has frozen its children under, 0 if none (heartbeat input)
 	x265Recheck     sync.Mutex
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
 	videoInUse      videoInUseCache

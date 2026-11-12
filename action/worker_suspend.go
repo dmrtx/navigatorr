@@ -43,6 +43,9 @@ type workerSuspendState struct {
 	frozen      int
 	countsKnown bool
 	unsupported time.Time
+	// maybeOn is set when a suspend was sent and the worker has not been seen
+	// off since: its encodes may be frozen although no answer confirmed it.
+	maybeOn bool
 }
 
 // suspendIntent is what the server wants of a worker's suspend flag.
@@ -124,7 +127,17 @@ func (e *Engine) syncWorkerSuspend(ctx context.Context, w transcode.NamedWorker)
 	if err == nil && intent == suspendKeep {
 		want = got.Suspend
 	}
+	if err == nil && got.Suspend && !want && !e.holdCoversTheQueue(w) {
+		// Lifting the freeze would open the queue: the hold that must take
+		// over was not confirmed (the change failed or its answer was lost).
+		// The suspend stays on; the next sweep tries the hold again.
+		log.Printf("worker %s: suspend kept because its hold is not confirmed yet", w.Name)
+		want = true
+	}
 	if err == nil && got.Suspend != want {
+		if want {
+			st.maybeOn = true
+		}
 		got, err = suspender.SetSuspend(ctx, want)
 		if err == nil && got.Suspend != want {
 			err = errors.New("worker reports the other suspend after the change")
@@ -132,7 +145,7 @@ func (e *Engine) syncWorkerSuspend(ctx context.Context, w transcode.NamedWorker)
 	}
 	switch {
 	case errors.Is(err, httpclient.ErrSuspendUnsupported):
-		st.known, st.on, st.countsKnown, st.unsupported = false, false, false, time.Now()
+		st.known, st.on, st.countsKnown, st.unsupported, st.maybeOn = false, false, false, time.Now(), false
 		if want {
 			log.Printf("worker %s: suspend wanted but the worker does not support it", w.Name)
 		}
@@ -140,9 +153,32 @@ func (e *Engine) syncWorkerSuspend(ctx context.Context, w transcode.NamedWorker)
 		st.known, st.countsKnown = false, false
 		log.Printf("worker %s: suspend %t not confirmed: %v", w.Name, want, err)
 	default:
-		st.known, st.on, st.unsupported = true, want, time.Time{}
+		st.known, st.on, st.unsupported, st.maybeOn = true, got.Suspend, time.Time{}, got.Suspend
 		st.active, st.frozen, st.countsKnown = got.Active, got.Frozen, got.CountsKnown
 	}
+}
+
+// holdCoversTheQueue is whether the worker's queue is closed by something
+// other than the suspend: the node does not want a hold at all, the worker has
+// none to give (it cannot hold), or it confirmed the hold. Only then may a
+// suspend be lifted, so the queue is never open between the two.
+func (e *Engine) holdCoversTheQueue(w transcode.NamedWorker) bool {
+	if _, ok := w.Executor.(workerHolder); !ok || !e.workerHoldWanted(w.Name) {
+		return true
+	}
+	st := &e.workerStateFor(w.Name).hold
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.known && st.on
+}
+
+// workerMaybeFrozen is whether a suspend was sent to the worker and no later
+// answer showed it released.
+func (e *Engine) workerMaybeFrozen(name string) bool {
+	st := &e.workerStateFor(name).suspend
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.maybeOn
 }
 
 // workerSuspendConfirmed reports whether the worker confirmed it is suspended.
@@ -151,13 +187,6 @@ func (e *Engine) workerSuspendConfirmed(name string) bool {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.known && st.on
-}
-
-// suspendKeepsTheQueue is whether the node is in suspend mode and its worker
-// confirmed the suspend, which holds the worker's queue by itself.
-func (e *Engine) suspendKeepsTheQueue(name string) bool {
-	intent, ok := e.workerSuspendIntent(name)
-	return ok && intent == suspendHold && e.workerSuspendConfirmed(name)
 }
 
 // workerFrozen is how many running jobs the suspended worker says are frozen
@@ -195,6 +224,12 @@ func (e *Engine) suspendNode(ctx context.Context, w transcode.NamedWorker, previ
 			return transcode.NodePauseStatus{}, fmt.Errorf("%w: node %s did not confirm the suspend and the pause could not be restored, so it stays in suspend (its queue is held and the worker may still be running its encodes); resume the node or choose another mode to lift it", transcode.ErrSuspendNotUndone, w.Name)
 		}
 		e.syncWorkerHold(ctx, w)
+		if e.workerMaybeFrozen(w.Name) {
+			// The suspend may have reached the worker although no answer came
+			// back, and the release could not be confirmed either: "nothing
+			// changed" would be untrue.
+			return transcode.NodePauseStatus{}, fmt.Errorf("%w: node %s did not confirm the suspend, the previous pause was restored, but the worker did not confirm releasing it and may still have its encodes frozen; the next sweep releases it (resume the node if it does not)", transcode.ErrSuspendReleasePending, w.Name)
+		}
 		return transcode.NodePauseStatus{}, fmt.Errorf("%w: node %s did not confirm the suspend (unreachable, or its worker is not updated); nothing changed", transcode.ErrSuspendUnavailable, w.Name)
 	}
 	return transcode.NodePauseStatus{}, nil

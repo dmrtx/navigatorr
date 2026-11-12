@@ -45,9 +45,17 @@ const suspendFile = "worker-suspend.json"
 var suspendPollInterval = 500 * time.Millisecond
 
 type suspendRecord struct {
-	Suspend   bool      `json:"suspend"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Suspend bool `json:"suspend"`
+	// Generation names this suspension: a resume removes the record and the
+	// next suspend gets a new one. Runners report the generation they froze
+	// under, so a stale heartbeat is never counted for a later suspend.
+	Generation int64     `json:"generation,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
+
+// unreadableSuspendGeneration is the generation of a record that cannot be
+// read: it suspends (see Suspended) under one fixed name.
+const unreadableSuspendGeneration = 1
 
 func (w *Worker) suspendPath() string {
 	if w == nil || w.cfg == nil || w.cfg.StateDir == "" {
@@ -56,27 +64,39 @@ func (w *Worker) suspendPath() string {
 	return filepath.Join(w.cfg.StateDir, suspendFile)
 }
 
-// Suspended reports whether the node is suspended. An unreadable record
-// suspends too, like the hold: a frozen encode is recoverable, an encode that
-// keeps using a CPU the operator asked for is the mistake the pause exists to
-// prevent.
-func (w *Worker) Suspended() bool {
+// suspendState reads the durable record: whether the node is suspended and
+// under which generation. An unreadable record suspends too, like the hold: a
+// frozen encode is recoverable, an encode that keeps using a CPU the operator
+// asked for is the mistake the pause exists to prevent.
+func (w *Worker) suspendState() (on bool, generation int64) {
 	path := w.suspendPath()
 	if path == "" {
-		return false
+		return false, 0
 	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false
+		return false, 0
 	}
 	if err != nil {
-		return true
+		return true, unreadableSuspendGeneration
 	}
 	var rec suspendRecord
 	if json.Unmarshal(data, &rec) != nil {
-		return true
+		return true, unreadableSuspendGeneration
 	}
-	return rec.Suspend
+	if !rec.Suspend {
+		return false, 0
+	}
+	if rec.Generation == 0 {
+		return true, unreadableSuspendGeneration
+	}
+	return true, rec.Generation
+}
+
+// Suspended reports whether the node is suspended.
+func (w *Worker) Suspended() bool {
+	on, _ := w.suspendState()
+	return on
 }
 
 // queueHeld is whether the scheduler must start nothing: the hold, or a
@@ -104,7 +124,15 @@ func (w *Worker) SetSuspend(suspend bool) error {
 		return err
 	}
 	defer capLock.Unlock()
-	data, err := json.MarshalIndent(suspendRecord{Suspend: true, UpdatedAt: time.Now().UTC()}, "", "  ")
+	// Repeating a suspend keeps its generation; only a readable record counts,
+	// so an unreadable one is rewritten under a fresh name.
+	if raw, rerr := os.ReadFile(path); rerr == nil {
+		var cur suspendRecord
+		if json.Unmarshal(raw, &cur) == nil && cur.Suspend && cur.Generation > unreadableSuspendGeneration {
+			return nil
+		}
+	}
+	data, err := json.MarshalIndent(suspendRecord{Suspend: true, Generation: time.Now().UnixNano(), UpdatedAt: time.Now().UTC()}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -132,6 +160,7 @@ func (w *Worker) SetSuspend(suspend bool) error {
 // suspendCounts is how many jobs the worker is running and how many of those
 // their runners report frozen.
 func (w *Worker) suspendCounts() (active, frozen int, err error) {
+	on, generation := w.suspendState()
 	entries, err := os.ReadDir(w.cfg.StateDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -154,7 +183,9 @@ func (w *Worker) suspendCounts() (active, frozen int, err error) {
 			continue
 		}
 		active++
-		if job.Suspended {
+		// Frozen only under the suspend that is in force now: a heartbeat
+		// from an earlier suspension says nothing about this one.
+		if on && job.Suspended && job.SuspendGeneration == generation {
 			frozen++
 		}
 	}
@@ -173,14 +204,17 @@ func (w *Worker) suspendCounts() (active, frozen int, err error) {
 // start in its own group to be frozen whole.
 type suspendControl struct {
 	mu       sync.Mutex
-	frozen   bool // the gate is closed: nothing new starts
+	frozen   bool  // the gate is closed: nothing new starts
+	gen      int64 // generation of the suspend being applied; 0 when not frozen
 	children map[int]*suspendChild
 	resume   chan struct{}
 	// onChange runs after the reported state changes, outside mu, one delivery
 	// at a time (see deliver).
-	onChange  func(frozen bool)
+	// It receives the generation the children are frozen under, or 0 when
+	// they are not (all) frozen.
+	onChange  func(generation int64)
 	notifyMu  sync.Mutex
-	delivered bool // last value handed to onChange; guarded by mu
+	delivered int64 // last value handed to onChange; guarded by mu
 }
 
 type suspendChild struct {
@@ -244,7 +278,10 @@ func (c *suspendControl) deliver() {
 	c.notifyMu.Lock()
 	defer c.notifyMu.Unlock()
 	c.mu.Lock()
-	reported := c.reportedLocked()
+	reported := int64(0)
+	if c.reportedLocked() {
+		reported = c.gen
+	}
 	notify := c.onChange
 	changed := reported != c.delivered
 	c.delivered = reported
@@ -296,19 +333,38 @@ func (c *suspendControl) signalOneLocked(pid int, ch *suspendChild, sig syscall.
 	ch.failed = err != nil
 }
 
-// apply freezes or continues every registered child. Repeating a state does
-// nothing except retry the children that could not be signalled the last time.
+// apply freezes (under generation 1) or continues every registered child; the
+// worker's watcher uses applyGeneration with the record's own generation.
 func (c *suspendControl) apply(frozen bool) {
+	generation := int64(0)
+	if frozen {
+		generation = 1
+	}
+	c.applyGeneration(frozen, generation)
+}
+
+// applyGeneration freezes or continues every registered child. Repeating a
+// state does nothing except retry the children that could not be signalled the
+// last time. A new generation while already frozen is a new suspension that
+// this runner never saw end (a resume and a suspend between two polls): the
+// children are stopped again under it, so what is reported is true of it.
+func (c *suspendControl) applyGeneration(frozen bool, generation int64) {
 	c.mutate(func() {
 		sig := syscall.SIGCONT
 		if frozen {
 			sig = syscall.SIGSTOP
 		}
 		if c.frozen == frozen {
+			if frozen && c.gen != generation {
+				c.gen = generation
+				c.signalLocked(sig, false)
+				return
+			}
 			c.signalLocked(sig, true)
 			return
 		}
 		c.frozen = frozen
+		c.gen = generation
 		if frozen {
 			c.resume = make(chan struct{})
 			c.signalLocked(sig, false)
@@ -377,10 +433,15 @@ func startGated(ctx context.Context, cmd *exec.Cmd) (func(), error) {
 
 // watchSuspend follows the durable record for the life of the runner: it
 // freezes or continues the registered children as the record changes and
-// mirrors the state in w.suspendedNow for the heartbeat.
+// mirrors the generation it is frozen under in w.suspendedGen for the
+// heartbeat.
 func (w *Worker) watchSuspend(ctx context.Context, c *suspendControl) {
-	c.onChange = func(frozen bool) { w.suspendedNow.Store(frozen) }
-	c.apply(w.Suspended())
+	c.onChange = func(generation int64) { w.suspendedGen.Store(generation) }
+	apply := func() {
+		on, generation := w.suspendState()
+		c.applyGeneration(on, generation)
+	}
+	apply()
 	go func() {
 		ticker := time.NewTicker(suspendPollInterval)
 		defer ticker.Stop()
@@ -389,7 +450,7 @@ func (w *Worker) watchSuspend(ctx context.Context, c *suspendControl) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				c.apply(w.Suspended())
+				apply()
 			}
 		}
 	}()

@@ -343,7 +343,8 @@ func TestWorkerPauseMCPSaysWhenAFailedSuspendCouldNotBeUndone(t *testing.T) {
 		t.Fatal(resultText(t, res))
 	}
 	res := callTool(t, s, "worker_pause", map[string]any{"node": "m1", "mode": "suspend"})
-	if !res.IsError || !strings.Contains(resultText(t, res), "stays in suspend") || strings.Contains(resultText(t, res), "nothing changed") {
+	text := resultText(t, res)
+	if !res.IsError || !strings.HasPrefix(text, "suspend not confirmed and not undone: ") || strings.Contains(text, "not saved") || !strings.Contains(text, "stays in suspend") || strings.Contains(text, "nothing changed") {
 		t.Fatalf("the tool must say the pause stays in suspend: error=%v %s", res.IsError, resultText(t, res))
 	}
 	if pauses, _ := st.ListWorkerPauses(); pauses["m1"].Mode != store.WorkerPauseSuspend {

@@ -14,6 +14,11 @@ var ErrSuspendUnavailable = errors.New("suspend unavailable")
 // The node keeps its queue held, and a Resume (or another mode) lifts it.
 var ErrSuspendNotUndone = errors.New("suspend not confirmed and not undone")
 
+// ErrSuspendReleasePending is a suspend the node did not confirm, undone in the
+// stored pause, but whose release the worker did not confirm: it may still have
+// its encodes frozen until the next sweep releases it.
+var ErrSuspendReleasePending = errors.New("suspend not confirmed, release pending")
+
 // NodePauseStatus is one node's pause: the operator's switch that takes the
 // node out of service so its CPU is free for other work, and what is left
 // before it is. It is shared by the maintenance UI and the workers list.

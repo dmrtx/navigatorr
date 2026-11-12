@@ -354,7 +354,7 @@ func TestSuspendEndpoint(t *testing.T) {
 func TestSuspendDoesNotReportFrozenWhenASignalFails(t *testing.T) {
 	ctl := newSuspendControl()
 	var reported []bool
-	ctl.onChange = func(frozen bool) { reported = append(reported, frozen) }
+	ctl.onChange = func(gen int64) { reported = append(reported, gen != 0) }
 	parent, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ctx := withSuspendControl(parent, ctl)
@@ -477,7 +477,8 @@ func TestSuspendDeliversTheLatestStateWhenTransitionsRace(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	first := true
-	ctl.onChange = func(frozen bool) {
+	ctl.onChange = func(gen int64) {
+		frozen := gen != 0
 		callsMu.Lock()
 		calls = append(calls, frozen)
 		block := first
@@ -519,4 +520,112 @@ func TestSuspendDeliversTheLatestStateWhenTransitionsRace(t *testing.T) {
 	if len(calls) != 2 || !calls[0] || calls[1] {
 		t.Fatalf("callbacks = %v, want [true false] in order", calls)
 	}
+}
+
+// A heartbeat is only evidence for the suspension it was written under. A
+// suspend, a resume and a new suspend between two heartbeats must not count the
+// running process as frozen from the first one, and a freeze that fails under
+// the new suspension must not borrow the old report either.
+func TestFrozenCountsBelongToTheCurrentSuspension(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, nil)
+	jobDir := filepath.Join(w.cfg.StateDir, "job1")
+	jobFile := filepath.Join(jobDir, "job.json")
+	if err := os.MkdirAll(jobDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveJobAtomic(jobFile, &JobRecord{ID: "job1", Status: "running", PID: os.Getpid(), DurationSec: 100}); err != nil {
+		t.Fatal(err)
+	}
+	w.isAlive = func(*JobRecord) bool { return true }
+
+	ctl := newSuspendControl()
+	ctl.onChange = func(gen int64) { w.suspendedGen.Store(gen) }
+	// The runner's poll, stepped by hand so the test decides what it has seen.
+	poll := func() {
+		on, gen := w.suspendState()
+		ctl.applyGeneration(on, gen)
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := withSuspendControl(parent, ctl)
+	file := filepath.Join(t.TempDir(), "count")
+	done := make(chan error, 1)
+	go func() { done <- runCharged(ctx, counterCmd(ctx, file)) }()
+	waitFor(t, "the child to count", func() bool { return readCount(t, file) > 3 })
+
+	heartbeat := func() *JobRecord {
+		t.Helper()
+		if err := w.persistJobHeartbeat(jobDir, jobFile, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		job, _ := LoadJob(jobFile)
+		return job
+	}
+	frozen := func() int {
+		t.Helper()
+		_, n, err := w.suspendCounts()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	resuspend := func() {
+		t.Helper()
+		if err := w.SetSuspend(false); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond) // a new suspension is a new generation
+		if err := w.SetSuspend(true); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := w.SetSuspend(true); err != nil {
+		t.Fatal(err)
+	}
+	poll()
+	first := heartbeat()
+	if !first.Suspended || first.SuspendGeneration == 0 || frozen() != 1 {
+		t.Fatalf("the first suspension: %+v frozen=%d", first.JobTelemetry, frozen())
+	}
+
+	// Resume and suspend again before the runner polls or heartbeats.
+	resuspend()
+	if got := frozen(); got != 0 {
+		t.Fatalf("a heartbeat of the earlier suspension counted as frozen: %d", got)
+	}
+	poll() // the runner adopts the new suspension
+	second := heartbeat()
+	if second.SuspendGeneration == first.SuspendGeneration || frozen() != 1 {
+		t.Fatalf("the new suspension must be reported under its own generation: %d vs %d, frozen=%d", second.SuspendGeneration, first.SuspendGeneration, frozen())
+	}
+
+	// A resume the runner sees, then a suspension whose SIGSTOP fails: nothing
+	// from the earlier reports may stand in for it.
+	if err := w.SetSuspend(false); err != nil {
+		t.Fatal(err)
+	}
+	poll()
+	if heartbeat().Suspended {
+		t.Fatal("a resumed job is not suspended")
+	}
+	real := killProcess
+	defer func() { killProcess = real }()
+	time.Sleep(2 * time.Millisecond)
+	if err := w.SetSuspend(true); err != nil {
+		t.Fatal(err)
+	}
+	killProcess = func(int, syscall.Signal) error { return syscall.EPERM }
+	poll()
+	failed := heartbeat()
+	if failed.Suspended || frozen() != 0 {
+		t.Fatalf("a failed freeze was counted: suspended=%v frozen=%d", failed.Suspended, frozen())
+	}
+	killProcess = real
+	poll() // the retry
+	if got := heartbeat(); !got.Suspended || frozen() != 1 {
+		t.Fatalf("after the retry the freeze is reported: %+v frozen=%d", got.JobTelemetry, frozen())
+	}
+	cancel()
+	<-done
 }

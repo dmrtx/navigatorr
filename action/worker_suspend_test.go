@@ -31,6 +31,8 @@ type suspendingExecutor struct {
 	failTurnOn bool
 	// loseTurnOnReply applies SetSuspend(true) but loses the answer, once.
 	loseTurnOnReply bool
+	// dropAfterLost makes the worker unreachable after the lost reply.
+	dropAfterLost bool
 }
 
 func (s *suspendingExecutor) status() (httpclient.SuspendStatus, error) {
@@ -69,6 +71,9 @@ func (s *suspendingExecutor) SetSuspend(ctx context.Context, suspend bool) (http
 		s.frozen = 0
 	}
 	if lost {
+		if s.dropAfterLost {
+			s.err = errors.New("connection refused")
+		}
 		return httpclient.SuspendStatus{}, errors.New("reply lost")
 	}
 	return s.status()
@@ -466,5 +471,50 @@ func TestSuspendWhoseUndoFailsSaysThePauseStaysInSuspend(t *testing.T) {
 	}
 	if m1.suspend {
 		t.Fatal("the worker never confirmed, so nothing is frozen")
+	}
+}
+
+// A worker that froze its encodes but whose answer was lost, and that then
+// cannot be reached for the release, may still be frozen: the answer must not
+// claim that nothing changed. The stored pause is back to what it was, and the
+// next sweep releases the worker once it answers.
+func TestSuspendWithALostReplyAndNoReleaseAdmitsTheWorkerMayBeFrozen(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	m1.loseTurnOnReply, m1.dropAfterLost = true, true
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+
+	_, err := e.SetNodePause(context.Background(), "m1", store.WorkerPauseSuspend)
+	if !errors.Is(err, transcode.ErrSuspendReleasePending) || errors.Is(err, transcode.ErrSuspendUnavailable) || strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("err = %v, want the release-pending answer and not a nothing-changed refusal", err)
+	}
+	if !m1.suspend {
+		t.Fatal("the worker did freeze: that is the state the error describes")
+	}
+	if st := e.NodePauseStatuses(context.Background())["m1"]; st.Mode != store.WorkerPauseGraceful {
+		t.Fatalf("the stored pause is back to graceful: %+v", st)
+	}
+
+	// The worker answers again: the sweep releases the freeze.
+	m1.err = nil
+	e.syncWorkerHold(context.Background(), mustWorker(t, e, "m1"))
+	if m1.suspend {
+		t.Fatal("the next sweep must release the freeze")
+	}
+	if e.workerMaybeFrozen("m1") {
+		t.Fatal("once seen released the worker is no longer suspect")
+	}
+}
+
+// A refusal before anything reached the worker stays "nothing changed".
+func TestSuspendRefusedBeforeAnythingWasSentSaysNothingChanged(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.err = errors.New("connection refused")
+	e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+	_, err := e.SetNodePause(context.Background(), "m1", store.WorkerPauseSuspend)
+	if !errors.Is(err, transcode.ErrSuspendUnavailable) || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatalf("err = %v", err)
 	}
 }

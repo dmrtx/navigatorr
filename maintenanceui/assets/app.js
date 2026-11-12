@@ -994,7 +994,7 @@ function nodePauseControls(worker) {
 function setNodePause(worker, mode) {
   return safe(async () => {
     await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? `${worker.name} resumed.` : mode === "suspend" ? `${worker.name} suspended. Running files are frozen and continue on resume.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
+    notify(mode === "off" ? `${worker.name} resumed.` : mode === "suspend" ? `${worker.name} suspend requested. Running files freeze within a second and continue on resume.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }

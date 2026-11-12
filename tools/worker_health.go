@@ -70,7 +70,8 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 			switch {
 			case errors.As(err, &unknown):
 				return mcp.NewToolResultError("node " + node + " is not configured"), nil
-			case errors.Is(err, transcode.ErrSuspendUnavailable):
+			case errors.Is(err, transcode.ErrSuspendUnavailable), errors.Is(err, transcode.ErrSuspendNotUndone), errors.Is(err, transcode.ErrSuspendReleasePending):
+				// These say exactly what happened to the pause; "not saved" would contradict them.
 				return mcp.NewToolResultError(err.Error()), nil
 			case err != nil:
 				return mcp.NewToolResultError("node pause not saved: " + err.Error()), nil
