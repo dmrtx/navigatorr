@@ -23,7 +23,7 @@ func TestBuildsViewIsWiredIntoTheWorkersDialog(t *testing.T) {
 		`api("builds?limit=100")`,
 		`renderBuilds($("builds-list")`,
 		`nodeBuildLines(worker.name, worker.pause?.builds)`,
-		`worker.pause.held_by === "builds"`,
+		`worker.pause?.held_by === "builds"`,
 		`const operatorPaused = pause.paused && pause.held_by !== "builds"`,
 		`"Target", "Source", "Holder", "Kind", "Title", "Priority", "Status", "Duration", "Last heartbeat", "Progress"`,
 	} {

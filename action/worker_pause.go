@@ -524,7 +524,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		}
 		pause, paused := pauses[name]
 		if !paused {
-			st.Message = "Not paused. The node takes new jobs."
+			st.Message = "Transcode not paused. The node takes new jobs."
 			out[name] = st
 			continue
 		}
@@ -581,25 +581,25 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		}
 		switch {
 		case settling:
-			st.Message = "Paused just now; checking for admissions in flight."
+			st.Message = "Transcode paused just now; checking for admissions in flight."
 		case !st.Reachable:
-			st.Message = "Paused, but the node is unreachable so its jobs cannot be confirmed."
+			st.Message = "Transcode paused, but the node is unreachable so its jobs cannot be confirmed."
 		case st.PublicationPending > 0:
-			st.Message = fmt.Sprintf("Paused: %d finished encode(s) not saved yet. Use Try again once storage is reachable.", st.PublicationPending)
+			st.Message = fmt.Sprintf("Transcode paused: %d finished encode(s) not saved yet. Use Try again once storage is reachable.", st.PublicationPending)
 		case pause.Mode == store.WorkerPauseSuspend && !confirmed:
-			st.Message = "Suspended, but the node has not confirmed that its encodes are frozen."
+			st.Message = "Transcode suspended, but the node has not confirmed that its encodes are frozen."
 		case pause.Mode == store.WorkerPauseSuspend && st.Running > 0:
-			st.Message = fmt.Sprintf("Suspended: %d job(s) not frozen yet.", st.Running)
+			st.Message = fmt.Sprintf("Transcode suspended: %d job(s) not frozen yet.", st.Running)
 		case st.Suspended > 0:
 			st.Idle = true
-			st.Message = fmt.Sprintf("Suspended: %d encode(s) frozen where they were. The CPU is free; they continue when the node is resumed.", st.Suspended)
+			st.Message = fmt.Sprintf("Transcode suspended: %d encode(s) frozen where they were. The CPU is free; they continue when the node is resumed.", st.Suspended)
 		case st.Running > 0 && pause.Mode == store.WorkerPauseImmediate:
-			st.Message = fmt.Sprintf("Paused: %d job(s) still active. Encoding jobs return to the queue; encoded files finish publishing.", st.Running)
+			st.Message = fmt.Sprintf("Transcode paused: %d job(s) still active. Encoding jobs return to the queue; encoded files finish publishing.", st.Running)
 		case st.Running > 0:
-			st.Message = fmt.Sprintf("Paused: %d job(s) still finishing. Nothing new starts here.", st.Running)
+			st.Message = fmt.Sprintf("Transcode paused: %d job(s) still finishing. Nothing new starts here.", st.Running)
 		default:
 			st.Idle = true
-			st.Message = "Paused and idle: nothing runs on this node."
+			st.Message = "Transcode paused and idle: no encode runs on this node."
 		}
 		if st.HeldBy == "builds" {
 			running := 0

@@ -990,8 +990,11 @@ function renderWorkerDetails(host, info) {
     const row = node("div", "", "worker-node");
     const head = node("div", "", "worker-node-head");
     const badges = node("span", "", "worker-node-badges");
-    if (worker.pause?.paused && worker.pause.held_by === "builds") badges.append(node("span", "Busy · build", "badge"));
-    else if (worker.pause?.paused) badges.append(node("span", worker.pause.idle ? "Paused · idle" : "Pausing", "badge"));
+    // The operator's pause stops transcode only; a build on the node is a
+    // separate state, so when both apply both badges show.
+    const operatorPaused = worker.pause?.paused && worker.pause.held_by !== "builds";
+    if (operatorPaused) badges.append(node("span", worker.pause.idle ? "Transcode paused · idle" : "Pausing transcode", "badge"));
+    if (worker.pause?.held_by === "builds" || (worker.pause?.builds || []).some(b => b.status === "running")) badges.append(node("span", "Busy · build", "badge"));
     badges.append(node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
     head.append(node("strong", worker.name), badges);
     row.append(head);
@@ -1047,12 +1050,12 @@ function nodePauseControls(worker) {
     buttons.append(button);
   };
   if (!operatorPaused) {
-    add("Pause after current files", "graceful", "Nothing new starts on this node; what is encoding finishes.");
-    add("Pause now", "immediate", "Encodes on this node go back to the queue and start again on another node.");
-    add("Suspend now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
+    add("Pause transcode after current files", "graceful", "No new transcode starts on this node; what is encoding finishes. Builds are not paused.");
+    add("Pause transcode now", "immediate", "Encodes on this node go back to the queue and start again on another node. Builds are not paused.");
+    add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume. Builds are not paused.");
   } else {
-    add("Resume", "off", pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes files again.");
-    if (pause.mode === "graceful") add("Suspend now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
+    add("Resume transcode", "off", pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
+    if (pause.mode === "graceful") add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
     if (pause.mode === "graceful" || pause.mode === "suspend") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
   }
   box.append(buttons);
@@ -1061,7 +1064,7 @@ function nodePauseControls(worker) {
 function setNodePause(worker, mode) {
   return safe(async () => {
     await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? `${worker.name} resumed.` : mode === "suspend" ? `${worker.name} suspend requested.` : mode === "immediate" ? `${worker.name} paused. Its files are going back to the queue.` : `${worker.name} paused. Files already encoding finish.`);
+    notify(mode === "off" ? `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }
@@ -7443,12 +7446,12 @@ $("x265-limit").addEventListener("change", () => { state.x265FormDirty = true; x
 // it resumes. Say so here, where the limits are, with the way out.
 function renderNodePausedNotice(selected) {
   const worker = (state.workerInfo?.nodes || []).find(n => n.worker === selected.name || n.name === selected.name);
-  const paused = Boolean(worker?.pause?.paused);
+  const paused = Boolean(worker?.pause?.paused && worker.pause.held_by !== "builds");
   $("settings-node-paused").hidden = !paused;
   if (!paused) return;
   $("settings-node-paused-text").textContent = worker.pause.idle
-    ? `${worker.name} is paused. Nothing starts on it until you resume, so the limits below apply from then on.`
-    : `${worker.name} is pausing. Files already encoding finish and nothing new starts until you resume.`;
+    ? `${worker.name} transcode is paused. Nothing transcodes on it until you resume, so the limits below apply from then on.`
+    : `${worker.name} transcode is pausing. Files already encoding finish and nothing new transcodes until you resume.`;
   $("settings-node-resume").onclick = () => setNodePause(worker, "off").then(() => refreshWorkerActivity(true));
 }
 // How many of the node's CPUs encodes may use together, so the rest stays free
@@ -7660,8 +7663,8 @@ function slotProgressCells(job, alive) {
   return [phase, cell];
 }
 // What keeps new files off a node, in the word the slot lines use: "build" while
-// a running build holds it, "paused" for the operator's pause (which wins).
-const nodeHoldWord = n => n.held_by === "builds" ? "build" : n.held_by ? "paused" : "";
+// a running build holds it, "transcode paused" for the operator's pause (which wins).
+const nodeHoldWord = n => n.held_by === "builds" ? "build" : n.held_by ? "transcode paused" : "";
 // Builds running on a node. A waiting build holds nothing and is not a slot.
 const runningBuilds = n => (n.builds || []).filter(b => b.status === "running");
 // A node's occupied/total encode slots. Builds are rows in the table but not
