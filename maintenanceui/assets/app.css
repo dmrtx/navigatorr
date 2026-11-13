@@ -3671,6 +3671,19 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .stat-open:not(:disabled):hover { border-color: var(--forest); }
 .stat-open:disabled { opacity: 1; color: var(--muted); background: transparent; }
 .stat-open:disabled .stat-open-arrow { display: none; }
+/* A build's output: monospace, wrapped, scrolling inside the dialog. */
+#build-log { width: min(860px, calc(100% - 16px)); max-width: 860px; }
+.build-log-meta { margin: 4px 0 8px; font-weight: 600; }
+.build-log-meta[data-status="running"] { color: var(--forest); }
+.build-log-meta[data-status="waiting"] { color: var(--warning); }
+.build-log-meta[data-status="failed"], .build-log-meta[data-status="lost"] { color: var(--danger); }
+.build-log-meta[data-status="succeeded"], .build-log-meta[data-status="cancelled"] { color: var(--muted); }
+.build-log-lines { box-sizing: border-box; height: min(60vh, 520px); margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); color: var(--ink); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.build-log-lines:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; }
+.build-open { cursor: pointer; }
+.worker-slot.build-open:hover strong { text-decoration: underline; text-underline-offset: 3px; }
+.worker-slot.build-open:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; border-radius: 3px; }
+.slots-table tr.build-open:hover .slot-file-link { text-decoration: underline; text-underline-offset: 3px; }
 #ready-dialog .stat-list { max-height: min(60vh, 520px); overflow: auto; }
 #ready-replace-all:empty { display: none; }
 #ready-replace-all { display: flex; justify-content: flex-start; margin: 4px 0 8px; }

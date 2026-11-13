@@ -52,6 +52,10 @@ const (
 	buildProgMax  = 200
 )
 
+var errStoreForBuilds = errors.New("store is required for builds")
+
+func errorsIsBuildNotFound(err error) bool { return errors.Is(err, store.ErrBuildNotFound) }
+
 var buildTargetPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // BuildInvalidError is a build request the caller can fix.
@@ -222,9 +226,12 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 // HeartbeatBuild extends a running build's expiry and optionally replaces its
 // progress line and ttl. A build that already ended gives store.ErrBuildEnded
 // together with its record.
-func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string, ttlSeconds int) (store.Build, error) {
+func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string, ttlSeconds int, logLines ...string) (store.Build, error) {
 	if e.deps.Store == nil {
-		return store.Build{}, errors.New("store is required for builds")
+		return store.Build{}, errStoreForBuilds
+	}
+	if err := checkBuildLog(logLines); err != nil {
+		return store.Build{}, err
 	}
 	if progress != nil {
 		p, err := checkBuildText("progress", *progress, buildProgMax, false)
@@ -242,6 +249,9 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		}
 	}
 	b, err := e.deps.Store.HeartbeatBuild(id, e.now(), ttl, progress)
+	if err == nil {
+		e.buildLogs.append(id, logLines, e.now())
+	}
 	if errors.Is(err, store.ErrBuildExpired) {
 		// The late heartbeat marked the build lost: release its node hold the
 		// way a finish does, and let a waiting build take the node.
@@ -330,6 +340,7 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 		e.WakeReconciler()
 	}
 	e.promoteWaitingBuilds()
+	e.pruneBuildLogs()
 	retention := 30 * 24 * time.Hour
 	if e.deps.Config != nil {
 		retention = e.deps.Config.Builds.RetentionDuration()

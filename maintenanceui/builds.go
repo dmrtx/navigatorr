@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
@@ -21,6 +22,7 @@ import (
 //	GET  /api/maintenance/builds                list (target, status, source, limit)
 //	GET  /api/maintenance/builds/{id}           one build
 //	POST /api/maintenance/builds/{id}/heartbeat extend; 409 if the build ended
+//	GET  /api/maintenance/builds/{id}/log       output tail: {lines, updated_at, status}
 //	POST /api/maintenance/builds/{id}/finish    end it; finishing an ended build
 //	                                            answers 200 with it unchanged
 //
@@ -42,7 +44,7 @@ func isBuildsPath(p string) bool {
 	if len(parts) == 0 || len(parts) > 2 || !validBuildID(parts[0]) {
 		return false
 	}
-	return len(parts) == 1 || parts[1] == "heartbeat" || parts[1] == "finish"
+	return len(parts) == 1 || parts[1] == "heartbeat" || parts[1] == "finish" || parts[1] == "log"
 }
 
 func validBuildID(id string) bool {
@@ -124,14 +126,15 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Progress   *string `json:"progress"`
-		TTLSeconds int     `json:"ttl_seconds"`
+		Progress   *string  `json:"progress"`
+		TTLSeconds int      `json:"ttl_seconds"`
+		Log        []string `json:"log"`
 	}
 	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		fail(w, 400, `send {"progress"?, "ttl_seconds"?} or nothing`)
+		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
 		return
 	}
-	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds)
+	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds, body.Log...)
 	if errors.Is(err, store.ErrBuildEnded) {
 		writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
 		return
@@ -140,6 +143,20 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, b)
+}
+
+// buildLog answers the output tail of a build: the last lines its heartbeats
+// sent, oldest first. They are kept in memory only (see action/buildlog.go).
+func (s *Server) buildLog(w http.ResponseWriter, r *http.Request) {
+	b, lines, updated, err := s.engine.BuildLog(r.PathValue("id"))
+	if s.buildError(w, err) {
+		return
+	}
+	var at any
+	if !updated.IsZero() {
+		at = updated.UTC().Format(time.RFC3339)
+	}
+	writeJSON(w, 200, map[string]any{"lines": lines, "updated_at": at, "status": b.Status})
 }
 
 func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {

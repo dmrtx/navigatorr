@@ -1,0 +1,165 @@
+package action
+
+import (
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/jakenesler/navigatorr/store"
+)
+
+// Build output tail. A build's heartbeat may carry the new lines of its output;
+// the engine keeps the last ones per build in memory only. Output can hold
+// secrets, so it never reaches the database, a backup, the MCP tools or the
+// worker activity, and a restart forgets it. A buffer lives while its build
+// runs and BuildLogRetention after it ended.
+const (
+	// BuildLogMaxBatch is how many lines one heartbeat may add.
+	BuildLogMaxBatch = 64
+	// BuildLogMaxLine is the longest line, in characters.
+	BuildLogMaxLine = 300
+	// BuildLogKeep is how many lines a build keeps.
+	BuildLogKeep = 200
+	// BuildLogRetention is how long a build's lines stay readable once it ended.
+	BuildLogRetention = 30 * time.Minute
+	// buildLogMaxBuilds bounds the buffers held at once.
+	buildLogMaxBuilds = 64
+)
+
+type buildLogBuffer struct {
+	lines     []string
+	updatedAt time.Time
+}
+
+// buildLogs is the in-memory store of build output tails.
+type buildLogs struct {
+	mu   sync.Mutex
+	bufs map[string]*buildLogBuffer
+}
+
+// checkBuildLog validates the lines of a heartbeat the way progress is checked:
+// single lines, no NUL.
+func checkBuildLog(lines []string) error {
+	if len(lines) > BuildLogMaxBatch {
+		return invalidBuild("log must have at most %d lines per heartbeat", BuildLogMaxBatch)
+	}
+	for i, l := range lines {
+		switch {
+		case utf8.RuneCountInString(l) > BuildLogMaxLine:
+			return invalidBuild("log line %d must be at most %d characters", i+1, BuildLogMaxLine)
+		case strings.ContainsAny(l, "\r\n\x00"):
+			return invalidBuild("log line %d must be a single line", i+1)
+		}
+	}
+	return nil
+}
+
+func (l *buildLogs) append(id string, lines []string, now time.Time) {
+	if len(lines) == 0 {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.bufs == nil {
+		l.bufs = map[string]*buildLogBuffer{}
+	}
+	buf := l.bufs[id]
+	if buf == nil {
+		if len(l.bufs) >= buildLogMaxBuilds {
+			// Drop the least recently updated buffer to stay bounded.
+			oldest := ""
+			for k, v := range l.bufs {
+				if oldest == "" || v.updatedAt.Before(l.bufs[oldest].updatedAt) {
+					oldest = k
+				}
+			}
+			delete(l.bufs, oldest)
+		}
+		buf = &buildLogBuffer{}
+		l.bufs[id] = buf
+	}
+	buf.lines = append(buf.lines, lines...)
+	if over := len(buf.lines) - BuildLogKeep; over > 0 {
+		// Copy so the dropped head is released.
+		buf.lines = append([]string(nil), buf.lines[over:]...)
+	}
+	buf.updatedAt = now
+}
+
+func (l *buildLogs) get(id string) ([]string, time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	buf := l.bufs[id]
+	if buf == nil {
+		return nil, time.Time{}
+	}
+	return append([]string(nil), buf.lines...), buf.updatedAt
+}
+
+func (l *buildLogs) drop(id string) {
+	l.mu.Lock()
+	delete(l.bufs, id)
+	l.mu.Unlock()
+}
+
+func (l *buildLogs) ids() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, 0, len(l.bufs))
+	for k := range l.bufs {
+		out = append(out, k)
+	}
+	return out
+}
+
+// buildLogExpired is whether the build ended long enough ago for its output to
+// be forgotten.
+func buildLogExpired(b store.Build, now time.Time) bool {
+	if b.EndedAt == "" {
+		return false
+	}
+	end, err := time.Parse(time.RFC3339, b.EndedAt)
+	return err == nil && now.Sub(end) >= BuildLogRetention
+}
+
+// BuildLog is a build's output tail: at most BuildLogKeep lines, oldest first.
+// updated is the zero time when nothing was logged. An unknown build gives
+// store.ErrBuildNotFound; a build whose retention passed gives no lines.
+func (e *Engine) BuildLog(id string) (build store.Build, lines []string, updated time.Time, err error) {
+	if e.deps.Store == nil {
+		return store.Build{}, nil, time.Time{}, errStoreForBuilds
+	}
+	b, err := e.deps.Store.GetBuild(id)
+	if err != nil {
+		e.buildLogs.drop(id)
+		return store.Build{}, nil, time.Time{}, err
+	}
+	if buildLogExpired(b, e.now()) {
+		e.buildLogs.drop(id)
+		return b, []string{}, time.Time{}, nil
+	}
+	lines, updated = e.buildLogs.get(id)
+	if lines == nil {
+		lines = []string{}
+	}
+	return b, lines, updated, nil
+}
+
+// pruneBuildLogs drops the buffers of builds that are gone or whose output
+// retention passed. The reconcile tick calls it.
+func (e *Engine) pruneBuildLogs() {
+	if e.deps.Store == nil {
+		return
+	}
+	now := e.now()
+	for _, id := range e.buildLogs.ids() {
+		b, err := e.deps.Store.GetBuild(id)
+		if err != nil && !errorsIsBuildNotFound(err) {
+			continue
+		}
+		if err != nil || buildLogExpired(b, now) {
+			e.buildLogs.drop(id)
+		}
+	}
+}

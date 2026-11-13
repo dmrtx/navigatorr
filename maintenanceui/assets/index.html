@@ -1343,6 +1343,15 @@
       <div id="ready-replace-all" class="ready-replace-all"></div>
       <ul id="ready-list" class="stat-list"></ul>
     </dialog>
+    <dialog id="build-log" aria-labelledby="build-log-title">
+      <div class="dialog-heading">
+        <h2 id="build-log-title">Build</h2>
+        <button id="close-build-log" class="icon-button" aria-label="Close">×</button>
+      </div>
+      <p id="build-log-meta" class="metadata build-log-meta" role="status"></p>
+      <p id="build-log-empty" class="muted">No output yet</p>
+      <pre id="build-log-lines" class="build-log-lines" tabindex="0" hidden></pre>
+    </dialog>
     <dialog id="workers-dialog" aria-labelledby="workers-title">
       <div class="dialog-heading">
         <h2 id="workers-title">Connected nodes</h2>

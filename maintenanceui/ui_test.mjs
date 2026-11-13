@@ -2720,7 +2720,7 @@ test("worker slots list running builds, and a node held by a build or a pause of
   assert.equal(rows().length,1);
   const cells=rows()[0].children;
   assert.equal(cells[0].textContent,"m1 · build");
-  assert.equal(cells[1].textContent,"unit tests");
+  assert.equal(cells[1].children[0].textContent,"unit tests");
   assert.equal(cells[2].children[0].textContent,"Build running");
   assert.equal(cells[2].children[1].textContent,"ci:runner1 · swift-test · step 2/5");
   assert.equal(cells[3].textContent,"");
@@ -10424,4 +10424,94 @@ test("a node with a transcode pause and a running build shows both states", () =
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: false, message: "x", builds: [] }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(badges(), ["Pausing transcode", "Reachable · Ready"]);
+});
+
+test("a running build's row opens its output, as text, newest at the bottom", async () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  const timers=[], calls=[];
+  h.context.setTimeout=(fn,ms)=>{timers.push([fn,ms]);return timers.length;};
+  h.context.calls=calls;
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"<b>unit</b> tests",status:"running",started_at:new Date(Date.now()-90000).toISOString()};
+  const one=(name,extra={})=>({name,available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:0,jobs:[],slots:{ceiling:1,split:false,video:{total:1,used:0},podcast:{total:0,used:0}}},...extra});
+  h.context.activity={available:true,workers:[one("m1",{held_by:"builds",builds:[build]})]};
+  h.run('renderWorkerActivity(activity)');
+  const row=h.elements.get("worker-slots").children[1].children[0].children[1].children[0];
+  const phone=h.elements.get("worker-slots").children[0].children[0].children[1].children[0];
+  assert.match(markup,/<dialog id="build-log"[^>]*>[\s\S]*id="build-log-meta"[\s\S]*id="build-log-empty"[^>]*>No output yet<\/p>[\s\S]*<pre id="build-log-lines"/);
+  // The wide row and the phone row both open it.
+  let payload={lines:["compiling <script>alert(1)</script>","tests passed"],updated_at:"2026-11-13T10:00:00Z",status:"running"};
+  h.run('api=async(path)=>{calls.push(path);return log;}');
+  h.context.log=payload;
+  assert.equal(h.elements.get("build-log").open,false);
+  row.listeners.get("click")();
+  assert.equal(h.elements.get("build-log").open,true);
+  await Promise.resolve();await Promise.resolve();
+  assert.deepEqual(calls,["builds/b1/log"]);
+  assert.equal(h.elements.get("build-log-title").textContent,"<b>unit</b> tests");
+  assert.equal(h.elements.get("build-log-lines").textContent,"compiling <script>alert(1)</script>\ntests passed");
+  assert.equal(h.elements.get("build-log-lines").hidden,false);
+  assert.equal(h.elements.get("build-log-empty").hidden,true);
+  assert.match(h.elements.get("build-log-meta").textContent,/^Running · 1m \d+s elapsed$/);
+  assert.equal(h.elements.get("build-log-meta").dataset.status,"running");
+  // Refreshes every 5 s while open, and the view follows the bottom until the person scrolls up.
+  const box=h.elements.get("build-log-lines");
+  box.scrollHeight=1000;box.clientHeight=200;box.scrollTop=800;
+  h.context.log={...payload,lines:[...payload.lines,"more"]};
+  assert.equal(timers.at(-1)[1],5000);
+  await timers.at(-1)[0]();
+  assert.equal(calls.length,2);
+  assert.equal(box.scrollTop,1000);
+  box.scrollTop=100;box.listeners.get("scroll")();
+  h.context.log={...payload,lines:[...payload.lines,"more","last"]};
+  await timers.at(-1)[0]();
+  assert.equal(box.textContent.endsWith("last"),true);
+  assert.equal(box.scrollTop,100);
+  box.scrollTop=800;box.listeners.get("scroll")();
+  // A hidden page asks nothing; closing stops the refresh.
+  h.context.document.hidden=true;
+  const before=calls.length;
+  await timers.at(-1)[0]();
+  assert.equal(calls.length,before);
+  h.context.document.hidden=false;
+  h.elements.get("close-build-log").listeners.get("click")();
+  assert.equal(h.elements.get("build-log").open,false);
+  h.elements.get("build-log").listeners.get("close")();
+  const n=timers.length;
+  await timers.at(-1)[0]();
+  assert.equal(calls.length,before);
+  assert.equal(timers.length,n);
+  // The phone row opens it too, by click and by Enter.
+  phone.listeners.get("click")();
+  assert.equal(h.elements.get("build-log").open,true);
+  h.elements.get("build-log").open=false;
+  let prevented=false;
+  phone.listeners.get("keydown")({key:"Enter",preventDefault(){prevented=true;}});
+  assert.equal(prevented,true);
+  assert.equal(h.elements.get("build-log").open,true);
+});
+
+test("a build with no output yet says so in one line, and an ended build stops refreshing", async () => {
+  const h=harness();
+  const timers=[];
+  h.context.setTimeout=(fn,ms)=>{timers.push([fn,ms]);return timers.length;};
+  h.context.log={lines:[],updated_at:null,status:"running"};
+  h.run('api=async()=>log;');
+  await h.run('openBuildLog({id:"b2",title:"empty",status:"running",started_at:new Date().toISOString()})');
+  assert.match(markup,/<p id="build-log-empty" class="muted">No output yet<\/p>/);
+  assert.equal(h.elements.get("build-log-empty").hidden,false);
+  assert.equal(h.elements.get("build-log-lines").hidden,true);
+  assert.equal(timers.length,1);
+  h.context.log={lines:["done"],updated_at:"2026-11-13T10:00:00Z",status:"failed"};
+  await timers.at(-1)[0]();
+  assert.equal(h.elements.get("build-log-empty").hidden,true);
+  assert.match(h.elements.get("build-log-meta").textContent,/^Failed · /);
+  assert.equal(h.elements.get("build-log-meta").dataset.status,"failed");
+  assert.equal(timers.length,1);
+  // A failing read keeps the lines already shown.
+  h.run('api=async()=>{throw new Error("down")}');
+  await h.run('refreshBuildLog()');
+  assert.equal(h.elements.get("build-log-lines").textContent,"done");
+  assert.match(css,/\.build-log-lines \{[^}]*font: 12px\/1\.45 ui-monospace/);
+  assert.match(css,/\.build-log-lines \{[^}]*overflow: auto/);
 });

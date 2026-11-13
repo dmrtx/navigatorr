@@ -258,7 +258,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("offline", () => setConnection(false));
   window.addEventListener("online", () => safe(reconnect));
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) { safe(reconnect); resumeFolderSizes(); }
+    if (!document.hidden) { safe(reconnect); resumeFolderSizes(); if (buildLogView.id) void refreshBuildLog(); }
   });
 }
 function invalidateAuthentication() {
@@ -983,6 +983,77 @@ function renderBuilds(host, builds, now = Date.now()) {
   host.append(table);
 }
 // builds:end
+// The output tail of a running build, in a dialog opened from its slot row. The
+// lines come from GET builds/{id}/log, are shown as text only, newest at the
+// bottom, and follow the bottom unless the person scrolled up.
+const BUILD_LOG_REFRESH_MS = 5000;
+const buildLogView = { id: null, build: null, seq: 0, timer: 0, pinned: true, text: null, status: null, loaded: false };
+const BUILD_STATUS_LABEL = { running: "Running", waiting: "Waiting", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", lost: "Lost" };
+function renderBuildLogMeta() {
+  const meta = $("build-log-meta"), status = buildLogView.status || buildLogView.build?.status || "running";
+  const elapsed = activityElapsed(buildLogView.build?.started_at || buildLogView.build?.created_at);
+  meta.dataset.status = status;
+  meta.textContent = [BUILD_STATUS_LABEL[status] || status, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · ");
+}
+function renderBuildLog(lines) {
+  const text = lines.join("\n"), box = $("build-log-lines");
+  $("build-log-empty").hidden = lines.length > 0;
+  box.hidden = lines.length === 0;
+  if (text !== buildLogView.text) {
+    buildLogView.text = text;
+    box.textContent = text;
+  }
+  if (buildLogView.pinned) box.scrollTop = box.scrollHeight;
+}
+async function refreshBuildLog() {
+  const id = buildLogView.id;
+  if (!id || !$("build-log").open) return;
+  const seq = ++buildLogView.seq;
+  try {
+    const log = await api(`builds/${encodeURIComponent(id)}/log`);
+    if (seq !== buildLogView.seq || id !== buildLogView.id) return;
+    buildLogView.status = log.status;
+    buildLogView.loaded = true;
+    renderBuildLogMeta();
+    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : []);
+  } catch {
+    // The last lines stay; a build that cannot be read shows the empty line.
+    if (seq === buildLogView.seq && !buildLogView.loaded) renderBuildLog([]);
+  }
+}
+function scheduleBuildLog() {
+  clearTimeout(buildLogView.timer);
+  const id = buildLogView.id;
+  if (!id) return;
+  buildLogView.timer = setTimeout(async () => {
+    if (id !== buildLogView.id || !$("build-log").open) return;
+    // A hidden page asks nothing; it refreshes when it is shown again.
+    if (!document.hidden) await refreshBuildLog();
+    // Nothing more arrives once the build ended.
+    if (id === buildLogView.id && !["succeeded", "failed", "cancelled", "lost"].includes(buildLogView.status)) scheduleBuildLog();
+  }, BUILD_LOG_REFRESH_MS);
+}
+function openBuildLog(build) {
+  Object.assign(buildLogView, { id: build.id, build, seq: buildLogView.seq + 1, pinned: true, text: null, status: build.status || null, loaded: false });
+  $("build-log-title").textContent = build.title || "Build";
+  $("build-log-title").title = build.title || "";
+  renderBuildLogMeta();
+  renderBuildLog([]);
+  if (!$("build-log").open) $("build-log").showModal();
+  void refreshBuildLog();
+  scheduleBuildLog();
+}
+// A build row opens its log by click, and by Enter or Space where it is no button.
+function buildLogOpener(el, build) {
+  el.addEventListener("click", () => openBuildLog(build));
+  el.classList.add("build-open");
+}
+$("close-build-log").addEventListener("click", () => $("build-log").close());
+$("build-log").addEventListener("close", () => { clearTimeout(buildLogView.timer); buildLogView.id = null; buildLogView.seq++; });
+$("build-log-lines").addEventListener("scroll", () => {
+  const box = $("build-log-lines");
+  buildLogView.pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+});
 function renderWorkerDetails(host, info) {
   host.replaceChildren();
   for (const worker of info?.nodes || []) {
@@ -7735,6 +7806,13 @@ function buildSlotRow(n, b) {
   const row = node("div","","worker-slot");
   row.append(node("strong",`${n.name || "Node"} · build · ${b.title}`));
   row.children[0].title = b.title;
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Output of build ${b.title}`);
+  buildLogOpener(row, b);
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openBuildLog(b); }
+  });
   const elapsed = activityElapsed(b.started_at);
   row.append(node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts"));
   return row;
@@ -7767,8 +7845,11 @@ function slotNodeDetails(n, entries) {
 // A running build as the cells of a table row, in the same columns as an
 // encode: Slot, File, Phase, Progress, Kind, Elapsed.
 function buildTableCells(n, b) {
-  const file = node("td", b.title, "slot-file");
+  const file = node("td", "", "slot-file");
   file.title = b.title;
+  const open = node("button", b.title, "slot-file-link");
+  open.type = "button";
+  file.append(open);
   const phase = node("td", "", "slot-phase");
   phase.append(node("span", "Build running", "slot-phase-name"));
   const line = [buildOwner(b), b.kind, b.progress].filter(Boolean).join(" · ");
@@ -7802,6 +7883,7 @@ function slotTable(groups) {
       const row = node("tr");
       if (b) {
         row.append(...buildTableCells(n, b));
+        buildLogOpener(row, b);
         tbody.append(row);
         continue;
       }
