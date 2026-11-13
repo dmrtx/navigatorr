@@ -19,23 +19,27 @@ import (
 func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body struct {
-			Node string `json:"node"`
-			Mode string `json:"mode"`
+			Node string  `json:"node"`
+			Mode *string `json:"mode"`
 			// BuildsPaused is the independent builds switch: true refuses new
 			// builds on the node, false lets them in again. It cannot be sent
-			// together with a mode, so one request never half applies.
+			// together with a mode (by presence, even an empty one), so one request never half applies.
 			BuildsPaused *bool `json:"builds_paused"`
 		}
 		mode := ""
 		if decode(w, r, &body) == nil {
 			switch {
-			case body.BuildsPaused != nil && body.Mode != "":
+			case body.BuildsPaused != nil && body.Mode != nil:
 				body.Node = ""
 			case body.BuildsPaused != nil:
 			default:
-				switch body.Mode {
+				given := ""
+				if body.Mode != nil {
+					given = *body.Mode
+				}
+				switch given {
 				case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
-					mode = body.Mode
+					mode = given
 				case "off":
 				default:
 					body.Node = ""

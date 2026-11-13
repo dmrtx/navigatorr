@@ -20,12 +20,17 @@ import (
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
 	var buildPauses map[string]store.BuildPause
+	unreadable := false
 	if e.deps.Store != nil {
-		buildPauses, _ = e.deps.Store.ListBuildPauses()
+		var err error
+		if buildPauses, err = e.deps.Store.ListBuildPauses(); err != nil {
+			unreadable = true
+		}
 	}
 	for i := range out.Workers {
 		out.Workers[i].Builds = e.NodeBuilds(out.Workers[i].Name)
-		_, out.Workers[i].BuildsPaused = buildPauses[out.Workers[i].Name]
+		_, paused := buildPauses[out.Workers[i].Name]
+		out.Workers[i].BuildsPaused = paused || unreadable
 	}
 	if len(out.Workers) == 1 {
 		out.Builds = out.Workers[0].Builds

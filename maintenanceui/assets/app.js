@@ -1136,6 +1136,13 @@ $("build-log-lines").addEventListener("scroll", () => {
   updateBuildLogOverflow();
 });
 if (typeof window !== "undefined") window.addEventListener("resize", updateBuildLogOverflow);
+// A paused state, in the warning colours so it reads at a glance beside the
+// plain reachability badge; the class stays "badge".
+function pausedBadge(text) {
+  const badge = node("span", text, "badge");
+  badge.dataset.state = "paused";
+  return badge;
+}
 function renderWorkerDetails(host, info) {
   host.replaceChildren();
   for (const worker of info?.nodes || []) {
@@ -1146,9 +1153,9 @@ function renderWorkerDetails(host, info) {
     // The operator's pause stops transcode only; a build on the node is a
     // separate state, so when both apply both badges show.
     const operatorPaused = worker.pause?.paused && worker.pause.held_by !== "builds";
-    if (operatorPaused) badges.append(node("span", worker.pause.idle ? "Transcode paused · idle" : "Pausing transcode", "badge"));
+    if (operatorPaused) badges.append(pausedBadge(worker.pause.idle ? "Transcode paused · idle" : "Pausing transcode"));
     // The builds pause is its own switch: shown whatever the transcode pause is.
-    if (worker.pause?.builds_paused) badges.append(node("span", "Builds paused", "badge"));
+    if (worker.pause?.builds_paused) badges.append(pausedBadge("Builds paused"));
     if (worker.pause?.held_by === "builds" || (worker.pause?.builds || []).some(b => b.status === "running")) badges.append(node("span", "Busy · build", "badge"));
     badges.append(node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
     head.append(node("strong", worker.name), badges);
@@ -1185,8 +1192,9 @@ function nodePauseControls(worker) {
   if (pause.paused) box.dataset.paused = pause.idle ? "idle" : "pausing";
   box.append(node("p", pause.message || "", "metadata"));
   const buttons = node("div", "", "worker-pause-actions");
-  const add = (label, mode, title) => {
+  const add = (label, mode, title, extraClass) => {
     const button = node("button", label);
+    if (extraClass) button.className = extraClass;
     button.type = "button";
     button.title = title;
     button.disabled = !serverReachable;
@@ -1224,8 +1232,8 @@ function nodePauseControls(worker) {
   // The builds pause sits in the same row and is independent of the transcode
   // pause above: the server refuses new builds on this node while it is on;
   // builds already registered carry on either way.
-  if (pause.builds_paused) add("Resume builds", "builds_resume", "This node accepts new builds again.");
-  else add("Pause builds", "builds_pause", "New builds on this node are refused; builds already registered carry on.");
+  if (pause.builds_paused) add("Resume builds", "builds_resume", "This node accepts new builds again.", "pause-builds");
+  else add("Pause builds", "builds_pause", "New builds on this node are refused; builds already registered carry on.", "pause-builds");
   box.append(buttons);
   return box;
 }
@@ -7953,8 +7961,8 @@ function slotNodeDetails(n, entries) {
   const summary = node("summary");
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
-    node("span", !online ? n.message || "Unavailable" : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
-      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || "all available", n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · "), "metadata"));
+    node("span", !online ? [n.message || "Unavailable", n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · ") : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
+      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available"), n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · "), "metadata"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.
@@ -7987,10 +7995,10 @@ function slotTable(groups) {
   const wrap = node("div","","slots-table");
   const multi = groups.length > 1, busy = [], free = [], down = [], held = [], buildsPaused = [];
   for (const {n, entries} of groups) {
-    if (!(n.available && n.activity)) { down.push(`${n.name} · ${n.message || "Unavailable"}`); continue; }
+    if (n.builds_paused) buildsPaused.push(n.name || "node");
+    if (!(n.available && n.activity)) { down.push([n.name, n.message || "Unavailable", n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · ")); continue; }
     const idle = entries.filter(e => !e.job && !e.unknown).length, hold = nodeHoldWord(n);
     // A held node takes no new file, so its free slots are not available.
-    if (n.builds_paused) buildsPaused.push(`${n.name || "node"} builds paused`);
     if (hold) held.push(`${n.name || "node"} ${hold}`);
     else if (idle) free.push([n.name, idle]);
     for (const b of runningBuilds(n)) busy.push({n, b});
@@ -8037,12 +8045,17 @@ function slotTable(groups) {
     table.append(thead, tbody);
     wrap.append(table);
   }
+  if (buildsPaused.length) {
+    // The state sits with the node, as a chip in the badge style, not in the footnote.
+    const chips = node("div", "", "slot-node-chips");
+    for (const name of buildsPaused) chips.append(pausedBadge(`${name} · Builds paused`));
+    wrap.prepend(chips);
+  }
   const freeCount = free.reduce((sum, [, count]) => sum + count, 0);
   const idleParts = [];
   if (freeCount) idleParts.push(`${freeCount} ${freeCount === 1 ? "slot" : "slots"} available${multi ? ` · ${free.map(([name, count]) => `${name} ${count}`).join(", ")}` : ""}`);
   else if (held.length) idleParts.push("No slot available");
   if (held.length) idleParts.push(held.join(", "));
-  if (buildsPaused.length) idleParts.push(buildsPaused.join(", "));
   if (idleParts.length) wrap.append(node("p", idleParts.join(" · "), "metadata slot-idle-line"));
   for (const text of down) wrap.append(node("p", text, "metadata slot-down"));
   return wrap;

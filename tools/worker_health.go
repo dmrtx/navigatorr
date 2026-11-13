@@ -53,10 +53,14 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 		args := req.GetArguments()
 		node, _ := args["node"].(string)
 		mode, hasMode := args["mode"].(string)
-		buildsPaused, hasBuilds := args["builds_paused"].(bool)
+		rawBuilds, hasBuilds := args["builds_paused"]
+		buildsPaused, buildsIsBool := rawBuilds.(bool)
+		_, modeGiven := args["mode"]
 		var statuses []transcode.NodePauseStatus
 		switch {
-		case hasBuilds && hasMode && mode != "":
+		case hasBuilds && !buildsIsBool:
+			return mcp.NewToolResultError("builds_paused must be true or false"), nil
+		case hasBuilds && modeGiven:
 			return mcp.NewToolResultError("send either mode or builds_paused, not both: they are independent switches"), nil
 		case hasBuilds && node == "":
 			return mcp.NewToolResultError("builds_paused needs a node: send node and builds_paused"), nil

@@ -212,6 +212,9 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 				err = &BuildsPausedError{Node: w.Name}
 				return
 			}
+			if e.afterBuildsPausedCheck != nil {
+				e.afterBuildsPausedCheck(w.Name)
+			}
 		}
 		// A low priority build waits only where there is a node to wait for.
 		b, err = e.deps.Store.CreateBuild(b, e.now(), ttl, b.Priority == store.BuildPriorityLow && isNode)

@@ -38,7 +38,7 @@ func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused boo
 	if !ok {
 		return transcode.NodePauseStatus{}, &transcode.WorkerNotConfiguredError{Name: node}
 	}
-	// The node's request lock orders this against a create that checks the
+	// The node's request lock (the one withNodeLock takes) orders this against a create that checks the
 	// flag, so a build is either refused or registered before the pause.
 	lock := &e.workerStateFor(w.Name).pauseMu
 	lock.Lock()
@@ -57,13 +57,12 @@ func (e *Engine) buildsPausedOn(node string) (bool, error) {
 }
 
 // NodeBuildsPaused reports whether new builds on the named node are refused. It
-// reads stored state only. An unreadable state reads as not paused: the switch
-// only ever refuses a request, and the create path itself fails closed on a
-// read error.
+// reads stored state only. An unreadable state reads as paused, as the create
+// path fails closed on a read error too.
 func (e *Engine) NodeBuildsPaused(name string) bool {
 	if e.deps.Store == nil {
 		return false
 	}
-	paused, _ := e.deps.Store.BuildsPaused(e.resolveWorker(name))
-	return paused
+	paused, err := e.deps.Store.BuildsPaused(e.resolveWorker(name))
+	return paused || err != nil
 }

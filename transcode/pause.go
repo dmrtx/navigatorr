@@ -50,7 +50,7 @@ type NodePauseStatus struct {
 	// BuildsPaused is the second, independent switch: while true the server
 	// refuses to register a new build on this node. It says nothing about the
 	// transcode pause above and never affects builds already registered.
-	BuildsPaused      bool   `json:"builds_paused"`
+	BuildsPaused      bool   `json:"builds_paused,omitempty"`
 	BuildsPausedSince string `json:"builds_paused_since,omitempty"`
 	// Builds are the builds running or waiting on the node, oldest first.
 	Builds []NodeBuild `json:"builds,omitempty"`

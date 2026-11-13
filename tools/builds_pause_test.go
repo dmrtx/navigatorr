@@ -105,3 +105,32 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 		t.Fatalf("worker_health: %+v", flags)
 	}
 }
+
+func TestWorkerPauseToolRefusesMixedOrMistypedBuildsRequests(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "builds.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "node-a", Executor: &observedHealthWorker{}, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	s := server.NewMCPServer("test", "0")
+	registerWorkerPause(s, engine)
+	for _, bad := range []map[string]any{
+		{"node": "node-a", "mode": "", "builds_paused": true},
+		{"node": "node-a", "mode": "off", "builds_paused": false},
+		{"node": "node-a", "builds_paused": "true"},
+		{"node": "node-a", "builds_paused": nil},
+		{"node": "node-a", "builds_paused": float64(1)},
+	} {
+		if res := callTool(t, s, "worker_pause", bad); !res.IsError {
+			t.Fatalf("must be an error, not a silent read: %+v", bad)
+		}
+	}
+	if engine.NodeBuildsPaused("node-a") {
+		t.Fatal("nothing changed")
+	}
+}

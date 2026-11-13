@@ -189,3 +189,25 @@ func TestWorkerPauseRequestsForTheBuildsSwitch(t *testing.T) {
 		t.Fatal("worker activity (the slots) carries it", w.Body.String())
 	}
 }
+
+// The mode and the builds switch are never in one request: presence decides,
+// whatever the mode's value is.
+func TestWorkerPauseRefusesModeAndBuildsPausedTogetherByPresence(t *testing.T) {
+	s, h := testUI(t)
+	node := transcode.DefaultWorkerName
+	for _, bad := range []string{
+		`{"node":"` + node + `","mode":"","builds_paused":true}`,
+		`{"node":"` + node + `","mode":"off","builds_paused":false}`,
+		`{"node":"` + node + `","mode":"graceful","builds_paused":true}`,
+	} {
+		if w := request(h, "POST", pausePath, bad, true); w.Code != 400 {
+			t.Fatal("must be a 400", bad, w.Code, w.Body.String())
+		}
+	}
+	if s.engine.NodeBuildsPaused(node) {
+		t.Fatal("a refused request changes nothing")
+	}
+	if pauses, _ := s.engine.Deps().Store.ListWorkerPauses(); len(pauses) != 0 {
+		t.Fatal(pauses)
+	}
+}
