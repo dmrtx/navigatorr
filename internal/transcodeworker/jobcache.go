@@ -41,10 +41,22 @@ import (
 // every job allocates nothing per record. The caller must treat it as
 // read-only, fields and everything its slices and pointers refer to; code that
 // goes on to change and save a record loads it with LoadJob.
-const (
-	jobCacheRacyWindow = 2 * time.Second
-	jobCacheMaxEntries = 1 << 14
-)
+//
+// The index is bounded. A pruned job keeps its record, so the history only
+// grows, and past the bound a full reset on overflow would make every scan
+// decode every record again. Instead, when the index is full a record is added
+// only by dropping a colder one (see makeRoomLocked), so what a scan needs
+// stays cached and the cost of the overflow is the records beyond the bound,
+// not all of them. Records of jobs that left the directory are forgotten as
+// soon as a listing shows it.
+const jobCacheRacyWindow = 2 * time.Second
+
+// jobCacheMaxEntries is a variable only so tests can exercise the bound with a
+// few records.
+var jobCacheMaxEntries = 1 << 14
+
+// jobCacheEvictSample is how many entries a full index looks at to find one to drop.
+const jobCacheEvictSample = 8
 
 type fileSig struct {
 	mtime int64
@@ -118,12 +130,36 @@ func peekJob(path string) (*JobRecord, error) {
 		return job, nil
 	}
 	jobIndex.Lock()
-	if len(jobIndex.m) >= jobCacheMaxEntries {
-		jobIndex.m = map[string]*jobCacheEntry{}
+	if _, have := jobIndex.m[key]; have || len(jobIndex.m) < jobCacheMaxEntries || makeRoomLocked(sig.mtime) {
+		jobIndex.m[key] = &jobCacheEntry{sig: sig, job: job}
 	}
-	jobIndex.m[key] = &jobCacheEntry{sig: sig, job: job}
 	jobIndex.Unlock()
 	return job, nil
+}
+
+// makeRoomLocked reports whether an entry with the given file time may be added
+// to a full index, dropping a colder one if so. It looks at a few entries only
+// (Go's map iteration starts at a random place), takes the one whose file is
+// oldest and replaces it only if the newcomer's file is newer. Live and
+// recently changed jobs therefore always get in, while a scan over a history
+// larger than the bound converges on holding its newest records and then stops
+// churning, instead of evicting what the same scan needs next.
+func makeRoomLocked(mtime int64) bool {
+	victim, oldest := "", mtime
+	n := 0
+	for p, e := range jobIndex.m {
+		if e.sig.mtime < oldest {
+			victim, oldest = p, e.sig.mtime
+		}
+		if n++; n >= jobCacheEvictSample {
+			break
+		}
+	}
+	if victim == "" {
+		return false
+	}
+	delete(jobIndex.m, victim)
+	return true
 }
 
 type dirListing struct {
@@ -162,6 +198,9 @@ func (w *Worker) readJobDirs() ([]fs.DirEntry, error) {
 	}
 	// A listing taken while the directory was being modified is not kept.
 	if time.Since(fi.ModTime()) <= jobCacheRacyWindow {
+		// The listing is not kept, but it is fresh: jobs it no longer shows
+		// must leave the record index now, not at some later settled refresh.
+		forgetDepartedJobs(dir, entries)
 		dirIndex.Lock()
 		delete(dirIndex.m, dir)
 		dirIndex.Unlock()
