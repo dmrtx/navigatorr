@@ -2727,7 +2727,17 @@ test("worker slots list running builds, and a node held by a build or a pause of
   assert.equal(cells[4].textContent,"Build");
   assert.equal(cells[5].textContent,"1m 30s");
   assert.equal(table().children[1].textContent,"2 slots available · m4 2 · m1 build");
-  assert.match(h.elements.get("worker-capacity").textContent,/1\/3 occupied/);
+  // Builds are not slots: m1 is held (no free slot, nothing on it), m4 offers 2.
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/2 occupied · 1 build");
+  // Two builds and one encode on m1 beside an idle one-slot m4: 1/2 occupied, builds counted apart.
+  const one=(name,used,extra={})=>({name,available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:used,jobs:[],
+    slots:{ceiling:1,split:false,video:{total:1,used},podcast:{total:0,used:0}}},...extra});
+  h.context.activity2={available:true,workers:[one("m1",1,{held_by:"builds",builds:[build,{...build,id:"b3"}]}),one("m4",0)]};
+  h.run('renderWorkerActivity(activity2)');
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 1/2 occupied · 2 builds");
+  h.run('activity2.workers[0].builds.pop();renderWorkerActivity(activity2)');
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 1/2 occupied · 1 build");
+  h.run('renderWorkerActivity(activity)');
   // The phone layout shows the build first and does not call the held node's slots available.
   const phone=h.elements.get("worker-slots").children[0].children[0];
   assert.match(phone.children[1].children[0].children[0].textContent,/m1 · build · unit tests/);

@@ -7562,7 +7562,8 @@ function renderWorkerActivity(data) {
   const used = counts.reduce((sum, c) => sum + c.used, 0);
   const total = counts.reduce((sum, c) => sum + c.total, 0);
   const missing = nodes.length - live.length;
-  $("worker-capacity").textContent = `Worker slots · ${used}/${total} occupied${missing ? ` · ${missing} of ${nodes.length} nodes unavailable` : ""}`;
+  const builds = live.reduce((sum, n) => sum + runningBuilds(n).length, 0);
+  $("worker-capacity").textContent = `Worker slots · ${used}/${total} occupied${builds ? ` · ${builds} build${builds === 1 ? "" : "s"}` : ""}${missing ? ` · ${missing} of ${nodes.length} nodes unavailable` : ""}`;
   $("activity-checked").textContent = "Updated now · Job reservations";
   const selected = settingsNode(nodes, live);
   renderNodePicker(nodes, selected);
@@ -7663,12 +7664,12 @@ function slotProgressCells(job, alive) {
 const nodeHoldWord = n => n.held_by === "builds" ? "build" : n.held_by ? "paused" : "";
 // Builds running on a node. A waiting build holds nothing and is not a slot.
 const runningBuilds = n => (n.builds || []).filter(b => b.status === "running");
-// A node's occupied/total as the slots show it: each running build is one
-// occupied row, and a held node offers no free slot, so it counts only what is
-// on it.
+// A node's occupied/total encode slots. Builds are rows in the table but not
+// slots, so they never count here; a held node offers no free slot, so it counts
+// only what is on it.
 function nodeSlotCounts(n) {
-  const a = n.activity, builds = runningBuilds(n).length, used = a.worker_slots_used + builds;
-  return {used, total: nodeHoldWord(n) ? used : a.worker_slots_total + builds};
+  const a = n.activity, used = a.worker_slots_used;
+  return {used, total: nodeHoldWord(n) ? used : a.worker_slots_total};
 }
 // One node's slots. Each node keeps its own slot positions. An entry is a free
 // slot, a slot the worker says is busy without saying with what (an older
