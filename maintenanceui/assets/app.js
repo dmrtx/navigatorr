@@ -920,6 +920,69 @@ function schedulerSummary(info = state.workerInfo) {
   if (!fresh.length || fresh.length !== nodes.length) return "Scheduler · Unknown" + age;
   return (fresh.some(w => w.scheduler_health === "degraded") ? "Scheduler · Degraded" : "Scheduler · Normal") + age;
 }
+// builds:start
+// Builds are jobs on any machine that may hold a transcode node while they run.
+// Running ones come first, then waiting ones (oldest first), then history as
+// the server sent it (newest first).
+function formatBuildDuration(ms) {
+  const minutes = Math.floor(Math.max(0, ms) / 60000);
+  if (minutes < 1) return "<1 min";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours} h ${minutes % 60} min` : `${hours} h`;
+}
+function buildDuration(build, now = Date.now()) {
+  const start = Date.parse(build.started_at || build.created_at);
+  if (!Number.isFinite(start)) return "";
+  const end = build.ended_at ? Date.parse(build.ended_at) : now;
+  return formatBuildDuration((Number.isFinite(end) ? end : now) - start);
+}
+function buildHeartbeatAge(build, now = Date.now()) {
+  const at = Date.parse(build.last_heartbeat_at);
+  if (!Number.isFinite(at)) return "";
+  const seconds = Math.floor(Math.max(0, now - at) / 1000);
+  return seconds < 60 ? `${seconds} s ago` : `${formatBuildDuration(now - at)} ago`;
+}
+function buildOwner(build) {
+  return build.holder ? `${build.source}:${build.holder}` : build.source;
+}
+function sortBuilds(builds) {
+  const rank = {running: 0, waiting: 1};
+  const active = builds.filter(b => b.status in rank).sort((a, b) => rank[a.status] - rank[b.status] || String(a.created_at).localeCompare(String(b.created_at)));
+  return [...active, ...builds.filter(b => !(b.status in rank))];
+}
+// One line per build that keeps a node busy, for that node's card only.
+function nodeBuildLines(name, builds, now = Date.now()) {
+  return (builds || []).map(b => b.status === "waiting"
+    ? `${name} next: build ${b.title} (${buildOwner(b)}) is waiting for an idle node`
+    : `${name} busy: build ${b.title} (${buildOwner(b)}), ${buildDuration(b, now)}`);
+}
+const buildColumns = ["Target", "Source", "Holder", "Kind", "Title", "Priority", "Status", "Duration", "Last heartbeat", "Progress"];
+function renderBuilds(host, builds, now = Date.now()) {
+  host.replaceChildren();
+  if (!builds?.length) return host.append(node("p", "No builds yet.", "muted"));
+  const table = node("table", "", "builds-table");
+  const head = node("tr");
+  for (const name of buildColumns) head.append(node("th", name));
+  const thead = node("thead");
+  thead.append(head);
+  const body = node("tbody");
+  for (const b of sortBuilds(builds)) {
+    const row = node("tr");
+    row.dataset.status = b.status;
+    const live = ["running", "waiting"].includes(b.status);
+    const cells = [b.target, b.source, b.holder || "", b.kind || "", b.title, b.priority, b.status, buildDuration(b, now), live ? buildHeartbeatAge(b, now) : "", b.progress || ""];
+    cells.forEach((text, i) => {
+      const cell = node("td", text, i === 6 ? "build-status" : "");
+      if (i === 6) cell.dataset.status = b.status;
+      row.append(cell);
+    });
+    body.append(row);
+  }
+  table.append(thead, body);
+  host.append(table);
+}
+// builds:end
 function renderWorkerDetails(host, info) {
   host.replaceChildren();
   for (const worker of info?.nodes || []) {
@@ -927,7 +990,8 @@ function renderWorkerDetails(host, info) {
     const row = node("div", "", "worker-node");
     const head = node("div", "", "worker-node-head");
     const badges = node("span", "", "worker-node-badges");
-    if (worker.pause?.paused) badges.append(node("span", worker.pause.idle ? "Paused · idle" : "Pausing", "badge"));
+    if (worker.pause?.paused && worker.pause.held_by === "builds") badges.append(node("span", "Busy · build", "badge"));
+    else if (worker.pause?.paused) badges.append(node("span", worker.pause.idle ? "Paused · idle" : "Pausing", "badge"));
     badges.append(node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
     head.append(node("strong", worker.name), badges);
     row.append(head);
@@ -935,6 +999,7 @@ function renderWorkerDetails(host, info) {
     const age = Number.isFinite(Date.parse(worker.observed_at)) ? ` · checked ${Math.max(0, Math.floor((Date.now() - Date.parse(worker.observed_at)) / 1000))}s ago` : "";
     row.append(node("p", `Scheduler ${fresh ? worker.scheduler_health || "unknown" : "unknown (outdated)"}${age}`, "metadata"));
     if (worker.last_error?.message) row.append(node("p", `${fresh ? "Last error" : "Previous error"}: ${worker.last_error.class || "scheduler"} · ${worker.last_error.message}`, "muted"));
+    for (const line of nodeBuildLines(worker.name, worker.pause?.builds)) row.append(node("p", line, "metadata build-line"));
     const pause = nodePauseControls(worker);
     if (pause) row.append(pause);
     const details = node("details", "", "worker-node-details");
@@ -955,6 +1020,8 @@ function nodePauseControls(worker) {
   const pause = worker.pause;
   if (!pause || !worker.worker) return null;
   const box = node("div", "", "worker-pause");
+  // A hold by builds is not the operator's pause: the operator can still pause it.
+  const operatorPaused = pause.paused && pause.held_by !== "builds";
   if (pause.paused) box.dataset.paused = pause.idle ? "idle" : "pausing";
   box.append(node("p", pause.message || "", "metadata"));
   const buttons = node("div", "", "worker-pause-actions");
@@ -979,7 +1046,7 @@ function nodePauseControls(worker) {
     });
     buttons.append(button);
   };
-  if (!pause.paused) {
+  if (!operatorPaused) {
     add("Pause after current files", "graceful", "Nothing new starts on this node; what is encoding finishes.");
     add("Pause now", "immediate", "Encodes on this node go back to the queue and start again on another node.");
     add("Suspend now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
@@ -1108,6 +1175,7 @@ function renderWorkers() {
     : info.message || info.nodes?.[0]?.message || "Video worker offline or not ready. New jobs are blocked.";
   renderWorkerDetails($("worker-nodes"), info);
   renderWorkerDetails($("settings-worker"), info);
+  renderBuilds($("builds-list"), state.builds || []);
   renderWorkerDrain(info);
   // A normal scheduler is the default and stays in the dialog; only a doubt belongs in the header.
   const scheduler = schedulerSummary(info);
@@ -1127,6 +1195,7 @@ async function refreshWorkers() {
       const info = await api("workers");
       if (auth !== state.authRevision || $("workspace").hidden) return;
       state.workerInfo = info;
+      try { state.builds = (await api("builds?limit=100")).builds || []; } catch { state.builds = state.builds || []; }
       state.workerCheckedAt = Date.now();
     } catch {
       if (auth === state.authRevision) state.workerInfo = null;
