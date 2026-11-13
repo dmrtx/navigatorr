@@ -1,13 +1,18 @@
 package action
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
 )
 
@@ -166,23 +171,113 @@ func TestBuildLogBuffersAreBounded(t *testing.T) {
 	}
 }
 
+// The output reaches nothing that outlives the process or leaves it: not the
+// database files (rows, write-ahead log), not the build records the lists and
+// the node status serve. There is no database export or backup of builds in the
+// repo to check beyond the files themselves.
 func TestBuildLogIsNotPersisted(t *testing.T) {
-	e, _ := buildEngine(t, &mockTranscodeExecutor{})
-	b := startBuild(t, e, "laptop", "", 0)
-	if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "token=synthetic-secret"); err != nil {
-		t.Fatal(err)
-	}
-	// Nothing about the output is in the stored record.
-	rec, err := e.deps.Store.GetBuild(b.ID)
+	const secret = "token=synthetic-secret-8f3a"
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s := fmt.Sprintf("%+v", rec); strings.Contains(s, "synthetic-secret") {
-		t.Fatalf("the output reached the build record: %s", s)
+	clock := &buildClock{t: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)}
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}, Workers: twoWorkers(t, &mockTranscodeExecutor{}, &mockTranscodeExecutor{}, 0), DrainSettle: -1, Now: clock.now})
+	b := startBuild(t, e, "m1", "graceful", 0)
+	for i := 0; i < 3; i++ {
+		if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, secret, "second "+secret); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// A new engine over the same store (a restart) has no output.
-	e2 := NewEngine(EngineDeps{Store: e.deps.Store, Config: e.deps.Config, Now: e.deps.Now})
+	if _, lines, _, _ := e.BuildLog(b.ID); len(lines) != 6 {
+		t.Fatal("the output is meant to be in memory", lines)
+	}
+	finishBuild(t, e, b.ID, store.BuildSucceeded)
+
+	// What the callers can read.
+	payloads := map[string]any{"build": mustBuild(t, e, b.ID), "list": mustList(t, e), "pause": e.NodePauseStatuses(context.Background())}
+	for name, v := range payloads {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "synthetic-secret") {
+			t.Fatalf("the output reached the %s payload: %s", name, raw)
+		}
+	}
+	// What the disk holds, the write-ahead log included, before and after a close.
+	scan := func(when string) {
+		files, _ := filepath.Glob(filepath.Join(dir, "state.db*"))
+		if len(files) == 0 {
+			t.Fatal("no database file")
+		}
+		for _, f := range files {
+			raw, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(raw, []byte("synthetic-secret")) {
+				t.Fatalf("the output reached %s %s", filepath.Base(f), when)
+			}
+		}
+	}
+	scan("while open")
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	scan("after close")
+	// The scan can see what the database does hold: the build's title is there.
+	if raw, err := os.ReadFile(filepath.Join(dir, "state.db")); err != nil || !bytes.Contains(raw, []byte("integration run")) {
+		t.Fatal("the scan is blind: the title is not in the database file", err)
+	}
+	// A restart over the same file has no output.
+	st2, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	e2 := NewEngine(EngineDeps{Store: st2, Config: &config.Config{}, Now: clock.now})
 	if _, lines, _, err := e2.BuildLog(b.ID); err != nil || len(lines) != 0 {
 		t.Fatalf("a restart must forget the output: %v %v", lines, err)
+	}
+}
+
+func mustBuild(t *testing.T, e *Engine, id string) store.Build {
+	t.Helper()
+	b, err := e.GetBuild(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func mustList(t *testing.T, e *Engine) []store.Build {
+	t.Helper()
+	list, err := e.ListBuilds(store.BuildFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return list
+}
+
+// A store that cannot answer says nothing about a build: it is not ended, so
+// its buffer is not the first to go.
+func TestBuildEndedIgnoresStoreErrors(t *testing.T) {
+	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	b := startBuild(t, e, "laptop", "", 0)
+	if e.buildEnded(b.ID) {
+		t.Fatal("a running build is not ended")
+	}
+	if !e.buildEnded("bld_gone") {
+		t.Fatal("a build that is gone is")
+	}
+	finishBuild(t, e, b.ID, store.BuildFailed)
+	if !e.buildEnded(b.ID) {
+		t.Fatal("a finished build is ended")
+	}
+	e.deps.Store.Close()
+	if e.buildEnded(b.ID) {
+		t.Fatal("a store error must not read as ended")
 	}
 }

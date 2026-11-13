@@ -592,7 +592,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 			st.Message = fmt.Sprintf("Transcode suspended: %d job(s) not frozen yet.", st.Running)
 		case st.Suspended > 0:
 			st.Idle = true
-			st.Message = fmt.Sprintf("Transcode suspended: %d encode(s) frozen where they were; they continue when the node is resumed.", st.Suspended)
+			st.Message = fmt.Sprintf("Transcode suspended: %d encode(s) frozen where they were.", st.Suspended)
 		case st.Running > 0 && pause.Mode == store.WorkerPauseImmediate:
 			st.Message = fmt.Sprintf("Transcode paused: %d job(s) still active. Encoding jobs return to the queue; encoded files finish publishing.", st.Running)
 		case st.Running > 0:

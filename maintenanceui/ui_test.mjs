@@ -10398,7 +10398,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
 
   // A suspended node offers Resume and sending the frozen files back, not
   // another Suspend.
-  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Transcode suspended: 1 encode(s) frozen where they were; they continue when the node is resumed." }) };
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Transcode suspended: 1 encode(s) frozen where they were." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(buttons(), ["Resume transcode", "Send running files back"]);
 });
@@ -10543,6 +10543,34 @@ test("the build log says why it is empty: no output, a failed read, output gone;
   assert.equal(timers.length, n);
 });
 
+test("an ended build with nothing left says its output is no longer kept", async () => {
+  const { h, timers, build, empty, box } = buildLogHarness();
+  const ended = new Date().toISOString();
+  h.context.log = { lines: [], updated_at: null, status: "succeeded", ended_at: ended };
+  h.context.build = build;
+  h.run("api = async () => log");
+  h.run("openBuildLog(build)");
+  await tick();
+  assert.equal(empty.textContent, "Output no longer kept");
+  assert.equal(empty.hidden, false);
+  assert.equal(box.hidden, true);
+  assert.equal(timers.length, 1, "nothing more is asked of an ended build");
+  // Purged altogether (404) after it ended while the dialog was open: the same words.
+  h.elements.get("build-log").listeners.get("close")();
+  h.context.log = { lines: ["x"], status: "running", ended_at: null };
+  h.run("openBuildLog(build)");
+  await tick();
+  h.run("buildLogView.status = 'failed'; api = async () => { throw Object.assign(new Error('build not found'), { status: 404 }) }");
+  await timers.at(-1)[0]();
+  await tick();
+  assert.equal(empty.textContent, "Output no longer kept");
+  // A running build that is unknown stays "no longer available".
+  h.elements.get("build-log").listeners.get("close")();
+  h.run("openBuildLog(build)");
+  await tick();
+  assert.equal(empty.textContent, "Output no longer available");
+});
+
 test("an ended build's elapsed time stops at its end and polling stops", async () => {
   const { h, timers, build, meta } = buildLogHarness();
   const started = new Date(Date.now() - 3600000).toISOString(), ended = new Date(Date.now() - 3600000 + 125000).toISOString();
@@ -10593,31 +10621,78 @@ test("a late answer never replaces a newer one, nor one for a reopened build", a
   assert.equal(box.textContent, "fresh");
 });
 
-test("closing the build log returns focus to the opener, else to its row, else to the slots heading", async () => {
+test("closing the build log returns focus to a shown row: the opener, else a visible match, else the slots heading", () => {
   const { h, tableRow, phoneRow, build } = buildLogHarness();
+  h.context.build = build;
   h.run("api = async () => ({ lines: [], status: 'running', ended_at: null })");
-  const focused = [];
+  const log = [];
+  // A stand-in row: focus lands only when it is shown.
+  const row = (name, shown) => ({
+    name,
+    dataset: { buildId: "b1" },
+    getClientRects: () => (shown ? [{}] : []),
+    focus() {
+      log.push(name);
+      if (shown) h.document.activeElement = this;
+    },
+  });
+  const close = () => {
+    h.document.activeElement = null;
+    h.elements.get("build-log").listeners.get("close")();
+  };
+  const open = () => tableRow().listeners.get("click")();
+  const heading = h.elements.get("worker-capacity");
+  heading.focus = () => log.push("heading");
+  // The opener of the table is the title button; the rows are rebuilt on refresh and it can be gone.
   const opener = tableRow().children[1].children[0];
-  opener.focus = () => focused.push("opener");
   assert.equal(opener.dataset.buildId, "b1");
-  tableRow().listeners.get("click")();
-  h.elements.get("build-log").listeners.get("close")();
-  assert.deepEqual(focused, ["opener"]);
-  // The rows are rebuilt on every refresh: the opener is gone, its replacement is found by the build's id.
-  const replacement = { focus: () => focused.push("replacement") };
-  h.document.querySelector = (selector) => selector === '[data-build-id="b1"]' ? replacement : null;
+  opener.focus = function () { log.push("opener"); h.document.activeElement = this; };
+  open();
+  close();
+  assert.deepEqual(log.splice(0), ["opener"]);
+  // Desktop: the phone row comes first in the document and is hidden; the table row is the one to focus.
   opener.isConnected = false;
-  tableRow().listeners.get("click")();
-  h.elements.get("build-log").listeners.get("close")();
-  assert.deepEqual(focused.slice(1), ["replacement"]);
-  // Nothing to return to: the Worker slots heading.
-  h.document.querySelector = () => null;
-  h.elements.get("worker-capacity").focus = () => focused.push("heading");
-  tableRow().listeners.get("click")();
-  h.elements.get("build-log").listeners.get("close")();
-  assert.equal(focused.at(-1), "heading");
-  assert.equal(h.elements.get("worker-capacity").tabIndex, -1);
-  void phoneRow; void build;
+  const phoneHidden = row("phone-hidden", false), tableShown = row("table", true);
+  h.document.querySelectorAll = (selector) => (selector === '[data-build-id="b1"]' ? [phoneHidden, tableShown] : []);
+  open();
+  close();
+  assert.deepEqual(log.splice(0), ["table"]);
+  assert.equal(h.document.activeElement, tableShown);
+  // Phone: the table row is the hidden one.
+  const phoneShown = row("phone", true), tableHidden = row("table-hidden", false);
+  h.document.querySelectorAll = () => [phoneShown, tableHidden];
+  open();
+  close();
+  assert.deepEqual(log.splice(0), ["phone"]);
+  // An opener that is not shown (the layout changed under it) is passed over, not focused.
+  const hiddenOpener = row("hidden-opener", false);
+  h.run("openBuildLog(build, null)");
+  h.elements.get("build-log").open = true;
+  Object.assign(h.run("buildLogView"), { opener: hiddenOpener });
+  close();
+  assert.deepEqual(log.splice(0), ["phone"]);
+  // Focus that does not land (a shown element that refuses it) falls through to the heading.
+  const refusing = { getClientRects: () => [{}], focus: () => log.push("refusing") };
+  h.document.querySelectorAll = () => [refusing];
+  open();
+  close();
+  assert.deepEqual(log.splice(0), ["refusing", "heading"]);
+  assert.equal(heading.tabIndex, -1);
+  // Nothing at all: the heading.
+  h.document.querySelectorAll = () => [];
+  open();
+  close();
+  assert.deepEqual(log.splice(0), ["heading"]);
+  // The phone row opened with Enter or Space hands itself over as the opener, as a click does.
+  phoneRow().focus = function () { log.push("phone-row"); h.document.activeElement = this; };
+  for (const key of ["Enter", " "]) {
+    let prevented = false;
+    phoneRow().listeners.get("keydown")({ key, preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    assert.equal(h.run("buildLogView.opener"), phoneRow());
+    close();
+    assert.deepEqual(log.splice(0), ["phone-row"]);
+  }
 });
 
 test("a build row carries a cue that it opens something, and the dialog follows the layout rules", () => {
@@ -10630,8 +10705,9 @@ test("a build row carries a cue that it opens something, and the dialog follows 
   // No live region that announces every refresh.
   assert.doesNotMatch(markup, /id="build-log-meta"[^>]*(role="status"|aria-live)/);
   // Wraps at spaces, breaks a token only when it alone is wider; one scroller that grows with its lines.
-  assert.match(css, /\.build-log-lines \{[^}]*white-space: pre-wrap; overflow-wrap: break-word/);
-  assert.doesNotMatch(css, /\.build-log-lines \{[^}]*(overflow-wrap: anywhere|height: min\(60vh)/);
+  assert.match(css, /\.build-log-lines \{[^}]*white-space: pre-wrap; overflow-wrap: normal; word-break: normal/);
+  assert.match(css, /\.build-log-lines \{[^}]*overflow: auto; overflow-x: auto/);
+  assert.doesNotMatch(css, /\.build-log-lines \{[^}]*(overflow-wrap: (anywhere|break-word)|word-break: (break-all|break-word)|height: min\(60vh)/);
   assert.match(css, /\.build-log-lines \{[^}]*flex: 0 1 auto; min-height: 0;[^}]*overflow: auto/);
   assert.match(css, /#build-log\[open\] \{ display: flex; flex-direction: column; overflow: hidden; \}/);
   assert.match(css, /\.build-log-lines \{[^}]*font: 12px\/1\.45 ui-monospace/);
@@ -10671,14 +10747,14 @@ test("Resume transcode says a running build keeps the node held", async () => {
   const resume = () => flatten(h.elements.get("worker-nodes")).find((e) => e.textContent === "Resume transcode");
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x", builds: [build] }) };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.equal(resume().title, "Transcode starts again when the running build ends.");
+  assert.equal(resume().title, "Lifts your pause; the running build still holds transcode on this node until it ends.");
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "suspend", idle: true, message: "x", builds: [build] }) };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.equal(resume().title, "Frozen encodes continue where they were when the running build ends.");
+  assert.equal(resume().title, "Lifts your pause; the running build still holds transcode on this node until it ends.");
   h.context.notices = [];
   h.run("api = async () => ({}); refreshWorkers = async () => {}; notify = (t) => notices.push(t);");
   await resume().listeners.get("click")();
-  assert.deepEqual(plain(h.context.notices), ["m1 transcode pause lifted. Transcode starts again when the running build ends."]);
+  assert.deepEqual(plain(h.context.notices), ["m1: Lifts your pause; the running build still holds transcode on this node until it ends."]);
   // Without a running build it is the plain resume.
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x", builds: [{ ...build, status: "waiting" }] }) };
   h.run("state.workerInfo = info; renderWorkers();");

@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -126,41 +127,54 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Progress   *string   `json:"progress"`
-		TTLSeconds int       `json:"ttl_seconds"`
-		Log        []*string `json:"log"`
+		Progress   *string         `json:"progress"`
+		TTLSeconds int             `json:"ttl_seconds"`
+		Log        json.RawMessage `json:"log"`
 	}
 	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
 		return
 	}
-	// A null element is no line. A build that is gone or over still answers
-	// 404 or 409 first, as for any other bad line.
-	lines := make([]string, 0, len(body.Log))
-	for _, l := range body.Log {
+	id := r.PathValue("id")
+	// The log is checked after the build: one that is gone or over answers 404
+	// or 409 first, whatever is wrong with the lines.
+	var lines []string
+	var items []*string
+	if len(body.Log) > 0 && string(body.Log) != "null" {
+		if err := json.Unmarshal(body.Log, &items); err != nil {
+			items = []*string{nil}
+		}
+	}
+	for _, l := range items {
 		if l == nil {
-			cur, err := s.engine.GetBuild(r.PathValue("id"))
+			cur, err := s.engine.GetBuild(id)
 			if s.buildError(w, err) {
 				return
 			}
 			if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
-				writeJSON(w, 409, map[string]any{"error": "build already ended", "build": cur})
+				writeBuildEnded(w, cur)
 				return
 			}
-			fail(w, 400, "log lines must be strings")
+			fail(w, 400, "log must be an array of strings")
 			return
 		}
 		lines = append(lines, *l)
 	}
-	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds, lines...)
+	b, err := s.engine.HeartbeatBuild(r.Context(), id, body.Progress, body.TTLSeconds, lines...)
 	if errors.Is(err, store.ErrBuildEnded) {
-		writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
+		writeBuildEnded(w, b)
 		return
 	}
 	if s.buildError(w, err) {
 		return
 	}
 	writeJSON(w, 200, b)
+}
+
+// writeBuildEnded is the 409 of a heartbeat to a build that is over; the
+// record is the one the engine marked (see Engine.GetBuild, HeartbeatBuild).
+func writeBuildEnded(w http.ResponseWriter, b store.Build) {
+	writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
 }
 
 // buildLog answers the output tail of a build: the last lines its heartbeats

@@ -1029,7 +1029,9 @@ async function refreshBuildLog() {
     if (seq !== buildLogView.seq || id !== buildLogView.id) return;
     Object.assign(buildLogView, { status: log.status, endedAt: log.ended_at || null, loaded: true, stale: false });
     renderBuildLogMeta();
-    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : [], "No output yet");
+    // A build that ended with nothing to show has lost its output (or never had
+    // any): the retention is over, so the line does not promise more.
+    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : [], BUILD_ENDED.includes(log.status) ? "Output no longer kept" : "No output yet");
   } catch (err) {
     if (seq !== buildLogView.seq || id !== buildLogView.id) return;
     if (err?.status === 404) {
@@ -1037,7 +1039,7 @@ async function refreshBuildLog() {
       Object.assign(buildLogView, { gone: true, loaded: false, stale: false });
       buildLogView.text = null;
       renderBuildLogMeta();
-      renderBuildLog([], "Output no longer available");
+      renderBuildLog([], BUILD_ENDED.includes(buildLogView.status) ? "Output no longer kept" : "Output no longer available");
     } else if (buildLogView.loaded) {
       // The lines already shown stay; the meta line says they may be old.
       buildLogView.stale = true;
@@ -1086,14 +1088,21 @@ function buildOpenCue() {
   }
   return cue;
 }
+// Both layouts carry the build's row and only one is shown, so the first match
+// in the document may be the hidden one: take the first that is displayed and
+// check that focus really moved before giving up on it.
 function focusAfterBuildLog(view) {
-  let target = view.opener && view.opener.isConnected !== false ? view.opener : null;
-  if (!target && view.id && /^[A-Za-z0-9_-]+$/.test(view.id)) target = document.querySelector(`[data-build-id="${view.id}"]`);
-  if (!target) {
-    target = $("worker-capacity");
-    target.tabIndex = -1;
+  const candidates = [view.opener];
+  if (view.id && /^[A-Za-z0-9_-]+$/.test(view.id)) candidates.push(...(document.querySelectorAll?.(`[data-build-id="${view.id}"]`) || []));
+  for (const el of candidates) {
+    if (!el || el.isConnected === false) continue;
+    if (typeof el.getClientRects === "function" && el.getClientRects().length === 0) continue;
+    el.focus?.();
+    if (document.activeElement === el) return;
   }
-  target.focus?.();
+  const heading = $("worker-capacity");
+  heading.tabIndex = -1;
+  heading.focus?.();
 }
 $("close-build-log").addEventListener("click", () => $("build-log").close());
 $("build-log").addEventListener("close", () => {
@@ -1142,6 +1151,7 @@ function renderWorkerDetails(host, info) {
 // encoding. "After current files" lets what is encoding finish; "Now" sends it
 // back to the queue to start again on another node (nothing is cancelled).
 // "Suspend now" freezes what is encoding where it is; it continues on Resume.
+const NODE_PAUSE_LIFTED = "Lifts your pause; the running build still holds transcode on this node until it ends.";
 const nodeHasRunningBuild = pause => (pause?.builds || []).some(b => b.status === "running");
 function nodePauseControls(worker) {
   const pause = worker.pause;
@@ -1180,8 +1190,10 @@ function nodePauseControls(worker) {
   } else {
     // A running build keeps holding the node after the operator's pause is lifted.
     const building = nodeHasRunningBuild(pause);
+    // Whether the frozen encodes thaw at once depends on the build's own mode,
+    // so with a build running the tooltip only says what is certain.
     add("Resume transcode", "off", building
-      ? pause.mode === "suspend" ? "Frozen encodes continue where they were when the running build ends." : "Transcode starts again when the running build ends."
+      ? NODE_PAUSE_LIFTED
       : pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
     if (pause.mode === "graceful") add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
     if (pause.mode === "graceful" || pause.mode === "suspend") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
@@ -1192,7 +1204,7 @@ function nodePauseControls(worker) {
 function setNodePause(worker, mode) {
   return safe(async () => {
     await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? nodeHasRunningBuild(worker.pause) ? `${worker.name} transcode pause lifted. Transcode starts again when the running build ends.` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
+    notify(mode === "off" ? nodeHasRunningBuild(worker.pause) ? `${worker.name}: ${NODE_PAUSE_LIFTED}` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }
@@ -7868,7 +7880,7 @@ function buildSlotRow(n, b) {
   row.setAttribute("aria-label", `Output of build ${b.title}`);
   buildLogOpener(row, b);
   row.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openBuildLog(b); }
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openBuildLog(b, row); }
   });
   const elapsed = activityElapsed(b.started_at);
   row.append(node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts"));

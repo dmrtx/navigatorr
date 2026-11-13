@@ -129,10 +129,15 @@ func buildLogExpired(b store.Build, now time.Time) bool {
 	return err == nil && now.Sub(end) >= BuildLogRetention
 }
 
-// buildEnded is whether a build is over or gone.
+// buildEnded is whether a build is over or gone. A store error that says
+// nothing about the build counts as not ended, so a hiccup never makes a live
+// build the first buffer to go.
 func (e *Engine) buildEnded(id string) bool {
 	b, err := e.deps.Store.GetBuild(id)
-	return err != nil || (b.Status != store.BuildRunning && b.Status != store.BuildWaiting)
+	if err != nil {
+		return errorsIsBuildNotFound(err)
+	}
+	return b.Status != store.BuildRunning && b.Status != store.BuildWaiting
 }
 
 // BuildLog is a build's output tail: at most BuildLogKeep lines, oldest first.

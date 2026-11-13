@@ -15,7 +15,7 @@ func TestNodePauseMessages(t *testing.T) {
 		notPaused = "Transcode not paused. The node takes new jobs."
 		idle      = "Transcode paused and idle: no encode runs on this node."
 		pausing   = "Transcode paused: 1 job(s) still finishing. Nothing new starts here."
-		suspended = "Transcode suspended: 1 encode(s) frozen where they were; they continue when the node is resumed."
+		suspended = "Transcode suspended: 1 encode(s) frozen where they were."
 		busy      = "Busy with 1 running build(s). "
 	)
 	message := func(e *Engine) string {
@@ -70,6 +70,23 @@ func TestNodePauseMessages(t *testing.T) {
 			t.Fatal(got)
 		}
 	})
+	// The operator's suspend says the same whatever mode the running build has:
+	// the sentence makes no promise about when the encodes continue.
+	for _, mode := range []string{"graceful", "immediate", "suspend"} {
+		t.Run("suspended with a "+mode+" build", func(t *testing.T) {
+			m1 := newSuspendingM1(transcode.StatusRunning)
+			m1.active = 1
+			e := pauseEngine(t, m1, &mockTranscodeExecutor{})
+			seedEncoding(t, e, "enc", "m1", "job-enc")
+			pauseNode(t, e, "m1", store.WorkerPauseSuspend)
+			e.sweepPausedNodes(context.Background())
+			startBuild(t, e, "m1", mode, 0)
+			e.sweepPausedNodes(context.Background())
+			if got := message(e); got != suspended {
+				t.Fatal(got)
+			}
+		})
+	}
 	t.Run("held by a build alone", func(t *testing.T) {
 		e := pauseEngine(t, &mockTranscodeExecutor{}, &mockTranscodeExecutor{})
 		startBuild(t, e, "m1", "graceful", 0)

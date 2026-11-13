@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,37 +66,74 @@ func TestBuildLogEvictsTheLeastRecentRunningBufferWhenNoneEnded(t *testing.T) {
 func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *testing.T) {
 	e, _ := buildEngine(t, &mockTranscodeExecutor{})
 	b := startBuild(t, e, "laptop", "", 0)
-	const workers, perWorker = 8, 40
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	accepted := map[string]bool{}
+	// 8 x 20 lines stay below BuildLogKeep, so every accepted line is still kept.
+	const workers, perWorker, finishAfter = 8, 20, 40
+	if workers*perWorker >= BuildLogKeep {
+		t.Fatal("the test must not overflow the buffer")
+	}
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		accepted = map[string]bool{}
+		refused  int
+		count    atomic.Int32
+		start    = make(chan struct{})
+		reached  = make(chan struct{})
+		finished = make(chan struct{})
+		once     sync.Once
+	)
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
+			<-start
 			for i := 0; i < perWorker; i++ {
 				line := fmt.Sprintf("w%d-%03d", w, i)
 				_, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, line)
-				if err == nil {
-					mu.Lock()
+				mu.Lock()
+				switch {
+				case err == nil:
 					accepted[line] = true
-					mu.Unlock()
-				} else if !errors.Is(err, store.ErrBuildEnded) {
+				case errors.Is(err, store.ErrBuildEnded):
+					refused++
+				default:
 					t.Errorf("heartbeat: %v", err)
 				}
+				mu.Unlock()
+				if err == nil && count.Add(1) == finishAfter {
+					once.Do(func() { close(reached) })
+				}
 			}
+			// One more after the end, so the refusal is always exercised.
+			<-finished
+			_, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, fmt.Sprintf("w%d-late", w))
+			mu.Lock()
+			if errors.Is(err, store.ErrBuildEnded) {
+				refused++
+			} else {
+				t.Errorf("a heartbeat after the end: %v", err)
+			}
+			mu.Unlock()
 		}(w)
 	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		time.Sleep(2 * time.Millisecond)
-		e.FinishBuild(context.Background(), b.ID, store.BuildCancelled, nil)
+		<-start
+		<-reached
+		if _, _, err := e.FinishBuild(context.Background(), b.ID, store.BuildCancelled, nil); err != nil {
+			t.Errorf("finish: %v", err)
+		}
+		close(finished)
 	}()
+	close(start)
 	wg.Wait()
 	_, lines, _, err := e.BuildLog(b.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(accepted) < finishAfter || refused == 0 {
+		t.Fatalf("the test proves nothing: %d accepted, %d refused", len(accepted), refused)
 	}
 	// Only accepted lines are there, each once, and each worker's lines in order.
 	last := map[string]string{}
@@ -113,14 +151,6 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 	}
 	if len(lines) != len(accepted) {
 		t.Fatalf("%d lines kept, %d accepted", len(lines), len(accepted))
-	}
-	// After the end, nothing more lands.
-	n := len(lines)
-	if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "after"); !errors.Is(err, store.ErrBuildEnded) {
-		t.Fatal(err)
-	}
-	if _, after, _, _ := e.BuildLog(b.ID); len(after) != n {
-		t.Fatal("a line landed after the end")
 	}
 }
 
