@@ -489,6 +489,15 @@ func (e *Engine) NodePauseStatuses(ctx context.Context) map[string]transcode.Nod
 	return e.nodePauseStatuses(ctx, e.observeWorkers(ctx))
 }
 
+// NodePauseStatesStored is NodePauseStatuses without the worker health probes:
+// the same effective pause, builds pause and build list, read from the store and
+// memory only, so it makes no network call. Reachable is left false and the
+// messages that depend on it are not meaningful; the mode, the paused flags and
+// Builds are the same as NodePauseStatuses reports.
+func (e *Engine) NodePauseStatesStored(ctx context.Context) map[string]transcode.NodePauseStatus {
+	return e.nodePauseStatuses(ctx, transcode.WorkerObservation{})
+}
+
 func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObservation) map[string]transcode.NodePauseStatus {
 	now := time.Now().UTC()
 	out := map[string]transcode.NodePauseStatus{}
