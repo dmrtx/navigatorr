@@ -106,3 +106,61 @@ func (s *Store) ClearTranscodeBatchItemJob(childActionID string) error {
 	_, err := s.db.Exec(`UPDATE transcode_batch_items SET job_id = '', worker = '', updated_at = ? WHERE child_action_id = ?`, nowStr(), childActionID)
 	return err
 }
+
+// BuildPause is the operator's switch that makes the server refuse new builds
+// on one node. It is one durable row per node, so a restart keeps it, and it
+// is independent of the transcode pause (WorkerPause).
+type BuildPause struct {
+	Worker    string `json:"worker"`
+	Since     string `json:"since"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+// ListBuildPauses returns the nodes whose builds are paused, by worker name.
+func (s *Store) ListBuildPauses() (map[string]BuildPause, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT worker, since, updated_at FROM build_pauses`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]BuildPause{}
+	for rows.Next() {
+		var p BuildPause
+		if err := rows.Scan(&p.Worker, &p.Since, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out[p.Worker] = p
+	}
+	return out, rows.Err()
+}
+
+// BuildsPaused reports whether new builds on the node are refused.
+func (s *Store) BuildsPaused(worker string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var one int
+	err := s.db.QueryRow(`SELECT 1 FROM build_pauses WHERE worker=?`, worker).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// SetBuildPause pauses (true) or resumes (false) new builds on a node.
+// Repeating the same request changes nothing and keeps the start time.
+func (s *Store) SetBuildPause(worker string, paused bool) error {
+	if worker == "" {
+		return errors.New("worker name is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !paused {
+		_, err := s.db.Exec(`DELETE FROM build_pauses WHERE worker=?`, worker)
+		return err
+	}
+	now := nowStr()
+	_, err := s.db.Exec(`INSERT INTO build_pauses(worker, since, updated_at) VALUES(?, ?, ?) ON CONFLICT(worker) DO NOTHING`, worker, now, now)
+	return err
+}

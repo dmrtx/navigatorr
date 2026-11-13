@@ -19,7 +19,10 @@ import (
 // when the target is a transcode node it holds that node while it runs (see
 // action/builds.go).
 //
-//	POST /api/maintenance/builds                create; 200 with the build
+//	POST /api/maintenance/builds                create; 200 with the build; 409
+//	                                            {"error": "builds paused on <node>",
+//	                                            "code": "builds_paused"} while the
+//	                                            operator paused builds on that node
 //	GET  /api/maintenance/builds                list (target, status, source, limit)
 //	GET  /api/maintenance/builds/{id}           one build
 //	POST /api/maintenance/builds/{id}/heartbeat extend; 409 if the build ended
@@ -229,11 +232,15 @@ func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {
 // buildError answers an error of a build call and reports whether it did.
 func (s *Server) buildError(w http.ResponseWriter, err error) bool {
 	var invalid *action.BuildInvalidError
+	var paused *action.BuildsPausedError
 	switch {
 	case err == nil:
 		return false
 	case errors.As(err, &invalid):
 		fail(w, 400, invalid.Reason)
+	case errors.As(err, &paused):
+		// Nothing was created and no hold was taken; the code is stable for scripts.
+		writeJSON(w, 409, map[string]string{"error": paused.Error(), "code": action.BuildsPausedCode})
 	case errors.Is(err, store.ErrBuildNotFound):
 		fail(w, 404, "build not found")
 	default:

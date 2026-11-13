@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -13,30 +14,65 @@ import (
 // for other work: "graceful" lets what is encoding finish, "immediate" sends it
 // back to the transcode queue without cancelling the conversion, "suspend"
 // freezes what is encoding so it continues where it was, and "off" resumes the
-// node. Repeating a request changes nothing.
+// node. A separate request, {"node", "builds_paused": bool}, toggles the
+// independent builds pause: the server refuses new builds on the node while it
+// is on. Repeating a request changes nothing.
 func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		// The two switches are read key-wise, by presence in any form (an empty
+		// string or null counts), the same rule as the MCP tool: one request
+		// flips one switch, so it never half applies.
 		var body struct {
-			Node string `json:"node"`
-			Mode string `json:"mode"`
+			Node         string          `json:"node"`
+			Mode         json.RawMessage `json:"mode"`
+			BuildsPaused json.RawMessage `json:"builds_paused"`
 		}
 		mode := ""
+		var builds *bool
 		if decode(w, r, &body) == nil {
-			switch body.Mode {
-			case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
-				mode = body.Mode
-			case "off":
-			default:
+			hasMode, hasBuilds := len(body.Mode) > 0, len(body.BuildsPaused) > 0
+			switch {
+			case hasMode && hasBuilds:
 				body.Node = ""
+			case hasBuilds:
+				// Only a JSON true or false: null or any other type is refused.
+				switch string(body.BuildsPaused) {
+				case "true":
+					v := true
+					builds = &v
+				case "false":
+					v := false
+					builds = &v
+				default:
+					body.Node = ""
+				}
+			default:
+				var given string
+				if hasMode && json.Unmarshal(body.Mode, &given) != nil {
+					given = "?"
+				}
+				switch given {
+				case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
+					mode = given
+				case "off":
+				default:
+					body.Node = ""
+				}
 			}
 		} else {
 			body.Node = ""
 		}
 		if body.Node == "" {
-			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"suspend"|"off"}`)
+			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"suspend"|"off"} or {"node": "<name>", "builds_paused": true|false}`)
 			return
 		}
-		status, err := s.engine.SetNodePause(r.Context(), body.Node, mode)
+		var status transcode.NodePauseStatus
+		var err error
+		if builds != nil {
+			status, err = s.engine.SetNodeBuildsPause(r.Context(), body.Node, *builds)
+		} else {
+			status, err = s.engine.SetNodePause(r.Context(), body.Node, mode)
+		}
 		var unknown *transcode.WorkerNotConfiguredError
 		switch {
 		case errors.As(err, &unknown):

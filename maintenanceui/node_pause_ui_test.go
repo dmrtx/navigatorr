@@ -29,7 +29,7 @@ func nodePauseControlsSource(t *testing.T) string {
 // own status message, above them.
 func TestNodePauseControlsOfferSuspendInTheOneActionsRow(t *testing.T) {
 	src := nodePauseControlsSource(t)
-	for _, want := range []string{`add("Pause transcode after current files", "graceful"`, `add("Pause transcode now", "immediate"`, `add("Suspend transcode now", "suspend"`, `add("Resume transcode", "off"`} {
+	for _, want := range []string{`add("Pause transcode after current files", "graceful"`, `add("Pause transcode now", "immediate"`, `add("Suspend transcode now", "suspend"`, `add("Resume transcode", "off"`, `add("Resume builds", "builds_resume"`, `add("Pause builds", "builds_pause"`} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("missing %s", want)
 		}

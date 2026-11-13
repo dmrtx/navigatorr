@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 25
+const SchemaVersion = 26
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -464,6 +464,13 @@ var migrations = []migration{
 		// created in the same second keep their creation order.
 		`CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, target TEXT NOT NULL, source TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, preempt_mode TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', last_heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '', exit_code INTEGER, seq INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID`,
 		`CREATE INDEX IF NOT EXISTS builds_status ON builds(status, expires_at)`,
+	}},
+	{version: 26, statements: []string{
+		// A node whose builds the operator paused: one row while it is paused,
+		// none otherwise. It is independent of worker_pauses (the transcode
+		// pause) and only makes the server refuse to register a new build on
+		// the node; builds already registered are untouched.
+		`CREATE TABLE IF NOT EXISTS build_pauses (worker TEXT PRIMARY KEY, since TEXT NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
 	}},
 }
 
