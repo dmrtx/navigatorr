@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -51,6 +52,10 @@ const (
 	buildTitleMax = 200
 	buildProgMax  = 200
 )
+
+var errStoreForBuilds = errors.New("store is required for builds")
+
+func errorsIsBuildNotFound(err error) bool { return errors.Is(err, store.ErrBuildNotFound) }
 
 var buildTargetPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
@@ -219,29 +224,82 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	return e.markBuild(b), nil
 }
 
+// buildHeartbeatGap is a test seam: it runs between a heartbeat's store update
+// and its log append, to widen the window a missing lock would leave open.
+var buildHeartbeatGap atomic.Pointer[func()]
+
+// checkHeartbeat validates the log, the progress line and the ttl of a
+// heartbeat, and returns the ttl (0 keeps the window the build has). progress
+// is replaced by its trimmed form.
+func checkHeartbeat(progress **string, ttlSeconds int, logLines []string) (time.Duration, error) {
+	if err := checkBuildLog(logLines); err != nil {
+		return 0, err
+	}
+	if *progress != nil {
+		p, err := checkBuildText("progress", **progress, buildProgMax, false)
+		if err != nil {
+			return 0, err
+		}
+		*progress = &p
+	}
+	if ttlSeconds == 0 {
+		return 0, nil
+	}
+	return buildTTL(ttlSeconds)
+}
+
+// OpenBuild is the first step of a heartbeat that comes from outside: it finds
+// the build before anything the caller sent is read. An unknown build gives
+// store.ErrBuildNotFound; an ended one gives store.ErrBuildEnded with its
+// record. A running build whose expiry passed counts as ended too: it is marked
+// lost here (releasing its node hold) rather than left for the next tick, and
+// is answered the same way. Otherwise it returns the build, unchanged.
+func (e *Engine) OpenBuild(ctx context.Context, id string) (store.Build, error) {
+	cur, err := e.GetBuild(id)
+	if err != nil {
+		return store.Build{}, err
+	}
+	if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+		return cur, store.ErrBuildEnded
+	}
+	if exp, perr := time.Parse(time.RFC3339, cur.ExpiresAt); perr == nil && !exp.After(e.now()) {
+		if b, err := e.HeartbeatBuild(ctx, id, nil, 0); err != nil {
+			return b, err
+		}
+	}
+	return cur, nil
+}
+
 // HeartbeatBuild extends a running build's expiry and optionally replaces its
 // progress line and ttl. A build that already ended gives store.ErrBuildEnded
 // together with its record.
-func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string, ttlSeconds int) (store.Build, error) {
+func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string, ttlSeconds int, logLines ...string) (store.Build, error) {
 	if e.deps.Store == nil {
-		return store.Build{}, errors.New("store is required for builds")
+		return store.Build{}, errStoreForBuilds
 	}
-	if progress != nil {
-		p, err := checkBuildText("progress", *progress, buildProgMax, false)
-		if err != nil {
-			return store.Build{}, err
+	// Everything the caller sent is checked before anything is applied, and a
+	// build that is gone or over answers as such whatever was wrong with it.
+	ttl, err := checkHeartbeat(&progress, ttlSeconds, logLines)
+	if err != nil {
+		if cur, gerr := e.deps.Store.GetBuild(id); gerr != nil {
+			return store.Build{}, gerr
+		} else if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+			return e.markBuild(cur), store.ErrBuildEnded
 		}
-		progress = &p
+		return store.Build{}, err
 	}
-	// 0 keeps the window the build already has (see Store.HeartbeatBuild).
-	ttl := time.Duration(0)
-	if ttlSeconds != 0 {
-		var err error
-		if ttl, err = buildTTL(ttlSeconds); err != nil {
-			return store.Build{}, err
-		}
-	}
+	// The update and the append are one step against a finish, a cancel or a
+	// loss, and against another heartbeat: lines stay in order and never land
+	// on an ended build.
+	e.buildMu.Lock()
 	b, err := e.deps.Store.HeartbeatBuild(id, e.now(), ttl, progress)
+	if err == nil {
+		if gap := buildHeartbeatGap.Load(); gap != nil {
+			(*gap)()
+		}
+		e.buildLogs.append(id, logLines, e.now(), e.buildEnded)
+	}
+	e.buildMu.Unlock()
 	if errors.Is(err, store.ErrBuildExpired) {
 		// The late heartbeat marked the build lost: release its node hold the
 		// way a finish does, and let a waiting build take the node.
@@ -274,7 +332,9 @@ func (e *Engine) FinishBuild(ctx context.Context, id, status string, exit *int) 
 		return store.Build{}, false, err
 	}
 	e.withNodeLock(current.Target, func(w transcode.NamedWorker, isNode bool) {
+		e.buildMu.Lock()
 		b, changed, err = e.deps.Store.FinishBuild(id, status, exit, e.now())
+		e.buildMu.Unlock()
 		if err == nil && changed && isNode {
 			e.syncWorkerHold(ctx, w)
 		}
@@ -318,7 +378,9 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 		return
 	}
 	now := e.now()
+	e.buildMu.Lock()
 	lost, err := e.deps.Store.ExpireBuilds(now)
+	e.buildMu.Unlock()
 	if err != nil {
 		log.Printf("builds: expiring: %v", err)
 	}
@@ -330,6 +392,7 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 		e.WakeReconciler()
 	}
 	e.promoteWaitingBuilds()
+	e.pruneBuildLogs()
 	retention := 30 * 24 * time.Hour
 	if e.deps.Config != nil {
 		retention = e.deps.Config.Builds.RetentionDuration()

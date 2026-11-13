@@ -41,6 +41,11 @@ type Engine struct {
 	afterBatchPlanLock func()
 	// beforeAutoEnqueue, in tests, can fail an automatic submission.
 	beforeAutoEnqueue func(id string) error
+	// buildLogs holds the output tails of builds, in memory only.
+	buildLogs buildLogs
+	// buildMu makes a heartbeat's update and log append one step against the
+	// transitions that end a build.
+	buildMu sync.Mutex
 	// notes tracks skipped-replacement notes still being written.
 	notes sync.WaitGroup
 

@@ -3,11 +3,13 @@ package maintenanceui
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/store"
@@ -21,6 +23,7 @@ import (
 //	GET  /api/maintenance/builds                list (target, status, source, limit)
 //	GET  /api/maintenance/builds/{id}           one build
 //	POST /api/maintenance/builds/{id}/heartbeat extend; 409 if the build ended
+//	GET  /api/maintenance/builds/{id}/log       output tail: {lines, updated_at, status}
 //	POST /api/maintenance/builds/{id}/finish    end it; finishing an ended build
 //	                                            answers 200 with it unchanged
 //
@@ -42,7 +45,7 @@ func isBuildsPath(p string) bool {
 	if len(parts) == 0 || len(parts) > 2 || !validBuildID(parts[0]) {
 		return false
 	}
-	return len(parts) == 1 || parts[1] == "heartbeat" || parts[1] == "finish"
+	return len(parts) == 1 || parts[1] == "heartbeat" || parts[1] == "finish" || parts[1] == "log"
 }
 
 func validBuildID(id string) bool {
@@ -123,23 +126,88 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Progress   *string `json:"progress"`
-		TTLSeconds int     `json:"ttl_seconds"`
-	}
-	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-		fail(w, 400, `send {"progress"?, "ttl_seconds"?} or nothing`)
+	id := r.PathValue("id")
+	// The build comes first, from the path alone: unknown is 404 and over (or
+	// past its expiry) is 409, whatever the body is or how large. Only then is the
+	// body read and judged (400).
+	if b, err := s.engine.OpenBuild(r.Context(), id); errors.Is(err, store.ErrBuildEnded) {
+		writeBuildEnded(w, b)
+		return
+	} else if s.buildError(w, err) {
 		return
 	}
-	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds)
+	var body struct {
+		Progress   json.RawMessage `json:"progress"`
+		TTLSeconds json.RawMessage `json:"ttl_seconds"`
+		Log        json.RawMessage `json:"log"`
+	}
+	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
+		return
+	}
+	var progress *string
+	var ttl int
+	var lines []string
+	if len(body.Progress) > 0 && string(body.Progress) != "null" {
+		var p string
+		if json.Unmarshal(body.Progress, &p) != nil {
+			fail(w, 400, "progress must be a string")
+			return
+		}
+		progress = &p
+	}
+	if len(body.TTLSeconds) > 0 && string(body.TTLSeconds) != "null" && json.Unmarshal(body.TTLSeconds, &ttl) != nil {
+		fail(w, 400, "ttl_seconds must be a whole number")
+		return
+	}
+	if len(body.Log) > 0 && string(body.Log) != "null" {
+		var items []*string
+		if json.Unmarshal(body.Log, &items) != nil {
+			items = []*string{nil}
+		}
+		for _, l := range items {
+			if l == nil {
+				fail(w, 400, "log must be an array of strings")
+				return
+			}
+			lines = append(lines, *l)
+		}
+	}
+	// The engine judges the values (length, range) and, if the build ended in
+	// the meantime, answers 409.
+	b, err := s.engine.HeartbeatBuild(r.Context(), id, progress, ttl, lines...)
 	if errors.Is(err, store.ErrBuildEnded) {
-		writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
+		writeBuildEnded(w, b)
 		return
 	}
 	if s.buildError(w, err) {
 		return
 	}
 	writeJSON(w, 200, b)
+}
+
+// writeBuildEnded is the 409 of a heartbeat to a build that is over; the
+// record is the one the engine marked (see Engine.GetBuild, HeartbeatBuild).
+func writeBuildEnded(w http.ResponseWriter, b store.Build) {
+	writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
+}
+
+// buildLog answers the output tail of a build: the last lines its heartbeats
+// sent, oldest first. They are kept in memory only (see action/buildlog.go).
+func (s *Server) buildLog(w http.ResponseWriter, r *http.Request) {
+	out, err := s.engine.BuildOutput(r.PathValue("id"))
+	if s.buildError(w, err) {
+		return
+	}
+	var at any
+	if !out.Updated.IsZero() {
+		at = out.Updated.UTC().Format(time.RFC3339)
+	}
+	var ended any
+	if out.Build.EndedAt != "" {
+		ended = out.Build.EndedAt
+	}
+	writeJSON(w, 200, map[string]any{"lines": out.Lines, "updated_at": at, "status": out.Build.Status, "ended_at": ended, "expired": out.Expired})
 }
 
 func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {

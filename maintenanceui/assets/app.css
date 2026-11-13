@@ -3671,6 +3671,43 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 .stat-open:not(:disabled):hover { border-color: var(--forest); }
 .stat-open:disabled { opacity: 1; color: var(--muted); background: transparent; }
 .stat-open:disabled .stat-open-arrow { display: none; }
+/* A build's output: monospace, grows with its lines up to the room the dialog
+   has, and is then the dialog's one scroller. */
+#build-log { width: min(860px, calc(100% - 16px)); max-width: 860px; }
+#build-log[open] { display: flex; flex-direction: column; overflow: hidden; }
+#build-log .dialog-heading, .build-log-meta, #build-log-empty { flex: none; }
+.build-log-meta { margin: 4px 0 8px; font-weight: 600; }
+.build-log-meta[data-status="running"] { color: var(--forest); }
+.build-log-meta[data-status="waiting"] { color: var(--warning); }
+.build-log-meta[data-status="failed"], .build-log-meta[data-status="lost"] { color: var(--danger); }
+.build-log-meta[data-status="succeeded"], .build-log-meta[data-status="cancelled"] { color: var(--muted); }
+#build-log-empty { margin: 0; }
+#build-log-empty[data-state="error"] { color: var(--danger); }
+.build-log-lines { box-sizing: border-box; flex: 0 1 auto; min-height: 0; margin: 0; padding: 8px 10px; overflow: auto; overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); color: var(--ink); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: normal; word-break: normal; }
+.build-log-lines[hidden] { display: none; }
+/* The block's wrapper carries the overflow hint, so the block itself keeps its
+   focus ring and scrollbar whole. Wider than the dialog and not at the end: a
+   narrow strip inside the right edge, clear of the scrollbars (set by the script). */
+.build-log-wrap { --build-log-bar-x: 0px; --build-log-bar-y: 0px; position: relative; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.build-log-wrap.more-right::after { content: ""; position: absolute; top: 1px; bottom: calc(1px + var(--build-log-bar-y)); right: calc(1px + var(--build-log-bar-x)); width: 18px; border-radius: 0 5px 5px 0; background: linear-gradient(to right, transparent, color-mix(in srgb, var(--ink) 28%, transparent)); pointer-events: none; }
+.build-log-lines:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; }
+.build-open { cursor: pointer; }
+/* The cue that a build's row opens its output: a terminal and a chevron. */
+.build-cue { display: inline-flex; align-items: center; gap: 2px; color: var(--muted); vertical-align: middle; }
+.build-cue svg { width: 14px; height: 14px; }
+.slots-table .slot-file-link.build-title { display: inline-block; max-width: calc(100% - 44px); vertical-align: middle; }
+.slots-table td.slot-file .build-cue { margin-left: 6px; }
+.worker-slot.build-open { position: relative; }
+.worker-slot.build-open > strong { padding-right: 40px; }
+.worker-slot.build-open > .build-cue { position: absolute; top: 7px; right: 0; }
+.worker-slot.build-open:hover strong, .slots-table tr.build-open:hover .slot-file-link { text-decoration: underline; text-underline-offset: 3px; }
+.worker-slot.build-open:hover .build-cue, .slots-table tr.build-open:hover .build-cue { color: var(--forest); }
+.worker-slot.build-open:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; border-radius: 3px; }
+/* The dialog's close button keeps its look and gets a 44px target on a phone. */
+@media (pointer: coarse), (max-width: 900px) {
+  #close-build-log { position: relative; }
+  #close-build-log::after { content: ""; position: absolute; inset: -7px; }
+}
 #ready-dialog .stat-list { max-height: min(60vh, 520px); overflow: auto; }
 #ready-replace-all:empty { display: none; }
 #ready-replace-all { display: flex; justify-content: flex-start; margin: 4px 0 8px; }

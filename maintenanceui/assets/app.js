@@ -152,6 +152,8 @@ function actionIcon(label) {
     "More actions": "M5 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM12 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2ZM19 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z",
     // Fallback for job actions without their own icon (new server decisions).
     Action: "M5 12h14M13 6l6 6-6 6",
+    Output: "M4 5h16v14H4ZM8 10l3 2-3 2M13 15h3",
+    Open: "M9 6l6 6-6 6",
   };
   if (!paths[label]) return null;
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -258,7 +260,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("offline", () => setConnection(false));
   window.addEventListener("online", () => safe(reconnect));
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) { safe(reconnect); resumeFolderSizes(); }
+    if (!document.hidden) { safe(reconnect); resumeFolderSizes(); if (buildLogView.id) void refreshBuildLog(); }
   });
 }
 function invalidateAuthentication() {
@@ -983,6 +985,157 @@ function renderBuilds(host, builds, now = Date.now()) {
   host.append(table);
 }
 // builds:end
+// The output tail of a running build, in a dialog opened from its slot row. The
+// lines come from GET builds/{id}/log, are shown as text only, newest at the
+// bottom, and follow the bottom unless the person scrolled up.
+const BUILD_LOG_REFRESH_MS = 5000;
+const buildLogView = { id: null, build: null, opener: null, seq: 0, timer: 0, pinned: true, text: null, status: null, endedAt: null, loaded: false, gone: false, stale: false };
+const BUILD_STATUS_LABEL = { running: "Running", waiting: "Waiting", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", lost: "Lost" };
+const BUILD_ENDED = ["succeeded", "failed", "cancelled", "lost"];
+// Time between two instants in the slot lines' style; an ended build stops at its end.
+function buildSpan(start, end) {
+  const from = Date.parse(start || ""), to = end ? Date.parse(end) : Date.now();
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from < Date.UTC(2000,0,1)) return null;
+  const seconds = Math.max(0, Math.floor((to - from) / 1000));
+  return seconds >= 60 ? `${Math.floor(seconds/60)}m ${seconds%60}s` : `${seconds}s`;
+}
+function renderBuildLogMeta() {
+  const meta = $("build-log-meta"), status = buildLogView.status || buildLogView.build?.status || "running";
+  const ended = BUILD_ENDED.includes(status);
+  const elapsed = buildSpan(buildLogView.build?.started_at || buildLogView.build?.created_at, ended ? buildLogView.endedAt : null);
+  meta.dataset.status = status;
+  meta.textContent = [BUILD_STATUS_LABEL[status] || status, elapsed ? (ended ? elapsed : `${elapsed} elapsed`) : null, buildLogView.stale ? "update failed" : null].filter(Boolean).join(" · ");
+}
+// One line stands in for the block while there is nothing to show: loading, no
+// output, a failed read, or output that is gone.
+function renderBuildLog(lines, message) {
+  const text = lines.join("\n"), box = $("build-log-lines"), empty = $("build-log-empty");
+  empty.hidden = lines.length > 0;
+  if (lines.length === 0) empty.textContent = message;
+  empty.dataset.state = lines.length ? "" : message === "Loading output" ? "loading" : message === "Couldn't load the output" || message === "Output no longer available" ? "error" : "empty";
+  box.hidden = lines.length === 0;
+  if (text !== buildLogView.text) {
+    buildLogView.text = text;
+    box.textContent = text;
+  }
+  if (buildLogView.pinned) box.scrollTop = box.scrollHeight;
+  updateBuildLogOverflow();
+}
+// A long token keeps the block wider than the dialog: a strip at the right edge
+// says there is more that way, until the scroll reaches the end. It is an overlay
+// on the wrapper (the block keeps its focus ring and scrollbars whole).
+function updateBuildLogOverflow() {
+  const box = $("build-log-lines"), wrap = $("build-log-wrap");
+  const more = box.scrollWidth > box.clientWidth + 1 && box.scrollLeft + box.clientWidth < box.scrollWidth - 1;
+  // Keep the strip off the block's own scrollbars (the 2px are its border).
+  const bar = (outer, inner) => `${Math.max(0, (outer - inner - 2) || 0)}px`;
+  wrap.style.setProperty("--build-log-bar-x", bar(box.offsetWidth, box.clientWidth));
+  wrap.style.setProperty("--build-log-bar-y", bar(box.offsetHeight, box.clientHeight));
+  wrap.classList.toggle("more-right", more);
+}
+async function refreshBuildLog() {
+  const id = buildLogView.id;
+  if (!id || !$("build-log").open || buildLogView.gone) return;
+  const seq = ++buildLogView.seq;
+  try {
+    const log = await api(`builds/${encodeURIComponent(id)}/log`);
+    if (seq !== buildLogView.seq || id !== buildLogView.id) return;
+    Object.assign(buildLogView, { status: log.status, endedAt: log.ended_at || null, loaded: true, stale: false });
+    renderBuildLogMeta();
+    // Only output the server dropped (retention, the cap) is "no longer kept";
+    // an ended build that never sent any simply has none.
+    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : [], log.expired ? "Output no longer kept" : BUILD_ENDED.includes(log.status) ? "No output" : "No output yet");
+  } catch (err) {
+    if (seq !== buildLogView.seq || id !== buildLogView.id) return;
+    if (err?.status === 404) {
+      // Purged or never known: nothing more will come.
+      Object.assign(buildLogView, { gone: true, loaded: false, stale: false });
+      buildLogView.text = null;
+      renderBuildLogMeta();
+      renderBuildLog([], BUILD_ENDED.includes(buildLogView.status) ? "Output no longer kept" : "Output no longer available");
+    } else if (buildLogView.loaded) {
+      // The lines already shown stay; the meta line says they may be old.
+      buildLogView.stale = true;
+      renderBuildLogMeta();
+    } else {
+      renderBuildLog([], "Couldn't load the output");
+    }
+  }
+}
+function scheduleBuildLog() {
+  clearTimeout(buildLogView.timer);
+  const id = buildLogView.id;
+  if (!id) return;
+  buildLogView.timer = setTimeout(async () => {
+    if (id !== buildLogView.id || !$("build-log").open) return;
+    // A hidden page asks nothing; it refreshes when it is shown again.
+    if (!document.hidden) await refreshBuildLog();
+    // Nothing more arrives once the build ended or its output is gone.
+    if (id === buildLogView.id && !buildLogView.gone && !BUILD_ENDED.includes(buildLogView.status)) scheduleBuildLog();
+  }, BUILD_LOG_REFRESH_MS);
+}
+function openBuildLog(build, opener = null) {
+  Object.assign(buildLogView, { id: build.id, build, opener, seq: buildLogView.seq + 1, pinned: true, text: null, status: build.status || null, endedAt: null, loaded: false, gone: false, stale: false });
+  $("build-log-title").textContent = build.title || "Build";
+  $("build-log-title").title = build.title || "";
+  renderBuildLogMeta();
+  renderBuildLog([], "Loading output");
+  if (!$("build-log").open) $("build-log").showModal();
+  void refreshBuildLog();
+  scheduleBuildLog();
+}
+// A build row opens its log by click. focusEl is what takes focus again when
+// the dialog closes; the rows are rebuilt on every refresh, so it is also
+// found again by the build's id.
+function buildLogOpener(el, build, focusEl = el) {
+  focusEl.dataset.buildId = build.id;
+  el.addEventListener("click", () => openBuildLog(build, focusEl));
+  el.classList.add("build-open");
+}
+// A small terminal and a chevron beside a build's title: the row opens something.
+function buildOpenCue() {
+  const cue = node("span", "", "build-cue");
+  for (const label of ["Output", "Open"]) {
+    const icon = actionIcon(label);
+    if (icon) cue.append(icon);
+  }
+  return cue;
+}
+// Both layouts carry the build's row and only one is shown, so the first match
+// in the document may be the hidden one: take the first that is displayed and
+// check that focus really moved before giving up on it.
+function focusShownBuild(candidates, options) {
+  for (const el of candidates) {
+    if (!el || el.isConnected === false) continue;
+    if (typeof el.getClientRects === "function" && el.getClientRects().length === 0) continue;
+    el.focus?.(options);
+    if (document.activeElement === el) return true;
+  }
+  return false;
+}
+const buildRowsOf = id => id && /^[A-Za-z0-9_-]+$/.test(id) ? [...(document.querySelectorAll?.(`[data-build-id="${id}"]`) || [])] : [];
+// Where focus goes when the build row it was on is gone: the slots heading.
+function focusCapacityHeading(options) {
+  const heading = $("worker-capacity");
+  heading.tabIndex = -1;
+  heading.focus?.(options);
+}
+function focusAfterBuildLog(view) {
+  if (!focusShownBuild([view.opener, ...buildRowsOf(view.id)])) focusCapacityHeading();
+}
+$("close-build-log").addEventListener("click", () => $("build-log").close());
+$("build-log").addEventListener("close", () => {
+  clearTimeout(buildLogView.timer);
+  const closed = { id: buildLogView.id, opener: buildLogView.opener };
+  Object.assign(buildLogView, { id: null, opener: null, seq: buildLogView.seq + 1 });
+  focusAfterBuildLog(closed);
+});
+$("build-log-lines").addEventListener("scroll", () => {
+  const box = $("build-log-lines");
+  buildLogView.pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+  updateBuildLogOverflow();
+});
+if (typeof window !== "undefined") window.addEventListener("resize", updateBuildLogOverflow);
 function renderWorkerDetails(host, info) {
   host.replaceChildren();
   for (const worker of info?.nodes || []) {
@@ -1019,6 +1172,8 @@ function renderWorkerDetails(host, info) {
 // encoding. "After current files" lets what is encoding finish; "Now" sends it
 // back to the queue to start again on another node (nothing is cancelled).
 // "Suspend now" freezes what is encoding where it is; it continues on Resume.
+const NODE_PAUSE_LIFTED = "Lifts your pause; the running build still holds transcode on this node until it ends.";
+const nodeHasRunningBuild = pause => (pause?.builds || []).some(b => b.status === "running");
 function nodePauseControls(worker) {
   const pause = worker.pause;
   if (!pause || !worker.worker) return null;
@@ -1054,7 +1209,13 @@ function nodePauseControls(worker) {
     add("Pause transcode now", "immediate", "Encodes on this node go back to the queue and start again on another node. Builds are not paused.");
     add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume. Builds are not paused.");
   } else {
-    add("Resume transcode", "off", pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
+    // A running build keeps holding the node after the operator's pause is lifted.
+    const building = nodeHasRunningBuild(pause);
+    // Whether the frozen encodes thaw at once depends on the build's own mode,
+    // so with a build running the tooltip only says what is certain.
+    add("Resume transcode", "off", building
+      ? NODE_PAUSE_LIFTED
+      : pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
     if (pause.mode === "graceful") add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
     if (pause.mode === "graceful" || pause.mode === "suspend") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
   }
@@ -1063,8 +1224,10 @@ function nodePauseControls(worker) {
 }
 function setNodePause(worker, mode) {
   return safe(async () => {
-    await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
+    // The answer is the node's pause as it is now, builds included: a build
+    // that started or ended since the click decides the words, not the page.
+    const status = await api("worker-pause", {node: worker.worker, mode});
+    notify(mode === "off" ? nodeHasRunningBuild(status) ? `${worker.name} pause lifted; the running build still holds transcode until it ends.` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }
@@ -7547,7 +7710,16 @@ function activityNodes(data) {
   if (!data) return [];
   return data.workers || [{name: "", available: data.available, activity: data.activity, message: data.message}];
 }
+// The slots are rebuilt on every refresh. A build row that has focus is
+// replaced with it, so focus goes to the new row of the same build, without
+// scrolling; a row that is gone (the build ended, the update failed, the worker
+// is unavailable) hands focus to the slots heading rather than losing it to the body.
 function renderWorkerActivity(data) {
+  const focused = document.activeElement?.dataset?.buildId;
+  renderWorkerActivityRows(data);
+  if (focused && !focusShownBuild(buildRowsOf(focused), {preventScroll: true})) focusCapacityHeading({preventScroll: true});
+}
+function renderWorkerActivityRows(data) {
   state.activityData = data;
   $("worker-slots").replaceChildren();
   const nodes = activityNodes(data), live = nodes.filter(n => n.available && n.activity);
@@ -7735,8 +7907,19 @@ function buildSlotRow(n, b) {
   const row = node("div","","worker-slot");
   row.append(node("strong",`${n.name || "Node"} · build · ${b.title}`));
   row.children[0].title = b.title;
+  row.tabIndex = 0;
+  row.setAttribute("role", "button");
+  row.setAttribute("aria-label", `Output of build ${b.title}`);
+  row.setAttribute("aria-describedby", `build-facts-${b.id}`);
+  buildLogOpener(row, b);
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openBuildLog(b, row); }
+  });
   const elapsed = activityElapsed(b.started_at);
-  row.append(node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts"));
+  const facts = node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts");
+  facts.id = `build-facts-${b.id}`;
+  row.append(facts);
+  row.append(buildOpenCue());
   return row;
 }
 // One node as a row that opens onto its slots. Open while something runs or is
@@ -7745,7 +7928,8 @@ function slotNodeDetails(n, entries) {
   const online = Boolean(n.available && n.activity);
   const builds = online ? runningBuilds(n) : [], hold = online ? nodeHoldWord(n) : "";
   for (const e of entries) if (hold && !e.job && !e.unknown) e.held = hold;
-  const busy = entries.filter(e => e.job || e.unknown).length + builds.length;
+  // Slots count encodes only; a build is shown beside them, as the header does.
+  const slotsBusy = entries.filter(e => e.job || e.unknown).length, busy = slotsBusy + builds.length;
   const stale = entries.some(e => e.job && !heartbeatAlive(workerHeartbeatState(e.job.heartbeat_at)));
   const key = n.name || "", chosen = state.slotNodeOpen?.get(key);
   const details = node("details","","slot-node");
@@ -7754,7 +7938,8 @@ function slotNodeDetails(n, entries) {
   const summary = node("summary");
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
-    node("span", !online ? n.message || "Unavailable" : `${busy}/${nodeSlotCounts(n).total}${busy ? "" : hold ? ` · ${hold}` : " · all available"}`, "metadata"));
+    node("span", !online ? n.message || "Unavailable" : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
+      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || "all available"].filter(Boolean).join(" · "), "metadata"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.
@@ -7767,8 +7952,11 @@ function slotNodeDetails(n, entries) {
 // A running build as the cells of a table row, in the same columns as an
 // encode: Slot, File, Phase, Progress, Kind, Elapsed.
 function buildTableCells(n, b) {
-  const file = node("td", b.title, "slot-file");
+  const file = node("td", "", "slot-file");
   file.title = b.title;
+  const open = node("button", b.title, "slot-file-link build-title");
+  open.type = "button";
+  file.append(open, buildOpenCue());
   const phase = node("td", "", "slot-phase");
   phase.append(node("span", "Build running", "slot-phase-name"));
   const line = [buildOwner(b), b.kind, b.progress].filter(Boolean).join(" · ");
@@ -7802,6 +7990,7 @@ function slotTable(groups) {
       const row = node("tr");
       if (b) {
         row.append(...buildTableCells(n, b));
+        buildLogOpener(row, b, row.children[1].children[0]);
         tbody.append(row);
         continue;
       }
