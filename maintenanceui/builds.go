@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,12 @@ import (
 //	                                            "code": "builds_paused"} while the
 //	                                            operator paused builds on that node
 //	GET  /api/maintenance/builds                list (target, status, source, limit)
+//	GET  /api/maintenance/builds/nodes          every transcode node (or one, with
+//	                                            ?node=NAME; 404 if unknown): its
+//	                                            transcode pause, builds pause and
+//	                                            running builds, to pick a machine
+//	                                            before registering a build. Read from
+//	                                            stored state, no worker call
 //	GET  /api/maintenance/builds/{id}           one build
 //	POST /api/maintenance/builds/{id}/heartbeat extend; 409 if the build ended
 //	GET  /api/maintenance/builds/{id}/log       output tail: {lines, updated_at, status}
@@ -118,6 +125,48 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"builds": list})
+}
+
+// buildsNodes answers the machine picker: per configured transcode node, the
+// effective transcode pause and builds pause (the same state worker-pause
+// reads, without its worker probes) and the builds running on it. The literal
+// path wins over /builds/{id}.
+func (s *Server) buildsNodes(w http.ResponseWriter, r *http.Request) {
+	// Label is the build's title on purpose: nbuild status consumes this name.
+	type runningBuild struct {
+		ID        string `json:"id"`
+		Source    string `json:"source"`
+		Label     string `json:"label"`
+		StartedAt string `json:"started_at"`
+	}
+	type nodeState struct {
+		Node            string         `json:"node"`
+		TranscodePaused bool           `json:"transcode_paused"`
+		TranscodeMode   string         `json:"transcode_mode"`
+		BuildsPaused    bool           `json:"builds_paused"`
+		RunningBuilds   []runningBuild `json:"running_builds"`
+	}
+	want := r.URL.Query().Get("node")
+	statuses := s.engine.NodePauseStatesStored(r.Context())
+	nodes := make([]nodeState, 0, len(statuses))
+	for name, st := range statuses {
+		if want != "" && name != want {
+			continue
+		}
+		n := nodeState{Node: name, TranscodePaused: st.Paused, TranscodeMode: st.Mode, BuildsPaused: st.BuildsPaused, RunningBuilds: []runningBuild{}}
+		for _, b := range st.Builds {
+			if b.Status == store.BuildRunning {
+				n.RunningBuilds = append(n.RunningBuilds, runningBuild{ID: b.ID, Source: b.Source, Label: b.Title, StartedAt: b.StartedAt})
+			}
+		}
+		nodes = append(nodes, n)
+	}
+	if want != "" && len(nodes) == 0 {
+		fail(w, 404, "unknown node "+want)
+		return
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Node < nodes[j].Node })
+	writeJSON(w, 200, map[string]any{"nodes": nodes})
 }
 
 func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {

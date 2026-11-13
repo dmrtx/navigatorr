@@ -200,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-pause", s.workerPause)
 	mux.HandleFunc("GET "+buildsPath, s.buildsRoot)
 	mux.HandleFunc("POST "+buildsPath, s.buildsRoot)
+	mux.HandleFunc("GET "+buildsPath+"/nodes", s.buildsNodes)
 	mux.HandleFunc("GET "+buildsPath+"/{id}", s.buildOne)
 	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.buildHeartbeat)
 	mux.HandleFunc("GET "+buildsPath+"/{id}/log", s.buildLog)
