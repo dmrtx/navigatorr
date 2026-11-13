@@ -40,6 +40,12 @@ var (
 	ErrBuildEnded    = errors.New("build already ended")
 )
 
+// ErrBuildExpired is what HeartbeatBuild reports for a heartbeat that arrives
+// after the build's expiry but before the reconcile tick marked it lost. The
+// build is marked lost right there; the error wraps ErrBuildEnded, so callers
+// that only care that the build is over treat it the same.
+var ErrBuildExpired = fmt.Errorf("%w: heartbeat after its expiry, marked lost", ErrBuildEnded)
+
 // Build is one job another tool runs on a machine: a gradle build, an
 // integration test, a warm-up. Target is free text; when it names a transcode
 // node the build holds that node while it runs. The record stays as history
@@ -190,35 +196,46 @@ func (s *Store) PromoteBuild(id string, now time.Time) (bool, error) {
 	return n > 0, err
 }
 
-// ListBuilds returns the matching builds: the active ones (running, waiting)
-// first, newest first, then the ended history newest first. The limit cuts the
-// history, never an active build ahead of it. Limit 0 means 100; a negative
-// limit means no limit.
+// ListBuilds returns the matching builds: every active one (running, waiting)
+// first, newest first, then the ended history newest first. The limit applies
+// to the history only: all the active builds are always returned, followed by
+// up to limit ended ones. Limit 0 means 100; a negative limit means no limit.
 func (s *Store) ListBuilds(f BuildFilter) ([]Build, error) {
-	q := `SELECT ` + buildColumns + ` FROM builds WHERE 1=1`
+	where := ` WHERE 1=1`
 	var args []any
 	for _, c := range []struct{ col, v string }{{"target", f.Target}, {"status", f.Status}, {"source", f.Source}} {
 		if c.v != "" {
-			q += ` AND ` + c.col + `=?`
+			where += ` AND ` + c.col + `=?`
 			args = append(args, c.v)
 		}
 	}
-	q += ` ORDER BY CASE WHEN status IN ('running','waiting') THEN 0 ELSE 1 END, created_at DESC, seq DESC`
 	limit := f.Limit
 	if limit == 0 {
 		limit = 100
 	}
-	if limit > 0 {
-		q += fmt.Sprintf(` LIMIT %d`, limit)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.queryBuildsLocked(q, args...)
+	out, err := s.queryBuildsLocked(`SELECT `+buildColumns+` FROM builds`+where+` AND status IN ('running','waiting') ORDER BY created_at DESC, seq DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	hq := `SELECT ` + buildColumns + ` FROM builds` + where + ` AND status NOT IN ('running','waiting') ORDER BY created_at DESC, seq DESC`
+	if limit > 0 {
+		hq += fmt.Sprintf(` LIMIT %d`, limit)
+	}
+	history, err := s.queryBuildsLocked(hq, args...)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, history...), nil
 }
 
 // HeartbeatBuild extends a running build's expiry to now+ttl (a ttl of 0 keeps the window it had) and optionally
 // replaces its progress line. A build that ended gives ErrBuildEnded (with the
-// stored record).
+// stored record). A heartbeat that arrives after the build's expiry never
+// extends it: the build is marked lost on the spot, with ended_at set to its
+// expires_at (when it really lapsed, not when the late call came), and the
+// call gives ErrBuildExpired (which is an ErrBuildEnded) with the lost record.
 func (s *Store) HeartbeatBuild(id string, now time.Time, ttl time.Duration, progress *string) (Build, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -228,6 +245,15 @@ func (s *Store) HeartbeatBuild(id string, now time.Time, ttl time.Duration, prog
 	}
 	if b.Status != BuildRunning && b.Status != BuildWaiting {
 		return b, ErrBuildEnded
+	}
+	if exp, perr := time.Parse(time.RFC3339, b.ExpiresAt); perr == nil && !exp.After(now) {
+		// Same boundary as ExpireBuilds and PromoteBuild: expires_at <= now.
+		b.Status, b.EndedAt = BuildLost, b.ExpiresAt
+		_, err = s.db.Exec(`UPDATE builds SET status='lost', ended_at=? WHERE id=? AND status IN ('running','waiting')`, b.EndedAt, id)
+		if err != nil {
+			return b, err
+		}
+		return b, ErrBuildExpired
 	}
 	if ttl <= 0 {
 		// Keep the window the build already has, as it is: no floor. Only a

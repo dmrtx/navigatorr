@@ -98,13 +98,14 @@ func TestListBuildsKeepsActiveBuildsPastTheLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, limit := range []int{0, 100, 5} {
+	// The limit applies to the history: both active builds always come first.
+	for _, limit := range []int{0, 100, 5, 1} {
 		list, err := s.ListBuilds(BuildFilter{Limit: limit})
 		want := limit
 		if want == 0 {
 			want = 100
 		}
-		if err != nil || len(list) != want {
+		if err != nil || len(list) != 2+want {
 			t.Fatalf("limit %d: %d builds %v", limit, len(list), err)
 		}
 		// Newest first inside the active group: the waiting one was created second.
@@ -113,6 +114,36 @@ func TestListBuildsKeepsActiveBuildsPastTheLimit(t *testing.T) {
 		}
 		if list[2].Title != "done" || list[2].CreatedAt != buildTime(now.Add(120*time.Minute)) {
 			t.Fatalf("limit %d: then the history newest first: %+v", limit, list[2])
+		}
+	}
+	// More active builds than the limit: none is dropped.
+	for i := 0; i < 3; i++ {
+		mustBuild(t, s, Build{Target: "x", Source: "ci", Title: "more", PreemptMode: WorkerPauseSuspend}, now.Add(time.Duration(200+i)*time.Minute), 24*time.Hour, false)
+	}
+	list, err := s.ListBuilds(BuildFilter{Limit: 2})
+	if err != nil || len(list) != 5+2 {
+		t.Fatalf("5 active builds past a limit of 2 plus 2 ended: %d %v", len(list), err)
+	}
+	if l, _ := s.ListBuilds(BuildFilter{Limit: -1}); len(l) != 5+120 {
+		t.Fatalf("no limit: %d", len(l))
+	}
+}
+
+func TestLateHeartbeatMarksTheBuildLostInTheStore(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	for _, wait := range []bool{false, true} {
+		b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "x", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Minute, wait)
+		got, err := s.HeartbeatBuild(b.ID, now.Add(2*time.Minute), time.Hour, nil)
+		if !errors.Is(err, ErrBuildExpired) || !errors.Is(err, ErrBuildEnded) || got.Status != BuildLost || got.EndedAt != b.ExpiresAt {
+			t.Fatalf("wait=%v: %+v %v", wait, got, err)
+		}
+		stored, _ := s.GetBuild(b.ID)
+		if stored.Status != BuildLost || stored.ExpiresAt != b.ExpiresAt || stored.EndedAt != b.ExpiresAt {
+			t.Fatalf("wait=%v: not extended: %+v", wait, stored)
+		}
+		if _, err := s.HeartbeatBuild(b.ID, now.Add(2*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) || errors.Is(err, ErrBuildExpired) {
+			t.Fatalf("a second heartbeat is the plain ended error: %v", err)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
@@ -291,5 +292,26 @@ func TestWorkerEndpointsListTheNodesBuilds(t *testing.T) {
 	w = request(h, "GET", "/api/maintenance/worker-activity", "", true)
 	if !strings.Contains(w.Body.String(), `"builds"`) {
 		t.Fatal("worker activity carries the node's builds", w.Body.String())
+	}
+}
+
+func TestBuildsLateHeartbeatIs409AndMarksTheBuildLost(t *testing.T) {
+	_, h := buildsUI(t)
+	node := transcode.DefaultWorkerName
+	const path = "/api/maintenance/builds"
+	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"build","ttl_seconds":1}`))
+	waiting := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"warm","title":"warm","priority":"low","ttl_seconds":1}`))
+	if running.Status != store.BuildRunning || waiting.Status != store.BuildWaiting {
+		t.Fatalf("%+v %+v", running, waiting)
+	}
+	time.Sleep(2100 * time.Millisecond) // past both windows, before any reconcile tick
+	for _, b := range []store.Build{running, waiting} {
+		w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"ttl_seconds":600}`)
+		if w.Code != 409 || !strings.Contains(w.Body.String(), `"status":"lost"`) {
+			t.Fatal("a late heartbeat is a 409 with the lost build", w.Code, w.Body.String())
+		}
+		if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+b.ID, "")); got.Status != store.BuildLost || got.ExpiresAt != b.ExpiresAt {
+			t.Fatalf("not revived: %+v", got)
+		}
 	}
 }

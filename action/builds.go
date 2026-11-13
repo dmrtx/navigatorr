@@ -199,8 +199,11 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 			return
 		}
 		if b.Status == store.BuildWaiting {
-			if ok, _ := e.promoteIfIdleLocked(w, b); ok {
-				b.Status, b.StartedAt = store.BuildRunning, e.now().UTC().Format(time.RFC3339)
+			// Oldest first, like the tick: the new build starts only if no older
+			// waiting build on the node goes before it.
+			e.promoteNodeLocked(w)
+			if cur, gerr := e.deps.Store.GetBuild(b.ID); gerr == nil {
+				b = cur
 			}
 		}
 		if b.Status == store.BuildRunning {
@@ -237,6 +240,17 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		}
 	}
 	b, err := e.deps.Store.HeartbeatBuild(id, e.now(), ttl, progress)
+	if errors.Is(err, store.ErrBuildExpired) {
+		// The late heartbeat marked the build lost: release its node hold the
+		// way a finish does, and let a waiting build take the node.
+		e.withNodeLock(b.Target, func(w transcode.NamedWorker, isNode bool) {
+			if isNode {
+				e.syncWorkerHold(ctx, w)
+			}
+		})
+		e.promoteWaitingBuilds()
+		e.WakeReconciler()
+	}
 	return e.markBuild(b), err
 }
 
@@ -366,11 +380,69 @@ func (e *Engine) nodeIdleForBuild(node string) bool {
 
 // promoteIfIdleLocked starts a waiting build when its node is idle. The node's
 // request lock is held by the caller.
+//
+// Exclusivity with dispatch: the idle check and the promotion are both under
+// the node's pauseMu, and a conversion records its job on the node (the
+// identity checkpoint before its submit, see admitOnNode) under the same lock,
+// re-checking the node's hold there. So either the job is recorded first and
+// the idle check sees it, or the build is running first and the dispatch sees
+// the hold: a low build and an encode never run on the node together.
 func (e *Engine) promoteIfIdleLocked(w transcode.NamedWorker, b store.Build) (bool, error) {
 	if !e.nodeIdleForBuild(w.Name) {
 		return false, nil
 	}
+	if e.afterBuildIdleCheck != nil {
+		e.afterBuildIdleCheck(w.Name)
+	}
 	return e.deps.Store.PromoteBuild(b.ID, e.now())
+}
+
+// promoteNodeLocked starts the oldest waiting build on the node when the node
+// is idle (by created_at, then insertion order). A build whose expiry has
+// passed is not started and the next one is tried. The node's request lock is
+// held by the caller.
+func (e *Engine) promoteNodeLocked(w transcode.NamedWorker) (bool, error) {
+	waiting, err := e.deps.Store.WaitingBuilds()
+	if err != nil {
+		return false, err
+	}
+	for _, b := range waiting {
+		if n, ok := e.buildNode(b.Target); !ok || n.Name != w.Name {
+			continue
+		}
+		ok, err := e.promoteIfIdleLocked(w, b)
+		if err != nil || ok {
+			return ok, err
+		}
+		if !e.nodeIdleForBuild(w.Name) {
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+// admitOnNode is the dispatcher's side of the exclusivity with builds. It
+// re-checks that the conversion's node takes new work and, under the node's
+// request lock, runs record, which persists the job on the node (the state a
+// build's idle check reads). It never waits for the lock: a busy node
+// (a build promotion or an operator request in flight) defers the job for a
+// pass. Lock order: the dispatcher holds its execution and parent leases, then
+// only tries pauseMu; nothing that holds pauseMu waits for those leases on a
+// blocking path, so there is no cycle. The lock is released before the submit.
+func (e *Engine) admitOnNode(ec *ExecutionContext, phase string, record func() error) (StepResult, bool, error) {
+	name := e.resolveWorker(assignedWorker(ec.State))
+	if _, ok := e.buildNode(name); !ok {
+		return StepResult{}, false, record()
+	}
+	lock := &e.workerStateFor(name).pauseMu
+	if !lock.TryLock() {
+		return pauseBlockedResult(phase, "a request for node "+name+" is in progress"), true, nil
+	}
+	defer lock.Unlock()
+	if held, reason := e.pauseHold(name); held {
+		return pauseBlockedResult(phase, reason), true, nil
+	}
+	return StepResult{}, false, record()
 }
 
 // promoteWaitingBuilds starts the waiting builds whose node is idle, oldest
@@ -391,6 +463,10 @@ func (e *Engine) promoteWaitingBuilds() {
 	for _, b := range waiting {
 		w, ok := e.buildNode(b.Target)
 		if !ok {
+			continue
+		}
+		// Re-read: an earlier iteration may have started or expired it.
+		if cur, gerr := e.deps.Store.GetBuild(b.ID); gerr != nil || cur.Status != store.BuildWaiting {
 			continue
 		}
 		lock := &e.workerStateFor(w.Name).pauseMu

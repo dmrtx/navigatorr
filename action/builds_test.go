@@ -451,7 +451,7 @@ func TestBuildHistoryIsOrderedFilteredAndPruned(t *testing.T) {
 	mid := startBuild(t, e, "host-b", "", 0)
 	finishBuild(t, e, mid.ID, store.BuildFailed)
 	clock.advance(time.Hour)
-	running := startBuild(t, e, "host-a", "", 0)
+	running := startBuild(t, e, "host-a", "", 7200)
 
 	list, err := e.ListBuilds(store.BuildFilter{})
 	if err != nil || len(list) != 3 || list[0].ID != running.ID || list[1].ID != mid.ID || list[2].ID != old.ID {
@@ -466,19 +466,19 @@ func TestBuildHistoryIsOrderedFilteredAndPruned(t *testing.T) {
 	if l, _ := e.ListBuilds(store.BuildFilter{Source: "nobody"}); len(l) != 0 {
 		t.Fatalf("source filter: %+v", l)
 	}
-	if l, _ := e.ListBuilds(store.BuildFilter{Limit: 2}); len(l) != 2 {
-		t.Fatalf("limit: %+v", l)
+	if l, _ := e.ListBuilds(store.BuildFilter{Limit: 2}); len(l) != 3 {
+		t.Fatalf("limit cuts only the history: the running build plus two ended: %+v", l)
 	}
 	waiting := lowBuild(t, e, "m1", 7200)
 	if waiting.Status != store.BuildWaiting {
 		t.Fatalf("%+v", waiting)
 	}
 
-	// Retention is 30 days. Both active builds are heartbeated every day, so
-	// they stay active for 32 days; they are never pruned while the ended
-	// builds past the retention go.
-	for i := 0; i < 32; i++ {
-		clock.advance(24 * time.Hour)
+	// Retention is 30 days. Both active builds are heartbeated inside their
+	// 7200 s window (every 90 minutes), so they stay active for 32 days; they
+	// are never pruned while the ended builds past the retention go.
+	for i := 0; i < 32*16; i++ {
+		clock.advance(90 * time.Minute)
 		for _, id := range []string{running.ID, waiting.ID} {
 			if _, err := e.HeartbeatBuild(context.Background(), id, nil, 7200); err != nil {
 				t.Fatal(err)
@@ -878,5 +878,137 @@ func TestOperatorImmediateOverASuspendBuild(t *testing.T) {
 	finishBuild(t, e, b.ID, store.BuildSucceeded)
 	if e.workerPaused("m1") || m1.suspend {
 		t.Fatal("free")
+	}
+}
+
+func TestLateHeartbeatMarksTheBuildLostAndReleasesTheNode(t *testing.T) {
+	for _, low := range []bool{false, true} {
+		m1 := newSuspendingM1(transcode.StatusRunning)
+		e, clock := buildEngine(t, m1)
+		var b store.Build
+		if low {
+			m1.active = 1
+			seedEncoding(t, e, "enc", "m1", "job-enc")
+			b = lowBuild(t, e, "m1", 60)
+			if b.Status != store.BuildWaiting {
+				t.Fatalf("%+v", b)
+			}
+		} else {
+			b = startBuild(t, e, "m1", "", 60)
+		}
+		created := b.ExpiresAt
+		clock.advance(61 * time.Second) // past expires_at, before any tick
+		got, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 600)
+		if !errors.Is(err, store.ErrBuildEnded) || got.Status != store.BuildLost || got.EndedAt != created {
+			t.Fatalf("low=%v: a late heartbeat does not revive the build: %+v %v", low, got, err)
+		}
+		if again, _ := e.GetBuild(b.ID); again.Status != store.BuildLost || again.ExpiresAt != created {
+			t.Fatalf("low=%v: stored lost, expiry untouched: %+v", low, again)
+		}
+		if holds, _ := e.buildHolds(); len(holds) != 0 {
+			t.Fatalf("low=%v: the node hold is released: %+v", low, holds)
+		}
+	}
+}
+
+func TestLateHeartbeatLetsAWaitingBuildTakeTheNode(t *testing.T) {
+	e, clock := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	runner := lowBuild(t, e, "m1", 60)
+	waiter := lowBuild(t, e, "m1", 3600)
+	if runner.Status != store.BuildRunning || waiter.Status != store.BuildWaiting {
+		t.Fatalf("%+v %+v", runner, waiter)
+	}
+	clock.advance(61 * time.Second)
+	if _, err := e.HeartbeatBuild(context.Background(), runner.ID, nil, 0); !errors.Is(err, store.ErrBuildEnded) {
+		t.Fatal(err)
+	}
+	if got, _ := e.GetBuild(waiter.ID); got.Status != store.BuildRunning {
+		t.Fatalf("the waiting build takes the node: %+v", got)
+	}
+}
+
+func TestNewLowBuildDoesNotJumpAheadOfAnOlderWaitingOne(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	a := lowBuild(t, e, "m1", 0)
+	if a.Status != store.BuildWaiting {
+		t.Fatalf("%+v", a)
+	}
+	endEncode(t, e, "enc") // the node is idle now, the tick has not run
+	m1.active = 0
+	b := lowBuild(t, e, "m1", 0)
+	ga, _ := e.GetBuild(a.ID)
+	gb, _ := e.GetBuild(b.ID)
+	if ga.Status != store.BuildRunning || gb.Status != store.BuildWaiting || b.Status != store.BuildWaiting {
+		t.Fatalf("the older build starts, the new one waits: a=%+v b=%+v", ga, gb)
+	}
+}
+
+// A conversion recorded on the node between a build's idle check and its
+// promotion must never leave both running: the dispatcher defers the job.
+func TestPromotionAndDispatchNeverBothTakeTheNode(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	low := lowBuild(t, e, "m1", 0)
+	endEncode(t, e, "enc")
+	m1.active = 0
+
+	// A conversion assigned to the node that has not been sent yet.
+	tmpl, _ := e.GetTemplate("transcode_media")
+	seedActionInstance(t, e.deps.Store, "late", "transcode_media", StatusRunning, actionStepIndex(tmpl, "transcode_submit"), "",
+		map[string]any{"path": "/Volumes/media/late.mkv"}, map[string]any{workerStateKey: "m1"})
+	late := mustInstance(t, e.deps.Store, "late")
+	ec := parseExecutionContext(late, e)
+	ec.State["job_id"] = "job-late"
+	var res StepResult
+	var deferred bool
+	var hookRan bool
+	e.afterBuildIdleCheck = func(node string) {
+		hookRan = true
+		// The dispatcher reaches its recording step right now.
+		var err error
+		res, deferred, err = e.admitOnNode(ec, "transcode", func() error {
+			ec.State["transcode_reconcile"] = true
+			return e.persistExecutionState(context.Background(), ec)
+		})
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	tick(e)
+	if !hookRan {
+		t.Fatal("the seam was not reached")
+	}
+	if !deferred || res.Status != StepWaitingExternal || res.WaitingCondition != pauseWaitCondition {
+		t.Fatalf("the dispatch is deferred while the promotion holds the node: %+v %v", res, deferred)
+	}
+	if got, _ := e.GetBuild(low.ID); got.Status != store.BuildRunning {
+		t.Fatalf("%+v", got)
+	}
+	inst := mustInstance(t, e.deps.Store, "late")
+	if getBool(parseExecutionContext(inst, e).State, "transcode_reconcile") {
+		t.Fatal("no job was recorded on the node")
+	}
+	// And the other order: the job is recorded first, the build then waits.
+	e.afterBuildIdleCheck = nil
+	finishBuild(t, e, low.ID, store.BuildSucceeded)
+	next := lowBuild(t, e, "m1", 0)
+	if next.Status != store.BuildRunning {
+		t.Fatalf("idle node: %+v", next)
+	}
+	finishBuild(t, e, next.ID, store.BuildSucceeded)
+	if _, d, err := e.admitOnNode(ec, "transcode", func() error {
+		ec.State["transcode_reconcile"] = true
+		return e.persistExecutionState(context.Background(), ec)
+	}); err != nil || d {
+		t.Fatalf("an idle node admits the job: %v %v", d, err)
+	}
+	third := lowBuild(t, e, "m1", 0)
+	if third.Status != store.BuildWaiting {
+		t.Fatalf("a recorded job keeps the build waiting: %+v", third)
 	}
 }
