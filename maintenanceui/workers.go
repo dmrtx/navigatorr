@@ -47,6 +47,10 @@ func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker) map[string]any {
 	node := map[string]any{"name": worker.Name, "address": worker.Address, "podcast": worker.Podcast, "available": false}
+	// The builds running or waiting on this node, so the activity view can say why it is busy.
+	if builds := s.engine.NodeBuilds(worker.Name); len(builds) > 0 {
+		node["builds"] = builds
+	}
 	reader, ok := worker.Executor.(workerActivityReader)
 	if !ok {
 		node["message"] = "Live worker activity requires the HTTP video worker."

@@ -307,6 +307,13 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	}
 
 	// Stable identity persisted before Submit so uncertainty can reconcile.
+	prior := map[string]any{}
+	identityKeys := []string{"job_id", "external_reference", "candidate_path", "output_path", "idempotency_key", "transcode_reconcile", transcodeRejectedKey}
+	for _, k := range identityKeys {
+		if v, ok := ec.State[k]; ok {
+			prior[k] = v
+		}
+	}
 	ec.State["job_id"] = jobID
 	ec.State["external_reference"] = jobID
 	ec.State["candidate_path"] = candidatePath
@@ -314,8 +321,23 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	ec.State["idempotency_key"] = jobID
 	ec.State["transcode_reconcile"] = true
 	delete(ec.State, transcodeRejectedKey)
-	if err := e.persistExecutionState(actx, ec); err != nil {
+	// Recording the job on the node is exclusive with a build's promotion on
+	// it (see admitOnNode); a node a build took meanwhile defers the job.
+	blocked, deferred, err := e.admitOnNode(ec, "transcode", func() error { return e.persistExecutionState(actx, ec) })
+	if err != nil {
 		return StepResult{}, err
+	}
+	if deferred {
+		// Nothing was recorded: put the state back as it was, so the file waits
+		// like any other held one.
+		for _, k := range identityKeys {
+			if v, ok := prior[k]; ok {
+				ec.State[k] = v
+			} else {
+				delete(ec.State, k)
+			}
+		}
+		return blocked, nil
 	}
 	// Ownership check after the identity checkpoint: if the parent lease was
 	// lost (or is no longer renewed), do not create a new remote job. The

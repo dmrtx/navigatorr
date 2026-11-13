@@ -37,9 +37,29 @@ type Config struct {
 	Web               WebConfig                `yaml:"web"`
 	NASHelper         NASHelperConfig          `yaml:"nas_helper"`
 	Cleanup           CleanupConfig            `yaml:"cleanup"`
+	Builds            BuildsConfig             `yaml:"builds"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
 	AllowDestructive  bool                     `yaml:"allow_destructive"`
 	LoadedPath        string                   `yaml:"-"`
+}
+
+// BuildsConfig tunes the build records other tools post to the maintenance API.
+type BuildsConfig struct {
+	// RetentionDays is how long an ended build is kept as history. 0 means the
+	// default of 30 days; the reconcile loop prunes older ones.
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// DefaultBuildsRetentionDays is the history kept when builds.retention_days is unset.
+const DefaultBuildsRetentionDays = 30
+
+// RetentionDuration is how long an ended build is kept.
+func (b BuildsConfig) RetentionDuration() time.Duration {
+	days := b.RetentionDays
+	if days <= 0 {
+		days = DefaultBuildsRetentionDays
+	}
+	return time.Duration(days) * 24 * time.Hour
 }
 
 // CleanupConfig tunes how Navigatorr removes files it created itself and no
@@ -53,10 +73,14 @@ type CleanupConfig struct {
 
 // Web is opt-in and shares the persistent MCP HTTP listener.
 type WebConfig struct {
-	Enabled          bool                   `yaml:"enabled"`
-	AuthMode         string                 `yaml:"auth_mode"`
-	Token            string                 `yaml:"token"`
-	TokenFile        string                 `yaml:"token_file"`
+	Enabled   bool   `yaml:"enabled"`
+	AuthMode  string `yaml:"auth_mode"`
+	Token     string `yaml:"token"`
+	TokenFile string `yaml:"token_file"`
+	// BuildsTokenFile holds a second bearer token that may call only the
+	// /api/maintenance/builds endpoints, for scripts on build machines. Read
+	// once at startup; unset means no such token exists.
+	BuildsTokenFile  string                 `yaml:"builds_token_file"`
 	CloudflareAccess CloudflareAccessConfig `yaml:"cloudflare_access"`
 }
 

@@ -18,6 +18,12 @@ import (
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
+	for i := range out.Workers {
+		out.Workers[i].Builds = e.NodeBuilds(out.Workers[i].Name)
+	}
+	if len(out.Workers) == 1 {
+		out.Builds = out.Workers[0].Builds
+	}
 	if len(out.Workers) > 0 {
 		drain := e.drainStatus(ctx, out)
 		out.Drain = &drain

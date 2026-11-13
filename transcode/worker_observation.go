@@ -95,6 +95,8 @@ type WorkerObservation struct {
 	// AdmissionNote states what the readiness result means for job
 	// submission when the deep checks failed or did not finish.
 	AdmissionNote string `json:"admission_note,omitempty"`
+	// Builds are the builds running or waiting on this worker's node, oldest first.
+	Builds []NodeBuild `json:"builds,omitempty"`
 	// Workers is each configured worker's own observation, in config order.
 	// The fields above summarise them: reachable and ready when any worker is.
 	Workers []WorkerObservation `json:"workers,omitempty"`

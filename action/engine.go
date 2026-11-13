@@ -61,6 +61,13 @@ type Engine struct {
 	holdSyncing atomic.Bool
 	// pauseSweeping is set while a background sweep of paused nodes runs.
 	pauseSweeping atomic.Bool
+
+	// afterBuildIdleCheck is a test seam: it runs between a waiting build's
+	// idle check and its promotion, with the node's request lock held.
+	afterBuildIdleCheck func(node string)
+	// beforeBuildTryLock is a test seam: it runs just before a waiting build's
+	// node lock is tried in promoteWaitingBuilds.
+	beforeBuildTryLock func(node string)
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the
 	// durable queue order lives in each waiter's state (worker_slot_wait_since).

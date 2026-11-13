@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 24
+const SchemaVersion = 25
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -454,6 +454,16 @@ var migrations = []migration{
 		// How many of a node's CPUs encodes may use together, so the rest of the
 		// machine stays free for other work. 0 is all of them.
 		`ALTER TABLE worker_slot_settings ADD COLUMN core_budget INTEGER NOT NULL DEFAULT 0`,
+	}},
+	{version: 25, statements: []string{
+		// A build is one job another tool runs on a machine (a node or any
+		// other target). It stays as history after it ends. A build on a
+		// transcode node holds that node while it is running (see
+		// action/builds.go); the operator's worker_pauses row is never touched.
+		// seq is the insertion order (created_at has second precision), so builds
+		// created in the same second keep their creation order.
+		`CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, target TEXT NOT NULL, source TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, preempt_mode TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', last_heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '', exit_code INTEGER, seq INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID`,
+		`CREATE INDEX IF NOT EXISTS builds_status ON builds(status, expires_at)`,
 	}},
 }
 

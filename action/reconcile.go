@@ -48,6 +48,8 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 			d := newReconcileDispatcher()
 			defer d.wg.Wait()
 			for {
+				// Builds past their expiry end as lost before the hold sync reads them.
+				e.reconcileBuilds(ctx)
 				e.startWorkerHoldSync(ctx)
 				// Automatic replacements a crash or an error left behind.
 				e.drainAutoReplacements(ctx)

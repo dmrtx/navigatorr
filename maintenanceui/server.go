@@ -46,17 +46,21 @@ var allowedTools = map[string]bool{
 var allowedActions = map[string]bool{"clean_podcast_ads": true, "transcode_media": true, "transcode_batch": true, "benchmark_transcode": true, "promote_transcode_candidate": true}
 
 type Server struct {
-	cfg         *config.Config
-	registry    *arrservice.Registry
-	engine      *action.Engine
-	mcp         *server.MCPServer
-	access      *cloudflareAccessVerifier
-	accessOnly  bool
-	tokenHash   [32]byte
-	mu          sync.Mutex
-	sessions    map[string]time.Time
-	folderSizes folderSizeCache
-	storage     storageState
+	cfg        *config.Config
+	registry   *arrservice.Registry
+	engine     *action.Engine
+	mcp        *server.MCPServer
+	access     *cloudflareAccessVerifier
+	accessOnly bool
+	tokenHash  [32]byte
+	// buildsTokenHash is the hash of web.builds_token_file, which may call only
+	// the build routes (see builds.go).
+	buildsTokenHash [32]byte
+	hasBuildsToken  bool
+	mu              sync.Mutex
+	sessions        map[string]time.Time
+	folderSizes     folderSizeCache
+	storage         storageState
 	// nas replaces the configured NAS helper in tests.
 	nas             nasMeter
 	folderListings  folderListingCache
@@ -96,8 +100,21 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 		issuer, _ := cfg.Web.CloudflareIssuer()
 		access = newCloudflareVerifier(issuer, strings.TrimSpace(cfg.Web.CloudflareAccess.Audience))
 	}
+	var buildsHash [32]byte
+	hasBuilds := false
+	if cfg.Web.BuildsTokenFile != "" {
+		b, err := os.ReadFile(cfg.Web.BuildsTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("read web builds token file: %w", err)
+		}
+		bt := strings.TrimSpace(string(b))
+		if len(bt) < 24 {
+			return nil, fmt.Errorf("web builds token must contain at least 24 characters")
+		}
+		buildsHash, hasBuilds = sha256.Sum256([]byte(bt)), true
+	}
 	if cfg.Web.AuthModeValue() == "cloudflare_access" {
-		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, accessOnly: true}, nil
+		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, accessOnly: true, buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds}, nil
 	}
 	token := strings.TrimSpace(cfg.Web.Token)
 	if cfg.Web.TokenFile != "" {
@@ -113,7 +130,7 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 	if len(token) < 24 {
 		return nil, fmt.Errorf("web token must contain at least 24 characters")
 	}
-	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, tokenHash: sha256.Sum256([]byte(token)), sessions: map[string]time.Time{}}, nil
+	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, tokenHash: sha256.Sum256([]byte(token)), buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds, sessions: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -181,6 +198,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-drain", s.workerDrain)
 	mux.HandleFunc("GET /api/maintenance/worker-pause", s.workerPause)
 	mux.HandleFunc("POST /api/maintenance/worker-pause", s.workerPause)
+	mux.HandleFunc("GET "+buildsPath, s.buildsRoot)
+	mux.HandleFunc("POST "+buildsPath, s.buildsRoot)
+	mux.HandleFunc("GET "+buildsPath+"/{id}", s.buildOne)
+	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.buildHeartbeat)
+	mux.HandleFunc("POST "+buildsPath+"/{id}/finish", s.buildFinish)
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("GET /api/maintenance/compression", s.compression)
@@ -218,7 +240,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// The builds token is a bearer for scripts, accepted on the build
+			// routes only; being no ambient credential it needs no same-origin
+			// header. Every other credential is checked as before.
+			buildsCall := s.buildsTokenCall(r)
+			if !buildsCall && r.Method != http.MethodGet && r.Method != http.MethodHead {
 				if r.Header.Get("X-Navigatorr-Request") != "1" {
 					fail(w, 403, "missing same-origin request header")
 					return
@@ -231,7 +257,7 @@ func (s *Server) Handler() http.Handler {
 					}
 				}
 			}
-			if r.URL.Path != "/api/maintenance/auth-info" && r.URL.Path != "/api/maintenance/login" && !s.authorized(r) {
+			if r.URL.Path != "/api/maintenance/auth-info" && r.URL.Path != "/api/maintenance/login" && !buildsCall && !s.authorized(r) {
 				fail(w, 401, "sign in to Navigatorr")
 				return
 			}

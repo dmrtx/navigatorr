@@ -57,7 +57,9 @@ type workerState struct {
 
 	// pauseMu serialises SetNodePause for the node, so a suspend that is
 	// written, synced, confirmed and possibly undone is never interleaved with
-	// another request for the same node.
+	// another request for the same node. It also serialises the promotion of a
+	// waiting build with the dispatcher's recording of a job on the node
+	// (admitOnNode).
 	pauseMu sync.Mutex
 }
 

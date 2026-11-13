@@ -31,6 +31,8 @@ web:
   enabled: false
   auth_mode: "token" # Default; choose cloudflare_access for Google login at Cloudflare
   token_file: "/run/secrets/navigatorr-web-token" # Random token, at least 24 characters
+  # Optional second token that can call only /api/maintenance/builds (for build scripts).
+  # builds_token_file: "/run/secrets/navigatorr-builds-token"
 # For Cloudflare Access, replace the web block above (no token/token_file):
 # web:
 #   enabled: true
@@ -330,3 +332,7 @@ maintenance:
     - "SampleFansub"
     - "DemoEncodes"
   preferred_resolution: "1080p"
+
+# Build records posted by other tools (see docs/MAINTENANCE_UI.md).
+# builds:
+#   retention_days: 30 # How long an ended build stays in the history
