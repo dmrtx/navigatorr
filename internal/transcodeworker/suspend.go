@@ -161,7 +161,7 @@ func (w *Worker) SetSuspend(suspend bool) error {
 // their runners report frozen.
 func (w *Worker) suspendCounts() (active, frozen int, err error) {
 	on, generation := w.suspendState()
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, 0, nil
@@ -173,7 +173,7 @@ func (w *Worker) suspendCounts() (active, frozen int, err error) {
 		if !entry.IsDir() || len(name) == 0 || name[0] == '.' {
 			continue
 		}
-		job, lerr := LoadJob(filepath.Join(w.cfg.StateDir, name, "job.json"))
+		job, lerr := peekJob(filepath.Join(w.cfg.StateDir, name, "job.json"))
 		if lerr != nil || job == nil || job.ID != name || job.Status != "running" || job.PID <= 0 || !w.jobAlive(job) {
 			continue
 		}

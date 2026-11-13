@@ -51,6 +51,7 @@ func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath str
 			if rerr := w.SweepRetained(ctx); rerr != nil {
 				err = errors.Join(err, rerr)
 			}
+			w.MaybePruneJobs(ctx)
 		} else {
 			count, err = w.ScheduleQueued(ctx, selfExe, configPath)
 		}

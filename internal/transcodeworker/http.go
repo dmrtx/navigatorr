@@ -248,8 +248,9 @@ func extendRequestDeadlines(w http.ResponseWriter, window time.Duration) {
 // for each request, and echoes the request ID in the response. A missing or
 // malformed X-Request-ID is replaced by a worker-generated one. Headers and
 // query strings are never logged, so the bearer token cannot leak here.
-// Successful liveness and activity polls are not logged: they arrive every
-// few seconds and would drown out the requests worth reading.
+// Successful polls of the read-only routes the server hits every few seconds
+// (see isPolledPath) are not logged: they would drown out the requests worth
+// reading.
 func (s *Server) withRequestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -267,7 +268,7 @@ func (s *Server) withRequestLog(next http.Handler) http.Handler {
 		if s.logf == nil {
 			return
 		}
-		if r.Method == http.MethodGet && status < 400 && (r.URL.Path == "/v1/health" || r.URL.Path == "/v1/activity") {
+		if r.Method == http.MethodGet && status >= 200 && status < 300 && isPolledPath(r.URL.Path) {
 			return
 		}
 		path := r.URL.Path
@@ -281,6 +282,21 @@ func (s *Server) withRequestLog(next http.Handler) http.Handler {
 		s.logf("worker http request_id=%s method=%s path=%q status=%d duration=%s job_id=%s",
 			requestID, r.Method, path, status, time.Since(start).Round(time.Millisecond), jobID)
 	})
+}
+
+// isPolledPath reports the read-only routes Navigatorr polls every few
+// seconds: liveness, readiness, activity, slots, capabilities, the hold and
+// suspend state, and the status of one job. A successful GET of one says
+// nothing worth a log line; a failure, or any other method, is still logged.
+func isPolledPath(path string) bool {
+	switch path {
+	case "/v1/health", "/v1/ready", "/v1/activity", "/v1/slots", "/v1/capabilities", "/v1/hold", "/v1/suspend":
+		return true
+	}
+	if id, ok := strings.CutPrefix(path, "/v1/jobs/"); ok {
+		return id != "" && !strings.Contains(id, "/")
+	}
+	return false
 }
 
 func newWorkerRequestID() string {

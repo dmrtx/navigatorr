@@ -189,6 +189,7 @@ func SaveJobAtomic(path string, job *JobRecord) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("renaming temp file %s to %s: %w", tmpName, path, err)
 	}
+	dropJobIndex(path)
 
 	return nil
 }

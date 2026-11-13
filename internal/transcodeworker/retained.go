@@ -502,7 +502,7 @@ func (w *Worker) sweepRegularDir(name string) error {
 	if !ok {
 		return w.collectShellDir(dir)
 	}
-	job, err := LoadJob(jobFile)
+	job, err := peekJob(jobFile)
 	if err != nil || job == nil || job.ID != name || !isEncodedAwaitingRetention(job) {
 		return nil // not ours; other sweeps report corrupt records
 	}
@@ -730,7 +730,7 @@ func (w *Worker) findRetainedLocked(jobID, key string) (*JobRecord, error) {
 // encodes that have not produced their candidate, which free disk space does
 // not reflect yet.
 func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return 0, 0, nil
@@ -751,7 +751,7 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 		default:
 			id = name
 		}
-		job, err := LoadJob(filepath.Join(w.cfg.StateDir, name, "job.json"))
+		job, err := peekJob(filepath.Join(w.cfg.StateDir, name, "job.json"))
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
