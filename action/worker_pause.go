@@ -78,14 +78,36 @@ func (e *Engine) pauseSettleWindow() time.Duration {
 	return pauseSettle
 }
 
-// workerPauses is the paused nodes by name. A store that cannot be read gives
-// an error, which callers treat as paused: sending a job to a node that may be
-// paused is the worse mistake.
+// workerPauses is the effective pause of each node by name: the operator's
+// pause if the node has one, else the hold of its running builds (see
+// builds.go). Everything that decides dispatch, requeue, the worker's hold and
+// its freeze reads this view; only the operator's own requests read
+// operatorPauses. A store that cannot be read gives an error, which callers
+// treat as paused: sending a job to a node that may be paused is the worse
+// mistake.
 func (e *Engine) workerPauses() (map[string]store.WorkerPause, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
-	return e.deps.Store.ListWorkerPauses()
+	operator, err := e.operatorPauses()
+	if err != nil {
+		return nil, err
+	}
+	holds, err := e.buildHolds()
+	if err != nil {
+		return nil, err
+	}
+	if len(holds) == 0 {
+		return operator, nil
+	}
+	out := make(map[string]store.WorkerPause, len(operator)+len(holds))
+	for name, hold := range holds {
+		out[name] = hold
+	}
+	for name, pause := range operator {
+		out[name] = pause
+	}
+	return out, nil
 }
 
 // workerPaused reports whether new jobs for the node are held. A node name is
@@ -161,7 +183,9 @@ func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode
 	lock.Lock()
 	defer lock.Unlock()
 	if mode == store.WorkerPauseSuspend {
-		pauses, err := e.workerPauses()
+		// The operator's own pause is what a failed suspend goes back to; a
+		// build's hold is not theirs to restore or clear.
+		pauses, err := e.operatorPauses()
 		if err != nil {
 			return transcode.NodePauseStatus{}, err
 		}
@@ -461,6 +485,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		return out
 	}
 	pauses, perr := e.workerPauses()
+	operator, _ := e.operatorPauses()
 	rows, rerr := e.deps.Store.ListDrainActions()
 	encoding := map[string]int{}
 	if rerr == nil {
@@ -471,6 +496,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		}
 	}
 	for name, st := range out {
+		st.Builds = e.NodeBuilds(name)
 		if perr != nil {
 			st.Paused, st.Message = true, "The pause state could not be read; new jobs are held until it can."
 			out[name] = st
@@ -483,6 +509,10 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 			continue
 		}
 		st.Paused, st.Mode, st.Since = true, pause.Mode, pause.Since
+		st.HeldBy = "builds"
+		if _, ok := operator[name]; ok {
+			st.HeldBy = "operator"
+		}
 		if rerr != nil {
 			st.Message = "The open jobs could not be read, so the node cannot be reported idle."
 			out[name] = st
@@ -550,6 +580,15 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		default:
 			st.Idle = true
 			st.Message = "Paused and idle: nothing runs on this node."
+		}
+		if st.HeldBy == "builds" {
+			running := 0
+			for _, b := range st.Builds {
+				if b.Status == store.BuildRunning {
+					running++
+				}
+			}
+			st.Message = fmt.Sprintf("Busy with %d running build(s). ", running) + st.Message
 		}
 		out[name] = st
 	}

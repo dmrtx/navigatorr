@@ -573,20 +573,21 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 	var newToolsList []any
 
 	newToolNames := map[string]bool{
-		"action_run":            true,
-		"action_resume":         true,
-		"action_status":         true,
-		"action_detail":         true,
-		"action_list":           true,
-		"action_catalog":        true,
-		"action_retry":          true,
-		"action_cancel":         true,
-		"diagnostics":           true,
-		"action_history":        true,
-		"transcode_backups":     true,
-		"worker_health":         true,
-		"worker_drain":          true,
-		"worker_pause":          true,
+		"action_run":        true,
+		"action_resume":     true,
+		"action_status":     true,
+		"action_detail":     true,
+		"action_list":       true,
+		"action_catalog":    true,
+		"action_retry":      true,
+		"action_cancel":     true,
+		"diagnostics":       true,
+		"action_history":    true,
+		"transcode_backups": true,
+		"worker_health":     true,
+		"worker_drain":      true,
+		"worker_pause":      true,
+		"build_list":        true, "build_status": true, "build_cancel": true,
 		"transcode_goal_change": true,
 		"podcast_ad_library":    true, "podcast_artifact": true, "podcast_blocks": true, "podcast_block": true, "podcast_classify": true, "podcast_review": true,
 	}
@@ -616,14 +617,14 @@ func TestRealWorld_MCPSchemaFootprint(t *testing.T) {
 		}
 	}
 
-	if toolsTotal != 79 {
-		t.Errorf("expected exactly 79 tools total, got %d", toolsTotal)
+	if toolsTotal != 82 {
+		t.Errorf("expected exactly 82 tools total, got %d", toolsTotal)
 	}
 	if len(baseToolsList) != 58 {
 		t.Errorf("expected exactly 58 base tools, got %d", len(baseToolsList))
 	}
-	if len(newToolsList) != 21 {
-		t.Errorf("expected exactly 21 new tools, got %d", len(newToolsList))
+	if len(newToolsList) != 24 {
+		t.Errorf("expected exactly 24 new tools, got %d", len(newToolsList))
 	}
 }
 

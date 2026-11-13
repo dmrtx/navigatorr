@@ -44,7 +44,30 @@ type NodePauseStatus struct {
 	// Idle is true when the node is paused and nothing runs on it, so the
 	// machine can be used for something else.
 	Idle bool `json:"idle"`
+	// HeldBy says what holds the node: "operator" (a pause the operator set;
+	// it wins) or "builds" (running builds only), empty when it is free.
+	HeldBy string `json:"held_by,omitempty"`
+	// Builds are the builds running or waiting on the node, oldest first.
+	Builds []NodeBuild `json:"builds,omitempty"`
 	// Message says in a sentence what is left to wait for.
 	Message   string    `json:"message"`
 	CheckedAt time.Time `json:"checked_at"`
+}
+
+// NodeBuild is a running build on a node, as the node's status lists it.
+type NodeBuild struct {
+	ID          string `json:"id"`
+	Source      string `json:"source"`
+	Holder      string `json:"holder,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Title       string `json:"title"`
+	PreemptMode string `json:"preempt_mode"`
+	Priority    string `json:"priority"`
+	// Status is "running" or "waiting" (a low priority build for an idle node).
+	Status          string `json:"status"`
+	StartedAt       string `json:"started_at,omitempty"`
+	Progress        string `json:"progress,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	LastHeartbeatAt string `json:"last_heartbeat_at"`
+	ExpiresAt       string `json:"expires_at"`
 }
