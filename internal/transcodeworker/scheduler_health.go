@@ -38,6 +38,8 @@ func schedulerDiagnostic(err error) *transcode.WorkerDiagnostic {
 }
 
 func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath string) {
+	// Keep the log cap honest while the worker itself logs nothing.
+	CheckStderrLog()
 	for _, name := range []string{"post_encode", "queue"} {
 		start := time.Now().UTC()
 		var count int

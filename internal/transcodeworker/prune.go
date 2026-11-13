@@ -138,6 +138,10 @@ func (w *Worker) MaybePruneJobs(ctx context.Context) {
 	}
 }
 
+// pruneCandidateHook runs before each candidate, with no lock held; tests use
+// it to observe that the capacity lock is free between candidates.
+var pruneCandidateHook func(name string)
+
 // PruneJobs empties the finished jobs older than the retention window as of
 // now, up to a batch, and returns how many it emptied.
 func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
@@ -177,11 +181,6 @@ func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 	if len(candidates) == 0 {
 		return 0, nil
 	}
-	capLock, err := acquireCapacityLock(stateDir)
-	if err != nil {
-		return 0, err
-	}
-	defer capLock.Unlock()
 	removed := 0
 	var errs []error
 	for _, name := range candidates {
@@ -189,7 +188,16 @@ func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 			errs = append(errs, err)
 			break
 		}
+		if pruneCandidateHook != nil {
+			pruneCandidateHook(name)
+		}
+		capLock, err := acquireCapacityLock(stateDir)
+		if err != nil {
+			errs = append(errs, err)
+			break // the same failure would repeat for every candidate
+		}
 		ok, err := w.pruneOne(stateDir, name, cutoff)
+		capLock.Unlock()
 		if err != nil {
 			errs = append(errs, err)
 		}
@@ -202,6 +210,13 @@ func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 	}
 	return removed, errors.Join(errs...)
 }
+
+// The capacity lock is taken per candidate, not for the whole pass. Locked or
+// live candidates do not count against the batch, so with thousands of them a
+// pass holding the lock throughout would keep submissions and the scheduler
+// waiting for as long as it took to walk them all. Releasing between
+// candidates is safe because pruneOne decides again under the job lock, and
+// the lock order (capacity, then job) is unchanged.
 
 // pruneOne removes one job directory after deciding again under the job lock.
 func (w *Worker) pruneOne(stateDir, name string, cutoff time.Time) (bool, error) {
