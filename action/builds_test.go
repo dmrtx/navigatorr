@@ -3,7 +3,9 @@ package action
 import (
 	"context"
 	"errors"
+	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -121,13 +123,17 @@ func TestBuildRequestsAreValidated(t *testing.T) {
 	cases := map[string]BuildInput{
 		"no target":     {Source: "s", Title: "t"},
 		"bad target":    {Target: "bad target!", Source: "s", Title: "t"},
-		"long target":   {Target: string(make([]byte, 65)), Source: "s", Title: "t"},
+		"long target":   {Target: strings.Repeat("a", 65), Source: "s", Title: "t"},
+		"long source":   {Target: "m1", Source: strings.Repeat("a", 65), Title: "t"},
+		"long holder":   {Target: "m1", Source: "s", Title: "t", Holder: strings.Repeat("a", 65)},
+		"long kind":     {Target: "m1", Source: "s", Title: "t", Kind: strings.Repeat("a", 65)},
+		"long progress": {Target: "m1", Source: "s", Title: "t", Progress: strings.Repeat("a", 201)},
 		"no source":     {Target: "m1", Title: "t"},
 		"no title":      {Target: "m1", Source: "s"},
 		"bad mode":      {Target: "m1", Source: "s", Title: "t", PreemptMode: "sideways"},
 		"negative ttl":  {Target: "m1", Source: "s", Title: "t", TTLSeconds: -1},
 		"multiline":     {Target: "m1", Source: "s", Title: "a\nb"},
-		"overlong text": {Target: "m1", Source: "s", Title: string(make([]rune, 201))},
+		"overlong text": {Target: "m1", Source: "s", Title: strings.Repeat("é", 201)},
 	}
 	for name, in := range cases {
 		var invalid *BuildInvalidError
@@ -138,9 +144,36 @@ func TestBuildRequestsAreValidated(t *testing.T) {
 	if list, _ := e.ListBuilds(store.BuildFilter{}); len(list) != 0 {
 		t.Fatalf("a refused request records nothing: %+v", list)
 	}
+	// Exactly at the limits is accepted (the title and progress count characters).
+	ok, err := e.CreateBuild(context.Background(), BuildInput{Target: strings.Repeat("a", 64), Source: strings.Repeat("s", 64), Holder: strings.Repeat("h", 64), Kind: strings.Repeat("k", 64), Title: strings.Repeat("é", 200), Progress: strings.Repeat("é", 200)})
+	if err != nil || utf8Len(ok.Title) != 200 {
+		t.Fatalf("the boundary values are valid: %+v %v", ok, err)
+	}
 	b := startBuild(t, e, "m1", "", 99999)
 	if b.ExpiresAt != e.now().Add(BuildMaxTTL).Format(time.RFC3339) {
 		t.Fatalf("ttl is capped at two hours: %+v", b)
+	}
+}
+
+func utf8Len(s string) int { return len([]rune(s)) }
+
+func TestBuildTTLCannotOverflowTheCap(t *testing.T) {
+	for _, secs := range []int{9223372037, math.MaxInt, math.MaxInt32, 7201} {
+		if d, err := buildTTL(secs); err != nil || d != BuildMaxTTL {
+			t.Fatalf("%d: %v %v", secs, d, err)
+		}
+	}
+	if d, _ := buildTTL(7200); d != BuildMaxTTL {
+		t.Fatal(d)
+	}
+	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	b := startBuild(t, e, "host-a", "", math.MaxInt)
+	if b.ExpiresAt != e.now().Add(BuildMaxTTL).Format(time.RFC3339) {
+		t.Fatalf("create: %+v", b)
+	}
+	hb, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 9223372037)
+	if err != nil || hb.ExpiresAt != e.now().Add(BuildMaxTTL).Format(time.RFC3339) {
+		t.Fatalf("heartbeat: %+v %v", hb, err)
 	}
 }
 
@@ -408,7 +441,10 @@ func TestBuildOnAnUnknownTargetIsOnlyTracked(t *testing.T) {
 }
 
 func TestBuildHistoryIsOrderedFilteredAndPruned(t *testing.T) {
-	e, clock := buildEngine(t, &mockTranscodeExecutor{})
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, clock := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc") // keeps the low build waiting
 	old := startBuild(t, e, "host-a", "", 0)
 	finishBuild(t, e, old.ID, store.BuildSucceeded)
 	clock.advance(time.Hour)
@@ -433,14 +469,33 @@ func TestBuildHistoryIsOrderedFilteredAndPruned(t *testing.T) {
 	if l, _ := e.ListBuilds(store.BuildFilter{Limit: 2}); len(l) != 2 {
 		t.Fatalf("limit: %+v", l)
 	}
+	waiting := lowBuild(t, e, "m1", 7200)
+	if waiting.Status != store.BuildWaiting {
+		t.Fatalf("%+v", waiting)
+	}
 
-	// Default retention is 30 days; the running build is never pruned.
-	clock.advance(31 * 24 * time.Hour)
-	e.deps.Config.Builds.RetentionDays = 0
-	e.reconcileBuilds(context.Background())
+	// Retention is 30 days. Both active builds are heartbeated every day, so
+	// they stay active for 32 days; they are never pruned while the ended
+	// builds past the retention go.
+	for i := 0; i < 32; i++ {
+		clock.advance(24 * time.Hour)
+		for _, id := range []string{running.ID, waiting.ID} {
+			if _, err := e.HeartbeatBuild(context.Background(), id, nil, 7200); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e.reconcileBuilds(context.Background())
+	}
 	l, _ := e.ListBuilds(store.BuildFilter{Limit: -1})
-	if len(l) != 1 || l[0].ID != running.ID && l[0].Status != store.BuildLost {
-		t.Fatalf("ended builds past the retention are pruned: %+v", l)
+	if len(l) != 2 {
+		t.Fatalf("only the two active builds are left: %+v", l)
+	}
+	got := map[string]string{}
+	for _, b := range l {
+		got[b.ID] = b.Status
+	}
+	if got[running.ID] != store.BuildRunning || got[waiting.ID] != store.BuildWaiting {
+		t.Fatalf("running and waiting builds are never pruned: %+v", got)
 	}
 }
 
@@ -630,5 +685,198 @@ func TestWaitingBuildSurvivesARestartWithItsExpiry(t *testing.T) {
 	tick(e2)
 	if got, _ := e2.GetBuild(b.ID); got.Status != store.BuildWaiting {
 		t.Fatal("the encode still runs, so it still waits")
+	}
+}
+
+func TestHeartbeatWithoutTTLKeepsAShortWindow(t *testing.T) {
+	e, clock := buildEngine(t, &mockTranscodeExecutor{})
+	b := startBuild(t, e, "host-a", "", 30)
+	clock.advance(10 * time.Second)
+	hb, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0)
+	if err != nil || hb.ExpiresAt != clock.now().Add(30*time.Second).Format(time.RFC3339) {
+		t.Fatalf("a build created with ttl 30 keeps 30 s, not 60: %+v %v", hb, err)
+	}
+}
+
+func TestExpiredWaitingBuildIsNotPromotedWhenTheHolderFinishes(t *testing.T) {
+	e, clock := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	normal := startBuild(t, e, "m1", "", 0)
+	low := lowBuild(t, e, "m1", 60)
+	if low.Status != store.BuildWaiting {
+		t.Fatalf("%+v", low)
+	}
+	clock.advance(2 * time.Minute) // the low build's ttl passes before any tick
+	finishBuild(t, e, normal.ID, store.BuildSucceeded)
+	if got, _ := e.GetBuild(low.ID); got.Status != store.BuildWaiting {
+		t.Fatalf("an expired build must not start: %+v", got)
+	}
+	if e.workerPaused("m1") {
+		t.Fatal("nothing holds the node")
+	}
+	tick(e)
+	if got, _ := e.GetBuild(low.ID); got.Status != store.BuildLost {
+		t.Fatalf("the next tick marks it lost: %+v", got)
+	}
+	if e.workerPaused("m1") {
+		t.Fatal("the node stays free")
+	}
+}
+
+func TestLowBuildsStartInCreationOrder(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	var ids []string
+	for i := 0; i < 8; i++ { // same clock second for all
+		ids = append(ids, lowBuild(t, e, "m1", 0).ID)
+	}
+	endEncode(t, e, "enc")
+	m1.active = 0
+	for i := range ids {
+		tick(e)
+		for j, id := range ids {
+			got, _ := e.GetBuild(id)
+			want := store.BuildWaiting
+			if j == i {
+				want = store.BuildRunning
+			}
+			if j < i {
+				want = store.BuildSucceeded
+			}
+			if got.Status != want {
+				t.Fatalf("round %d: build %d is %s, want %s", i, j, got.Status, want)
+			}
+		}
+		finishBuild(t, e, ids[i], store.BuildSucceeded)
+	}
+}
+
+func TestBuildHoldSinceIsWhenTheBuildStarted(t *testing.T) {
+	e, clock := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	normal := startBuild(t, e, "m1", "", 0)
+	low := lowBuild(t, e, "m1", 0)
+	clock.advance(10 * time.Minute)
+	finishBuild(t, e, normal.ID, store.BuildSucceeded)
+	tick(e)
+	got, _ := e.GetBuild(low.ID)
+	if got.Status != store.BuildRunning || got.StartedAt == got.CreatedAt {
+		t.Fatalf("%+v", got)
+	}
+	holds, err := e.buildHolds()
+	if err != nil || holds["m1"].Since != got.StartedAt {
+		t.Fatalf("the hold counts from the start, not the creation: %+v %v", holds, err)
+	}
+}
+
+func TestLowBuildIsAlwaysGracefulAndNeverFreezesALateEncode(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	e, _ := buildEngine(t, m1)
+	for _, mode := range []string{"", store.WorkerPauseSuspend, store.WorkerPauseImmediate} {
+		b, err := e.CreateBuild(context.Background(), BuildInput{Target: "laptop.local", Source: "s", Title: "t", Priority: store.BuildPriorityLow, PreemptMode: mode})
+		if err != nil || b.PreemptMode != store.WorkerPauseGraceful {
+			t.Fatalf("mode %q: %+v %v", mode, b, err)
+		}
+	}
+	// The idle node starts it; an encode that slips in afterwards (the
+	// dispatcher takes no node lock) is neither frozen nor requeued.
+	b, err := e.CreateBuild(context.Background(), BuildInput{Target: "m1", Source: "s", Title: "t", Priority: store.BuildPriorityLow, PreemptMode: store.WorkerPauseImmediate})
+	if err != nil || b.Status != store.BuildRunning || b.PreemptMode != store.WorkerPauseGraceful {
+		t.Fatalf("%+v %v", b, err)
+	}
+	m1.active = 1
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	tick(e)
+	e.sweepPausedNodes(context.Background())
+	if m1.suspend || m1.cancelCalls != 0 {
+		t.Fatalf("a low build never freezes or requeues: suspend=%v cancels=%d", m1.suspend, m1.cancelCalls)
+	}
+	if assignedWorker(parseExecutionContextMust(t, e, "enc").State) != "m1" {
+		t.Fatal("the encode stays on its node")
+	}
+	if !e.workerPaused("m1") {
+		t.Fatal("the node still takes no new work")
+	}
+}
+
+func TestNodeStaysHeldWhileAnotherBuildRunsAfterOneIsLost(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, clock := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	short := startBuild(t, e, "m1", store.WorkerPauseSuspend, 60)
+	long := startBuild(t, e, "m1", store.WorkerPauseSuspend, 600)
+	clock.advance(2 * time.Minute)
+	tick(e)
+	if got, _ := e.GetBuild(short.ID); got.Status != store.BuildLost {
+		t.Fatalf("%+v", got)
+	}
+	if got, _ := e.GetBuild(long.ID); got.Status != store.BuildRunning {
+		t.Fatalf("%+v", got)
+	}
+	if !e.workerPaused("m1") || !m1.suspend {
+		t.Fatalf("the other build still holds and freezes: suspend=%v", m1.suspend)
+	}
+	finishBuild(t, e, long.ID, store.BuildSucceeded)
+	if e.workerPaused("m1") || m1.suspend {
+		t.Fatal("freed only after the second ended")
+	}
+}
+
+func TestBuildHoldReturnsWhenTheOperatorResumes(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	b := startBuild(t, e, "m1", store.WorkerPauseSuspend, 0)
+	if !m1.suspend {
+		t.Fatal("frozen by the build")
+	}
+	// The operator's graceful pause is weaker than the build's freeze, but it is
+	// the effective state while it is set: the encode is thawed to finish.
+	st := pauseNode(t, e, "m1", store.WorkerPauseGraceful)
+	if st.HeldBy != "operator" || m1.suspend {
+		t.Fatalf("operator graceful wins while set: suspend=%v %+v", m1.suspend, st)
+	}
+	st = pauseNode(t, e, "m1", "")
+	if st.HeldBy != "builds" || st.Mode != store.WorkerPauseSuspend || !m1.suspend {
+		t.Fatalf("after the resume the build freezes the encode again: suspend=%v %+v", m1.suspend, st)
+	}
+	finishBuild(t, e, b.ID, store.BuildSucceeded)
+	if m1.suspend || e.workerPaused("m1") {
+		t.Fatal("free after the build")
+	}
+}
+
+func TestOperatorImmediateOverASuspendBuild(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	b := startBuild(t, e, "m1", store.WorkerPauseSuspend, 0)
+	if !m1.suspend {
+		t.Fatal("frozen by the build")
+	}
+	st := pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	e.sweepPausedNodes(context.Background())
+	if st.HeldBy != "operator" || st.Mode != store.WorkerPauseImmediate {
+		t.Fatalf("%+v", st)
+	}
+	if m1.cancelCalls != 1 || assignedWorker(parseExecutionContextMust(t, e, "enc").State) != "" {
+		t.Fatalf("operator immediate sends the encode back to the queue as ever: cancels=%d", m1.cancelCalls)
+	}
+	// As for suspend -> immediate: the freeze stays until the node is empty,
+	// then the worker is released.
+	e.syncWorkerSuspend(context.Background(), mustWorker(t, e, "m1"))
+	if m1.suspend {
+		t.Fatal("with the node empty the worker is released under the operator's immediate")
+	}
+	st = pauseNode(t, e, "m1", "")
+	if st.HeldBy != "builds" || st.Mode != store.WorkerPauseSuspend || !m1.suspend || !e.workerPaused("m1") {
+		t.Fatalf("operator off: the build's suspend hold applies again: suspend=%v %+v", m1.suspend, st)
+	}
+	finishBuild(t, e, b.ID, store.BuildSucceeded)
+	if e.workerPaused("m1") || m1.suspend {
+		t.Fatal("free")
 	}
 }

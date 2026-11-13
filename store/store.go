@@ -460,7 +460,9 @@ var migrations = []migration{
 		// other target). It stays as history after it ends. A build on a
 		// transcode node holds that node while it is running (see
 		// action/builds.go); the operator's worker_pauses row is never touched.
-		`CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, target TEXT NOT NULL, source TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, preempt_mode TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', last_heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '', exit_code INTEGER) WITHOUT ROWID`,
+		// seq is the insertion order (created_at has second precision), so builds
+		// created in the same second keep their creation order.
+		`CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, target TEXT NOT NULL, source TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, preempt_mode TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', last_heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '', exit_code INTEGER, seq INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID`,
 		`CREATE INDEX IF NOT EXISTS builds_status ON builds(status, expires_at)`,
 	}},
 }

@@ -62,3 +62,108 @@ func TestBuildStoreLifecycle(t *testing.T) {
 		t.Fatalf("%+v", list)
 	}
 }
+
+func mustBuild(t *testing.T, s *Store, b Build, now time.Time, ttl time.Duration, wait bool) Build {
+	t.Helper()
+	got, err := s.CreateBuild(b, now, ttl, wait)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func TestPromoteBuildNeverStartsAnExpiredBuild(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	w := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "warm", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, 30*time.Second, true)
+	if ok, err := s.PromoteBuild(w.ID, now.Add(30*time.Second)); ok || err != nil {
+		t.Fatalf("a build whose expiry has passed is not promoted: %v %v", ok, err)
+	}
+	if got, _ := s.GetBuild(w.ID); got.Status != BuildWaiting {
+		t.Fatalf("%+v", got)
+	}
+	if ok, _ := s.PromoteBuild(w.ID, now.Add(29*time.Second)); !ok {
+		t.Fatal("inside its window it is promoted")
+	}
+}
+
+func TestListBuildsKeepsActiveBuildsPastTheLimit(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	running := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "old", PreemptMode: WorkerPauseSuspend}, now, time.Hour, false)
+	waiting := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "old wait", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour, true)
+	for i := 1; i <= 120; i++ {
+		b := mustBuild(t, s, Build{Target: "h", Source: "ci", Title: "done", PreemptMode: WorkerPauseSuspend}, now.Add(time.Duration(i)*time.Minute), time.Hour, false)
+		if _, _, err := s.FinishBuild(b.ID, BuildSucceeded, nil, now.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, limit := range []int{0, 100, 5} {
+		list, err := s.ListBuilds(BuildFilter{Limit: limit})
+		want := limit
+		if want == 0 {
+			want = 100
+		}
+		if err != nil || len(list) != want {
+			t.Fatalf("limit %d: %d builds %v", limit, len(list), err)
+		}
+		// Newest first inside the active group: the waiting one was created second.
+		if list[0].ID != waiting.ID || list[1].ID != running.ID {
+			t.Fatalf("limit %d: active builds come first: %+v %+v", limit, list[0], list[1])
+		}
+		if list[2].Title != "done" || list[2].CreatedAt != buildTime(now.Add(120*time.Minute)) {
+			t.Fatalf("limit %d: then the history newest first: %+v", limit, list[2])
+		}
+	}
+}
+
+func TestBuildsCreatedInTheSameSecondKeepCreationOrder(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	var ids []string
+	for i := 0; i < 12; i++ {
+		b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "t", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour, true)
+		ids = append(ids, b.ID)
+	}
+	for name, read := range map[string]func() ([]Build, error){"waiting": s.WaitingBuilds, "active": s.ActiveBuilds} {
+		list, err := read()
+		if err != nil || len(list) != len(ids) {
+			t.Fatalf("%s: %v %v", name, len(list), err)
+		}
+		for i := range ids {
+			if list[i].ID != ids[i] {
+				t.Fatalf("%s: position %d is not creation order", name, i)
+			}
+		}
+	}
+	for i := range ids {
+		if ok, _ := s.PromoteBuild(ids[i], now); !ok {
+			t.Fatal("promote")
+		}
+	}
+	running, _ := s.RunningBuilds()
+	for i := range ids {
+		if running[i].ID != ids[i] {
+			t.Fatalf("running: position %d is not creation order", i)
+		}
+	}
+	// ListBuilds is the reverse inside the active group.
+	newest, _ := s.ListBuilds(BuildFilter{})
+	if newest[0].ID != ids[len(ids)-1] {
+		t.Fatal("newest first")
+	}
+}
+
+func TestHeartbeatWithoutTTLKeepsTheOwnWindowWithoutInflatingIt(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "t", PreemptMode: WorkerPauseSuspend}, now, 30*time.Second, false)
+	hb, err := s.HeartbeatBuild(b.ID, now.Add(10*time.Second), 0, nil)
+	if err != nil || hb.ExpiresAt != buildTime(now.Add(40*time.Second)) {
+		t.Fatalf("a 30 s build keeps 30 s: %+v %v", hb, err)
+	}
+	hb, _ = s.HeartbeatBuild(b.ID, now.Add(20*time.Second), 0, nil)
+	if hb.ExpiresAt != buildTime(now.Add(50*time.Second)) {
+		t.Fatalf("and it does not drift: %+v", hb)
+	}
+}

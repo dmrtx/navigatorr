@@ -23,7 +23,8 @@ import (
 // build's preempt mode with the machinery of a node pause (graceful, immediate,
 // suspend). When the last running build on the node ends, or its heartbeat
 // lapses and the reconcile loop marks it lost, the node resumes by itself.
-// A low priority build (cache warming) never preempts: it is created waiting
+// A low priority build (cache warming) never preempts (its preempt mode is
+// always graceful, whatever was asked): it is created waiting
 // and holds nothing until its node is idle, when it becomes running (see
 // promoteWaitingBuilds). A target that is not a node is only tracked: lifecycle, heartbeat, expiry and
 // history, and nothing is held.
@@ -84,7 +85,9 @@ func buildTTL(seconds int) (time.Duration, error) {
 		return 0, invalidBuild("ttl_seconds must be positive")
 	case seconds == 0:
 		return BuildDefaultTTL, nil
-	case time.Duration(seconds)*time.Second > BuildMaxTTL:
+	case int64(seconds) > int64(BuildMaxTTL/time.Second):
+		// Compared in seconds, before multiplying: a huge value would overflow
+		// the duration and slip under the cap.
 		return BuildMaxTTL, nil
 	}
 	return time.Duration(seconds) * time.Second, nil
@@ -177,6 +180,13 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 		b.Priority = store.BuildPriorityLow
 	default:
 		return b, invalidBuild(`priority must be "normal" or "low"`)
+	}
+	if b.Priority == store.BuildPriorityLow {
+		// A low priority build never preempts. The dispatcher does not take the
+		// node's request lock, so an encode can start between the idle check and
+		// the promotion; any stronger mode would then freeze or requeue it.
+		// Whatever mode was asked for, a low build holds the node gracefully.
+		b.PreemptMode = store.WorkerPauseGraceful
 	}
 	ttl, err := buildTTL(in.TTLSeconds)
 	if err != nil {
@@ -273,7 +283,8 @@ func (e *Engine) GetBuild(id string) (store.Build, error) {
 	return e.markBuild(b), err
 }
 
-// ListBuilds returns builds, running first and then the history newest first.
+// ListBuilds returns builds: the active ones (running, waiting) first, then the
+// history, each newest first. The limit cuts the history, never an active build.
 func (e *Engine) ListBuilds(f store.BuildFilter) ([]store.Build, error) {
 	if e.deps.Store == nil {
 		return nil, nil
@@ -428,15 +439,19 @@ func (e *Engine) buildHolds() (map[string]store.WorkerPause, error) {
 		if !ok {
 			continue
 		}
+		since := b.StartedAt
+		if since == "" {
+			since = b.CreatedAt
+		}
 		hold, seen := out[w.Name]
 		if !seen {
-			hold = store.WorkerPause{Worker: w.Name, Since: b.CreatedAt, UpdatedAt: b.LastHeartbeatAt}
+			hold = store.WorkerPause{Worker: w.Name, Since: since, UpdatedAt: b.LastHeartbeatAt}
 		}
 		if buildRank(b.PreemptMode) > buildRank(hold.Mode) {
 			hold.Mode = b.PreemptMode
 		}
-		if b.CreatedAt < hold.Since {
-			hold.Since = b.CreatedAt
+		if since < hold.Since {
+			hold.Since = since
 		}
 		out[w.Name] = hold
 	}

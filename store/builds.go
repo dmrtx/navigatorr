@@ -29,7 +29,8 @@ const (
 	BuildPriorityLow    = "low"
 )
 
-// BuildMinTTL is the shortest window a heartbeat without a ttl keeps.
+// BuildMinTTL is the window a heartbeat without a ttl falls back to only when
+// the build's own window cannot be read.
 const BuildMinTTL = time.Minute
 
 // ErrBuildNotFound and ErrBuildEnded are what the build calls report for an
@@ -115,7 +116,7 @@ func (s *Store) CreateBuild(b Build, now time.Time, ttl time.Duration, wait bool
 	b.EndedAt, b.ExitCode = "", nil
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`INSERT INTO builds(`+buildColumns+`) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NULL)`,
+	_, err := s.db.Exec(`INSERT INTO builds(`+buildColumns+`, seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, NULL, (SELECT COALESCE(MAX(seq), 0) + 1 FROM builds))`,
 		b.ID, b.Target, b.Source, b.Holder, b.Kind, b.Title, b.PreemptMode, b.Priority, b.Status, b.CreatedAt, b.StartedAt, b.LastHeartbeatAt, b.ExpiresAt, b.Progress)
 	return b, err
 }
@@ -137,68 +138,28 @@ func (s *Store) getBuildLocked(id string) (Build, error) {
 
 // RunningBuilds returns the builds that are running, oldest first.
 func (s *Store) RunningBuilds() ([]Build, error) {
-	list, err := s.ListBuilds(BuildFilter{Status: BuildRunning, Limit: -1})
-	for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
-		list[i], list[j] = list[j], list[i]
-	}
-	return list, err
+	return s.activeBuilds(`status='running'`)
 }
 
 // WaitingBuilds returns the waiting builds, oldest first.
 func (s *Store) WaitingBuilds() ([]Build, error) {
-	list, err := s.ListBuilds(BuildFilter{Status: BuildWaiting, Limit: -1})
-	for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
-		list[i], list[j] = list[j], list[i]
-	}
-	return list, err
-}
-
-// PromoteBuild turns a waiting build into a running one. It reports whether it
-// did (false when the build is no longer waiting).
-func (s *Store) PromoteBuild(id string, now time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE builds SET status='running', started_at=? WHERE id=? AND status='waiting'`, buildTime(now), id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	return s.activeBuilds(`status='waiting'`)
 }
 
 // ActiveBuilds returns the builds that are waiting or running, oldest first.
 func (s *Store) ActiveBuilds() ([]Build, error) {
-	list, err := s.ListBuilds(BuildFilter{Limit: -1})
-	out := make([]Build, 0, len(list))
-	for i := len(list) - 1; i >= 0; i-- {
-		if list[i].Status == BuildRunning || list[i].Status == BuildWaiting {
-			out = append(out, list[i])
-		}
-	}
-	return out, err
+	return s.activeBuilds(`status IN ('running','waiting')`)
 }
 
-// ListBuilds returns the matching builds, newest first. Limit 0 means 100; a
-// negative limit means no limit.
-func (s *Store) ListBuilds(f BuildFilter) ([]Build, error) {
-	q := `SELECT ` + buildColumns + ` FROM builds WHERE 1=1`
-	var args []any
-	for _, c := range []struct{ col, v string }{{"target", f.Target}, {"status", f.Status}, {"source", f.Source}} {
-		if c.v != "" {
-			q += ` AND ` + c.col + `=?`
-			args = append(args, c.v)
-		}
-	}
-	q += ` ORDER BY created_at DESC, id`
-	limit := f.Limit
-	if limit == 0 {
-		limit = 100
-	}
-	if limit > 0 {
-		q += fmt.Sprintf(` LIMIT %d`, limit)
-	}
+// activeBuilds reads builds by a fixed condition, oldest first: by creation
+// time, then by insertion order (created_at has second precision).
+func (s *Store) activeBuilds(cond string) ([]Build, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.queryBuildsLocked(`SELECT ` + buildColumns + ` FROM builds WHERE ` + cond + ` ORDER BY created_at, seq`)
+}
+
+func (s *Store) queryBuildsLocked(q string, args ...any) ([]Build, error) {
 	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -215,6 +176,46 @@ func (s *Store) ListBuilds(f BuildFilter) ([]Build, error) {
 	return out, rows.Err()
 }
 
+// PromoteBuild turns a waiting build into a running one. It reports whether it
+// did (false when the build is no longer waiting, or its expiry has passed: an
+// expired build is never started, the next reconcile tick marks it lost).
+func (s *Store) PromoteBuild(id string, now time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE builds SET status='running', started_at=? WHERE id=? AND status='waiting' AND expires_at > ?`, buildTime(now), id, buildTime(now))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ListBuilds returns the matching builds: the active ones (running, waiting)
+// first, newest first, then the ended history newest first. The limit cuts the
+// history, never an active build ahead of it. Limit 0 means 100; a negative
+// limit means no limit.
+func (s *Store) ListBuilds(f BuildFilter) ([]Build, error) {
+	q := `SELECT ` + buildColumns + ` FROM builds WHERE 1=1`
+	var args []any
+	for _, c := range []struct{ col, v string }{{"target", f.Target}, {"status", f.Status}, {"source", f.Source}} {
+		if c.v != "" {
+			q += ` AND ` + c.col + `=?`
+			args = append(args, c.v)
+		}
+	}
+	q += ` ORDER BY CASE WHEN status IN ('running','waiting') THEN 0 ELSE 1 END, created_at DESC, seq DESC`
+	limit := f.Limit
+	if limit == 0 {
+		limit = 100
+	}
+	if limit > 0 {
+		q += fmt.Sprintf(` LIMIT %d`, limit)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.queryBuildsLocked(q, args...)
+}
+
 // HeartbeatBuild extends a running build's expiry to now+ttl (a ttl of 0 keeps the window it had) and optionally
 // replaces its progress line. A build that ended gives ErrBuildEnded (with the
 // stored record).
@@ -229,11 +230,12 @@ func (s *Store) HeartbeatBuild(id string, now time.Time, ttl time.Duration, prog
 		return b, ErrBuildEnded
 	}
 	if ttl <= 0 {
-		// Keep the window the build already has.
+		// Keep the window the build already has, as it is: no floor. Only a
+		// window that cannot be read (never written by this code) falls back.
 		ttl = BuildMinTTL
 		last, e1 := time.Parse(time.RFC3339, b.LastHeartbeatAt)
 		exp, e2 := time.Parse(time.RFC3339, b.ExpiresAt)
-		if e1 == nil && e2 == nil && exp.Sub(last) > ttl {
+		if e1 == nil && e2 == nil && exp.Sub(last) > 0 {
 			ttl = exp.Sub(last)
 		}
 	}
