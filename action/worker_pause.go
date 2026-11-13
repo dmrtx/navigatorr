@@ -506,6 +506,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	}
 	pauses, perr := e.workerPauses()
 	operator, _ := e.operatorPauses()
+	buildPauses, _ := e.deps.Store.ListBuildPauses()
 	rows, rerr := e.deps.Store.ListDrainActions()
 	encoding := map[string]int{}
 	if rerr == nil {
@@ -517,6 +518,9 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	}
 	for name, st := range out {
 		st.Builds = e.NodeBuilds(name)
+		if since, ok := buildPauses[name]; ok {
+			st.BuildsPaused, st.BuildsPausedSince = true, since.Since
+		}
 		if perr != nil {
 			st.Paused, st.Message = true, "The pause state could not be read; new jobs are held until it can."
 			out[name] = st

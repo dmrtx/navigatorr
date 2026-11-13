@@ -200,6 +200,19 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 		return b, err
 	}
 	e.withNodeLock(b.Target, func(w transcode.NamedWorker, isNode bool) {
+		if isNode {
+			// Under the node's request lock, like the toggle: a build is either
+			// refused here or registered before the pause. Nothing is created.
+			paused, perr := e.buildsPausedOn(w.Name)
+			if perr != nil {
+				err = perr
+				return
+			}
+			if paused {
+				err = &BuildsPausedError{Node: w.Name}
+				return
+			}
+		}
 		// A low priority build waits only where there is a node to wait for.
 		b, err = e.deps.Store.CreateBuild(b, e.now(), ttl, b.Priority == store.BuildPriorityLow && isNode)
 		if err != nil || !isNode {

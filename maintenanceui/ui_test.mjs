@@ -10361,7 +10361,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: false, mode: "", message: "Transcode not paused. The node takes new jobs." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   const buttons = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent);
-  assert.deepEqual(buttons(), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now"]);
+  assert.deepEqual(buttons(), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now", "Pause builds"]);
 
   h.context.calls = [];
   h.run('api = async (...args) => { calls.push(args); return {}; }; refreshWorkers = async () => {};');
@@ -10389,7 +10389,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
 
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "graceful", idle: false, message: "Transcode paused: 1 job(s) still finishing. Nothing new starts here." }) };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.deepEqual(buttons(), ["Resume transcode", "Suspend transcode now", "Send running files back"]);
+  assert.deepEqual(buttons(), ["Resume transcode", "Suspend transcode now", "Send running files back", "Pause builds"]);
   const badges = flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "badge").map((e) => e.textContent);
   assert.deepEqual(badges, ["Pausing transcode", "Reachable · Ready"]);
   h.context.calls = [];
@@ -10400,7 +10400,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
   // another Suspend.
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Transcode suspended: 1 encode(s) frozen where they were." }) };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.deepEqual(buttons(), ["Resume transcode", "Send running files back"]);
+  assert.deepEqual(buttons(), ["Resume transcode", "Send running files back", "Pause builds"]);
 });
 
 // The operator's pause stops transcode only: a build on the same node shows as
@@ -10415,7 +10415,7 @@ test("a node with a transcode pause and a running build shows both states", () =
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(badges(), ["Transcode paused · idle", "Busy · build", "Reachable · Ready"]);
   assert.equal(lines().length, 1);
-  assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Resume transcode", "Suspend transcode now", "Send running files back"]);
+  assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Resume transcode", "Suspend transcode now", "Send running files back", "Pause builds"]);
   // A build alone: not a transcode pause, and the operator can still pause.
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "builds", mode: "suspend", idle: true, message: "x", builds: [build] }) };
   h.run("state.workerInfo = info; renderWorkers();");
@@ -10790,7 +10790,7 @@ test("a build hold alone leaves the operator's pause buttons available", () => {
   const build = { id: "b1", source: "ci", holder: "r1", kind: "k", title: "t", status: "running", started_at: new Date().toISOString() };
   h.context.info = { ready: true, nodes: [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause: { node: "m1", paused: true, held_by: "builds", mode: "suspend", idle: true, message: "x", builds: [build] } }] };
   h.run("state.workerInfo = info; renderWorkers();");
-  assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now"]);
+  assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now", "Pause builds"]);
 });
 
 test("the phone row of a paused node says so whatever else it holds", () => {
@@ -10903,4 +10903,70 @@ test("a block wider than the dialog shows a strip at its right edge until the sc
   // The ring is drawn outside the block and the strip sits inside its border.
   assert.match(css, /\.build-log-lines:focus-visible \{ outline: 2px solid var\(--forest\); outline-offset: 2px; \}/);
   assert.match(css, /\.build-log-wrap\.more-right::after \{[^}]*top: 1px;[^}]*right: calc\(1px \+ var\(--build-log-bar-x/);
+});
+
+// The builds pause is a second, independent switch in the same row as the
+// transcode pause, with its state visible at a glance wherever the node shows.
+test("a node card offers Pause builds beside the transcode pause and shows the state as a badge", async () => {
+  const h = harness();
+  const nodes = (pause) => [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause }];
+  const badges = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "badge").map((e) => e.textContent);
+  const clickable = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click"));
+  const show = (pause) => { h.context.info = { ready: true, nodes: nodes(pause) }; h.run("state.workerInfo = info; renderWorkers();"); };
+  show({ node: "m1", paused: false, builds_paused: false, message: "Transcode not paused. The node takes new jobs." });
+  assert.deepEqual(badges(), ["Reachable · Ready"]);
+  // Same group and same row as the transcode buttons.
+  const pauseBuilds = clickable().find((e) => e.textContent === "Pause builds");
+  const pauseTranscode = clickable().find((e) => e.textContent === "Pause transcode now");
+  const row = flatten(h.elements.get("worker-nodes")).find((e) => e.className === "worker-pause-actions");
+  assert.ok(pauseBuilds && pauseTranscode && row.children.includes(pauseBuilds) && row.children.includes(pauseTranscode));
+
+  h.context.calls = [];
+  h.context.notices = [];
+  h.run("api = async (...args) => { calls.push(args); return {}; }; refreshWorkers = async () => {}; notify = (t) => notices.push(t);");
+  await pauseBuilds.listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)), [["worker-pause", { node: "m1", builds_paused: true }]]);
+  assert.deepEqual(plain(h.context.notices), ["m1 builds paused. New builds are refused; running ones carry on."]);
+
+  // Builds paused, transcode running: the badge shows and the button turns to Resume.
+  show({ node: "m1", paused: false, builds_paused: true, message: "x" });
+  assert.deepEqual(badges(), ["Builds paused", "Reachable · Ready"]);
+  assert.deepEqual(clickable().map((e) => e.textContent), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now", "Resume builds"]);
+  h.context.calls = [];
+  h.context.notices = [];
+  await clickable().find((e) => e.textContent === "Resume builds").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)), [["worker-pause", { node: "m1", builds_paused: false }]]);
+  assert.deepEqual(plain(h.context.notices), ["m1 accepts builds again."]);
+
+  // Both pauses at once: both states, both resumes, independent requests.
+  show({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, builds_paused: true, message: "x" });
+  assert.deepEqual(badges(), ["Transcode paused · idle", "Builds paused", "Reachable · Ready"]);
+  assert.deepEqual(clickable().map((e) => e.textContent), ["Resume transcode", "Suspend transcode now", "Send running files back", "Resume builds"]);
+  h.context.calls = [];
+  await clickable().find((e) => e.textContent === "Resume transcode").listeners.get("click")();
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)), [["worker-pause", { node: "m1", mode: "off" }]]);
+  // Transcode paused alone: no builds badge.
+  show({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, builds_paused: false, message: "x" });
+  assert.deepEqual(badges(), ["Transcode paused · idle", "Reachable · Ready"]);
+});
+
+test("worker slots say builds are paused on a node, on the phone rows and the table", () => {
+  const h = harness();
+  h.elements.get("settings-node-pick").options = [];
+  const node = (name, extra = {}) => ({ name, available: true, activity: { details_available: true, worker_slots_total: 2, worker_slots_used: 0, jobs: [],
+    slots: { ceiling: 2, split: false, video: { total: 2, used: 0 }, podcast: { total: 0, used: 0 } } }, ...extra });
+  const summary = (d) => d.children[0].children.map((c) => c.textContent).join(" ");
+  const idleLine = () => h.elements.get("worker-slots").children[1].children.at(-1).textContent;
+  h.context.activity = { available: true, workers: [node("m1", { builds_paused: true }), node("m4")] };
+  h.run("renderWorkerActivity(activity)");
+  const phone = h.elements.get("worker-slots").children[0];
+  assert.match(summary(phone.children[0]), /m1 0\/2 · all available · builds paused/);
+  assert.doesNotMatch(summary(phone.children[1]), /builds paused/);
+  // The slots stay available: builds paused is not a transcode hold.
+  assert.equal(idleLine(), "4 slots available · m1 2, m4 2 · m1 builds paused");
+  // Independent of a transcode pause: both are said.
+  h.context.activity = { available: true, workers: [node("m1", { builds_paused: true, held_by: "operator" }), node("m4")] };
+  h.run("renderWorkerActivity(activity)");
+  assert.match(summary(h.elements.get("worker-slots").children[0].children[0]), /m1 0\/0 · transcode paused · builds paused/);
+  assert.match(idleLine(), /m1 transcode paused · m1 builds paused$/);
 });

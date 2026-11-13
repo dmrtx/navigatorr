@@ -55,6 +55,10 @@ func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker)
 	if held := s.engine.NodeHeldBy(worker.Name); held != "" {
 		node["held_by"] = held
 	}
+	// Whether new builds on the node are refused, shown beside its slots.
+	if s.engine.NodeBuildsPaused(worker.Name) {
+		node["builds_paused"] = true
+	}
 	reader, ok := worker.Executor.(workerActivityReader)
 	if !ok {
 		node["message"] = "Live worker activity requires the HTTP video worker."

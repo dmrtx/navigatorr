@@ -47,6 +47,11 @@ type NodePauseStatus struct {
 	// HeldBy says what holds the node: "operator" (a pause the operator set;
 	// it wins) or "builds" (running builds only), empty when it is free.
 	HeldBy string `json:"held_by,omitempty"`
+	// BuildsPaused is the second, independent switch: while true the server
+	// refuses to register a new build on this node. It says nothing about the
+	// transcode pause above and never affects builds already registered.
+	BuildsPaused      bool   `json:"builds_paused"`
+	BuildsPausedSince string `json:"builds_paused_since,omitempty"`
 	// Builds are the builds running or waiting on the node, oldest first.
 	Builds []NodeBuild `json:"builds,omitempty"`
 	// Message says in a sentence what is left to wait for.

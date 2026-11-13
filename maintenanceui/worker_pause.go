@@ -13,30 +13,48 @@ import (
 // for other work: "graceful" lets what is encoding finish, "immediate" sends it
 // back to the transcode queue without cancelling the conversion, "suspend"
 // freezes what is encoding so it continues where it was, and "off" resumes the
-// node. Repeating a request changes nothing.
+// node. A separate request, {"node", "builds_paused": bool}, toggles the
+// independent builds pause: the server refuses new builds on the node while it
+// is on. Repeating a request changes nothing.
 func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body struct {
 			Node string `json:"node"`
 			Mode string `json:"mode"`
+			// BuildsPaused is the independent builds switch: true refuses new
+			// builds on the node, false lets them in again. It cannot be sent
+			// together with a mode, so one request never half applies.
+			BuildsPaused *bool `json:"builds_paused"`
 		}
 		mode := ""
 		if decode(w, r, &body) == nil {
-			switch body.Mode {
-			case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
-				mode = body.Mode
-			case "off":
-			default:
+			switch {
+			case body.BuildsPaused != nil && body.Mode != "":
 				body.Node = ""
+			case body.BuildsPaused != nil:
+			default:
+				switch body.Mode {
+				case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
+					mode = body.Mode
+				case "off":
+				default:
+					body.Node = ""
+				}
 			}
 		} else {
 			body.Node = ""
 		}
 		if body.Node == "" {
-			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"suspend"|"off"}`)
+			fail(w, 400, `send {"node": "<name>", "mode": "graceful"|"immediate"|"suspend"|"off"} or {"node": "<name>", "builds_paused": true|false}`)
 			return
 		}
-		status, err := s.engine.SetNodePause(r.Context(), body.Node, mode)
+		var status transcode.NodePauseStatus
+		var err error
+		if body.BuildsPaused != nil {
+			status, err = s.engine.SetNodeBuildsPause(r.Context(), body.Node, *body.BuildsPaused)
+		} else {
+			status, err = s.engine.SetNodePause(r.Context(), body.Node, mode)
+		}
 		var unknown *transcode.WorkerNotConfiguredError
 		switch {
 		case errors.As(err, &unknown):

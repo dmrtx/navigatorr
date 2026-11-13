@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -18,11 +19,17 @@ import (
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
+	var buildPauses map[string]store.BuildPause
+	if e.deps.Store != nil {
+		buildPauses, _ = e.deps.Store.ListBuildPauses()
+	}
 	for i := range out.Workers {
 		out.Workers[i].Builds = e.NodeBuilds(out.Workers[i].Name)
+		_, out.Workers[i].BuildsPaused = buildPauses[out.Workers[i].Name]
 	}
 	if len(out.Workers) == 1 {
 		out.Builds = out.Workers[0].Builds
+		out.BuildsPaused = out.Workers[0].BuildsPaused
 	}
 	if len(out.Workers) > 0 {
 		drain := e.drainStatus(ctx, out)
