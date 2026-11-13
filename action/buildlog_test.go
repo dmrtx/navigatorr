@@ -281,3 +281,83 @@ func TestBuildEndedIgnoresStoreErrors(t *testing.T) {
 		t.Fatal("a store error must not read as ended")
 	}
 }
+
+// A store that fails for a moment says nothing about the build: the buffer is
+// kept and the next read has the lines. Only "unknown build" drops it.
+func TestBuildLogSurvivesATransientStoreError(t *testing.T) {
+	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	b := startBuild(t, e, "laptop", "", 0)
+	if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "one", "two"); err != nil {
+		t.Fatal(err)
+	}
+	working := e.deps.Store
+	broken, err := store.Open(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken.Close()
+	e.deps.Store = broken
+	if _, _, _, err := e.BuildLog(b.ID); err == nil || errors.Is(err, store.ErrBuildNotFound) {
+		t.Fatalf("a store error is returned as it is: %v", err)
+	}
+	if lines, _ := e.buildLogs.get(b.ID); len(lines) != 2 {
+		t.Fatal("a transient error dropped the buffer")
+	}
+	e.deps.Store = working
+	if _, lines, _, err := e.BuildLog(b.ID); err != nil || len(lines) != 2 {
+		t.Fatalf("the next read has the lines: %v %v", lines, err)
+	}
+	// A build the store does not know loses its buffer.
+	e.buildLogs.append("bld_gone", []string{"x"}, e.now(), nil)
+	if _, _, _, err := e.BuildLog("bld_gone"); !errors.Is(err, store.ErrBuildNotFound) {
+		t.Fatal(err)
+	}
+	if lines, _ := e.buildLogs.get("bld_gone"); lines != nil {
+		t.Fatal("an unknown build keeps a buffer")
+	}
+}
+
+// expired says the output was dropped on purpose (retention, the cap), not
+// that an ended build never had any.
+func TestBuildOutputExpiredOnlyWhenDropped(t *testing.T) {
+	e, clock := buildEngine(t, &mockTranscodeExecutor{})
+	ctx := context.Background()
+	silent := startBuild(t, e, "laptop", "", 0)
+	finishBuild(t, e, silent.ID, store.BuildSucceeded)
+	out, err := e.BuildOutput(silent.ID)
+	if err != nil || out.Expired || len(out.Lines) != 0 {
+		t.Fatalf("an ended build that sent nothing is not expired: %+v %v", out, err)
+	}
+	running := startBuild(t, e, "laptop", "", 0)
+	if out, _ := e.BuildOutput(running.ID); out.Expired {
+		t.Fatal("a running build is not expired")
+	}
+	e.HeartbeatBuild(ctx, running.ID, nil, 0, "x")
+	if out, _ := e.BuildOutput(running.ID); out.Expired || len(out.Lines) != 1 {
+		t.Fatalf("%+v", out)
+	}
+	// Retention.
+	kept := startBuild(t, e, "laptop", "", 0)
+	e.HeartbeatBuild(ctx, kept.ID, nil, 0, "line")
+	finishBuild(t, e, kept.ID, store.BuildSucceeded)
+	clock.advance(BuildLogRetention)
+	if out, _ := e.BuildOutput(kept.ID); !out.Expired || len(out.Lines) != 0 {
+		t.Fatalf("after the retention: %+v", out)
+	}
+	// The cap.
+	clock.advance(time.Second)
+	first := startBuild(t, e, "laptop", "", 0)
+	e.HeartbeatBuild(ctx, first.ID, nil, 0, "x")
+	finishBuild(t, e, first.ID, store.BuildFailed)
+	for i := 1; i < buildLogMaxBuilds; i++ {
+		clock.advance(time.Second)
+		b := startBuild(t, e, "laptop", "", 0)
+		e.HeartbeatBuild(ctx, b.ID, nil, 0, "x")
+	}
+	clock.advance(time.Second)
+	over := startBuild(t, e, "laptop", "", 0)
+	e.HeartbeatBuild(ctx, over.ID, nil, 0, "x")
+	if out, _ := e.BuildOutput(first.ID); !out.Expired || len(out.Lines) != 0 {
+		t.Fatalf("an evicted buffer is expired: %+v", out)
+	}
+}

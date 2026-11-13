@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -66,6 +67,12 @@ func TestBuildLogEvictsTheLeastRecentRunningBufferWhenNoneEnded(t *testing.T) {
 func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *testing.T) {
 	e, _ := buildEngine(t, &mockTranscodeExecutor{})
 	b := startBuild(t, e, "laptop", "", 0)
+	// Widen the gap between the store update and the append, so a heartbeat
+	// is regularly caught in it when the finish lands: without the engine's
+	// lock the output then changes after the finish returned.
+	gap := func() { time.Sleep(time.Millisecond) }
+	buildHeartbeatGap.Store(&gap)
+	t.Cleanup(func() { buildHeartbeatGap.Store(nil) })
 	// 8 x 20 lines stay below BuildLogKeep, so every accepted line is still kept.
 	const workers, perWorker, finishAfter = 8, 20, 40
 	if workers*perWorker >= BuildLogKeep {
@@ -81,6 +88,7 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 		reached  = make(chan struct{})
 		finished = make(chan struct{})
 		once     sync.Once
+		atEnd    []string
 	)
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -124,6 +132,8 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 		if _, _, err := e.FinishBuild(context.Background(), b.ID, store.BuildCancelled, nil); err != nil {
 			t.Errorf("finish: %v", err)
 		}
+		// The output as the finish leaves it: nothing may change it afterwards.
+		_, atEnd, _, _ = e.BuildLog(b.ID)
 		close(finished)
 	}()
 	close(start)
@@ -151,6 +161,9 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 	}
 	if len(lines) != len(accepted) {
 		t.Fatalf("%d lines kept, %d accepted", len(lines), len(accepted))
+	}
+	if !reflect.DeepEqual(lines, atEnd) {
+		t.Fatalf("lines landed after the finish returned: %d at the end, %d now", len(atEnd), len(lines))
 	}
 }
 

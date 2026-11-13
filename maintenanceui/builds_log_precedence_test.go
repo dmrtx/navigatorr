@@ -66,7 +66,16 @@ func TestBuildHeartbeatWrongLogTypeFollowsTheBuildStatus(t *testing.T) {
 	live := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"laptop","source":"ci","title":"unit run","progress":"step 1","ttl_seconds":120}`))
 	over := newBuild(t, h, "done")
 	withBuildsToken(h, "POST", path+"/"+over.ID+"/finish", `{"status":"succeeded"}`)
-	bodies := []string{`{"log":[1]}`, `{"log":"x"}`, `{"log":{"a":1}}`, `{"log":[["a"]]}`, `{"log":true}`, `{"log":[null]}`}
+	longProgress := strings.Repeat("p", 201)
+	bodies := []string{
+		`{"log":[1]}`, `{"log":"x"}`, `{"log":{"a":1}}`, `{"log":[["a"]]}`, `{"log":true}`, `{"log":[null]}`,
+		// progress: wrong type, too long, not a single line
+		`{"progress":42}`, `{"progress":["a"]}`, `{"progress":{"a":1}}`, `{"progress":"` + longProgress + `"}`, `{"progress":"a\nb"}`,
+		// ttl_seconds: wrong type, not whole, negative
+		`{"ttl_seconds":-1}`, `{"ttl_seconds":"x"}`, `{"ttl_seconds":1.5}`, `{"ttl_seconds":true}`, `{"ttl_seconds":[1]}`,
+		// a good field beside a bad one
+		`{"progress":"fine","ttl_seconds":-5}`, `{"progress":42,"log":["fine"]}`,
+	}
 	for _, body := range bodies {
 		if w := withBuildsToken(h, "POST", path+"/bld_missing/heartbeat", body); w.Code != 404 {
 			t.Errorf("%s on an unknown build: %d", body, w.Code)
@@ -75,12 +84,22 @@ func TestBuildHeartbeatWrongLogTypeFollowsTheBuildStatus(t *testing.T) {
 			t.Errorf("%s on an ended build: %d", body, w.Code)
 		}
 		// A new progress and a long ttl in the same body must not be applied.
-		with := strings.Replace(body, "{", `{"progress":"changed","ttl_seconds":3600,`, 1)
+		// (a field the body already has is not sent twice)
+		with := body
+		if !strings.Contains(body, `"progress"`) {
+			with = strings.Replace(with, "{", `{"progress":"changed",`, 1)
+		}
+		if !strings.Contains(body, `"ttl_seconds"`) {
+			with = strings.Replace(with, "{", `{"ttl_seconds":3600,`, 1)
+		}
 		if w := withBuildsToken(h, "POST", path+"/"+live.ID+"/heartbeat", with); w.Code != 400 {
 			t.Errorf("%s on a live build: %d %s", with, w.Code, w.Body.String())
 		}
 	}
 	got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+live.ID, ""))
+	if lines := decodeBuildLog(t, withBuildsToken(h, "GET", path+"/"+live.ID+"/log", "").Body.String()).Lines; len(lines) != 0 {
+		t.Fatal("a refused heartbeat kept lines", lines)
+	}
 	if got.Progress != "step 1" || got.ExpiresAt != live.ExpiresAt || got.LastHeartbeatAt != live.LastHeartbeatAt {
 		t.Fatalf("a refused heartbeat changed the build: %+v then %+v", live, got)
 	}
@@ -179,6 +198,12 @@ func TestBuildLogEvictionOverHTTP(t *testing.T) {
 	if lines(ids[63]) != 0 {
 		t.Fatal("the ended build kept its output")
 	}
+	if !strings.Contains(withBuildsToken(h, "GET", path+"/"+ids[63]+"/log", "").Body.String(), `"expired":true`) {
+		t.Fatal("an evicted buffer is expired")
+	}
+	if strings.Contains(withBuildsToken(h, "GET", path+"/"+ids[0]+"/log", "").Body.String(), `"expired":true`) {
+		t.Fatal("a running build is not expired")
+	}
 	for _, id := range append(ids[:63:63], extra.ID) {
 		if lines(id) != 1 {
 			t.Fatalf("running build %s lost its output", id)
@@ -204,7 +229,48 @@ func TestBuildLogExpiryOverHTTP(t *testing.T) {
 	if w.Code != 200 || len(got.Lines) != 0 || got.Status != "succeeded" {
 		t.Fatalf("after the retention: %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"ended_at":"`) {
-		t.Fatalf("ended_at is what tells the output expired: %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), `"ended_at":"`) || !strings.Contains(w.Body.String(), `"expired":true`) {
+		t.Fatalf("ended_at and expired tell the output is gone: %s", w.Body.String())
+	}
+	// An ended build that never sent anything is not expired: there was nothing to keep.
+	quiet := newBuild(t, h, "quiet")
+	withBuildsToken(h, "POST", path+"/"+quiet.ID+"/finish", `{"status":"succeeded"}`)
+	if body := withBuildsToken(h, "GET", path+"/"+quiet.ID+"/log", "").Body.String(); !strings.Contains(body, `"expired":false`) {
+		t.Fatalf("a build without output is not expired: %s", body)
+	}
+}
+
+// The output answers on GET /log only: none of the other endpoints that show
+// builds or nodes carry it.
+func TestBuildOutputIsOnlyOnTheLogEndpoint(t *testing.T) {
+	_, h := buildsUI(t)
+	const path = "/api/maintenance/builds"
+	node := "m1"
+	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"unit run"}`))
+	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"log":["token=synthetic-secret-77"]}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if !strings.Contains(withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String(), "synthetic-secret-77") {
+		t.Fatal("the log endpoint is meant to serve it")
+	}
+	reads := map[string]string{
+		"build":    path + "/" + b.ID,
+		"builds":   path,
+		"workers":  "/api/maintenance/workers",
+		"activity": "/api/maintenance/worker-activity",
+		"pause":    "/api/maintenance/worker-pause",
+		"slots":    "/api/maintenance/worker-slots",
+	}
+	for name, p := range reads {
+		w := withBuildsToken(h, "GET", p, "")
+		if w.Code == http.StatusUnauthorized || w.Code == http.StatusForbidden {
+			w = request(h, "GET", p, "", true)
+		}
+		if w.Code != 200 {
+			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "synthetic-secret") {
+			t.Fatalf("the output reached %s: %s", name, w.Body.String())
+		}
 	}
 }

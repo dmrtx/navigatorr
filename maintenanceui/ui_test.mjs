@@ -10543,18 +10543,26 @@ test("the build log says why it is empty: no output, a failed read, output gone;
   assert.equal(timers.length, n);
 });
 
-test("an ended build with nothing left says its output is no longer kept", async () => {
+test("an ended build with nothing left says whether its output was dropped or never sent", async () => {
   const { h, timers, build, empty, box } = buildLogHarness();
   const ended = new Date().toISOString();
-  h.context.log = { lines: [], updated_at: null, status: "succeeded", ended_at: ended };
   h.context.build = build;
+  // Ended and never sent any: just no output; the words do not claim it was lost.
+  h.context.log = { lines: [], updated_at: null, status: "succeeded", ended_at: ended, expired: false };
   h.run("api = async () => log");
+  h.run("openBuildLog(build)");
+  await tick();
+  assert.equal(empty.textContent, "No output");
+  assert.equal(empty.dataset.state, "empty");
+  assert.equal(timers.length, 1, "nothing more is asked of an ended build");
+  h.elements.get("build-log").listeners.get("close")();
+  // The server dropped it (retention, the cap).
+  h.context.log = { lines: [], updated_at: null, status: "succeeded", ended_at: ended, expired: true };
   h.run("openBuildLog(build)");
   await tick();
   assert.equal(empty.textContent, "Output no longer kept");
   assert.equal(empty.hidden, false);
   assert.equal(box.hidden, true);
-  assert.equal(timers.length, 1, "nothing more is asked of an ended build");
   // Purged altogether (404) after it ended while the dialog was open: the same words.
   h.elements.get("build-log").listeners.get("close")();
   h.context.log = { lines: ["x"], status: "running", ended_at: null };
@@ -10751,15 +10759,28 @@ test("Resume transcode says a running build keeps the node held", async () => {
   h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "suspend", idle: true, message: "x", builds: [build] }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.equal(resume().title, "Lifts your pause; the running build still holds transcode on this node until it ends.");
+  // The notice follows the node as the answer reports it after the click, not the page as it was.
+  const lifted = "m1 pause lifted; the running build still holds transcode until it ends.";
   h.context.notices = [];
-  h.run("api = async () => ({}); refreshWorkers = async () => {}; notify = (t) => notices.push(t);");
+  h.run("refreshWorkers = async () => {}; notify = (t) => notices.push(t); api = async () => ({ node: 'm1', paused: false, builds: [{ id: 'b1', status: 'running' }] });");
   await resume().listeners.get("click")();
-  assert.deepEqual(plain(h.context.notices), ["m1: Lifts your pause; the running build still holds transcode on this node until it ends."]);
-  // Without a running build it is the plain resume.
-  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x", builds: [{ ...build, status: "waiting" }] }) };
+  assert.deepEqual(plain(h.context.notices), [lifted]);
+  // The build ended before the pause was lifted: the page still shows it, the answer does not.
+  h.context.notices = [];
+  h.run("api = async () => ({ node: 'm1', paused: false })");
+  await resume().listeners.get("click")();
+  assert.deepEqual(plain(h.context.notices), ["m1 transcode resumed."]);
+  // No build on the page, one started since: the answer wins.
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x" }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.equal(resume().title, "This node takes transcode files again.");
   h.context.notices = [];
+  h.run("api = async () => ({ node: 'm1', paused: false, builds: [{ id: 'b9', status: 'running' }] })");
+  await resume().listeners.get("click")();
+  assert.deepEqual(plain(h.context.notices), [lifted]);
+  // A waiting build holds nothing.
+  h.context.notices = [];
+  h.run("api = async () => ({ node: 'm1', paused: false, builds: [{ id: 'b9', status: 'waiting' }] })");
   await resume().listeners.get("click")();
   assert.deepEqual(plain(h.context.notices), ["m1 transcode resumed."]);
 });
@@ -10770,4 +10791,84 @@ test("a build hold alone leaves the operator's pause buttons available", () => {
   h.context.info = { ready: true, nodes: [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause: { node: "m1", paused: true, held_by: "builds", mode: "suspend", idle: true, message: "x", builds: [build] } }] };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now"]);
+});
+
+test("the phone row of a paused node says so whatever else it holds", () => {
+  const { h, build, one } = buildLogHarness();
+  const encode = { id: "j1", kind: "conversion", file: "f.mkv", phase: "encoding", started_at: new Date().toISOString(), heartbeat_at: new Date().toISOString() };
+  const summaryText = (d) => d.children[0].children.map((c) => c.textContent).join(" ");
+  const show = (node) => { h.context.activity = { available: true, workers: [node] }; h.run("renderWorkerActivity(activity)"); };
+  const phone = () => summaryText(h.elements.get("worker-slots").children[0].children[0]);
+  const busy = { details_available: true, worker_slots_total: 1, worker_slots_used: 1, jobs: [encode], slots: { ceiling: 1, split: false, video: { total: 1, used: 1 }, podcast: { total: 0, used: 0 } } };
+  // A graceful pause while one encode finishes and a build runs.
+  show(one("node-a", { held_by: "operator", activity: busy, builds: [build] }));
+  assert.match(phone(), /node-a 1\/1 · 1 build · transcode paused/);
+  // An encode finishing, no build.
+  show(one("node-a", { held_by: "operator", activity: busy }));
+  assert.match(phone(), /node-a 1\/1 · transcode paused/);
+  // A build alone holding the node says nothing more than its count.
+  show(one("node-a", { held_by: "builds", builds: [build] }));
+  assert.doesNotMatch(phone(), /paused/);
+});
+
+test("focus stays on the build row when the slots are rebuilt, in both layouts", () => {
+  const { h, tableRow, phoneRow, build } = buildLogHarness();
+  const log = [];
+  // Rows as the next render creates them: the stand-ins found by the build id.
+  const fresh = (name, shown) => ({ name, getClientRects: () => (shown ? [{}] : []), focus(options) { log.push([name, options]); if (shown) h.document.activeElement = this; } });
+  const rebuild = (shownFirst) => {
+    const rows = shownFirst ? [fresh("new-phone", true), fresh("new-table", false)] : [fresh("new-phone", false), fresh("new-table", true)];
+    h.document.querySelectorAll = (selector) => (selector === '[data-build-id="b1"]' ? rows : []);
+  };
+  void phoneRow; void tableRow; void build;
+  const render = () => h.run("renderWorkerActivity(activity)");
+  // Desktop: the title button has focus, the phone row (first in the document) is hidden.
+  h.document.activeElement = { dataset: { buildId: "b1" } };
+  rebuild(false);
+  render();
+  assert.deepEqual(plain(log.splice(0)), [["new-table", { preventScroll: true }]]);
+  // Phone: the row itself has focus.
+  h.document.activeElement = { dataset: { buildId: "b1" } };
+  rebuild(true);
+  render();
+  assert.deepEqual(plain(log.splice(0)), [["new-phone", { preventScroll: true }]]);
+  // Focus anywhere else is left alone, and so is a build that is gone.
+  h.document.activeElement = { dataset: {} };
+  render();
+  h.document.activeElement = { dataset: { buildId: "gone" } };
+  render();
+  assert.deepEqual(log, []);
+});
+
+test("the phone row's name stays short and points at its facts; the output block has a name", () => {
+  const { phoneRow } = buildLogHarness();
+  const row = phoneRow();
+  assert.match(source, /row\.setAttribute\("aria-describedby", `build-facts-\$\{b\.id\}`\)/);
+  assert.match(source, /row\.setAttribute\("aria-label", `Output of build \$\{b\.title\}`\)/);
+  const facts = row.children.find((c) => c.id === "build-facts-b1");
+  assert.ok(facts && /Build running/.test(facts.textContent));
+  assert.match(markup, /<pre id="build-log-lines"[^>]*aria-label="Build output"/);
+});
+
+test("a block wider than the dialog fades at its right edge until the scroll reaches the end", async () => {
+  const { h, box } = buildLogHarness();
+  const toggles = [];
+  box.classList = { toggle: (name, on) => toggles.push([name, on]), add() {}, remove() {} };
+  h.run("api = async () => ({ lines: ['x'.repeat(500)], status: 'running', ended_at: null })");
+  Object.assign(box, { scrollWidth: 900, clientWidth: 400, scrollLeft: 0, scrollHeight: 100, clientHeight: 100 });
+  h.context.build = { id: "b1", title: "t", status: "running" };
+  h.run("openBuildLog(build)");
+  await tick();
+  assert.deepEqual(toggles.at(-1), ["more-right", true]);
+  box.scrollLeft = 500;
+  box.listeners.get("scroll")();
+  assert.deepEqual(toggles.at(-1), ["more-right", false]);
+  box.scrollLeft = 100;
+  box.listeners.get("scroll")();
+  assert.deepEqual(toggles.at(-1), ["more-right", true]);
+  // Nothing wider than the box: no fade.
+  box.scrollWidth = 400; box.scrollLeft = 0;
+  box.listeners.get("scroll")();
+  assert.deepEqual(toggles.at(-1), ["more-right", false]);
+  assert.match(css, /\.build-log-lines\.more-right \{[^}]*mask-image: linear-gradient\(to right/);
 });

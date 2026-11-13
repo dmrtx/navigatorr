@@ -127,8 +127,8 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Progress   *string         `json:"progress"`
-		TTLSeconds int             `json:"ttl_seconds"`
+		Progress   json.RawMessage `json:"progress"`
+		TTLSeconds json.RawMessage `json:"ttl_seconds"`
 		Log        json.RawMessage `json:"log"`
 	}
 	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
@@ -136,31 +136,49 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	// The log is checked after the build: one that is gone or over answers 404
-	// or 409 first, whatever is wrong with the lines.
+	// Every field is typed after the build is found: one that is gone or over
+	// answers 404 or 409 first, whatever is wrong with what was sent, and then
+	// the engine judges the values (length, range) in the same order.
+	var progress *string
+	var ttl int
 	var lines []string
-	var items []*string
+	reason := ""
+	if len(body.Progress) > 0 && string(body.Progress) != "null" {
+		var p string
+		if json.Unmarshal(body.Progress, &p) != nil {
+			reason = "progress must be a string"
+		}
+		progress = &p
+	}
+	if len(body.TTLSeconds) > 0 && string(body.TTLSeconds) != "null" && json.Unmarshal(body.TTLSeconds, &ttl) != nil {
+		reason = "ttl_seconds must be a whole number"
+	}
 	if len(body.Log) > 0 && string(body.Log) != "null" {
-		if err := json.Unmarshal(body.Log, &items); err != nil {
+		var items []*string
+		if json.Unmarshal(body.Log, &items) != nil {
 			items = []*string{nil}
 		}
+		for _, l := range items {
+			if l == nil {
+				reason = "log must be an array of strings"
+				break
+			}
+			lines = append(lines, *l)
+		}
 	}
-	for _, l := range items {
-		if l == nil {
-			cur, err := s.engine.GetBuild(id)
-			if s.buildError(w, err) {
-				return
-			}
-			if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
-				writeBuildEnded(w, cur)
-				return
-			}
-			fail(w, 400, "log must be an array of strings")
+	if reason != "" {
+		cur, err := s.engine.GetBuild(id)
+		if s.buildError(w, err) {
 			return
 		}
-		lines = append(lines, *l)
+		if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+			writeBuildEnded(w, cur)
+			return
+		}
+		fail(w, 400, reason)
+		return
 	}
-	b, err := s.engine.HeartbeatBuild(r.Context(), id, body.Progress, body.TTLSeconds, lines...)
+	b, err := s.engine.HeartbeatBuild(r.Context(), id, progress, ttl, lines...)
 	if errors.Is(err, store.ErrBuildEnded) {
 		writeBuildEnded(w, b)
 		return
@@ -180,19 +198,19 @@ func writeBuildEnded(w http.ResponseWriter, b store.Build) {
 // buildLog answers the output tail of a build: the last lines its heartbeats
 // sent, oldest first. They are kept in memory only (see action/buildlog.go).
 func (s *Server) buildLog(w http.ResponseWriter, r *http.Request) {
-	b, lines, updated, err := s.engine.BuildLog(r.PathValue("id"))
+	out, err := s.engine.BuildOutput(r.PathValue("id"))
 	if s.buildError(w, err) {
 		return
 	}
 	var at any
-	if !updated.IsZero() {
-		at = updated.UTC().Format(time.RFC3339)
+	if !out.Updated.IsZero() {
+		at = out.Updated.UTC().Format(time.RFC3339)
 	}
 	var ended any
-	if b.EndedAt != "" {
-		ended = b.EndedAt
+	if out.Build.EndedAt != "" {
+		ended = out.Build.EndedAt
 	}
-	writeJSON(w, 200, map[string]any{"lines": lines, "updated_at": at, "status": b.Status, "ended_at": ended})
+	writeJSON(w, 200, map[string]any{"lines": out.Lines, "updated_at": at, "status": out.Build.Status, "ended_at": ended, "expired": out.Expired})
 }
 
 func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,9 @@ type buildLogBuffer struct {
 type buildLogs struct {
 	mu   sync.Mutex
 	bufs map[string]*buildLogBuffer
+	// evicted remembers the builds whose buffer the cap pushed out, so a reader
+	// can tell "dropped" from "never sent anything". Pruned with the buffers.
+	evicted map[string]struct{}
 }
 
 // checkBuildLog validates the lines of a heartbeat the way progress is checked:
@@ -81,7 +84,12 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 				}
 			}
 			delete(l.bufs, oldest)
+			if l.evicted == nil {
+				l.evicted = map[string]struct{}{}
+			}
+			l.evicted[oldest] = struct{}{}
 		}
+		delete(l.evicted, id)
 		buf = &buildLogBuffer{}
 		l.bufs[id] = buf
 	}
@@ -106,7 +114,26 @@ func (l *buildLogs) get(id string) ([]string, time.Time) {
 func (l *buildLogs) drop(id string) {
 	l.mu.Lock()
 	delete(l.bufs, id)
+	delete(l.evicted, id)
 	l.mu.Unlock()
+}
+
+// wasEvicted is whether the cap pushed the build's buffer out.
+func (l *buildLogs) wasEvicted(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.evicted[id]
+	return ok
+}
+
+func (l *buildLogs) evictedIDs() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make([]string, 0, len(l.evicted))
+	for k := range l.evicted {
+		out = append(out, k)
+	}
+	return out
 }
 
 func (l *buildLogs) ids() []string {
@@ -140,27 +167,48 @@ func (e *Engine) buildEnded(id string) bool {
 	return b.Status != store.BuildRunning && b.Status != store.BuildWaiting
 }
 
+// BuildOutput is what a reader gets of a build's output.
+type BuildOutput struct {
+	Build   store.Build
+	Lines   []string
+	Updated time.Time
+	// Expired is true only when the output was dropped on purpose: its
+	// retention passed or the cap on buffers pushed it out. A build that never
+	// sent output, or whose output a restart forgot, is not expired.
+	Expired bool
+}
+
 // BuildLog is a build's output tail: at most BuildLogKeep lines, oldest first.
 // updated is the zero time when nothing was logged. An unknown build gives
 // store.ErrBuildNotFound; a build whose retention passed gives no lines.
 func (e *Engine) BuildLog(id string) (build store.Build, lines []string, updated time.Time, err error) {
+	out, err := e.BuildOutput(id)
+	return out.Build, out.Lines, out.Updated, err
+}
+
+// BuildOutput is BuildLog with the reason a buffer is empty. Only a build the
+// store says is unknown loses its buffer here; any other store error is
+// returned and the buffer stays for the next read.
+func (e *Engine) BuildOutput(id string) (BuildOutput, error) {
 	if e.deps.Store == nil {
-		return store.Build{}, nil, time.Time{}, errStoreForBuilds
+		return BuildOutput{}, errStoreForBuilds
 	}
 	b, err := e.deps.Store.GetBuild(id)
 	if err != nil {
-		e.buildLogs.drop(id)
-		return store.Build{}, nil, time.Time{}, err
+		if errorsIsBuildNotFound(err) {
+			e.buildLogs.drop(id)
+		}
+		return BuildOutput{}, err
 	}
 	if buildLogExpired(b, e.now()) {
 		e.buildLogs.drop(id)
-		return b, []string{}, time.Time{}, nil
+		return BuildOutput{Build: b, Lines: []string{}, Expired: true}, nil
 	}
-	lines, updated = e.buildLogs.get(id)
+	lines, updated := e.buildLogs.get(id)
 	if lines == nil {
 		lines = []string{}
 	}
-	return b, lines, updated, nil
+	return BuildOutput{Build: b, Lines: lines, Updated: updated, Expired: len(lines) == 0 && e.buildLogs.wasEvicted(id)}, nil
 }
 
 // pruneBuildLogs drops the buffers of builds that are gone or whose output
@@ -170,7 +218,7 @@ func (e *Engine) pruneBuildLogs() {
 		return
 	}
 	now := e.now()
-	for _, id := range e.buildLogs.ids() {
+	for _, id := range append(e.buildLogs.ids(), e.buildLogs.evictedIDs()...) {
 		b, err := e.deps.Store.GetBuild(id)
 		if err != nil && !errorsIsBuildNotFound(err) {
 			continue

@@ -3685,6 +3685,8 @@ a.review-main:hover .review-title { color: var(--forest); text-decoration: under
 #build-log-empty[data-state="error"] { color: var(--danger); }
 .build-log-lines { box-sizing: border-box; flex: 0 1 auto; min-height: 0; margin: 0; padding: 8px 10px; overflow: auto; overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--hover); color: var(--ink); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: normal; word-break: normal; }
 .build-log-lines[hidden] { display: none; }
+/* Wider than the dialog: the right edge fades until the scroll reaches the end. */
+.build-log-lines.more-right { -webkit-mask-image: linear-gradient(to right, currentColor calc(100% - 28px), transparent); mask-image: linear-gradient(to right, currentColor calc(100% - 28px), transparent); }
 .build-log-lines:focus-visible { outline: 2px solid var(--forest); outline-offset: 2px; }
 .build-open { cursor: pointer; }
 /* The cue that a build's row opens its output: a terminal and a chevron. */

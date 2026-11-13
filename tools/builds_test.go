@@ -82,3 +82,46 @@ func TestBuildMCPToolsListReadAndCancel(t *testing.T) {
 		t.Fatal("an unknown build is an error")
 	}
 }
+
+// A build's output tail is in memory only: none of the MCP tools that describe
+// builds or nodes carries it.
+func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "builds.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "m1", Executor: &observedHealthWorker{}, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	s := server.NewMCPServer("test", "0")
+	registerBuilds(s, engine)
+	registerWorkerHealth(s, engine)
+	registerWorkerPause(s, engine)
+	b, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "m1", Source: "ci", Title: "unit run", PreemptMode: store.WorkerPauseGraceful})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.HeartbeatBuild(context.Background(), b.ID, nil, 0, "token=synthetic-secret-77"); err != nil {
+		t.Fatal(err)
+	}
+	if _, lines, _, _ := engine.BuildLog(b.ID); len(lines) != 1 {
+		t.Fatal("the output is meant to be in memory")
+	}
+	for name, args := range map[string]map[string]any{
+		"build_list":    {},
+		"build_status":  {"id": b.ID},
+		"worker_health": {},
+		"worker_pause":  {},
+	} {
+		text := resultText(t, callTool(t, s, name, args))
+		if text == "" {
+			t.Fatalf("%s answered nothing", name)
+		}
+		if strings.Contains(text, "synthetic-secret") {
+			t.Fatalf("the output reached %s: %s", name, text)
+		}
+	}
+}

@@ -1012,13 +1012,21 @@ function renderBuildLog(lines, message) {
   const text = lines.join("\n"), box = $("build-log-lines"), empty = $("build-log-empty");
   empty.hidden = lines.length > 0;
   if (lines.length === 0) empty.textContent = message;
-  empty.dataset.state = lines.length ? "" : message === "No output yet" ? "empty" : message === "Loading output" ? "loading" : "error";
+  empty.dataset.state = lines.length ? "" : message === "Loading output" ? "loading" : message === "Couldn't load the output" || message === "Output no longer available" ? "error" : "empty";
   box.hidden = lines.length === 0;
   if (text !== buildLogView.text) {
     buildLogView.text = text;
     box.textContent = text;
   }
   if (buildLogView.pinned) box.scrollTop = box.scrollHeight;
+  updateBuildLogOverflow();
+}
+// A long token keeps the block wider than the dialog: a fade at the right edge
+// says there is more that way, until the scroll reaches the end.
+function updateBuildLogOverflow() {
+  const box = $("build-log-lines");
+  const more = box.scrollWidth > box.clientWidth + 1 && box.scrollLeft + box.clientWidth < box.scrollWidth - 1;
+  box.classList.toggle("more-right", more);
 }
 async function refreshBuildLog() {
   const id = buildLogView.id;
@@ -1029,9 +1037,9 @@ async function refreshBuildLog() {
     if (seq !== buildLogView.seq || id !== buildLogView.id) return;
     Object.assign(buildLogView, { status: log.status, endedAt: log.ended_at || null, loaded: true, stale: false });
     renderBuildLogMeta();
-    // A build that ended with nothing to show has lost its output (or never had
-    // any): the retention is over, so the line does not promise more.
-    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : [], BUILD_ENDED.includes(log.status) ? "Output no longer kept" : "No output yet");
+    // Only output the server dropped (retention, the cap) is "no longer kept";
+    // an ended build that never sent any simply has none.
+    renderBuildLog(Array.isArray(log.lines) ? log.lines.map(String) : [], log.expired ? "Output no longer kept" : BUILD_ENDED.includes(log.status) ? "No output" : "No output yet");
   } catch (err) {
     if (seq !== buildLogView.seq || id !== buildLogView.id) return;
     if (err?.status === 404) {
@@ -1091,15 +1099,18 @@ function buildOpenCue() {
 // Both layouts carry the build's row and only one is shown, so the first match
 // in the document may be the hidden one: take the first that is displayed and
 // check that focus really moved before giving up on it.
-function focusAfterBuildLog(view) {
-  const candidates = [view.opener];
-  if (view.id && /^[A-Za-z0-9_-]+$/.test(view.id)) candidates.push(...(document.querySelectorAll?.(`[data-build-id="${view.id}"]`) || []));
+function focusShownBuild(candidates, options) {
   for (const el of candidates) {
     if (!el || el.isConnected === false) continue;
     if (typeof el.getClientRects === "function" && el.getClientRects().length === 0) continue;
-    el.focus?.();
-    if (document.activeElement === el) return;
+    el.focus?.(options);
+    if (document.activeElement === el) return true;
   }
+  return false;
+}
+const buildRowsOf = id => id && /^[A-Za-z0-9_-]+$/.test(id) ? [...(document.querySelectorAll?.(`[data-build-id="${id}"]`) || [])] : [];
+function focusAfterBuildLog(view) {
+  if (focusShownBuild([view.opener, ...buildRowsOf(view.id)])) return;
   const heading = $("worker-capacity");
   heading.tabIndex = -1;
   heading.focus?.();
@@ -1114,7 +1125,9 @@ $("build-log").addEventListener("close", () => {
 $("build-log-lines").addEventListener("scroll", () => {
   const box = $("build-log-lines");
   buildLogView.pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 8;
+  updateBuildLogOverflow();
 });
+if (typeof window !== "undefined") window.addEventListener("resize", updateBuildLogOverflow);
 function renderWorkerDetails(host, info) {
   host.replaceChildren();
   for (const worker of info?.nodes || []) {
@@ -1203,8 +1216,10 @@ function nodePauseControls(worker) {
 }
 function setNodePause(worker, mode) {
   return safe(async () => {
-    await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? nodeHasRunningBuild(worker.pause) ? `${worker.name}: ${NODE_PAUSE_LIFTED}` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
+    // The answer is the node's pause as it is now, builds included: a build
+    // that started or ended since the click decides the words, not the page.
+    const status = await api("worker-pause", {node: worker.worker, mode});
+    notify(mode === "off" ? nodeHasRunningBuild(status) ? `${worker.name} pause lifted; the running build still holds transcode until it ends.` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }
@@ -7687,7 +7702,15 @@ function activityNodes(data) {
   if (!data) return [];
   return data.workers || [{name: "", available: data.available, activity: data.activity, message: data.message}];
 }
+// The slots are rebuilt on every refresh. A build row that has focus is
+// replaced with it, so focus goes to the new row of the same build, without
+// scrolling; a row that is gone leaves focus where the browser puts it.
 function renderWorkerActivity(data) {
+  const focused = document.activeElement?.dataset?.buildId;
+  renderWorkerActivityRows(data);
+  if (focused) focusShownBuild(buildRowsOf(focused), {preventScroll: true});
+}
+function renderWorkerActivityRows(data) {
   state.activityData = data;
   $("worker-slots").replaceChildren();
   const nodes = activityNodes(data), live = nodes.filter(n => n.available && n.activity);
@@ -7878,12 +7901,15 @@ function buildSlotRow(n, b) {
   row.tabIndex = 0;
   row.setAttribute("role", "button");
   row.setAttribute("aria-label", `Output of build ${b.title}`);
+  row.setAttribute("aria-describedby", `build-facts-${b.id}`);
   buildLogOpener(row, b);
   row.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openBuildLog(b, row); }
   });
   const elapsed = activityElapsed(b.started_at);
-  row.append(node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts"));
+  const facts = node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts");
+  facts.id = `build-facts-${b.id}`;
+  row.append(facts);
   row.append(buildOpenCue());
   return row;
 }
@@ -7904,7 +7930,7 @@ function slotNodeDetails(n, entries) {
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
     node("span", !online ? n.message || "Unavailable" : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
-      slotsBusy || builds.length && n.held_by === "builds" ? null : hold || (builds.length ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
+      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || "all available"].filter(Boolean).join(" · "), "metadata"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.

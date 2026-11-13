@@ -7,6 +7,7 @@ import (
 	"log"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -223,6 +224,30 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	return e.markBuild(b), nil
 }
 
+// buildHeartbeatGap is a test seam: it runs between a heartbeat's store update
+// and its log append, to widen the window a missing lock would leave open.
+var buildHeartbeatGap atomic.Pointer[func()]
+
+// checkHeartbeat validates the log, the progress line and the ttl of a
+// heartbeat, and returns the ttl (0 keeps the window the build has). progress
+// is replaced by its trimmed form.
+func checkHeartbeat(progress **string, ttlSeconds int, logLines []string) (time.Duration, error) {
+	if err := checkBuildLog(logLines); err != nil {
+		return 0, err
+	}
+	if *progress != nil {
+		p, err := checkBuildText("progress", **progress, buildProgMax, false)
+		if err != nil {
+			return 0, err
+		}
+		*progress = &p
+	}
+	if ttlSeconds == 0 {
+		return 0, nil
+	}
+	return buildTTL(ttlSeconds)
+}
+
 // HeartbeatBuild extends a running build's expiry and optionally replaces its
 // progress line and ttl. A build that already ended gives store.ErrBuildEnded
 // together with its record.
@@ -230,8 +255,10 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 	if e.deps.Store == nil {
 		return store.Build{}, errStoreForBuilds
 	}
-	if err := checkBuildLog(logLines); err != nil {
-		// A build that is gone or over answers as such, whatever the lines.
+	// Everything the caller sent is checked before anything is applied, and a
+	// build that is gone or over answers as such whatever was wrong with it.
+	ttl, err := checkHeartbeat(&progress, ttlSeconds, logLines)
+	if err != nil {
 		if cur, gerr := e.deps.Store.GetBuild(id); gerr != nil {
 			return store.Build{}, gerr
 		} else if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
@@ -239,27 +266,15 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		}
 		return store.Build{}, err
 	}
-	if progress != nil {
-		p, err := checkBuildText("progress", *progress, buildProgMax, false)
-		if err != nil {
-			return store.Build{}, err
-		}
-		progress = &p
-	}
-	// 0 keeps the window the build already has (see Store.HeartbeatBuild).
-	ttl := time.Duration(0)
-	if ttlSeconds != 0 {
-		var err error
-		if ttl, err = buildTTL(ttlSeconds); err != nil {
-			return store.Build{}, err
-		}
-	}
 	// The update and the append are one step against a finish, a cancel or a
 	// loss, and against another heartbeat: lines stay in order and never land
 	// on an ended build.
 	e.buildMu.Lock()
 	b, err := e.deps.Store.HeartbeatBuild(id, e.now(), ttl, progress)
 	if err == nil {
+		if gap := buildHeartbeatGap.Load(); gap != nil {
+			(*gap)()
+		}
 		e.buildLogs.append(id, logLines, e.now(), e.buildEnded)
 	}
 	e.buildMu.Unlock()
