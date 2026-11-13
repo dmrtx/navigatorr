@@ -55,7 +55,10 @@ func checkBuildLog(lines []string) error {
 	return nil
 }
 
-func (l *buildLogs) append(id string, lines []string, now time.Time) {
+// append adds lines to a build's buffer. When the cap of buffers is reached the
+// buffer of an ended build goes first (oldest update first), and only when none
+// has ended the least recently updated one of a running build.
+func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(id string) bool) {
 	if len(lines) == 0 {
 		return
 	}
@@ -67,11 +70,14 @@ func (l *buildLogs) append(id string, lines []string, now time.Time) {
 	buf := l.bufs[id]
 	if buf == nil {
 		if len(l.bufs) >= buildLogMaxBuilds {
-			// Drop the least recently updated buffer to stay bounded.
-			oldest := ""
+			oldest, oldestEnded := "", false
 			for k, v := range l.bufs {
-				if oldest == "" || v.updatedAt.Before(l.bufs[oldest].updatedAt) {
-					oldest = k
+				e := ended != nil && ended(k)
+				switch {
+				case oldest == "",
+					e && !oldestEnded,
+					e == oldestEnded && v.updatedAt.Before(l.bufs[oldest].updatedAt):
+					oldest, oldestEnded = k, e
 				}
 			}
 			delete(l.bufs, oldest)
@@ -121,6 +127,12 @@ func buildLogExpired(b store.Build, now time.Time) bool {
 	}
 	end, err := time.Parse(time.RFC3339, b.EndedAt)
 	return err == nil && now.Sub(end) >= BuildLogRetention
+}
+
+// buildEnded is whether a build is over or gone.
+func (e *Engine) buildEnded(id string) bool {
+	b, err := e.deps.Store.GetBuild(id)
+	return err != nil || (b.Status != store.BuildRunning && b.Status != store.BuildWaiting)
 }
 
 // BuildLog is a build's output tail: at most BuildLogKeep lines, oldest first.

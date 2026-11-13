@@ -126,15 +126,33 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Progress   *string  `json:"progress"`
-		TTLSeconds int      `json:"ttl_seconds"`
-		Log        []string `json:"log"`
+		Progress   *string   `json:"progress"`
+		TTLSeconds int       `json:"ttl_seconds"`
+		Log        []*string `json:"log"`
 	}
 	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
 		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
 		return
 	}
-	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds, body.Log...)
+	// A null element is no line. A build that is gone or over still answers
+	// 404 or 409 first, as for any other bad line.
+	lines := make([]string, 0, len(body.Log))
+	for _, l := range body.Log {
+		if l == nil {
+			cur, err := s.engine.GetBuild(r.PathValue("id"))
+			if s.buildError(w, err) {
+				return
+			}
+			if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+				writeJSON(w, 409, map[string]any{"error": "build already ended", "build": cur})
+				return
+			}
+			fail(w, 400, "log lines must be strings")
+			return
+		}
+		lines = append(lines, *l)
+	}
+	b, err := s.engine.HeartbeatBuild(r.Context(), r.PathValue("id"), body.Progress, body.TTLSeconds, lines...)
 	if errors.Is(err, store.ErrBuildEnded) {
 		writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
 		return
@@ -156,7 +174,11 @@ func (s *Server) buildLog(w http.ResponseWriter, r *http.Request) {
 	if !updated.IsZero() {
 		at = updated.UTC().Format(time.RFC3339)
 	}
-	writeJSON(w, 200, map[string]any{"lines": lines, "updated_at": at, "status": b.Status})
+	var ended any
+	if b.EndedAt != "" {
+		ended = b.EndedAt
+	}
+	writeJSON(w, 200, map[string]any{"lines": lines, "updated_at": at, "status": b.Status, "ended_at": ended})
 }
 
 func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {

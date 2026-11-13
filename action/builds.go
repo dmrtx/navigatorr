@@ -231,6 +231,12 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		return store.Build{}, errStoreForBuilds
 	}
 	if err := checkBuildLog(logLines); err != nil {
+		// A build that is gone or over answers as such, whatever the lines.
+		if cur, gerr := e.deps.Store.GetBuild(id); gerr != nil {
+			return store.Build{}, gerr
+		} else if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+			return e.markBuild(cur), store.ErrBuildEnded
+		}
 		return store.Build{}, err
 	}
 	if progress != nil {
@@ -248,10 +254,15 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 			return store.Build{}, err
 		}
 	}
+	// The update and the append are one step against a finish, a cancel or a
+	// loss, and against another heartbeat: lines stay in order and never land
+	// on an ended build.
+	e.buildMu.Lock()
 	b, err := e.deps.Store.HeartbeatBuild(id, e.now(), ttl, progress)
 	if err == nil {
-		e.buildLogs.append(id, logLines, e.now())
+		e.buildLogs.append(id, logLines, e.now(), e.buildEnded)
 	}
+	e.buildMu.Unlock()
 	if errors.Is(err, store.ErrBuildExpired) {
 		// The late heartbeat marked the build lost: release its node hold the
 		// way a finish does, and let a waiting build take the node.
@@ -284,7 +295,9 @@ func (e *Engine) FinishBuild(ctx context.Context, id, status string, exit *int) 
 		return store.Build{}, false, err
 	}
 	e.withNodeLock(current.Target, func(w transcode.NamedWorker, isNode bool) {
+		e.buildMu.Lock()
 		b, changed, err = e.deps.Store.FinishBuild(id, status, exit, e.now())
+		e.buildMu.Unlock()
 		if err == nil && changed && isNode {
 			e.syncWorkerHold(ctx, w)
 		}
@@ -328,7 +341,9 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 		return
 	}
 	now := e.now()
+	e.buildMu.Lock()
 	lost, err := e.deps.Store.ExpireBuilds(now)
+	e.buildMu.Unlock()
 	if err != nil {
 		log.Printf("builds: expiring: %v", err)
 	}

@@ -156,7 +156,7 @@ func TestBuildLogBuffersAreBounded(t *testing.T) {
 	var l buildLogs
 	now := time.Now()
 	for i := 0; i < buildLogMaxBuilds+20; i++ {
-		l.append(fmt.Sprintf("b%d", i), []string{"x"}, now.Add(time.Duration(i)*time.Second))
+		l.append(fmt.Sprintf("b%d", i), []string{"x"}, now.Add(time.Duration(i)*time.Second), nil)
 	}
 	if n := len(l.ids()); n != buildLogMaxBuilds {
 		t.Fatalf("%d buffers", n)
