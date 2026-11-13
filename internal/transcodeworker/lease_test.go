@@ -256,6 +256,7 @@ type fakeReporter struct {
 	paused    bool
 	down      bool
 	cancelled bool
+	gone      bool // the next heartbeat finds no such build (a 404)
 	nextID    int
 	registers []string
 	// onRegister runs first in Register, outside the lock.
@@ -300,6 +301,10 @@ func (f *fakeReporter) Heartbeat(id string, progress *string, ttl int, lines []s
 		b.progress = *progress
 	}
 	f.beats = append(f.beats, b)
+	if f.gone {
+		f.gone = false
+		return "ended", nil
+	}
 	if f.cancelled {
 		return "cancelled", nil
 	}

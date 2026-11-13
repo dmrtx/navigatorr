@@ -58,36 +58,15 @@ func (w *Worker) LeaseSocketPath() string {
 	return filepath.Join(w.cfg.StateDir, leaseSocketDirName, leaseSocketFileName)
 }
 
-// StartBuildLeases serves the lease socket and runs the tick and the server
-// reports until ctx ends. Leases are on only for a worker with a build_node. A
-// failure to open the socket is returned; the worker works without leases.
+// StartBuildLeases runs the tick (which expires leases, promotes low ones and
+// heals an unusable record) and the server reports until ctx ends, and serves
+// the lease socket. Leases are on only for a worker with a build_node. The tick
+// runs even when the socket cannot be opened (the error is returned; the worker
+// works without leases), so a record never stays unusable.
 func (w *Worker) StartBuildLeases(ctx context.Context) error {
 	path := w.LeaseSocketPath()
 	if path == "" {
 		return nil
-	}
-	if len(path) >= 100 {
-		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
-	}
-	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
-		return err
-	}
-	// A socket left by a worker that died: remove it. One that answers belongs
-	// to a live worker.
-	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
-		_ = c.Close()
-		return errors.New("another worker already serves the build socket")
-	}
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(path)
-	}
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = ln.Close()
-		return err
 	}
 	s := &w.leases
 	s.mu.Lock()
@@ -97,26 +76,14 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 	s.kick = make(chan struct{}, 1)
 	s.mu.Unlock()
 	w.leaseRestart()
+	w.leaseLoops(ctx)
+	return w.serveLeaseSocket(ctx, path)
+}
 
-	srv := &http.Server{
-		Handler:           w.leaseHandler(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
-	}
-	go func() {
-		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("build socket stopped: %v", err)
-		}
-	}()
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdown)
-		_ = os.Remove(path)
-	}()
-	// The tick never waits for the server: the reports run on their own.
+// leaseLoops starts the tick and the report pass, apart so that a slow server
+// never delays an expiry.
+func (w *Worker) leaseLoops(ctx context.Context) {
+	s := &w.leases
 	go func() {
 		tick := time.NewTicker(leaseTickEvery)
 		defer tick.Stop()
@@ -142,6 +109,50 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 				w.leaseReportPass()
 			}
 		}
+	}()
+}
+
+func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
+	if len(path) >= 100 {
+		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
+	}
+	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
+		return err
+	}
+	// A socket left by a worker that died: remove it. One that answers belongs
+	// to a live worker.
+	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
+		_ = c.Close()
+		return errors.New("another worker already serves the build socket")
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(path)
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	srv := &http.Server{
+		Handler:           w.leaseHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      40 * time.Second, // a create may wait for another, then for the freeze
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("build socket stopped: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdown)
+		_ = os.Remove(path)
 	}()
 	return nil
 }

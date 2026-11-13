@@ -22,14 +22,14 @@ the permission.
 
 - `GET /v1/node` gives `{"node": NAME, "leases": true}`.
 - `POST /api/maintenance/builds` creates a lease (`target` must be the node,
-  else 409 `wrong_node`). 200 with the build record; `status` is `running`
-  (normal) or `waiting` (low priority). A normal lease is answered only once
-  every running encode reported itself frozen (up to 10 s); if one did not, the
-  lease is rolled back (nothing held, nothing recorded) and the answer is 503.
-  409 `builds_paused` when the operator paused builds on the node. An optional
-  `id` (`bld_` plus 8 to 56 letters, digits, `_` or `-`) names the lease:
-  asking again with the same id returns that lease instead of making another,
-  so a caller that did not hear the answer can ask again.
+  else 409 `wrong_node`). Creates run one at a time. 200 with the build record;
+  `status` is `running` (normal) or `waiting` (low priority). A normal lease is
+  answered only once every running encode reported itself frozen (up to 10 s);
+  if one did not, the lease ends as cancelled and the answer is 503, with no
+  call to the server on that path. 409 `builds_paused` when the operator paused
+  builds on the node. An optional `id` (`bld_` plus 8 to 56 letters, digits,
+  `_` or `-`) names the lease: asking again returns what that id got (the same
+  lease, the same 503), never `running` for a freeze not yet confirmed.
 - `POST /api/maintenance/builds/{id}/heartbeat` extends the lease and carries
   `progress`, `ttl_seconds` and `log` lines. 409 with `{"build": {...}}` when
   the lease is over (`cancelled`, `lost`, ...), 404 when unknown.
@@ -46,17 +46,18 @@ the permission.
    freezes the encoders; a `graceful` or low one does not.
 3. Ended: `succeeded`, `failed`, `cancelled`, or `lost` when the heartbeats
    stopped past `ttl_seconds`. A lease found past its expiry
-   by a read or a finish is marked lost on the spot, and a finish then cannot
-   claim success. Ended leases stay on record for an hour once the server has
-   the end (or when there is no server to tell), at most a day otherwise, so a
-   late heartbeat is told it is over.
+   by a read or a finish is marked lost on the spot; a finish then cannot claim
+   success. A new normal lease's ttl starts when its freeze is confirmed. Ended
+   leases stay on record for an hour once the server has the end (or when there
+   is no server), at most a day otherwise.
 
 The state is `build-leases.json` in the state directory, written atomically.
 Runners read it like the suspend record, with the expiry evaluated at read time:
 an expired lease never freezes anything, even before the worker marked it lost.
-The freeze is the union of the server's suspend record and the leases. A record
-that cannot be read freezes (fail closed) until the worker's next tick or start,
-which replaces it with an empty one.
+The freeze is the union of the server's suspend record and the leases.
+Only a record that is empty or not JSON is replaced by an empty one (by the
+tick, which runs even if the socket cannot open); any other read error fails
+closed and is retried. A worker without `build_node` ignores the file.
 
 ## How the server learns about it
 
@@ -69,12 +70,10 @@ kept alive at a third of it, at most every 20 s), and finishes it (a lost lease 
 3 second timeout: a 409 `builds_paused` refuses the lease, anything else
 (unreachable, error) grants it and the registration is retried in the
 background. A build cancelled in the server answers the forwarded heartbeat as
-cancelled, and so does a 404 (the server forgot it); the lease then ends and the
-build learns it from its next heartbeat. The tick that expires and promotes
-leases and the report pass run on their own, so a slow server never delays an
-expiry. A low lease is registered as `normal` priority with `graceful` mode: a
-low build in the server would wait there for a node the worker already decided
-is free.
+cancelled. A 404 (the server forgot the build) only registers it again. The
+tick and the report pass run apart, every second. A low lease is registered as
+`normal` priority with `graceful` mode: a low build in the server would wait
+there for a node the worker already decided is free.
 
 ## Failure modes
 
@@ -88,9 +87,9 @@ is free.
   reports are retried and the server's record catches up. The server's own
   expiry may mark the build lost while the worker still holds it.
 - Low lease promoted while the server is down: granted without the pause check.
-- Whatever fails after the server registered a normal lease and before it is
-  recorded, the worker finishes the server's build as `cancelled`. If the
-  server's answer to the registration is lost, that build exists only in the
-  server and expires there by its ttl.
+- A normal lease is registered with the server before it is stored (the pause
+  check). If storing then fails, or the answer to the registration is lost, that
+  server build exists only there and expires by its ttl. A lease that ends
+  without a freeze stays on record, so the reporter finishes it with retries.
 - The socket has no token and no peer check: the 0700 directory and the 0600
   socket are the whole permission.

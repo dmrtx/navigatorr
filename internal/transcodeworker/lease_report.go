@@ -33,7 +33,7 @@ import (
 // ends the lease as cancelled, which the build learns from its next heartbeat.
 
 const (
-	leaseReportEvery   = 2 * time.Second
+	leaseReportEvery   = time.Second
 	leaseKeepaliveGap  = 20 * time.Second
 	leaseRegisterTries = 5 * time.Second // between background registration attempts
 	leaseReportTimeout = 3 * time.Second
@@ -153,8 +153,9 @@ func (r *httpLeaseReporter) Heartbeat(serverID string, progress *string, ttlSeco
 		}
 		return "ended", nil
 	case http.StatusNotFound:
-		// The server has no such build (someone removed it): over.
-		return leaseStatusCancelled, nil
+		// The server forgot the build (restart, purge): not the build's end.
+		// The lease registers it again.
+		return "ended", nil
 	case http.StatusBadRequest:
 		// A line the server refuses must not cost the heartbeat.
 		if len(lines) > 0 || progress != nil {
@@ -211,7 +212,6 @@ func (w *Worker) leaseReportPass() {
 	if rep == nil {
 		return
 	}
-	now := s.clock()
 	type job struct {
 		l   leaseRecord
 		p   leasePending
@@ -219,7 +219,12 @@ func (w *Worker) leaseReportPass() {
 	}
 	var work []job
 	s.mu.Lock()
-	f := w.loadLeasesLocked()
+	now := s.clock()
+	f, err := w.loadLeasesLocked()
+	if err != nil {
+		s.mu.Unlock()
+		return
+	}
 	for _, l := range f.Leases {
 		switch {
 		case l.active() && l.Status == leaseStatusRunning:
@@ -296,7 +301,10 @@ func (w *Worker) leaseUpdate(id string, fn func(l *leaseRecord)) {
 	s := &w.leases
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f := w.loadLeasesLocked()
+	f, err := w.loadLeasesLocked()
+	if err != nil {
+		return
+	}
 	for _, l := range f.Leases {
 		if l.ID == id {
 			fn(l)

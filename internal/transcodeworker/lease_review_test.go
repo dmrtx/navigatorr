@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,9 +63,11 @@ func TestLeaseIsAnsweredOnlyOnceTheRunnersFroze(t *testing.T) {
 	frozenFor(t, file)
 }
 
-// A runner that never confirms the freeze: the lease is rolled back (nothing
-// held, nothing recorded, the server's build cancelled) and the socket says 503.
-func TestLeaseFreezeTimeoutRollsBack(t *testing.T) {
+// A runner that never confirms the freeze: the lease ends at once (nothing
+// held, the socket says 503, no server call on that path), stays on record
+// ended, and the report pass finishes the server's build, retrying a Finish
+// that failed. Asking again with the same id gets the same refusal.
+func TestLeaseFreezeTimeoutEndsTheLeaseAndTheReporterFinishesIt(t *testing.T) {
 	old := leaseFreezeWait
 	leaseFreezeWait = 300 * time.Millisecond
 	defer func() { leaseFreezeWait = old }()
@@ -73,23 +77,41 @@ func TestLeaseFreezeTimeoutRollsBack(t *testing.T) {
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 
-	if _, err := w.LeaseCreate(leaseReq("compile")); !errors.Is(err, errLeaseFreeze) {
+	req := leaseReq("compile")
+	req.ID = "bld_cfreeze0001"
+	if _, err := w.LeaseCreate(req); !errors.Is(err, errLeaseFreeze) {
 		t.Fatalf("create: %v", err)
 	}
-	if f, _ := w.readLeaseFile(); len(f.Leases) != 0 {
-		t.Fatalf("a rolled back lease leaves no record: %+v", f.Leases)
+	if _, err := w.LeaseCreate(req); !errors.Is(err, errLeaseFreeze) {
+		t.Fatalf("asking again: %v", err)
+	}
+	f, _ := w.readLeaseFile()
+	if len(f.Leases) != 1 || f.Leases[0].Status != leaseStatusCancelled || f.Leases[0].ServerID == "" {
+		t.Fatalf("the ended lease stays for the reporter: %+v", f.Leases)
 	}
 	if w.queueHeld() || w.leaseHolds() {
-		t.Fatal("a rolled back lease holds nothing")
+		t.Fatal("an ended lease holds nothing")
 	}
+	if len(rep.finished) != 0 {
+		t.Fatal("the refusal makes no server call")
+	}
+	rep.mu.Lock()
+	rep.down = true
+	rep.mu.Unlock()
+	w.leaseReportPass()
+	rep.mu.Lock()
+	rep.down = false
+	rep.mu.Unlock()
+	w.leaseReportPass()
 	if len(rep.finished) != 1 {
-		t.Fatalf("the server's build must be ended: %v", rep.finished)
+		t.Fatalf("finished: %v", rep.finished)
 	}
 	for _, status := range rep.finished {
 		if status != "cancelled" {
 			t.Fatalf("server status = %s", status)
 		}
 	}
+	w.cfg.BuildNode = "nodeA"
 	if code, _ := leaseCall(t, w.leaseHandler(), "POST", "/api/maintenance/builds", `{"target":"nodeA","source":"s","title":"t"}`); code != 503 {
 		t.Fatalf("socket answer = %d, want 503", code)
 	}
@@ -101,6 +123,7 @@ func TestLeaseTickHealsAnUnreadableRecord(t *testing.T) {
 	for name, content := range map[string]string{"corrupt": "{not json", "empty": ""} {
 		t.Run(name, func(t *testing.T) {
 			w, _, _ := newPR3Worker(t, 2, nil)
+			w.cfg.BuildNode = "nodeA"
 			ctl, _, stop := startFrozenWatcher(t, w)
 			defer stop()
 			if err := os.MkdirAll(w.cfg.StateDir, 0o755); err != nil {
@@ -119,31 +142,6 @@ func TestLeaseTickHealsAnUnreadableRecord(t *testing.T) {
 				t.Fatal("the healed record must release the queue")
 			}
 		})
-	}
-}
-
-// Whatever fails after the server knows the build, the server is told it ended.
-func TestLeaseGrantFailureEndsTheServerBuild(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, nil)
-	if err := os.MkdirAll(w.cfg.StateDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	rep := &fakeReporter{}
-	rep.onRegister = func() { _ = os.Chmod(w.cfg.StateDir, 0o500) }
-	w.leases.reporter = rep
-	defer func() { _ = os.Chmod(w.cfg.StateDir, 0o755) }()
-	if _, err := w.LeaseCreate(leaseReq("compile")); err == nil {
-		t.Skip("the state directory stayed writable (running as root?)")
-	}
-	rep.mu.Lock()
-	defer rep.mu.Unlock()
-	if len(rep.registers) != 1 || len(rep.finished) != 1 {
-		t.Fatalf("registers=%v finished=%v", rep.registers, rep.finished)
-	}
-	for _, status := range rep.finished {
-		if status != "cancelled" {
-			t.Fatalf("server status = %s", status)
-		}
 	}
 }
 
@@ -271,8 +269,9 @@ func TestLeaseForwardsItsTTL(t *testing.T) {
 	}
 }
 
-// A build the server does not know any more (404 on a heartbeat) is over.
-func TestServerNotFoundEndsTheLease(t *testing.T) {
+// A build the server does not know any more (404 on a heartbeat) is not the
+// end of the lease: the reporter says "ended" and the lease registers again.
+func TestServerNotFoundIsNotAnEnd(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, `{"error":"build not found"}`, http.StatusNotFound)
 	}))
@@ -282,7 +281,7 @@ func TestServerNotFoundEndsTheLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := newHTTPLeaseReporter(srv.URL, tokenFile, "nodeA")
-	if ended, err := rep.Heartbeat("bld_x", nil, 60, nil); err != nil || ended != leaseStatusCancelled {
+	if ended, err := rep.Heartbeat("bld_x", nil, 60, nil); err != nil || ended != "ended" {
 		t.Fatalf("heartbeat: %q %v", ended, err)
 	}
 }
@@ -327,5 +326,166 @@ func TestLeaseSocketDirectories(t *testing.T) {
 		t.Fatal(err)
 	} else {
 		_ = c.Close()
+	}
+}
+
+// Two creates of one id at once make one lease and one server build.
+func TestConcurrentCreatesOfOneIDMakeOneLease(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	rep := &fakeReporter{onRegister: func() { time.Sleep(100 * time.Millisecond) }}
+	w.leases.reporter = rep
+	req := leaseReq("compile")
+	req.ID = "bld_cconcurrent1"
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if l, err := w.LeaseCreate(req); err != nil || l.ID != req.ID || l.Status != leaseStatusRunning {
+				t.Errorf("create: %+v %v", l, err)
+			}
+		}()
+	}
+	wg.Wait()
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if f, _ := w.readLeaseFile(); len(f.Leases) != 1 || len(rep.registers) != 1 {
+		t.Fatalf("leases=%d registers=%v", len(f.Leases), rep.registers)
+	}
+}
+
+// A retry while the first create waits for the freeze is not answered
+// "running" before the encoder is frozen.
+func TestRetryDuringTheFreezeWaitIsNotAnsweredEarly(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, nil)
+	jobDir, jobFile := seedRunningJob(t, w, "job1")
+	ctl, _, stop := startFrozenWatcher(t, w)
+	defer stop()
+	var beating atomic.Bool
+	quit := make(chan struct{})
+	defer close(quit)
+	go func() {
+		time.Sleep(400 * time.Millisecond)
+		beating.Store(true)
+		for {
+			select {
+			case <-quit:
+				return
+			case <-time.After(20 * time.Millisecond):
+				_ = w.persistJobHeartbeat(jobDir, jobFile, time.Now().UTC())
+			}
+		}
+	}()
+	req := leaseReq("compile")
+	req.ID = "bld_cretry000001"
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := w.LeaseCreate(req); err != nil {
+				t.Errorf("create: %v", err)
+			}
+			if !beating.Load() || !ctl.isFrozen() {
+				t.Error("answered running before the encoder was frozen")
+			}
+		}()
+		time.Sleep(100 * time.Millisecond)
+	}
+	wg.Wait()
+}
+
+// A ttl shorter than the freeze wait is not spent waiting for the freeze.
+func TestShortTTLSurvivesTheFreezeWait(t *testing.T) {
+	old := leaseFreezeWait
+	leaseFreezeWait = 3 * time.Second
+	defer func() { leaseFreezeWait = old }()
+	w, _, _ := newPR3Worker(t, 2, nil)
+	jobDir, jobFile := seedRunningJob(t, w, "job1")
+	_, _, stop := startFrozenWatcher(t, w)
+	defer stop()
+	quit := make(chan struct{})
+	defer close(quit)
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		for {
+			select {
+			case <-quit:
+				return
+			case <-time.After(20 * time.Millisecond):
+				_ = w.persistJobHeartbeat(jobDir, jobFile, time.Now().UTC())
+			}
+		}
+	}()
+	req := leaseReq("compile")
+	req.TTLSeconds = 1
+	l, err := w.LeaseCreate(req)
+	if err != nil || l.Status != leaseStatusRunning || !l.Confirmed {
+		t.Fatalf("create: %+v %v", l, err)
+	}
+	if _, err := w.LeaseHeartbeat(l.ID, nil, 0, nil); err != nil {
+		t.Fatalf("the ttl starts at the confirmation: %v", err)
+	}
+}
+
+// Only a record that is empty or not JSON is rewritten. A record that cannot be
+// read (here: a directory) is left alone and fails closed.
+func TestAnIOErrorIsNotHealed(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w.cfg.BuildNode = "nodeA"
+	if err := os.MkdirAll(w.leasePath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := w.freezeState(); !on || !w.queueHeld() {
+		t.Fatal("an unreadable record fails closed")
+	}
+	w.leaseTick()
+	if fi, err := os.Stat(w.leasePath()); err != nil || !fi.IsDir() {
+		t.Fatalf("nothing was rewritten: %v %v", fi, err)
+	}
+	if _, err := w.LeaseGet("bld_x"); err == nil || errors.Is(err, errLeaseNotFound) {
+		t.Fatalf("an unreadable record is an error, not an empty one: %v", err)
+	}
+}
+
+// Without leases (no build_node) a bad record is ignored: nothing would heal it.
+func TestUnreadableRecordIsIgnoredWithoutLeases(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, nil)
+	if err := os.MkdirAll(w.cfg.StateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(w.leasePath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := w.freezeState(); on || w.queueHeld() {
+		t.Fatal("a worker without leases must not freeze on the lease record")
+	}
+}
+
+// The reporter's "ended" (a 404) leaves the lease running and registers it
+// again.
+func TestForgottenServerBuildIsRegisteredAgain(t *testing.T) {
+	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	rep := &fakeReporter{}
+	w.leases.reporter = rep
+	l, err := w.LeaseCreate(leaseReq("compile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.LeaseHeartbeat(l.ID, ptr("x"), 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	rep.mu.Lock()
+	rep.gone = true
+	rep.mu.Unlock()
+	w.leaseReportPass()
+	got, err := w.LeaseGet(l.ID)
+	if err != nil || got.Status != leaseStatusRunning || got.ServerID != "" {
+		t.Fatalf("after the 404: %+v %v", got, err)
+	}
+	w.leases.pending = nil
+	w.leaseReportPass()
+	if got, _ = w.LeaseGet(l.ID); got.ServerID == "" || len(rep.registers) != 2 {
+		t.Fatalf("not registered again: %+v %v", got, rep.registers)
 	}
 }
