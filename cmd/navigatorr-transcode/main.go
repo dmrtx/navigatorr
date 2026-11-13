@@ -203,6 +203,12 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 		return err
 	}
 
+	// Stderr is a regular file under a service manager; without a cap the log
+	// grows for as long as the daemon runs.
+	if _, err := transcodeworker.CapStderrLog(cfg.LogMaxMB); err != nil {
+		fmt.Fprintf(os.Stderr, "log cap not installed: %v\n", err)
+	}
+
 	worker := transcodeworker.NewWorker(cfg)
 	srv := transcodeworker.NewServer(worker, serveCfg.SelfExe, serveCfg.ConfigPath, serveCfg.Token)
 

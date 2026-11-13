@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/jakenesler/navigatorr/transcode"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,7 +15,7 @@ import (
 func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 	slots := w.slotsStatus()
 	activity := transcode.WorkerActivity{SlotsTotal: slots.Ceiling, Slots: &slots, CheckedAt: time.Now().UTC(), DetailsAvailable: true, Jobs: []transcode.WorkerActivityJob{}}
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		return activity, fmt.Errorf("worker activity unavailable")
 	}
@@ -25,7 +24,7 @@ func (w *Worker) activitySnapshot() (transcode.WorkerActivity, error) {
 			continue
 		}
 		dir := filepath.Join(w.cfg.StateDir, entry.Name())
-		if job, err := LoadJob(filepath.Join(dir, "job.json")); err == nil && job.ID == entry.Name() && job.PID > 0 && (job.Status == "running" || job.Status == "queued") {
+		if job, err := peekJob(filepath.Join(dir, "job.json")); err == nil && job.ID == entry.Name() && job.PID > 0 && (job.Status == "running" || job.Status == "queued") {
 			var progress *float64
 			measured := ParseProgress(filepath.Join(dir, "progress.txt"), job.DurationSec)
 			if measured.Valid {

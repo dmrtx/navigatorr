@@ -1329,7 +1329,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 	}
 	defer capLock.Unlock()
 
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -1355,6 +1355,12 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 		}
 		jobDir := filepath.Join(w.cfg.StateDir, name)
 		jobFile := filepath.Join(jobDir, "job.json")
+		// Most records are finished jobs: one read through the record index
+		// rules them out without taking a lock on each. Whatever it cannot
+		// decide (unreadable, or a candidate) takes the locked path below.
+		if cached, cerr := peekJob(jobFile); cerr == nil && cached != nil && cached.ID == name && !isPostEncodeResume(cached) {
+			continue
+		}
 		if _, serr := os.Stat(jobFile); serr != nil {
 			if os.IsNotExist(serr) {
 				continue // empty / non-job dir

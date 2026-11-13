@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -99,6 +100,17 @@ type WorkerConfig struct {
 	// to the share at once. They run beside encodes, outside max_parallel_jobs,
 	// so this keeps them from flooding the NAS. Zero means 1.
 	MaxParallelPublications int `json:"max_parallel_publications" yaml:"max_parallel_publications"`
+
+	// JobRetentionDays is how long the directory of a finished job (completed,
+	// cancelled, or failed without a publication left to retry) stays in the
+	// state directory before the worker removes it. Zero means 30 days; below
+	// zero keeps every job. Queued, running, finalizing and retained jobs are
+	// never removed. It does not affect the execution-spec digest.
+	JobRetentionDays int `json:"job_retention_days" yaml:"job_retention_days"`
+	// LogMaxMB caps the serve log when stderr is a regular file: past it the
+	// newest part is kept as "<log>.1" and the log restarts. Zero means 20 MB;
+	// below zero leaves the log alone.
+	LogMaxMB int `json:"log_max_mb" yaml:"log_max_mb"`
 }
 
 // DefaultWorkerConfig returns sane defaults for an Apple Silicon Mac.
@@ -282,6 +294,8 @@ type Worker struct {
 	slotSplit       slotSplitCache
 	slotWrite       sync.Mutex
 	holdWrite       sync.Mutex
+	pruneMu         sync.Mutex
+	pruneAt         time.Time // last finished-job pruning pass; guarded by pruneMu
 	suspendWrite    sync.Mutex
 	suspendedGen    atomic.Int64 // generation of the suspend this runner has frozen its children under, 0 if none (heartbeat input)
 	x265Recheck     sync.Mutex
@@ -1376,7 +1390,7 @@ func (w *Worker) listQueuedJobsLocked() []*JobRecord {
 	return jobs
 }
 func (w *Worker) listQueuedJobsObserved() ([]*JobRecord, error) {
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -1391,15 +1405,11 @@ func (w *Worker) listQueuedJobsObserved() ([]*JobRecord, error) {
 			continue
 		}
 		path := filepath.Join(w.cfg.StateDir, name, "job.json")
-		if _, err := os.Stat(path); err != nil {
-			if !os.IsNotExist(err) {
+		job, err := peekJob(path)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
 				errs = append(errs, err)
 			}
-			continue
-		}
-		job, err := LoadJob(path)
-		if err != nil {
-			errs = append(errs, err)
 			continue
 		}
 		if job.ID != name {
@@ -1581,7 +1591,7 @@ func (w *Worker) countActiveJobs(excludeID string) (int, error) {
 // countActiveJobsByKind counts live transcode slot holders, podcast jobs apart
 // from the rest (video), and the x265 encodes among the video jobs.
 func (w *Worker) countActiveJobsByKind(excludeID string) (use slotCounts, err error) {
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		if os.IsNotExist(err) {
 			return slotCounts{}, nil
@@ -1594,12 +1604,11 @@ func (w *Worker) countActiveJobsByKind(excludeID string) (use slotCounts, err er
 		if !entry.IsDir() || name == excludeID || strings.HasPrefix(name, ".") {
 			continue
 		}
-		entryDir := filepath.Join(w.cfg.StateDir, name)
-
 		// 1. Check for active transcode job
-		jobPath := filepath.Join(entryDir, "job.json")
-		if fi, err := os.Stat(jobPath); err == nil && !fi.IsDir() {
-			job, err := LoadJob(jobPath)
+		jobPath := filepath.Join(w.cfg.StateDir, name, "job.json")
+		entryDir := filepath.Dir(jobPath)
+		{
+			job, err := peekJob(jobPath)
 			if err == nil && job != nil && job.ID == name {
 				if job.Status == "running" || job.Status == "queued" {
 					if job.PID == 0 {

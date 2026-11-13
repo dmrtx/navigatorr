@@ -380,7 +380,7 @@ type slotUse struct {
 // that is no longer alive does not.
 func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 	use := slotUse{kinds: map[string]slotKind{}}
-	entries, err := os.ReadDir(w.cfg.StateDir)
+	entries, err := w.readJobDirs()
 	if err != nil {
 		return use, err
 	}
@@ -388,8 +388,7 @@ func (w *Worker) observeSlotUse(checkAlive bool) (slotUse, error) {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		dir := filepath.Join(w.cfg.StateDir, entry.Name())
-		if job, err := LoadJob(filepath.Join(dir, "job.json")); err == nil && job.ID == entry.Name() {
+		if job, err := peekJob(filepath.Join(w.cfg.StateDir, entry.Name(), "job.json")); err == nil && job.ID == entry.Name() {
 			use.kinds[job.ID] = jobSlotKind(job)
 			if (job.Status == "running" || job.Status == "queued") && job.PID > 0 {
 				if !checkAlive || w.jobAlive(job) {
