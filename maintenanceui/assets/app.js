@@ -7961,8 +7961,10 @@ function slotNodeDetails(n, entries) {
   const summary = node("summary");
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
-    node("span", !online ? [n.message || "Unavailable", n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · ") : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
-      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available"), n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · "), "metadata"));
+    node("span", !online ? n.message || "Unavailable" : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
+      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
+  // The builds pause is a state, so it is a paused badge, as in the workers dialog, not metadata text.
+  if (n.builds_paused) summary.append(pausedBadge("Builds paused"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.
@@ -7996,7 +7998,7 @@ function slotTable(groups) {
   const multi = groups.length > 1, busy = [], free = [], down = [], held = [], buildsPaused = [];
   for (const {n, entries} of groups) {
     if (n.builds_paused) buildsPaused.push(n.name || "node");
-    if (!(n.available && n.activity)) { down.push([n.name, n.message || "Unavailable", n.builds_paused ? "builds paused" : null].filter(Boolean).join(" · ")); continue; }
+    if (!(n.available && n.activity)) { down.push(`${n.name} · ${n.message || "Unavailable"}`); continue; }
     const idle = entries.filter(e => !e.job && !e.unknown).length, hold = nodeHoldWord(n);
     // A held node takes no new file, so its free slots are not available.
     if (hold) held.push(`${n.name || "node"} ${hold}`);

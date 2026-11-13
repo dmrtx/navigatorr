@@ -10955,7 +10955,7 @@ test("worker slots show builds paused with the node as a chip, on the phone rows
   h.elements.get("settings-node-pick").options = [];
   const node = (name, extra = {}) => ({ name, available: true, activity: { details_available: true, worker_slots_total: 2, worker_slots_used: 0, jobs: [],
     slots: { ceiling: 2, split: false, video: { total: 2, used: 0 }, podcast: { total: 0, used: 0 } } }, ...extra });
-  const summary = (d) => d.children[0].children.map((c) => c.textContent).join(" ").trim();
+  const summary = (d) => d.children[0].children.filter((c) => c.className !== "badge").map((c) => c.textContent).join(" ").trim();
   const table = () => h.elements.get("worker-slots").children[1];
   const chips = () => table().children.filter((c) => c.className === "slot-node-chips").flatMap((c) => c.children);
   const idleLine = () => table().children.at(-1).textContent;
@@ -10963,7 +10963,10 @@ test("worker slots show builds paused with the node as a chip, on the phone rows
   show([node("m1", { builds_paused: true }), node("m4")]);
   const phone = () => h.elements.get("worker-slots").children[0];
   // Phone: no "all available" beside "builds paused".
-  assert.equal(summary(phone().children[0]), "m1 0/2 · builds paused");
+  assert.equal(summary(phone().children[0]), "m1 0/2");
+  const badgeOf = (row) => row.children[0].children.filter((c) => c.className === "badge").map((c) => [c.textContent, c.dataset.state]);
+  assert.deepEqual(badgeOf(phone().children[0]), [["Builds paused", "paused"]]);
+  assert.deepEqual(badgeOf(phone().children[1]), []);
   assert.equal(summary(phone().children[1]), "m4 0/2 · all available");
   // Desktop: a chip with the node, in the badge style with the paused state; the footnote only counts slots.
   assert.deepEqual(chips().map((c) => [c.className, c.textContent, c.dataset.state]), [["badge", "m1 · Builds paused", "paused"]]);
@@ -10971,13 +10974,15 @@ test("worker slots show builds paused with the node as a chip, on the phone rows
   assert.equal(idleLine(), "4 slots available · m1 2, m4 2");
   // Independent of a transcode pause: both are said.
   show([node("m1", { builds_paused: true, held_by: "operator" }), node("m4")]);
-  assert.equal(summary(phone().children[0]), "m1 0/0 · transcode paused · builds paused");
+  assert.equal(summary(phone().children[0]), "m1 0/0 · transcode paused");
+  assert.deepEqual(badgeOf(phone().children[0]), [["Builds paused", "paused"]]);
   assert.equal(chips().length, 1);
   // A node that does not answer still says so, on the phone and on the desktop.
   show([{ name: "m1", available: false, message: "Worker disconnected", builds_paused: true }, node("m4")]);
-  assert.equal(summary(phone().children[0]), "m1 Worker disconnected · builds paused");
-  assert.equal(chips().length, 1);
-  assert.ok(table().children.some((c) => c.textContent === "m1 · Worker disconnected · builds paused"));
+  assert.equal(summary(phone().children[0]), "m1 Worker disconnected");
+  assert.deepEqual(badgeOf(phone().children[0]), [["Builds paused", "paused"]]);
+  assert.deepEqual(chips().map((c) => c.textContent), ["m1 · Builds paused"]);
+  assert.ok(table().children.some((c) => c.textContent === "m1 · Worker disconnected"));
   // No chip when nothing is paused.
   show([node("m1"), node("m4")]);
   assert.equal(chips().length, 0);
@@ -10999,7 +11004,6 @@ test("no state of the node actions leaves a lone button in a row", () => {
       const groups = flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "worker-pause-actions");
       assert.equal(groups.length, 1, `${m}/${builds}`);
       const buttons = groups[0].children;
-      assert.ok(buttons.length >= 2, `${m || "free"}/${builds}: the group never holds one button`);
       const own = buttons.filter((b) => String(b.className).includes("pause-builds"));
       assert.equal(own.length, 1, "the builds button is in the same group, set apart by its class");
       assert.equal(own[0].textContent, builds ? "Resume builds" : "Pause builds");
@@ -11008,8 +11012,11 @@ test("no state of the node actions leaves a lone button in a row", () => {
       assert.equal(clickable.filter((e) => !buttons.includes(e)).length, 0, `${m}/${builds}: no button outside the group`);
     }
   }
-  const phone = css.match(/@media \(max-width: 600px\) \{\s*\.worker-pause-actions \{[^}]*\}[\s\S]*?\n\}/)?.[0] || "";
-  assert.match(phone, /\.worker-pause-actions \{\s*display: grid;\s*grid-template-columns: 1fr;/);
-  assert.match(phone, /\.worker-pause-actions button \{\s*width: 100%;/);
+  // The rule is not inside a media query: at every width the group is one
+  // column of full-width buttons, so none can sit alone in a half row.
+  const rule = css.match(/\n\.worker-pause-actions \{[^}]*\}/)?.[0] || "";
+  assert.match(rule, /display: grid;\s*grid-template-columns: 1fr;/);
+  assert.doesNotMatch(rule, /flex-wrap/);
+  assert.match(css, /\n\.worker-pause-actions button \{\s*width: 100%;/);
   assert.match(css, /\.badge\[data-state="paused"\] \{\s*color: var\(--warning-strong\);\s*background: var\(--warning-wash\);/);
 });

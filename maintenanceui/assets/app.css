@@ -1598,29 +1598,19 @@ main {
   display: grid;
   gap: 8px;
 }
+/* The node's actions are one stack of equal full-width buttons at every width,
+   so no button is ever left alone at the end of a wrapped row. The builds
+   switch is in the same group, set a little apart from the transcode buttons. */
 .worker-pause-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
-/* The builds switch is in the same group, set a little apart from the transcode buttons. */
-.worker-pause-actions .pause-builds {
-  margin-inline-start: 8px;
+.worker-pause-actions button {
+  width: 100%;
 }
-/* A phone shows the group as one stack of equal full-width buttons, so no
-   button is left alone at the end of a wrapped row. */
-@media (max-width: 600px) {
-  .worker-pause-actions {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-  .worker-pause-actions button {
-    width: 100%;
-  }
-  .worker-pause-actions .pause-builds {
-    margin-inline-start: 0;
-    margin-top: 6px;
-  }
+.worker-pause-actions .pause-builds {
+  margin-top: 6px;
 }
 /* Builds: every target, running and waiting first, history below. */
 .builds-section { display:grid; gap:8px; padding-top:12px; }

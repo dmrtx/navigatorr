@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -18,24 +19,37 @@ import (
 // is on. Repeating a request changes nothing.
 func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
+		// The two switches are read key-wise, by presence in any form (an empty
+		// string or null counts), the same rule as the MCP tool: one request
+		// flips one switch, so it never half applies.
 		var body struct {
-			Node string  `json:"node"`
-			Mode *string `json:"mode"`
-			// BuildsPaused is the independent builds switch: true refuses new
-			// builds on the node, false lets them in again. It cannot be sent
-			// together with a mode (by presence, even an empty one), so one request never half applies.
-			BuildsPaused *bool `json:"builds_paused"`
+			Node         string          `json:"node"`
+			Mode         json.RawMessage `json:"mode"`
+			BuildsPaused json.RawMessage `json:"builds_paused"`
 		}
 		mode := ""
+		var builds *bool
 		if decode(w, r, &body) == nil {
+			hasMode, hasBuilds := len(body.Mode) > 0, len(body.BuildsPaused) > 0
 			switch {
-			case body.BuildsPaused != nil && body.Mode != nil:
+			case hasMode && hasBuilds:
 				body.Node = ""
-			case body.BuildsPaused != nil:
+			case hasBuilds:
+				// Only a JSON true or false: null or any other type is refused.
+				switch string(body.BuildsPaused) {
+				case "true":
+					v := true
+					builds = &v
+				case "false":
+					v := false
+					builds = &v
+				default:
+					body.Node = ""
+				}
 			default:
-				given := ""
-				if body.Mode != nil {
-					given = *body.Mode
+				var given string
+				if hasMode && json.Unmarshal(body.Mode, &given) != nil {
+					given = "?"
 				}
 				switch given {
 				case store.WorkerPauseGraceful, store.WorkerPauseImmediate, store.WorkerPauseSuspend:
@@ -54,8 +68,8 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		}
 		var status transcode.NodePauseStatus
 		var err error
-		if body.BuildsPaused != nil {
-			status, err = s.engine.SetNodeBuildsPause(r.Context(), body.Node, *body.BuildsPaused)
+		if builds != nil {
+			status, err = s.engine.SetNodeBuildsPause(r.Context(), body.Node, *builds)
 		} else {
 			status, err = s.engine.SetNodePause(r.Context(), body.Node, mode)
 		}

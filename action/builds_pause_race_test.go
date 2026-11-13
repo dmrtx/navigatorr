@@ -18,25 +18,40 @@ import (
 // insert, which is exactly where a toggle without the node's lock would slip in.
 func TestBuildsPauseNeverLetsABuildBeCreatedAfterItReturns(t *testing.T) {
 	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
-	checked := make(chan struct{}, 1)
+	checked := make(chan struct{})
+	release := make(chan struct{})
 	e.afterBuildsPausedCheck = func(string) {
-		checked <- struct{}{}
-		time.Sleep(60 * time.Millisecond)
+		close(checked)
+		<-release
 	}
-	done := make(chan error, 1)
+	created := make(chan error, 1)
 	go func() {
 		_, err := createBuild(e, "m1", "")
-		done <- err
+		created <- err
 	}()
+	// The create has passed the check and is held before its insert.
 	<-checked
-	pauseBuilds(t, e, "m1", true)
-	atReturn, _ := e.ListBuilds(store.BuildFilter{})
-	if err := <-done; err != nil {
+	paused := make(chan struct{})
+	go func() {
+		pauseBuilds(t, e, "m1", true)
+		close(paused)
+	}()
+	select {
+	case <-paused:
+		t.Fatal("the pause returned while a create was between its check and its insert")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	if err := <-created; err != nil {
 		t.Fatal(err)
 	}
-	after, _ := e.ListBuilds(store.BuildFilter{})
-	if len(after) != len(atReturn) {
-		t.Fatalf("a build was created after the pause returned: %d at return, %d after", len(atReturn), len(after))
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the pause must return once the create is done")
+	}
+	if list, _ := e.ListBuilds(store.BuildFilter{}); len(list) != 1 {
+		t.Fatalf("the build registered before the pause: %+v", list)
 	}
 	if _, err := createBuild(e, "m1", ""); err == nil {
 		t.Fatal("and now builds are refused")

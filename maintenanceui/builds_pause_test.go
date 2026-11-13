@@ -211,3 +211,32 @@ func TestWorkerPauseRefusesModeAndBuildsPausedTogetherByPresence(t *testing.T) {
 		t.Fatal(pauses)
 	}
 }
+
+// Presence is read key-wise in any form, null included: a null never counts as
+// absent, so a rejected request changes neither switch.
+func TestWorkerPauseNullsAndMistypedValuesChangeNothing(t *testing.T) {
+	s, h := testUI(t)
+	node := transcode.DefaultWorkerName
+	for _, bad := range []string{
+		`{"node":"` + node + `","mode":null,"builds_paused":true}`,
+		`{"node":"` + node + `","mode":"off","builds_paused":null}`,
+		`{"node":"` + node + `","mode":"graceful","builds_paused":null}`,
+		`{"node":"` + node + `","mode":null,"builds_paused":null}`,
+		`{"node":"` + node + `","builds_paused":null}`,
+		`{"node":"` + node + `","builds_paused":"true"}`,
+		`{"node":"` + node + `","builds_paused":1}`,
+		`{"node":"` + node + `","builds_paused":[true]}`,
+		`{"node":"` + node + `","mode":null}`,
+		`{"node":"` + node + `","mode":5}`,
+	} {
+		if w := request(h, "POST", pausePath, bad, true); w.Code != 400 {
+			t.Fatal("must be a 400", bad, w.Code, w.Body.String())
+		}
+		if s.engine.NodeBuildsPaused(node) {
+			t.Fatal("a rejected request paused builds", bad)
+		}
+		if pauses, _ := s.engine.Deps().Store.ListWorkerPauses(); len(pauses) != 0 {
+			t.Fatal("a rejected request changed the transcode pause", bad, pauses)
+		}
+	}
+}
