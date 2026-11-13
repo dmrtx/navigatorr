@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -24,15 +25,16 @@ import (
 // caller that already speaks that one (nbuild) only changes where it sends:
 //
 //	GET  /v1/node                                   {"node": NAME, "leases": true}
-//	POST /api/maintenance/builds                    create; 200 with the build; 409
+//	POST /api/maintenance/builds                    create (an optional "id" makes asking again
+//	                                                safe); 200 with the build; 409
 //	                                                {"error", "code": "builds_paused"} while
 //	                                                the operator paused builds on the node
 //	GET  /api/maintenance/builds/{id}               one build
 //	POST /api/maintenance/builds/{id}/heartbeat     extend; 409 {"build": {...}} if it ended
 //	POST /api/maintenance/builds/{id}/finish        end it; finishing an ended build is 200
 //
-// A normal build is "running" in the answer to its create (the encoders are
-// frozen by then); a low one is "waiting" until the node is idle, and its
+// A normal build is "running" in the answer to its create (every running encoder
+// has frozen by then; 503 if one did not in time, and nothing is held); a low one is "waiting" until the node is idle, and its
 // heartbeats answer "running" once it is.
 
 const (
@@ -67,10 +69,7 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 	if len(path) >= 100 {
 		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
 		return err
 	}
 	// A socket left by a worker that died: remove it. One that answers belongs
@@ -117,17 +116,26 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 		_ = srv.Shutdown(shutdown)
 		_ = os.Remove(path)
 	}()
+	// The tick never waits for the server: the reports run on their own.
 	go func() {
 		tick := time.NewTicker(leaseTickEvery)
 		defer tick.Stop()
-		report := time.NewTicker(leaseReportEvery)
-		defer report.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
 				w.leaseTick()
+			}
+		}
+	}()
+	go func() {
+		report := time.NewTicker(leaseReportEvery)
+		defer report.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
 			case <-report.C:
 				w.leaseReportPass()
 			case <-s.kick:
@@ -135,6 +143,28 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 			}
 		}
 	}()
+	return nil
+}
+
+// prepareLeaseSocketDir makes the directory the socket goes in. The worker's
+// own (<state_dir>/.builds) is created 0700. A directory the operator chose is
+// theirs: it must already exist, belong to this user and not be writable by
+// anyone else; it is never changed.
+func prepareLeaseSocketDir(dir string, own bool) error {
+	if own {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return os.Chmod(dir, 0o700)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("build_socket directory: %w", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.IsDir() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o022 != 0 {
+		return errors.New("build_socket directory must be a directory of this user that others cannot write to")
+	}
 	return nil
 }
 
@@ -182,6 +212,8 @@ func (w *Worker) leaseError(rw http.ResponseWriter, l leaseRecord, err error) {
 		writeHTTPError(rw, http.StatusBadRequest, invalid.Reason)
 	case errors.Is(err, errLeasesPaused):
 		writeHTTPJSON(rw, http.StatusConflict, map[string]string{"error": "builds paused on " + w.cfg.BuildNode, "code": "builds_paused"})
+	case errors.Is(err, errLeaseFreeze):
+		writeHTTPError(rw, http.StatusServiceUnavailable, "the encoders did not freeze in time; try again")
 	case errors.Is(err, errLeaseNotFound):
 		writeHTTPError(rw, http.StatusNotFound, "build not found")
 	case errors.Is(err, errLeaseEnded):
@@ -200,6 +232,7 @@ func decodeLeaseBody(rw http.ResponseWriter, r *http.Request, v any) error {
 
 func (w *Worker) handleLeaseCreate(rw http.ResponseWriter, r *http.Request) {
 	var body struct {
+		ID          string `json:"id"`
 		Target      string `json:"target"`
 		Source      string `json:"source"`
 		Holder      string `json:"holder"`
@@ -219,7 +252,7 @@ func (w *Worker) handleLeaseCreate(rw http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(rw, http.StatusConflict, map[string]string{"error": "this socket serves another node", "code": "wrong_node"})
 		return
 	}
-	l, err := w.LeaseCreate(LeaseRequest{Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title,
+	l, err := w.LeaseCreate(LeaseRequest{ID: body.ID, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title,
 		PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, TTLSeconds: body.TTLSeconds})
 	if err != nil {
 		w.leaseError(rw, l, err)

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -253,8 +254,9 @@ func (w *Worker) saveLeasesLocked(f *leaseFileData, now time.Time) error {
 	}
 	name := tmp.Name()
 	_, werr := tmp.Write(data)
+	serr := tmp.Sync()
 	cerr := tmp.Close()
-	if err := errors.Join(werr, cerr); err != nil {
+	if err := errors.Join(werr, serr, cerr); err != nil {
 		_ = os.Remove(name)
 		return err
 	}
@@ -262,19 +264,36 @@ func (w *Worker) saveLeasesLocked(f *leaseFileData, now time.Time) error {
 		_ = os.Remove(name)
 		return err
 	}
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
 	return nil
 }
 
 // loadLeasesLocked reads the record for a change. A record that cannot be read
-// is replaced: leases are only as durable as the process that heartbeats them.
+// (corrupt, empty) is replaced by an empty one at once: runners fail closed on
+// it (the node stays frozen and held), so leaving it would keep the node held
+// until someone deleted the file. Leases are only as durable as the process
+// that heartbeats them.
 func (w *Worker) loadLeasesLocked() leaseFileData {
 	f, err := w.readLeaseFile()
 	if err != nil {
 		log.Printf("build leases: record unreadable, starting over: %v", err)
-		return leaseFileData{}
+		empty := leaseFileData{}
+		if serr := w.saveLeasesLocked(&empty, w.leases.clock()); serr != nil {
+			log.Printf("build leases: record not rewritten: %v", serr)
+		}
+		return empty
 	}
 	return f
 }
+
+var clientLeaseID = regexp.MustCompile(`^bld_[A-Za-z0-9_-]{8,56}$`)
+
+// leaseFreezeWait bounds how long a new normal lease waits for the running
+// encoders to confirm they are frozen. A var so tests can shorten it.
+var leaseFreezeWait = 10 * time.Second
 
 func newLeaseID() string {
 	var b [8]byte
@@ -311,6 +330,10 @@ func leaseTTL(seconds int) (time.Duration, error) {
 
 // LeaseRequest is a request for a lease.
 type LeaseRequest struct {
+	// ID is an optional client-chosen id ("bld_" and 8 to 56 letters, digits,
+	// '_' or '-'): asking again with the same id returns the lease it made
+	// instead of a second one, so a caller whose answer was lost can retry.
+	ID          string
 	Source      string
 	Holder      string
 	Kind        string
@@ -326,6 +349,12 @@ type LeaseRequest struct {
 func (w *Worker) checkLeaseRequest(in LeaseRequest, now time.Time) (*leaseRecord, error) {
 	var err error
 	l := &leaseRecord{ID: newLeaseID(), CreatedAt: now.UTC()}
+	if in.ID != "" {
+		if !clientLeaseID.MatchString(in.ID) {
+			return nil, &leaseInvalidError{`id must be "bld_" and 8 to 56 letters, digits, '_' or '-'`}
+		}
+		l.ID = in.ID
+	}
 	if l.Source, err = leaseText("source", in.Source, leaseFieldMax, true); err != nil {
 		return nil, err
 	}
@@ -394,29 +423,46 @@ func (w *Worker) grantLocked(f *leaseFileData, l *leaseRecord, now time.Time) er
 	return w.saveLeasesLocked(f, now)
 }
 
-// LeaseCreate asks for a lease. A normal one is granted at once (after the
-// server's one-time pause check); a low one waits for an idle node and is
+// errLeaseFreeze is a normal lease the running encoders did not freeze for in
+// time: it is rolled back, so nothing is held.
+var errLeaseFreeze = errors.New("the encoders did not freeze in time")
+
+// LeaseCreate asks for a lease. A normal one is answered only once every
+// running encoder reported itself frozen (bounded by leaseFreezeWait; on a
+// timeout the lease is rolled back and errLeaseFreeze returned), after the
+// server's one-time pause check. A low one waits for an idle node and is
 // promoted by the worker's tick (see leaseTick). The returned record is a copy.
+// With a client id, asking again returns the lease that id made.
 func (w *Worker) LeaseCreate(in LeaseRequest) (leaseRecord, error) {
 	s := &w.leases
-	now := s.clock()
-	l, err := w.checkLeaseRequest(in, now)
+	l, err := w.checkLeaseRequest(in, s.clock())
 	if err != nil {
 		return leaseRecord{}, err
+	}
+	if in.ID != "" {
+		s.mu.Lock()
+		f := w.loadLeasesLocked()
+		s.mu.Unlock()
+		for _, e := range f.Leases {
+			if e.ID == l.ID {
+				return *e, nil
+			}
+		}
 	}
 	if l.Priority == "low" {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		f := w.loadLeasesLocked()
 		f.Leases = append(f.Leases, l)
-		if err := w.saveLeasesLocked(&f, now); err != nil {
+		if err := w.saveLeasesLocked(&f, s.clock()); err != nil {
 			return leaseRecord{}, err
 		}
 		return *l, nil
 	}
 	// The server decides only whether builds are paused: outside every lock,
 	// since it is a network call. An unreachable server does not stop a build.
-	if rep := s.reporter; rep != nil {
+	rep := s.reporter
+	if rep != nil {
 		id, err := rep.Register(l)
 		if errors.Is(err, errLeasesPaused) {
 			return leaseRecord{}, err
@@ -425,20 +471,84 @@ func (w *Worker) LeaseCreate(in LeaseRequest) (leaseRecord, error) {
 			l.ServerID = id
 		}
 	}
+	// Whatever fails from here on, a build the server now knows is ended there:
+	// nobody else would finish it.
+	undo := func() {
+		if rep != nil && l.ServerID != "" {
+			_ = rep.Finish(l.ServerID, leaseStatusCancelled, nil)
+		}
+	}
+	if err := w.leaseGrantNew(l); err != nil {
+		undo()
+		return leaseRecord{}, err
+	}
+	w.leaseKickReporter()
+	if l.Freeze {
+		deadline := time.Now().Add(leaseFreezeWait)
+		for {
+			active, frozen, err := w.suspendCounts()
+			if err == nil && frozen >= active {
+				break
+			}
+			if time.Now().After(deadline) {
+				w.leaseDrop(l.ID)
+				undo()
+				return leaseRecord{}, errLeaseFreeze
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	return *l, nil
+}
+
+// leaseGrantNew records l as running. The clock is read under the locks, after
+// any network call, so a short ttl is not born expired.
+func (w *Worker) leaseGrantNew(l *leaseRecord) error {
+	s := &w.leases
 	capLock, err := acquireCapacityLock(filepath.Clean(w.cfg.StateDir))
 	if err != nil {
-		return leaseRecord{}, err
+		return err
 	}
 	defer capLock.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.clock()
 	f := w.loadLeasesLocked()
 	f.Leases = append(f.Leases, l)
 	if err := w.grantLocked(&f, l, now); err != nil {
-		return leaseRecord{}, err
+		return err
 	}
-	w.leaseKickReporter()
-	return *l, nil
+	return nil
+}
+
+// leaseDrop removes a lease from the record, as if it never was.
+func (w *Worker) leaseDrop(id string) {
+	s := &w.leases
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f := w.loadLeasesLocked()
+	kept := f.Leases[:0]
+	for _, l := range f.Leases {
+		if l.ID != id {
+			kept = append(kept, l)
+		}
+	}
+	f.Leases = kept
+	if err := w.saveLeasesLocked(&f, s.clock()); err != nil {
+		log.Printf("build leases: not saved: %v", err)
+	}
+	delete(s.pending, id)
+}
+
+// leasePrunable is whether an ended lease can leave the record: an hour after
+// it ended when its report is settled or there is nobody to report to; a
+// report that keeps failing is given up after a day.
+func (w *Worker) leasePrunable(l *leaseRecord, now time.Time) bool {
+	if l.active() || l.EndedAt == nil {
+		return false
+	}
+	age := now.Sub(*l.EndedAt)
+	return age > 24*leaseEndedKeep || (age > leaseEndedKeep && (l.Reported || w.leases.reporter == nil))
 }
 
 // leaseExpireLocked marks every active lease past its expiry lost and drops
@@ -453,19 +563,25 @@ func (w *Worker) leaseExpireLocked(f *leaseFileData, now time.Time) bool {
 			changed = true
 			log.Printf("build lease %s: no heartbeat before its expiry, marked lost", l.ID)
 		}
-		if !l.active() && l.EndedAt != nil && l.Reported && now.Sub(*l.EndedAt) > leaseEndedKeep {
+		if w.leasePrunable(l, now) {
 			changed = true
 			delete(w.leases.pending, l.ID)
-			continue
-		}
-		if !l.active() && l.EndedAt != nil && now.Sub(*l.EndedAt) > 24*leaseEndedKeep {
-			changed = true // a report that never went through is not retried for ever
 			continue
 		}
 		kept = append(kept, l)
 	}
 	f.Leases = kept
 	return changed
+}
+
+// leaseLostLocked marks the expired leases lost and saves the record, for a
+// caller that found one past its expiry before the tick did.
+func (w *Worker) leaseLostLocked(f *leaseFileData, now time.Time) {
+	w.leaseExpireLocked(f, now)
+	if err := w.saveLeasesLocked(f, now); err != nil {
+		log.Printf("build leases: not saved: %v", err)
+	}
+	w.leaseKickReporter()
 }
 
 // leaseNodeIdleLocked is whether a low lease may start: nothing runs or waits
@@ -494,11 +610,12 @@ func (w *Worker) leaseNodeIdleLocked(f *leaseFileData, now time.Time) bool {
 func (w *Worker) leaseTick() {
 	s := &w.leases
 	now := s.clock()
-	// Most ticks have nothing to do: look before taking the capacity lock.
+	// Most ticks have nothing to do: look before taking the capacity lock. An
+	// unreadable record is work: loading it heals it.
 	if f, err := w.readLeaseFile(); err == nil {
 		work := false
 		for _, l := range f.Leases {
-			if l.Status == leaseStatusWaiting || (l.active() && !l.ExpiresAt.After(now)) || (!l.active() && l.EndedAt != nil && now.Sub(*l.EndedAt) > leaseEndedKeep) {
+			if l.Status == leaseStatusWaiting || (l.active() && !l.ExpiresAt.After(now)) || w.leasePrunable(l, now) {
 				work = true
 			}
 		}
@@ -551,8 +668,9 @@ func (w *Worker) LeaseGet(id string) (leaseRecord, error) {
 			if !l.active() {
 				return *l, errLeaseEnded
 			}
-			if !l.ExpiresAt.After(s.clock()) {
-				return *l, errLeaseEnded // the tick will mark it lost; it does not count
+			if now := s.clock(); !l.ExpiresAt.After(now) {
+				w.leaseLostLocked(&f, now)
+				return *l, errLeaseEnded
 			}
 			return *l, nil
 		}
@@ -599,11 +717,7 @@ func (w *Worker) LeaseHeartbeat(id string, progress *string, ttlSeconds int, lin
 		}
 		if !l.ExpiresAt.After(now) {
 			// Past its expiry it is over, like on the server: lost, not revived.
-			w.leaseExpireLocked(&f, now)
-			if err := w.saveLeasesLocked(&f, now); err != nil {
-				log.Printf("build leases: not saved: %v", err)
-			}
-			w.leaseKickReporter()
+			w.leaseLostLocked(&f, now)
 			return *l, errLeaseEnded
 		}
 		if ttl > 0 {
@@ -666,6 +780,11 @@ func (w *Worker) leaseEnd(id, status string, exit *int) (leaseRecord, error) {
 			continue
 		}
 		if !l.active() {
+			return *l, nil
+		}
+		if !l.ExpiresAt.After(now) {
+			// Too late to say how it went: it was lost first.
+			w.leaseLostLocked(&f, now)
 			return *l, nil
 		}
 		t := now.UTC()

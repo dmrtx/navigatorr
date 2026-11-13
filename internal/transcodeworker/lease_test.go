@@ -258,17 +258,23 @@ type fakeReporter struct {
 	cancelled bool
 	nextID    int
 	registers []string
-	beats     []fakeBeat
-	finished  map[string]string
+	// onRegister runs first in Register, outside the lock.
+	onRegister func()
+	beats      []fakeBeat
+	finished   map[string]string
 }
 
 type fakeBeat struct {
 	id       string
 	progress string
 	log      []string
+	ttl      int
 }
 
 func (f *fakeReporter) Register(l *leaseRecord) (string, error) {
+	if f.onRegister != nil {
+		f.onRegister()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.down {
@@ -289,7 +295,7 @@ func (f *fakeReporter) Heartbeat(id string, progress *string, ttl int, lines []s
 	if f.down {
 		return "", errors.New("the server is unreachable")
 	}
-	b := fakeBeat{id: id, log: lines}
+	b := fakeBeat{id: id, log: lines, ttl: ttl}
 	if progress != nil {
 		b.progress = *progress
 	}
@@ -532,8 +538,8 @@ func TestLeaseSocketIsPrivateAndServes(t *testing.T) {
 	if fi, err := os.Stat(w.cfg.BuildSocket); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("socket: %v %v", fi, err)
 	}
-	if fi, err := os.Stat(filepath.Dir(w.cfg.BuildSocket)); err != nil || fi.Mode().Perm() != 0o700 {
-		t.Fatalf("dir: %v %v", fi, err)
+	if fi, err := os.Stat(filepath.Dir(w.cfg.BuildSocket)); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Fatalf("a directory the operator chose is not changed: %v %v", fi, err)
 	}
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", w.cfg.BuildSocket)

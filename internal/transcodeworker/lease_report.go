@@ -153,7 +153,8 @@ func (r *httpLeaseReporter) Heartbeat(serverID string, progress *string, ttlSeco
 		}
 		return "ended", nil
 	case http.StatusNotFound:
-		return "ended", nil
+		// The server has no such build (someone removed it): over.
+		return leaseStatusCancelled, nil
 	case http.StatusBadRequest:
 		// A line the server refuses must not cost the heartbeat.
 		if len(lines) > 0 || progress != nil {
@@ -185,6 +186,12 @@ func (w *Worker) leaseKickReporter() {
 		default:
 		}
 	}
+}
+
+// leaseKeepaliveEvery is how often an idle lease tells the server it lives:
+// well inside the ttl the server was given.
+func leaseKeepaliveEvery(l *leaseRecord) time.Duration {
+	return min(leaseKeepaliveGap, max(time.Second, l.ttl()/3))
 }
 
 // reportStatus is the status the server is told when a lease ends: the server
@@ -225,7 +232,7 @@ func (w *Worker) leaseReportPass() {
 				work = append(work, job{l: *l})
 				continue
 			}
-			if p.dirty || now.Sub(p.lastSent) >= leaseKeepaliveGap {
+			if p.dirty || now.Sub(p.lastSent) >= leaseKeepaliveEvery(l) {
 				work = append(work, job{l: *l, p: *p, hbs: true})
 				p.dirty, p.progress, p.log, p.lastSent = false, nil, nil, now
 			}
@@ -248,7 +255,7 @@ func (w *Worker) leaseReportPass() {
 				log.Printf("build lease %s: server reports builds paused; not recorded", l.ID)
 			}
 		case l.active():
-			ended, err := rep.Heartbeat(l.ServerID, j.p.progress, 0, j.p.log)
+			ended, err := rep.Heartbeat(l.ServerID, j.p.progress, l.TTLSeconds, j.p.log)
 			switch {
 			case err != nil:
 				// Keep what was not delivered for the next pass.
