@@ -493,7 +493,9 @@ func (e *Engine) NodePauseStatuses(ctx context.Context) map[string]transcode.Nod
 // the same effective pause, builds pause and build list, read from the store and
 // memory only, so it makes no network call. Reachable is left false and the
 // messages that depend on it are not meaningful; the mode, the paused flags and
-// Builds are the same as NodePauseStatuses reports.
+// Builds are the same as NodePauseStatuses reports (see
+// TestNodePauseStatesStoredEqualsObservedState). nodePauseStatuses only reads:
+// it writes nothing to the store, expiry included.
 func (e *Engine) NodePauseStatesStored(ctx context.Context) map[string]transcode.NodePauseStatus {
 	return e.nodePauseStatuses(ctx, transcode.WorkerObservation{})
 }

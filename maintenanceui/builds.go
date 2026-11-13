@@ -132,6 +132,7 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 // reads, without its worker probes) and the builds running on it. The literal
 // path wins over /builds/{id}.
 func (s *Server) buildsNodes(w http.ResponseWriter, r *http.Request) {
+	// Label is the build's title on purpose: nbuild status consumes this name.
 	type runningBuild struct {
 		ID        string `json:"id"`
 		Source    string `json:"source"`
