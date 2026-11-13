@@ -220,6 +220,13 @@ func runServe(cfg *transcodeworker.WorkerConfig, configPath, selfExe string, arg
 	// Vets the x265 pool partition in the background; never gates readiness.
 	worker.StartX265PartitionCheck(sigCtx)
 
+	// Build leases (local arbitration with builds): only with a build_node, and
+	// never fatal: without the socket the worker still serves transcodes and
+	// builds fall back to the server.
+	if err := worker.StartBuildLeases(sigCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "build leases not started: %v\n", err)
+	}
+
 	httpSrv := &http.Server{
 		Addr:              serveCfg.Listen,
 		Handler:           srv.Handler(),

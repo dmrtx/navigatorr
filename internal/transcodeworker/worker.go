@@ -61,6 +61,16 @@ type WorkerConfig struct {
 	HTTPToken     string `json:"http_token" yaml:"http_token"`
 	HTTPTokenFile string `json:"http_token_file" yaml:"http_token_file"`
 
+	// Build leases (lease.go). BuildNode is this machine's name in the server's
+	// node list; without it the worker offers no leases. BuildSocket overrides
+	// the default socket path (<state_dir>/.builds/lease.sock). BuildsURL and
+	// BuildsTokenFile (a builds-only token) let the worker report leases to the
+	// server; without them leases work but the server does not see them.
+	BuildNode       string `json:"build_node" yaml:"build_node"`
+	BuildSocket     string `json:"build_socket" yaml:"build_socket"`
+	BuildsURL       string `json:"builds_url" yaml:"builds_url"`
+	BuildsTokenFile string `json:"builds_token_file" yaml:"builds_token_file"`
+
 	// Operational storage settings (Phase 6B1). StagingPolicy is validated
 	// fail-closed on config load; ExternalRoots defaults to a copy of
 	// AllowedRoots when absent/empty; LocalWorkDir defaults to a deterministic
@@ -192,6 +202,8 @@ func (cfg *WorkerConfig) normalizeOperational() error {
 	cfg.AppleSpeechPath = expand(cfg.AppleSpeechPath)
 	cfg.StateDir = expand(cfg.StateDir)
 	cfg.HTTPTokenFile = expand(cfg.HTTPTokenFile)
+	cfg.BuildSocket = expand(cfg.BuildSocket)
+	cfg.BuildsTokenFile = expand(cfg.BuildsTokenFile)
 	cfg.LocalWorkDir = expand(cfg.LocalWorkDir)
 	cfg.SMBDirect.LocalRoot = expand(cfg.SMBDirect.LocalRoot)
 	cfg.SMBDirect.PasswordFile = expand(cfg.SMBDirect.PasswordFile)
@@ -297,6 +309,7 @@ type Worker struct {
 	pruneMu         sync.Mutex
 	pruneAt         time.Time // last finished-job pruning pass; guarded by pruneMu
 	suspendWrite    sync.Mutex
+	leases          leaseState   // build leases (lease.go)
 	suspendedGen    atomic.Int64 // generation of the suspend this runner has frozen its children under, 0 if none (heartbeat input)
 	x265Recheck     sync.Mutex
 	x265RecheckDone <-chan struct{} // the last slot-change recheck, guarded by x265Recheck
