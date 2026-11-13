@@ -23,16 +23,11 @@ func TestBuildsViewIsWiredIntoTheWorkersDialog(t *testing.T) {
 		`api("builds?limit=100")`,
 		`renderBuilds($("builds-list")`,
 		`nodeBuildLines(worker.name, worker.pause?.builds)`,
-		`worker.pause?.held_by === "builds"`,
-		`const operatorPaused = pause.paused && pause.held_by !== "builds"`,
 		`"Target", "Source", "Holder", "Kind", "Title", "Priority", "Status", "Duration", "Last heartbeat", "Progress"`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js is missing %s", want)
 		}
-	}
-	if !strings.Contains(js, "if (!operatorPaused) {") || strings.Contains(js, "if (!pause.paused) {\n    add(") {
-		t.Fatal("a build hold must not turn the operator's buttons into Resume")
 	}
 	if !strings.Contains(html, `id="builds-list"`) || strings.Contains(html, "builds-apply") {
 		t.Fatal("the dialog needs the builds list and no Apply row")

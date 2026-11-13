@@ -10358,7 +10358,7 @@ test("an unread default still sends the switch off; one Replace at a time; the s
 test("a node card offers pause after current files, pause now and suspend now, and Resume once paused", async () => {
   const h = harness();
   const nodes = (pause) => [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause }];
-  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: false, mode: "", message: "Not paused. The node takes new jobs." }) };
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: false, mode: "", message: "Transcode not paused. The node takes new jobs." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   const buttons = () => flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent);
   assert.deepEqual(buttons(), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now"]);
@@ -10387,7 +10387,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
   assert.deepEqual(JSON.parse(JSON.stringify(h.context.calls)), [["worker-pause", { node: "m1", mode: "suspend" }]]);
   assert.deepEqual(plain(h.context.notices), ["m1 transcode suspend requested."]);
 
-  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "graceful", idle: false, message: "Paused: 1 job(s) still finishing. Nothing new starts here." }) };
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "graceful", idle: false, message: "Transcode paused: 1 job(s) still finishing. Nothing new starts here." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(buttons(), ["Resume transcode", "Suspend transcode now", "Send running files back"]);
   const badges = flatten(h.elements.get("worker-nodes")).filter((e) => e.className === "badge").map((e) => e.textContent);
@@ -10398,7 +10398,7 @@ test("a node card offers pause after current files, pause now and suspend now, a
 
   // A suspended node offers Resume and sending the frozen files back, not
   // another Suspend.
-  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Suspended: 1 encode(s) frozen where they were." }) };
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, mode: "suspend", idle: true, message: "Transcode suspended: 1 encode(s) frozen where they were; they continue when the node is resumed." }) };
   h.run("state.workerInfo = info; renderWorkers();");
   assert.deepEqual(buttons(), ["Resume transcode", "Send running files back"]);
 });
@@ -10662,4 +10662,36 @@ test("a phone node row counts encode slots and shows its builds apart, as the he
   assert.match(summary(), /node-a 0\/1 · all available/);
   show(one("node-a", { held_by: "operator" }));
   assert.match(summary(), /node-a 0\/0 · transcode paused/);
+});
+
+test("Resume transcode says a running build keeps the node held", async () => {
+  const h = harness();
+  const build = { id: "b1", source: "ci", holder: "r1", kind: "k", title: "t", status: "running", started_at: new Date().toISOString() };
+  const nodes = (pause) => [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause }];
+  const resume = () => flatten(h.elements.get("worker-nodes")).find((e) => e.textContent === "Resume transcode");
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x", builds: [build] }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(resume().title, "Transcode starts again when the running build ends.");
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "suspend", idle: true, message: "x", builds: [build] }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(resume().title, "Frozen encodes continue where they were when the running build ends.");
+  h.context.notices = [];
+  h.run("api = async () => ({}); refreshWorkers = async () => {}; notify = (t) => notices.push(t);");
+  await resume().listeners.get("click")();
+  assert.deepEqual(plain(h.context.notices), ["m1 transcode pause lifted. Transcode starts again when the running build ends."]);
+  // Without a running build it is the plain resume.
+  h.context.info = { ready: true, nodes: nodes({ node: "m1", paused: true, held_by: "operator", mode: "graceful", idle: true, message: "x", builds: [{ ...build, status: "waiting" }] }) };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.equal(resume().title, "This node takes transcode files again.");
+  h.context.notices = [];
+  await resume().listeners.get("click")();
+  assert.deepEqual(plain(h.context.notices), ["m1 transcode resumed."]);
+});
+
+test("a build hold alone leaves the operator's pause buttons available", () => {
+  const h = harness();
+  const build = { id: "b1", source: "ci", holder: "r1", kind: "k", title: "t", status: "running", started_at: new Date().toISOString() };
+  h.context.info = { ready: true, nodes: [{ name: "m1", worker: "m1", ready: true, reachable: true, connected: true, scheduler_health: "ok", pause: { node: "m1", paused: true, held_by: "builds", mode: "suspend", idle: true, message: "x", builds: [build] } }] };
+  h.run("state.workerInfo = info; renderWorkers();");
+  assert.deepEqual(flatten(h.elements.get("worker-nodes")).filter((e) => e.listeners?.has("click")).map((e) => e.textContent), ["Pause transcode after current files", "Pause transcode now", "Suspend transcode now"]);
 });

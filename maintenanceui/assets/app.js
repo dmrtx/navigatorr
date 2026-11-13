@@ -1142,6 +1142,7 @@ function renderWorkerDetails(host, info) {
 // encoding. "After current files" lets what is encoding finish; "Now" sends it
 // back to the queue to start again on another node (nothing is cancelled).
 // "Suspend now" freezes what is encoding where it is; it continues on Resume.
+const nodeHasRunningBuild = pause => (pause?.builds || []).some(b => b.status === "running");
 function nodePauseControls(worker) {
   const pause = worker.pause;
   if (!pause || !worker.worker) return null;
@@ -1177,7 +1178,11 @@ function nodePauseControls(worker) {
     add("Pause transcode now", "immediate", "Encodes on this node go back to the queue and start again on another node. Builds are not paused.");
     add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume. Builds are not paused.");
   } else {
-    add("Resume transcode", "off", pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
+    // A running build keeps holding the node after the operator's pause is lifted.
+    const building = nodeHasRunningBuild(pause);
+    add("Resume transcode", "off", building
+      ? pause.mode === "suspend" ? "Frozen encodes continue where they were when the running build ends." : "Transcode starts again when the running build ends."
+      : pause.mode === "suspend" ? "Frozen encodes continue where they were." : "This node takes transcode files again.");
     if (pause.mode === "graceful") add("Suspend transcode now", "suspend", "Encodes on this node freeze where they are and continue when you resume.");
     if (pause.mode === "graceful" || pause.mode === "suspend") add("Send running files back", "immediate", "Encodes on this node go back to the queue and start again on another node.");
   }
@@ -1187,7 +1192,7 @@ function nodePauseControls(worker) {
 function setNodePause(worker, mode) {
   return safe(async () => {
     await api("worker-pause", {node: worker.worker, mode});
-    notify(mode === "off" ? `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
+    notify(mode === "off" ? nodeHasRunningBuild(worker.pause) ? `${worker.name} transcode pause lifted. Transcode starts again when the running build ends.` : `${worker.name} transcode resumed.` : mode === "suspend" ? `${worker.name} transcode suspend requested.` : mode === "immediate" ? `${worker.name} transcode paused. Its files are going back to the queue.` : `${worker.name} transcode paused. Files already encoding finish.`);
     await refreshWorkers();
   });
 }
