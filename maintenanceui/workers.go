@@ -51,6 +51,10 @@ func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker)
 	if builds := s.engine.NodeBuilds(worker.Name); len(builds) > 0 {
 		node["builds"] = builds
 	}
+	// What keeps new files off the node, so the slot count can leave it out.
+	if held := s.engine.NodeHeldBy(worker.Name); held != "" {
+		node["held_by"] = held
+	}
 	reader, ok := worker.Executor.(workerActivityReader)
 	if !ok {
 		node["message"] = "Live worker activity requires the HTTP video worker."

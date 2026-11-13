@@ -110,6 +110,26 @@ func (e *Engine) workerPauses() (map[string]store.WorkerPause, error) {
 	return out, nil
 }
 
+// NodeHeldBy says what keeps new jobs off a node: "operator" (a pause the
+// operator set; it wins), "builds" (a running build holds it) or "" when the
+// node takes jobs. It reads stored state only, so it is cheap enough for the
+// activity view. An unreadable pause state holds the node, as workerPaused does.
+func (e *Engine) NodeHeldBy(name string) string {
+	pauses, err := e.workerPauses()
+	if err != nil {
+		return "operator"
+	}
+	name = e.resolveWorker(name)
+	if _, ok := pauses[name]; !ok {
+		return ""
+	}
+	operator, _ := e.operatorPauses()
+	if _, ok := operator[name]; ok {
+		return "operator"
+	}
+	return "builds"
+}
+
 // workerPaused reports whether new jobs for the node are held. A node name is
 // resolved like any stored worker name.
 func (e *Engine) workerPaused(name string) bool {
