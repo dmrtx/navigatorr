@@ -15,32 +15,38 @@ import (
 // Job directory retention.
 //
 // Every submitted job leaves a directory in the state directory (record,
-// progress, logs) that nothing removed, so a long-lived worker kept thousands
-// of them and paid for the listing and the records on every scan. Finished jobs
-// older than the retention window are removed here.
+// progress, logs, scratch files) that nothing removed, so a long-lived worker
+// kept hundreds of megabytes of them. For finished jobs older than the
+// retention window everything but the record is removed.
 //
-// Only a job that is finished and that nothing can still act on is removed:
+// The record itself (job.json, with its terminal marker and lock file) stays:
+// it is what lets a resubmit with the same idempotency key find the finished
+// job, a different digest get its conflict, and GET /v1/jobs/<id> keep
+// answering, and it is a few kilobytes.
 //
-//   - completed and cancelled jobs, and failed jobs that never reached a
-//     finished encode. A failed job whose encode is complete but whose
-//     publication did not finish stays: an operator can still retry it and its
-//     record points at the candidate.
-//   - never a queued, running, finalizing, held or retained job, or one with a
-//     live runner, and never a hidden directory (retained candidates and their
-//     tombstones are the retained sweep's), whatever their age.
+// Only a job that is finished and that nothing can still act on is touched:
+//
+//   - status completed, cancelled, failed or expired, and a failed job only if
+//     it has no finished encode with an unfinished publication (an operator can
+//     still retry that);
+//   - never a record whose finalization state is pending, finalizing or
+//     retained, whatever its status; never a queued or running job, or one with
+//     a live runner; never a hidden directory (retained candidates and their
+//     tombstones are the retained sweep's).
 //
 // The age is the later of the job's own finish time and its record's file time,
 // so a record someone touched recently is kept. The decision is repeated under
-// the job's lock before anything is removed, and under the capacity lock so a
-// submit that is matching an idempotency key never sees a half-removed job.
+// the job's lock and the capacity lock before anything is removed.
 
 const (
 	// defaultJobRetentionDays is how long a finished job's directory is kept
 	// when job_retention_days is not set.
 	defaultJobRetentionDays = 30
+	// maxJobRetentionDays keeps the window's Duration from overflowing (100 years).
+	maxJobRetentionDays = 36500
 	// jobPruneInterval is how often the scheduler looks for old jobs.
 	jobPruneInterval = time.Hour
-	// jobPruneBatch bounds how many directories one pass removes, so the pass
+	// jobPruneBatch bounds how many directories one pass empties, so the pass
 	// never holds the capacity lock for long; the next pass takes the rest.
 	jobPruneBatch = 200
 )
@@ -54,7 +60,7 @@ func (w *Worker) jobRetention() time.Duration {
 	case days == 0:
 		return defaultJobRetentionDays * 24 * time.Hour
 	default:
-		return time.Duration(days) * 24 * time.Hour
+		return time.Duration(min(days, maxJobRetentionDays)) * 24 * time.Hour
 	}
 }
 
@@ -64,16 +70,37 @@ func prunable(job *JobRecord) bool {
 	if job == nil {
 		return false
 	}
+	switch FinalizationState(strings.TrimSpace(job.FinalizationState)) {
+	case FinalizationStatePending, FinalizationStateFinalizing, FinalizationStateRetained:
+		return false
+	}
 	switch job.Status {
-	case "completed", "cancelled":
+	case "completed", "cancelled", StatusExpired:
 		return true
 	case "failed":
-		if job.EncodeComplete && FinalizationState(strings.TrimSpace(job.FinalizationState)) != FinalizationStateCompleted {
-			return false // a publication an operator can still retry
-		}
-		return true
+		// A finished encode whose publication did not finish can be retried.
+		return !job.EncodeComplete || FinalizationState(strings.TrimSpace(job.FinalizationState)) == FinalizationStateCompleted
 	}
 	return false
+}
+
+// keptInPrunedJob are the files that stay in a pruned job directory.
+func keptInPrunedJob(name string) bool {
+	return name == "job.json" || name == "terminal.json" || name == ".lock"
+}
+
+// alreadyPruned reports a job directory that holds nothing but what stays.
+func alreadyPruned(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return true // unreadable: not ours to act on
+	}
+	for _, e := range entries {
+		if !keptInPrunedJob(e.Name()) {
+			return false
+		}
+	}
+	return true
 }
 
 // jobFinishedAt is when a record last meant anything: its finish time, or its
@@ -111,8 +138,8 @@ func (w *Worker) MaybePruneJobs(ctx context.Context) {
 	}
 }
 
-// PruneJobs removes the finished jobs older than the retention window as of
-// now, up to a batch, and returns how many it removed.
+// PruneJobs empties the finished jobs older than the retention window as of
+// now, up to a batch, and returns how many it emptied.
 func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 	retention := w.jobRetention()
 	if retention <= 0 {
@@ -142,10 +169,10 @@ func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 		if err != nil || job.ID != name || !prunable(job) || jobFinishedAt(job, fi.ModTime()).After(cutoff) {
 			continue
 		}
-		candidates = append(candidates, name)
-		if len(candidates) >= jobPruneBatch {
-			break
+		if alreadyPruned(filepath.Join(stateDir, name)) {
+			continue
 		}
+		candidates = append(candidates, name)
 	}
 	if len(candidates) == 0 {
 		return 0, nil
@@ -168,6 +195,9 @@ func (w *Worker) PruneJobs(ctx context.Context, now time.Time) (int, error) {
 		}
 		if ok {
 			removed++
+			if removed >= jobPruneBatch {
+				break // busy and live ones above did not count against the batch
+			}
 		}
 	}
 	return removed, errors.Join(errs...)
@@ -196,12 +226,23 @@ func (w *Worker) pruneOne(stateDir, name string, cutoff time.Time) (bool, error)
 	if job.PID > 0 && w.jobAlive(job) {
 		return false, nil
 	}
-	if err := os.RemoveAll(dir); err != nil {
-		return false, fmt.Errorf("removing finished job %s: %w", name, err)
-	}
-	invalidateJobIndexDir(dir)
+	// Pins first: a crash between the two steps leaves a job to prune again,
+	// not a cache entry nobody will release.
 	if w.sourceCacheEnabled() {
 		releaseSourceCachePins(w.sourceCacheDir(), name)
 	}
-	return true, nil
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, fmt.Errorf("listing finished job %s: %w", name, err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if keptInPrunedJob(e.Name()) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			errs = append(errs, fmt.Errorf("removing %s of finished job %s: %w", e.Name(), name, err))
+		}
+	}
+	return len(errs) == 0, errors.Join(errs...)
 }

@@ -18,18 +18,15 @@ import (
 // with a long history spent a core fraction decoding records that had not
 // changed in weeks.
 //
-// Two read-through caches remove that, and neither can serve something the
-// disk no longer says:
+// Two read-through caches remove the decoding, and neither can serve something
+// the disk no longer says:
 //
-//   - The record index keeps the decoded JobRecord of a job.json together with
-//     the file's modification time and size, and a read stats the file and
-//     decodes it again whenever either changed. A finished job (completed,
-//     failed, cancelled or expired) is not stat-ed again for
-//     jobCacheStableRecheck, since nothing moves such a record; every write
-//     made through SaveJobAtomic drops its entry at once, and the periodic
-//     recheck catches a write by another process or by hand. Running and
-//     queued records are always validated against the file, so a runner in
-//     another process is seen at the next read.
+//   - The record index keeps the decoded JobRecord of a job.json with the
+//     file's modification time and size. Every read stats the file (cheap) and
+//     decodes it again whenever either changed, a file that vanished leaves the
+//     index, and every write made through SaveJobAtomic drops its entry. There
+//     is no time-based shortcut: a record another process rewrote is seen by
+//     the next read.
 //
 //   - The directory index keeps the listing of the state directory with its
 //     modification time. Creating, renaming or removing a job directory moves
@@ -37,17 +34,16 @@ import (
 //
 // Both refuse to remember anything modified within jobCacheRacyWindow: a file
 // rewritten twice inside one timestamp tick would otherwise look unchanged.
-// Records of jobs that are active are rewritten every few seconds, so they stay
-// uncached and are read afresh, which is what keeps them correct.
+// A record is also cached only if its file looked the same before and after it
+// was decoded, so a write racing the decode is never installed.
 //
 // peekJob hands out the cached record itself, not a copy, so a scan over
 // every job allocates nothing per record. The caller must treat it as
 // read-only, fields and everything its slices and pointers refer to; code that
 // goes on to change and save a record loads it with LoadJob.
 const (
-	jobCacheRacyWindow    = 2 * time.Second
-	jobCacheStableRecheck = 30 * time.Second
-	jobCacheMaxEntries    = 1 << 14
+	jobCacheRacyWindow = 2 * time.Second
+	jobCacheMaxEntries = 1 << 14
 )
 
 type fileSig struct {
@@ -55,11 +51,11 @@ type fileSig struct {
 	size  int64
 }
 
+func sigOf(fi os.FileInfo) fileSig { return fileSig{mtime: fi.ModTime().UnixNano(), size: fi.Size()} }
+
 type jobCacheEntry struct {
-	sig     fileSig
-	job     *JobRecord
-	checked time.Time
-	stable  bool
+	sig fileSig
+	job *JobRecord
 }
 
 var jobIndex = struct {
@@ -67,24 +63,24 @@ var jobIndex = struct {
 	m map[string]*jobCacheEntry
 }{m: map[string]*jobCacheEntry{}}
 
-// jobIsStable reports whether a record can no longer change by itself.
-func jobIsStable(job *JobRecord) bool {
-	switch job.Status {
-	case "completed", "failed", "cancelled", StatusExpired:
-		return true
+// indexKey is the one spelling an index entry is stored and looked up under.
+func indexKey(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
 	}
-	return false
+	return filepath.Clean(path)
 }
 
 func dropJobIndex(path string) {
+	k := indexKey(path)
 	jobIndex.Lock()
-	delete(jobIndex.m, path)
+	delete(jobIndex.m, k)
 	jobIndex.Unlock()
 }
 
 // invalidateJobIndexDir forgets every cached record under dir.
 func invalidateJobIndexDir(dir string) {
-	prefix := filepath.Clean(dir) + string(filepath.Separator)
+	prefix := indexKey(dir) + string(filepath.Separator)
 	jobIndex.Lock()
 	for p := range jobIndex.m {
 		if strings.HasPrefix(p, prefix) {
@@ -94,43 +90,30 @@ func invalidateJobIndexDir(dir string) {
 	jobIndex.Unlock()
 }
 
-// peekJob is LoadJob through the record index; see the notes above for
-// what the caller may do with the result. Errors match LoadJob's: a missing
-// file still satisfies errors.Is(err, fs.ErrNotExist).
+// peekJob is LoadJob through the record index; see the notes above for what the
+// caller may do with the result. Errors match LoadJob's: a missing file still
+// satisfies errors.Is(err, fs.ErrNotExist).
 func peekJob(path string) (*JobRecord, error) {
-	now := time.Now()
-	jobIndex.Lock()
-	e := jobIndex.m[path]
-	if e != nil && e.stable && now.Sub(e.checked) < jobCacheStableRecheck {
-		job := e.job
-		jobIndex.Unlock()
-		return job, nil
-	}
-	jobIndex.Unlock()
-
+	key := indexKey(path)
 	fi, err := os.Stat(path)
 	if err != nil {
 		dropJobIndex(path)
 		return nil, fmt.Errorf("reading job file %s: %w", path, err)
 	}
-	sig := fileSig{mtime: fi.ModTime().UnixNano(), size: fi.Size()}
+	sig := sigOf(fi)
+	jobIndex.Lock()
+	e := jobIndex.m[key]
+	jobIndex.Unlock()
 	if e != nil && e.sig == sig {
-		jobIndex.Lock()
-		// Re-check under the lock: a concurrent save may have replaced it.
-		if cur := jobIndex.m[path]; cur == e {
-			e.checked = now
-			job := e.job
-			jobIndex.Unlock()
-			return job, nil
-		}
-		jobIndex.Unlock()
+		return e.job, nil
 	}
 	job, err := LoadJob(path)
 	if err != nil {
 		dropJobIndex(path)
 		return nil, err
 	}
-	if now.Sub(fi.ModTime()) <= jobCacheRacyWindow {
+	after, aerr := os.Stat(path)
+	if aerr != nil || sigOf(after) != sig || time.Since(fi.ModTime()) <= jobCacheRacyWindow {
 		dropJobIndex(path)
 		return job, nil
 	}
@@ -138,7 +121,7 @@ func peekJob(path string) (*JobRecord, error) {
 	if len(jobIndex.m) >= jobCacheMaxEntries {
 		jobIndex.m = map[string]*jobCacheEntry{}
 	}
-	jobIndex.m[path] = &jobCacheEntry{sig: sig, job: job, checked: now, stable: jobIsStable(job)}
+	jobIndex.m[key] = &jobCacheEntry{sig: sig, job: job}
 	jobIndex.Unlock()
 	return job, nil
 }
@@ -199,7 +182,7 @@ func forgetDepartedJobs(dir string, entries []fs.DirEntry) {
 	for _, e := range entries {
 		present[e.Name()] = struct{}{}
 	}
-	prefix := filepath.Clean(dir) + string(filepath.Separator)
+	prefix := indexKey(dir) + string(filepath.Separator)
 	jobIndex.Lock()
 	defer jobIndex.Unlock()
 	for p := range jobIndex.m {
