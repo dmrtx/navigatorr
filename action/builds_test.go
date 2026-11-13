@@ -311,8 +311,10 @@ func TestBuildsNeverTouchTheOperatorPause(t *testing.T) {
 	// The operator pauses (graceful) while the build runs, then ends the build:
 	// the operator pause stays and the node stays paused.
 	pauseNode(t, e, "m1", store.WorkerPauseGraceful)
-	if st := e.NodePauseStatuses(context.Background())["m1"]; st.HeldBy != "operator" || st.Mode != store.WorkerPauseGraceful {
-		t.Fatalf("the operator pause wins while it is set: %+v", st)
+	// The running build stays listed beside the operator pause, so the UI can
+	// show both states instead of one hiding the other.
+	if st := e.NodePauseStatuses(context.Background())["m1"]; st.HeldBy != "operator" || st.Mode != store.WorkerPauseGraceful || len(st.Builds) != 1 || st.Builds[0].ID != b.ID || st.Builds[0].Status != store.BuildRunning {
+		t.Fatalf("the operator pause wins while it is set and the running build stays listed: %+v", st)
 	}
 	finishBuild(t, e, b.ID, store.BuildSucceeded)
 	if p := operator(); len(p) != 1 || p["m1"].Mode != store.WorkerPauseGraceful {

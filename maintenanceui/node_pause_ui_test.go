@@ -29,7 +29,7 @@ func nodePauseControlsSource(t *testing.T) string {
 // own status message, above them.
 func TestNodePauseControlsOfferSuspendInTheOneActionsRow(t *testing.T) {
 	src := nodePauseControlsSource(t)
-	for _, want := range []string{`add("Pause after current files", "graceful"`, `add("Pause now", "immediate"`, `add("Suspend now", "suspend"`, `add("Resume", "off"`} {
+	for _, want := range []string{`add("Pause transcode after current files", "graceful"`, `add("Pause transcode now", "immediate"`, `add("Suspend transcode now", "suspend"`, `add("Resume transcode", "off"`} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("missing %s", want)
 		}
@@ -63,7 +63,7 @@ func TestSuspendNoticePromisesNeitherATimeNorAFreeze(t *testing.T) {
 	}
 	end := strings.Index(src[start:], "\n}\n")
 	body := src[start : start+end]
-	if !strings.Contains(body, "suspend requested.`") {
+	if !strings.Contains(body, "transcode suspend requested.`") {
 		t.Fatal("the suspend notice must say the suspend was requested")
 	}
 	for _, banned := range []string{"within a second", "are frozen", "frozen and"} {
