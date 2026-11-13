@@ -1012,3 +1012,88 @@ func TestPromotionAndDispatchNeverBothTakeTheNode(t *testing.T) {
 		t.Fatalf("a recorded job keeps the build waiting: %+v", third)
 	}
 }
+
+// A node whose request lock was busy for the older waiting build is skipped
+// for the whole pass: the lock freeing up must not let a newer build start
+// ahead of it.
+func TestBusyNodeLockKeepsTheOlderWaitingBuildFirst(t *testing.T) {
+	m1 := newSuspendingM1(transcode.StatusRunning)
+	m1.active = 1
+	e, _ := buildEngine(t, m1)
+	seedEncoding(t, e, "enc", "m1", "job-enc")
+	older := lowBuild(t, e, "m1", 0)
+	newer := lowBuild(t, e, "m1", 0)
+	if older.Status != store.BuildWaiting || newer.Status != store.BuildWaiting {
+		t.Fatalf("%+v %+v", older, newer)
+	}
+	endEncode(t, e, "enc")
+	m1.active = 0
+
+	lock := &e.workerStateFor("m1").pauseMu
+	calls := 0
+	held := false
+	e.beforeBuildTryLock = func(string) {
+		calls++
+		if calls == 1 {
+			lock.Lock() // an operator request is in flight for the first attempt
+			held = true
+		} else if held {
+			lock.Unlock() // and is done again for the second
+			held = false
+		}
+	}
+	e.promoteWaitingBuilds()
+	e.beforeBuildTryLock = nil
+	if held {
+		lock.Unlock()
+	}
+	for _, id := range []string{older.ID, newer.ID} {
+		if got, _ := e.GetBuild(id); got.Status != store.BuildWaiting {
+			t.Fatalf("a node skipped this pass starts nothing: %+v", got)
+		}
+	}
+	e.promoteWaitingBuilds()
+	if got, _ := e.GetBuild(older.ID); got.Status != store.BuildRunning {
+		t.Fatalf("the older build runs on the next pass: %+v", got)
+	}
+	if got, _ := e.GetBuild(newer.ID); got.Status != store.BuildWaiting {
+		t.Fatalf("the newer build still waits: %+v", got)
+	}
+}
+
+// The exclusion that matters when the lock is free: a low build already runs
+// on the node, so the dispatcher's re-check of the hold under the lock defers
+// the job and records nothing.
+func TestAdmitOnNodeDefersToARunningBuildUnderTheLock(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	low := lowBuild(t, e, "m1", 0)
+	if low.Status != store.BuildRunning {
+		t.Fatalf("idle node: %+v", low)
+	}
+	tmpl, _ := e.GetTemplate("transcode_media")
+	seedActionInstance(t, e.deps.Store, "late", "transcode_media", StatusRunning, actionStepIndex(tmpl, "transcode_submit"), "",
+		map[string]any{"path": "/Volumes/media/late.mkv"}, map[string]any{workerStateKey: "m1"})
+	ec := parseExecutionContext(mustInstance(t, e.deps.Store, "late"), e)
+	ec.State["job_id"] = "job-late"
+
+	lock := &e.workerStateFor("m1").pauseMu
+	recorded := false
+	res, deferred, err := e.admitOnNode(ec, "transcode", func() error {
+		recorded = true
+		ec.State["transcode_reconcile"] = true
+		return e.persistExecutionState(context.Background(), ec)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deferred || recorded || res.Status != StepWaitingExternal || res.WaitingCondition != pauseWaitCondition {
+		t.Fatalf("the job is deferred by the hold, nothing recorded: %+v deferred=%v recorded=%v", res, deferred, recorded)
+	}
+	if !lock.TryLock() {
+		t.Fatal("the node lock is released after the deferral")
+	}
+	lock.Unlock()
+	if getBool(parseExecutionContext(mustInstance(t, e.deps.Store, "late"), e).State, "transcode_reconcile") {
+		t.Fatal("nothing was persisted on the node")
+	}
+}

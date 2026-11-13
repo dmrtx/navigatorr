@@ -182,10 +182,12 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 		return b, invalidBuild(`priority must be "normal" or "low"`)
 	}
 	if b.Priority == store.BuildPriorityLow {
-		// A low priority build never preempts. The dispatcher does not take the
-		// node's request lock, so an encode can start between the idle check and
-		// the promotion; any stronger mode would then freeze or requeue it.
-		// Whatever mode was asked for, a low build holds the node gracefully.
+		// A low priority build never preempts. admitOnNode serialises the
+		// dispatcher's record step with promotion under the node's request
+		// lock, so an encode and a low build do not start together; forcing
+		// graceful is defence in depth should one ever slip through, since a
+		// stronger mode would then freeze or requeue that encode. Whatever mode
+		// was asked for, a low build holds the node gracefully.
 		b.PreemptMode = store.WorkerPauseGraceful
 	}
 	ttl, err := buildTTL(in.TTLSeconds)
@@ -460,9 +462,12 @@ func (e *Engine) promoteWaitingBuilds() {
 		return
 	}
 	promoted := false
+	// Nodes whose lock was busy this pass: every later waiting build on them
+	// waits too, so a newer build never starts ahead of an older one.
+	skipped := map[string]bool{}
 	for _, b := range waiting {
 		w, ok := e.buildNode(b.Target)
-		if !ok {
+		if !ok || skipped[w.Name] {
 			continue
 		}
 		// Re-read: an earlier iteration may have started or expired it.
@@ -470,7 +475,11 @@ func (e *Engine) promoteWaitingBuilds() {
 			continue
 		}
 		lock := &e.workerStateFor(w.Name).pauseMu
+		if e.beforeBuildTryLock != nil {
+			e.beforeBuildTryLock(w.Name)
+		}
 		if !lock.TryLock() {
+			skipped[w.Name] = true
 			continue
 		}
 		ok, err := e.promoteIfIdleLocked(w, b)
