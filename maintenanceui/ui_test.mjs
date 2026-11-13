@@ -2705,6 +2705,40 @@ test("worker activity gives each node a row that opens onto its slots, and a tab
   assert.equal(h.elements.get("worker-slots").children[0].children.length,1);
 });
 
+test("worker slots list running builds, and a node held by a build or a pause offers no free slot", () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  const started=new Date(Date.now()-90000).toISOString();
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:started,progress:"step 2/5"};
+  const node=(name,extra={})=>({name,available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],
+    slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}},...extra});
+  const table=()=>h.elements.get("worker-slots").children[1];
+  const rows=()=>table().children[0].children[1].children;
+  h.context.activity={available:true,workers:[node("m1",{held_by:"builds",builds:[build,{...build,id:"b2",status:"waiting",title:"later"}]}),node("m4")]};
+  h.run('renderWorkerActivity(activity)');
+  // One row for the running build; the waiting one is not a slot. Its node counts as occupied, not available.
+  assert.equal(rows().length,1);
+  const cells=rows()[0].children;
+  assert.equal(cells[0].textContent,"m1 · build");
+  assert.equal(cells[1].textContent,"unit tests");
+  assert.equal(cells[2].children[0].textContent,"Build running");
+  assert.equal(cells[2].children[1].textContent,"ci:runner1 · swift-test · step 2/5");
+  assert.equal(cells[3].textContent,"");
+  assert.equal(cells[4].textContent,"Build");
+  assert.equal(cells[5].textContent,"1m 30s");
+  assert.equal(table().children[1].textContent,"2 slots available · m4 2 · m1 build");
+  assert.match(h.elements.get("worker-capacity").textContent,/1\/3 occupied/);
+  // The phone layout shows the build first and does not call the held node's slots available.
+  const phone=h.elements.get("worker-slots").children[0].children[0];
+  assert.match(phone.children[1].children[0].children[0].textContent,/m1 · build · unit tests/);
+  assert.match(phone.children[1].children[1].children[0].textContent,/Held · build/);
+  // An operator pause on idle nodes: nothing runs, no slot is available.
+  h.run('activity.workers=[{...activity.workers[0],held_by:"operator",builds:undefined},{...activity.workers[1],held_by:"operator"}];renderWorkerActivity(activity)');
+  assert.equal(table().children.length,1);
+  assert.equal(table().children[0].textContent,"No slot available · m1 paused, m4 paused");
+  assert.match(h.elements.get("worker-capacity").textContent,/0\/0 occupied/);
+});
+
 test("the scheduler is a chip beside the slots and the settings link is an icon", () => {
   assert.match(markup,/<div class="activity-heading">.*id="activity-scheduler" class="sched-chip"/s);
   assert.match(markup,/id="worker-open-settings"[^>]*aria-label="Change in Settings"/);

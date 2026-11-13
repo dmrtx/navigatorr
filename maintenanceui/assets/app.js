@@ -7558,8 +7558,9 @@ function renderWorkerActivity(data) {
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
     return;
   }
-  const used = live.reduce((sum, n) => sum + n.activity.worker_slots_used, 0);
-  const total = live.reduce((sum, n) => sum + n.activity.worker_slots_total, 0);
+  const counts = live.map(nodeSlotCounts);
+  const used = counts.reduce((sum, c) => sum + c.used, 0);
+  const total = counts.reduce((sum, c) => sum + c.total, 0);
   const missing = nodes.length - live.length;
   $("worker-capacity").textContent = `Worker slots · ${used}/${total} occupied${missing ? ` · ${missing} of ${nodes.length} nodes unavailable` : ""}`;
   $("activity-checked").textContent = "Updated now · Job reservations";
@@ -7657,6 +7658,18 @@ function slotProgressCells(job, alive) {
   cell.append(track, node("span", percent != null ? `${percent.toFixed(1)}%` : "", "slot-bar-percent"));
   return [phase, cell];
 }
+// What keeps new files off a node, in the word the slot lines use: "build" while
+// a running build holds it, "paused" for the operator's pause (which wins).
+const nodeHoldWord = n => n.held_by === "builds" ? "build" : n.held_by ? "paused" : "";
+// Builds running on a node. A waiting build holds nothing and is not a slot.
+const runningBuilds = n => (n.builds || []).filter(b => b.status === "running");
+// A node's occupied/total as the slots show it: each running build is one
+// occupied row, and a held node offers no free slot, so it counts only what is
+// on it.
+function nodeSlotCounts(n) {
+  const a = n.activity, builds = runningBuilds(n).length, used = a.worker_slots_used + builds;
+  return {used, total: nodeHoldWord(n) ? used : a.worker_slots_total + builds};
+}
 // One node's slots. Each node keeps its own slot positions. An entry is a free
 // slot, a slot the worker says is busy without saying with what (an older
 // worker), or a slot with its job.
@@ -7698,7 +7711,7 @@ function slotRow(entry) {
   const {label, job} = entry;
   const row = node("div","",`worker-slot${job || entry.unknown ? "" : " idle"}`);
   if (!job) {
-    row.append(node("strong",`${label} · ${entry.unknown ? "Occupied" : "Available"}`));
+    row.append(node("strong",`${label} · ${entry.unknown ? "Occupied" : entry.held ? `Held · ${entry.held}` : "Available"}`));
     if (entry.unknown) row.append(node("p","File details require the updated video worker.","metadata"));
     return row;
   }
@@ -7712,11 +7725,23 @@ function slotRow(entry) {
   row.append(line);
   return row;
 }
+// A running build on the phone layout: the build's title, what it is and who
+// runs it, and how long it has run.
+function buildSlotRow(n, b) {
+  const row = node("div","","worker-slot");
+  row.append(node("strong",`${n.name || "Node"} · build · ${b.title}`));
+  row.children[0].title = b.title;
+  const elapsed = activityElapsed(b.started_at);
+  row.append(node("p", ["Build running", buildOwner(b), b.kind, b.progress, elapsed ? `${elapsed} elapsed` : null].filter(Boolean).join(" · "), "metadata slot-facts"));
+  return row;
+}
 // One node as a row that opens onto its slots. Open while something runs or is
 // wrong, shut when it is idle, until the person opens or shuts it themselves.
 function slotNodeDetails(n, entries) {
   const online = Boolean(n.available && n.activity);
-  const busy = entries.filter(e => e.job || e.unknown).length;
+  const builds = online ? runningBuilds(n) : [], hold = online ? nodeHoldWord(n) : "";
+  for (const e of entries) if (hold && !e.job && !e.unknown) e.held = hold;
+  const busy = entries.filter(e => e.job || e.unknown).length + builds.length;
   const stale = entries.some(e => e.job && !heartbeatAlive(workerHeartbeatState(e.job.heartbeat_at)));
   const key = n.name || "", chosen = state.slotNodeOpen?.get(key);
   const details = node("details","","slot-node");
@@ -7725,24 +7750,42 @@ function slotNodeDetails(n, entries) {
   const summary = node("summary");
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
-    node("span", !online ? n.message || "Unavailable" : `${busy}/${n.activity.worker_slots_total}${busy ? "" : " · all available"}`, "metadata"));
+    node("span", !online ? n.message || "Unavailable" : `${busy}/${nodeSlotCounts(n).total}${busy ? "" : hold ? ` · ${hold}` : " · all available"}`, "metadata"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.
   summary.addEventListener("click", () => { (state.slotNodeOpen ||= new Map()).set(key, !details.open); });
   const body = node("div","","slot-node-body");
-  body.append(...entries.map(slotRow));
+  body.append(...builds.map(b => buildSlotRow(n, b)), ...entries.map(slotRow));
   details.append(summary, body);
   return details;
+}
+// A running build as the cells of a table row, in the same columns as an
+// encode: Slot, File, Phase, Progress, Kind, Elapsed.
+function buildTableCells(n, b) {
+  const file = node("td", b.title, "slot-file");
+  file.title = b.title;
+  const phase = node("td", "", "slot-phase");
+  phase.append(node("span", "Build running", "slot-phase-name"));
+  const line = [buildOwner(b), b.kind, b.progress].filter(Boolean).join(" · ");
+  if (line) {
+    const facts = node("span", line, "slot-facts");
+    facts.title = line;
+    phase.append(facts);
+  }
+  return [node("td", `${n.name || "Node"} · build`), file, phase, node("td", "", "slot-bar"), node("td", "Build"), node("td", activityElapsed(b.started_at) || "")];
 }
 // Desktop layout: the slots that are doing something as a table, the rest in a line.
 function slotTable(groups) {
   const wrap = node("div","","slots-table");
-  const multi = groups.length > 1, busy = [], free = [], down = [];
+  const multi = groups.length > 1, busy = [], free = [], down = [], held = [];
   for (const {n, entries} of groups) {
     if (!(n.available && n.activity)) { down.push(`${n.name} · ${n.message || "Unavailable"}`); continue; }
-    const idle = entries.filter(e => !e.job && !e.unknown).length;
-    if (idle) free.push([n.name, idle]);
+    const idle = entries.filter(e => !e.job && !e.unknown).length, hold = nodeHoldWord(n);
+    // A held node takes no new file, so its free slots are not available.
+    if (hold) held.push(`${n.name || "node"} ${hold}`);
+    else if (idle) free.push([n.name, idle]);
+    for (const b of runningBuilds(n)) busy.push({n, b});
     for (const e of entries) if (e.job || e.unknown) busy.push({n, e});
   }
   if (busy.length) {
@@ -7751,9 +7794,14 @@ function slotTable(groups) {
     const thead = node("thead");
     thead.append(head);
     const tbody = node("tbody");
-    for (const {n, e} of busy) {
-      const row = node("tr"), slot = multi ? `${n.name} · ${e.label}` : e.label;
-      row.append(node("td", slot));
+    for (const {n, e, b} of busy) {
+      const row = node("tr");
+      if (b) {
+        row.append(...buildTableCells(n, b));
+        tbody.append(row);
+        continue;
+      }
+      row.append(node("td", multi ? `${n.name} · ${e.label}` : e.label));
       if (!e.job) {
         const note = node("td", "Occupied · File details require the updated video worker.", "metadata");
         note.colSpan = 5;
@@ -7781,7 +7829,11 @@ function slotTable(groups) {
     wrap.append(table);
   }
   const freeCount = free.reduce((sum, [, count]) => sum + count, 0);
-  if (freeCount) wrap.append(node("p", `${freeCount} ${freeCount === 1 ? "slot" : "slots"} available${multi ? ` · ${free.map(([name, count]) => `${name} ${count}`).join(", ")}` : ""}`, "metadata slot-idle-line"));
+  const idleParts = [];
+  if (freeCount) idleParts.push(`${freeCount} ${freeCount === 1 ? "slot" : "slots"} available${multi ? ` · ${free.map(([name, count]) => `${name} ${count}`).join(", ")}` : ""}`);
+  else if (held.length) idleParts.push("No slot available");
+  if (held.length) idleParts.push(held.join(", "));
+  if (idleParts.length) wrap.append(node("p", idleParts.join(" · "), "metadata slot-idle-line"));
   for (const text of down) wrap.append(node("p", text, "metadata slot-down"));
   return wrap;
 }

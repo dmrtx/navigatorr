@@ -315,3 +315,44 @@ func TestBuildsLateHeartbeatIs409AndMarksTheBuildLost(t *testing.T) {
 		}
 	}
 }
+
+// The slot view leaves a held node out of the free slots: worker activity says
+// what holds each node, and the operator's pause wins over a build.
+func TestWorkerActivityNamesWhatHoldsTheNode(t *testing.T) {
+	_, h := buildsUI(t)
+	node := transcode.DefaultWorkerName
+	heldBy := func() (any, bool) {
+		w := request(h, "GET", "/api/maintenance/worker-activity", "", true)
+		var out struct {
+			Workers []map[string]any `json:"workers"`
+		}
+		if json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Workers) == 0 {
+			t.Fatal("worker activity", w.Body.String())
+		}
+		held, ok := out.Workers[0]["held_by"]
+		return held, ok
+	}
+	if held, ok := heldBy(); ok {
+		t.Fatal("a free node has no hold", held)
+	}
+	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","source":"ci","title":"run","holder":"runner1"}`))
+	if held, _ := heldBy(); held != "builds" {
+		t.Fatal("a running build holds the node", held)
+	}
+	if w := request(h, "POST", "/api/maintenance/worker-pause", `{"node":"`+node+`","mode":"graceful"}`, true); w.Code != 200 {
+		t.Fatal("pause", w.Code, w.Body.String())
+	}
+	if held, _ := heldBy(); held != "operator" {
+		t.Fatal("the operator's pause wins over the build", held)
+	}
+	withBuildsToken(h, "POST", "/api/maintenance/builds/"+b.ID+"/finish", `{"status":"succeeded"}`)
+	if held, _ := heldBy(); held != "operator" {
+		t.Fatal("the pause stays after the build ends", held)
+	}
+	if w := request(h, "POST", "/api/maintenance/worker-pause", `{"node":"`+node+`","mode":"off"}`, true); w.Code != 200 {
+		t.Fatal("resume", w.Code, w.Body.String())
+	}
+	if held, ok := heldBy(); ok {
+		t.Fatal("a resumed node with no build is free", held)
+	}
+}
