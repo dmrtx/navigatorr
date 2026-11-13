@@ -248,6 +248,28 @@ func checkHeartbeat(progress **string, ttlSeconds int, logLines []string) (time.
 	return buildTTL(ttlSeconds)
 }
 
+// OpenBuild is the first step of a heartbeat that comes from outside: it finds
+// the build before anything the caller sent is read. An unknown build gives
+// store.ErrBuildNotFound; an ended one gives store.ErrBuildEnded with its
+// record. A running build whose expiry passed counts as ended too: it is marked
+// lost here (releasing its node hold) rather than left for the next tick, and
+// is answered the same way. Otherwise it returns the build, unchanged.
+func (e *Engine) OpenBuild(ctx context.Context, id string) (store.Build, error) {
+	cur, err := e.GetBuild(id)
+	if err != nil {
+		return store.Build{}, err
+	}
+	if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
+		return cur, store.ErrBuildEnded
+	}
+	if exp, perr := time.Parse(time.RFC3339, cur.ExpiresAt); perr == nil && !exp.After(e.now()) {
+		if b, err := e.HeartbeatBuild(ctx, id, nil, 0); err != nil {
+			return b, err
+		}
+	}
+	return cur, nil
+}
+
 // HeartbeatBuild extends a running build's expiry and optionally replaces its
 // progress line and ttl. A build that already ended gives store.ErrBuildEnded
 // together with its record.

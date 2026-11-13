@@ -25,6 +25,8 @@ const (
 	BuildLogRetention = 30 * time.Minute
 	// buildLogMaxBuilds bounds the buffers held at once.
 	buildLogMaxBuilds = 64
+	// buildLogMaxDropped bounds the ids remembered as "had output, dropped".
+	buildLogMaxDropped = 256
 )
 
 type buildLogBuffer struct {
@@ -36,9 +38,43 @@ type buildLogBuffer struct {
 type buildLogs struct {
 	mu   sync.Mutex
 	bufs map[string]*buildLogBuffer
-	// evicted remembers the builds whose buffer the cap pushed out, so a reader
-	// can tell "dropped" from "never sent anything". Pruned with the buffers.
-	evicted map[string]struct{}
+	// dropped remembers the builds whose buffer retention or the cap actually
+	// dropped, so a reader can tell "dropped" from "never sent anything". It
+	// keeps the last buildLogMaxDropped ids, oldest out (droppedOrder).
+	dropped      map[string]struct{}
+	droppedOrder []string
+}
+
+// markDroppedLocked records that a build's buffer was dropped.
+func (l *buildLogs) markDroppedLocked(id string) {
+	if l.dropped == nil {
+		l.dropped = map[string]struct{}{}
+	}
+	if _, ok := l.dropped[id]; ok {
+		return
+	}
+	l.dropped[id] = struct{}{}
+	l.droppedOrder = append(l.droppedOrder, id)
+	if over := len(l.droppedOrder) - buildLogMaxDropped; over > 0 {
+		for _, old := range l.droppedOrder[:over] {
+			delete(l.dropped, old)
+		}
+		l.droppedOrder = append([]string(nil), l.droppedOrder[over:]...)
+	}
+}
+
+// forgetDroppedLocked removes an id from the dropped set.
+func (l *buildLogs) forgetDroppedLocked(id string) {
+	if _, ok := l.dropped[id]; !ok {
+		return
+	}
+	delete(l.dropped, id)
+	for i, v := range l.droppedOrder {
+		if v == id {
+			l.droppedOrder = append(l.droppedOrder[:i:i], l.droppedOrder[i+1:]...)
+			break
+		}
+	}
 }
 
 // checkBuildLog validates the lines of a heartbeat the way progress is checked:
@@ -84,12 +120,9 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 				}
 			}
 			delete(l.bufs, oldest)
-			if l.evicted == nil {
-				l.evicted = map[string]struct{}{}
-			}
-			l.evicted[oldest] = struct{}{}
+			l.markDroppedLocked(oldest)
 		}
-		delete(l.evicted, id)
+		l.forgetDroppedLocked(id)
 		buf = &buildLogBuffer{}
 		l.bufs[id] = buf
 	}
@@ -111,29 +144,37 @@ func (l *buildLogs) get(id string) ([]string, time.Time) {
 	return append([]string(nil), buf.lines...), buf.updatedAt
 }
 
+// drop forgets a build altogether (its record is gone).
 func (l *buildLogs) drop(id string) {
 	l.mu.Lock()
 	delete(l.bufs, id)
-	delete(l.evicted, id)
+	l.forgetDroppedLocked(id)
 	l.mu.Unlock()
 }
 
-// wasEvicted is whether the cap pushed the build's buffer out.
-func (l *buildLogs) wasEvicted(id string) bool {
+// expire drops a build's buffer because its retention passed, and remembers it
+// did. A build with no buffer is left alone: nothing was dropped.
+func (l *buildLogs) expire(id string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	_, ok := l.evicted[id]
+	if _, ok := l.bufs[id]; ok {
+		delete(l.bufs, id)
+		l.markDroppedLocked(id)
+	}
+}
+
+// wasDropped is whether retention or the cap dropped the build's buffer.
+func (l *buildLogs) wasDropped(id string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.dropped[id]
 	return ok
 }
 
-func (l *buildLogs) evictedIDs() []string {
+func (l *buildLogs) droppedIDs() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	out := make([]string, 0, len(l.evicted))
-	for k := range l.evicted {
-		out = append(out, k)
-	}
-	return out
+	return append([]string(nil), l.droppedOrder...)
 }
 
 func (l *buildLogs) ids() []string {
@@ -172,7 +213,7 @@ type BuildOutput struct {
 	Build   store.Build
 	Lines   []string
 	Updated time.Time
-	// Expired is true only when the output was dropped on purpose: its
+	// Expired is true only when a buffer this build had was dropped: its
 	// retention passed or the cap on buffers pushed it out. A build that never
 	// sent output, or whose output a restart forgot, is not expired.
 	Expired bool
@@ -201,14 +242,13 @@ func (e *Engine) BuildOutput(id string) (BuildOutput, error) {
 		return BuildOutput{}, err
 	}
 	if buildLogExpired(b, e.now()) {
-		e.buildLogs.drop(id)
-		return BuildOutput{Build: b, Lines: []string{}, Expired: true}, nil
+		e.buildLogs.expire(id)
 	}
 	lines, updated := e.buildLogs.get(id)
 	if lines == nil {
 		lines = []string{}
 	}
-	return BuildOutput{Build: b, Lines: lines, Updated: updated, Expired: len(lines) == 0 && e.buildLogs.wasEvicted(id)}, nil
+	return BuildOutput{Build: b, Lines: lines, Updated: updated, Expired: len(lines) == 0 && e.buildLogs.wasDropped(id)}, nil
 }
 
 // pruneBuildLogs drops the buffers of builds that are gone or whose output
@@ -218,13 +258,14 @@ func (e *Engine) pruneBuildLogs() {
 		return
 	}
 	now := e.now()
-	for _, id := range append(e.buildLogs.ids(), e.buildLogs.evictedIDs()...) {
+	for _, id := range append(e.buildLogs.ids(), e.buildLogs.droppedIDs()...) {
 		b, err := e.deps.Store.GetBuild(id)
-		if err != nil && !errorsIsBuildNotFound(err) {
-			continue
-		}
-		if err != nil || buildLogExpired(b, now) {
+		switch {
+		case err != nil && !errorsIsBuildNotFound(err):
+		case err != nil:
 			e.buildLogs.drop(id)
+		case buildLogExpired(b, now):
+			e.buildLogs.expire(id)
 		}
 	}
 }

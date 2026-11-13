@@ -344,6 +344,18 @@ func TestBuildOutputExpiredOnlyWhenDropped(t *testing.T) {
 	if out, _ := e.BuildOutput(kept.ID); !out.Expired || len(out.Lines) != 0 {
 		t.Fatalf("after the retention: %+v", out)
 	}
+	// A build that never sent output stays "No output" after the retention too,
+	// on a read and after the reconcile tick has pruned.
+	if out, _ := e.BuildOutput(silent.ID); out.Expired || len(out.Lines) != 0 {
+		t.Fatalf("a quiet build read after the retention is not expired: %+v", out)
+	}
+	e.pruneBuildLogs()
+	if out, _ := e.BuildOutput(silent.ID); out.Expired {
+		t.Fatalf("pruning does not make a quiet build expired: %+v", out)
+	}
+	if out, _ := e.BuildOutput(kept.ID); !out.Expired {
+		t.Fatal("the dropped build stays expired after the prune")
+	}
 	// The cap.
 	clock.advance(time.Second)
 	first := startBuild(t, e, "laptop", "", 0)
@@ -359,5 +371,55 @@ func TestBuildOutputExpiredOnlyWhenDropped(t *testing.T) {
 	e.HeartbeatBuild(ctx, over.ID, nil, 0, "x")
 	if out, _ := e.BuildOutput(first.ID); !out.Expired || len(out.Lines) != 0 {
 		t.Fatalf("an evicted buffer is expired: %+v", out)
+	}
+}
+
+// A buffer the reconcile tick drops (nobody read it) is remembered as dropped too.
+func TestPruneRemembersTheBuffersItDrops(t *testing.T) {
+	e, clock := buildEngine(t, &mockTranscodeExecutor{})
+	b := startBuild(t, e, "laptop", "", 0)
+	e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "line")
+	finishBuild(t, e, b.ID, store.BuildSucceeded)
+	clock.advance(BuildLogRetention)
+	e.pruneBuildLogs()
+	if lines, _ := e.buildLogs.get(b.ID); lines != nil {
+		t.Fatal("the prune drops the buffer")
+	}
+	if out, _ := e.BuildOutput(b.ID); !out.Expired {
+		t.Fatalf("%+v", out)
+	}
+}
+
+func TestDroppedSetIsBoundedAndOldestGoesFirst(t *testing.T) {
+	var l buildLogs
+	now := time.Now()
+	total := buildLogMaxDropped + 44
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("b%d", i)
+		l.append(id, []string{"x"}, now, nil)
+		l.expire(id)
+	}
+	if n := len(l.dropped); n != buildLogMaxDropped || len(l.droppedOrder) != buildLogMaxDropped {
+		t.Fatalf("%d ids, %d in order", n, len(l.droppedOrder))
+	}
+	if l.wasDropped("b0") || l.wasDropped("b43") {
+		t.Fatal("the oldest ids go first")
+	}
+	if !l.wasDropped("b44") || !l.wasDropped(fmt.Sprintf("b%d", total-1)) {
+		t.Fatal("the newest ids stay")
+	}
+	// Expiring a build that has no buffer records nothing.
+	l.expire("never-had-output")
+	if l.wasDropped("never-had-output") || len(l.dropped) != buildLogMaxDropped {
+		t.Fatal("nothing was dropped")
+	}
+	// Output sent again, or the build gone, takes the id back out.
+	l.append("b100", []string{"x"}, now, nil)
+	if l.wasDropped("b100") || len(l.droppedOrder) != buildLogMaxDropped-1 {
+		t.Fatal("a fresh buffer is not dropped")
+	}
+	l.drop("b101")
+	if l.wasDropped("b101") || len(l.dropped) != len(l.droppedOrder) {
+		t.Fatal("a gone build is forgotten")
 	}
 }

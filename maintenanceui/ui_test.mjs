@@ -38,7 +38,7 @@ class Element {
   children = [];
   listeners = new Map();
   dataset = {};
-  style = {};
+  style = { setProperty(name, value) { this[name] = value; } };
   hidden = false;
   disabled = false;
   value = "";
@@ -10832,12 +10832,26 @@ test("focus stays on the build row when the slots are rebuilt, in both layouts",
   rebuild(true);
   render();
   assert.deepEqual(plain(log.splice(0)), [["new-phone", { preventScroll: true }]]);
-  // Focus anywhere else is left alone, and so is a build that is gone.
+  // Focus anywhere else is left alone.
   h.document.activeElement = { dataset: {} };
   render();
+  assert.deepEqual(log, []);
+  // A build row that is gone after the refresh (build ended, update failed, worker
+  // unavailable) hands focus to the slots heading, without scrolling.
+  const heading = h.elements.get("worker-capacity");
+  heading.focus = (options) => log.push(["heading", options]);
   h.document.activeElement = { dataset: { buildId: "gone" } };
   render();
-  assert.deepEqual(log, []);
+  assert.deepEqual(plain(log.splice(0)), [["heading", { preventScroll: true }]]);
+  assert.equal(heading.tabIndex, -1);
+  h.document.querySelectorAll = () => [];
+  h.document.activeElement = { dataset: { buildId: "b1" } };
+  render();
+  assert.deepEqual(plain(log.splice(0)), [["heading", { preventScroll: true }]]);
+  h.document.activeElement = { dataset: { buildId: "b1" } };
+  h.context.activity = { available: false, message: "worker unavailable" };
+  render();
+  assert.deepEqual(plain(log.splice(0)), [["heading", { preventScroll: true }]]);
 });
 
 test("the phone row's name stays short and points at its facts; the output block has a name", () => {
@@ -10847,13 +10861,19 @@ test("the phone row's name stays short and points at its facts; the output block
   assert.match(source, /row\.setAttribute\("aria-label", `Output of build \$\{b\.title\}`\)/);
   const facts = row.children.find((c) => c.id === "build-facts-b1");
   assert.ok(facts && /Build running/.test(facts.textContent));
-  assert.match(markup, /<pre id="build-log-lines"[^>]*aria-label="Build output"/);
+  // A named region, not a live one: aria-label on a generic role is not announced.
+  assert.match(markup, /<pre id="build-log-lines"[^>]*role="region"[^>]*aria-label="Build output"/);
+  assert.doesNotMatch(markup, /<pre id="build-log-lines"[^>]*aria-live/);
 });
 
-test("a block wider than the dialog fades at its right edge until the scroll reaches the end", async () => {
+test("a block wider than the dialog shows a strip at its right edge until the scroll reaches the end", async () => {
   const { h, box } = buildLogHarness();
   const toggles = [];
-  box.classList = { toggle: (name, on) => toggles.push([name, on]), add() {}, remove() {} };
+  // The strip belongs to the wrapper, so the block keeps its focus ring and scrollbar whole.
+  const wrap = h.document.getElementById("build-log-wrap");
+  wrap.classList = { toggle: (name, on) => toggles.push([name, on]), add() {}, remove() {} };
+  box.classList = { toggle: () => assert.fail("the block itself is never masked"), add() {}, remove() {} };
+  Object.assign(box, { offsetWidth: 412, clientWidth: 395, offsetHeight: 120, clientHeight: 118 });
   h.run("api = async () => ({ lines: ['x'.repeat(500)], status: 'running', ended_at: null })");
   Object.assign(box, { scrollWidth: 900, clientWidth: 400, scrollLeft: 0, scrollHeight: 100, clientHeight: 100 });
   h.context.build = { id: "b1", title: "t", status: "running" };
@@ -10870,5 +10890,17 @@ test("a block wider than the dialog fades at its right edge until the scroll rea
   box.scrollWidth = 400; box.scrollLeft = 0;
   box.listeners.get("scroll")();
   assert.deepEqual(toggles.at(-1), ["more-right", false]);
-  assert.match(css, /\.build-log-lines\.more-right \{[^}]*mask-image: linear-gradient\(to right/);
+  // The strip keeps clear of the block's scrollbars (offset minus client minus the 2px border).
+  assert.equal(wrap.style["--build-log-bar-x"], "10px");
+  assert.equal(wrap.style["--build-log-bar-y"], "18px");
+  // An overlay on the wrapper: no mask on the block, which would clip its focus ring and scrollbar.
+  assert.doesNotMatch(css, /mask-image/);
+  assert.match(css, /\.build-log-wrap \{[^}]*position: relative;/);
+  assert.match(css, /\.build-log-wrap\.more-right::after \{[^}]*position: absolute;[^}]*width: 18px;[^}]*pointer-events: none;/);
+  // Token colours only, visible on both themes: a share of the ink colour.
+  assert.match(css, /\.build-log-wrap\.more-right::after \{[^}]*color-mix\(in srgb, var\(--ink\) 28%, transparent\)/);
+  assert.doesNotMatch(css, /\.build-log-wrap[^{]*\{[^}]*#[0-9a-fA-F]{3,8}\b/);
+  // The ring is drawn outside the block and the strip sits inside its border.
+  assert.match(css, /\.build-log-lines:focus-visible \{ outline: 2px solid var\(--forest\); outline-offset: 2px; \}/);
+  assert.match(css, /\.build-log-wrap\.more-right::after \{[^}]*top: 1px;[^}]*right: calc\(1px \+ var\(--build-log-bar-x/);
 });

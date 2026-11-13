@@ -126,6 +126,16 @@ func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	// The build comes first, from the path alone: unknown is 404 and over (or
+	// past its expiry) is 409, whatever the body is or how large. Only then is the
+	// body read and judged (400).
+	if b, err := s.engine.OpenBuild(r.Context(), id); errors.Is(err, store.ErrBuildEnded) {
+		writeBuildEnded(w, b)
+		return
+	} else if s.buildError(w, err) {
+		return
+	}
 	var body struct {
 		Progress   json.RawMessage `json:"progress"`
 		TTLSeconds json.RawMessage `json:"ttl_seconds"`
@@ -135,23 +145,20 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
 		return
 	}
-	id := r.PathValue("id")
-	// Every field is typed after the build is found: one that is gone or over
-	// answers 404 or 409 first, whatever is wrong with what was sent, and then
-	// the engine judges the values (length, range) in the same order.
 	var progress *string
 	var ttl int
 	var lines []string
-	reason := ""
 	if len(body.Progress) > 0 && string(body.Progress) != "null" {
 		var p string
 		if json.Unmarshal(body.Progress, &p) != nil {
-			reason = "progress must be a string"
+			fail(w, 400, "progress must be a string")
+			return
 		}
 		progress = &p
 	}
 	if len(body.TTLSeconds) > 0 && string(body.TTLSeconds) != "null" && json.Unmarshal(body.TTLSeconds, &ttl) != nil {
-		reason = "ttl_seconds must be a whole number"
+		fail(w, 400, "ttl_seconds must be a whole number")
+		return
 	}
 	if len(body.Log) > 0 && string(body.Log) != "null" {
 		var items []*string
@@ -160,24 +167,14 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, l := range items {
 			if l == nil {
-				reason = "log must be an array of strings"
-				break
+				fail(w, 400, "log must be an array of strings")
+				return
 			}
 			lines = append(lines, *l)
 		}
 	}
-	if reason != "" {
-		cur, err := s.engine.GetBuild(id)
-		if s.buildError(w, err) {
-			return
-		}
-		if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
-			writeBuildEnded(w, cur)
-			return
-		}
-		fail(w, 400, reason)
-		return
-	}
+	// The engine judges the values (length, range) and, if the build ended in
+	// the meantime, answers 409.
 	b, err := s.engine.HeartbeatBuild(r.Context(), id, progress, ttl, lines...)
 	if errors.Is(err, store.ErrBuildEnded) {
 		writeBuildEnded(w, b)

@@ -1021,12 +1021,17 @@ function renderBuildLog(lines, message) {
   if (buildLogView.pinned) box.scrollTop = box.scrollHeight;
   updateBuildLogOverflow();
 }
-// A long token keeps the block wider than the dialog: a fade at the right edge
-// says there is more that way, until the scroll reaches the end.
+// A long token keeps the block wider than the dialog: a strip at the right edge
+// says there is more that way, until the scroll reaches the end. It is an overlay
+// on the wrapper (the block keeps its focus ring and scrollbars whole).
 function updateBuildLogOverflow() {
-  const box = $("build-log-lines");
+  const box = $("build-log-lines"), wrap = $("build-log-wrap");
   const more = box.scrollWidth > box.clientWidth + 1 && box.scrollLeft + box.clientWidth < box.scrollWidth - 1;
-  box.classList.toggle("more-right", more);
+  // Keep the strip off the block's own scrollbars (the 2px are its border).
+  const bar = (outer, inner) => `${Math.max(0, (outer - inner - 2) || 0)}px`;
+  wrap.style.setProperty("--build-log-bar-x", bar(box.offsetWidth, box.clientWidth));
+  wrap.style.setProperty("--build-log-bar-y", bar(box.offsetHeight, box.clientHeight));
+  wrap.classList.toggle("more-right", more);
 }
 async function refreshBuildLog() {
   const id = buildLogView.id;
@@ -1109,11 +1114,14 @@ function focusShownBuild(candidates, options) {
   return false;
 }
 const buildRowsOf = id => id && /^[A-Za-z0-9_-]+$/.test(id) ? [...(document.querySelectorAll?.(`[data-build-id="${id}"]`) || [])] : [];
-function focusAfterBuildLog(view) {
-  if (focusShownBuild([view.opener, ...buildRowsOf(view.id)])) return;
+// Where focus goes when the build row it was on is gone: the slots heading.
+function focusCapacityHeading(options) {
   const heading = $("worker-capacity");
   heading.tabIndex = -1;
-  heading.focus?.();
+  heading.focus?.(options);
+}
+function focusAfterBuildLog(view) {
+  if (!focusShownBuild([view.opener, ...buildRowsOf(view.id)])) focusCapacityHeading();
 }
 $("close-build-log").addEventListener("click", () => $("build-log").close());
 $("build-log").addEventListener("close", () => {
@@ -7704,11 +7712,12 @@ function activityNodes(data) {
 }
 // The slots are rebuilt on every refresh. A build row that has focus is
 // replaced with it, so focus goes to the new row of the same build, without
-// scrolling; a row that is gone leaves focus where the browser puts it.
+// scrolling; a row that is gone (the build ended, the update failed, the worker
+// is unavailable) hands focus to the slots heading rather than losing it to the body.
 function renderWorkerActivity(data) {
   const focused = document.activeElement?.dataset?.buildId;
   renderWorkerActivityRows(data);
-  if (focused) focusShownBuild(buildRowsOf(focused), {preventScroll: true});
+  if (focused && !focusShownBuild(buildRowsOf(focused), {preventScroll: true})) focusCapacityHeading({preventScroll: true});
 }
 function renderWorkerActivityRows(data) {
   state.activityData = data;

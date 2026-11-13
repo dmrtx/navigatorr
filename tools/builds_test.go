@@ -115,6 +115,7 @@ func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
 		"build_status":  {"id": b.ID},
 		"worker_health": {},
 		"worker_pause":  {},
+		"build_cancel":  {"id": b.ID},
 	} {
 		text := resultText(t, callTool(t, s, name, args))
 		if text == "" {
