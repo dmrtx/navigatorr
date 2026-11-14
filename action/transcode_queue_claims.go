@@ -2,9 +2,32 @@ package action
 
 import (
 	"context"
+	"time"
 
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
+
+// Invariants of placement (written before the code; the scenario test in
+// transcode_queue_placement_test.go and the tests of this file hold them).
+//
+//	I1  "Which workers may this conversion be given now" has one answer,
+//	    placeableOn. The queue claim of the conversion asking for a turn, the
+//	    claim of every waiter and batch item ahead of it, and pickVideoWorker
+//	    all read it; pickVideoWorker only chooses among those workers by free
+//	    slots and preference. A waiter's claim therefore reaches exactly the
+//	    workers the pick could give it.
+//	I2  A worker that refused a conversion within roomRefusedFor is in neither
+//	    its claim nor its pick, so a conversion that keeps being refused never
+//	    holds that worker's slot against the ones behind it.
+//	I3  A queued standalone conversion has a known source size after its first
+//	    queue turn (ensureSourceSize): "unknown" never means "needs nothing"
+//	    for longer than one turn. If the size truly cannot be read (no file
+//	    system, a stat that does not answer) the conversion is placed as one
+//	    that needs no room; the node it is given refuses at once if it has
+//	    none, and I2 then keeps that node's slot free for the others.
+//	I4  Batch items keep a disk-only claim (RoomNeed{}) and go through the
+//	    same function.
 
 // Who may take which free slot.
 //
@@ -25,12 +48,47 @@ type queueClaim struct {
 	usable []bool
 }
 
-// claimFor is the claim of a conversion that needs the room need.
-func (e *Engine) claimFor(ctx context.Context, q queueSlots, need transcode.RoomNeed) queueClaim {
-	eligible := e.retentionEligible(ctx, q.workers, need)
-	c := queueClaim{reach: make([]bool, len(q.workers)), usable: make([]bool, len(q.workers))}
+// placement describes a conversion for placeableOn: what it needs and which
+// worker refused it, when.
+type placement struct {
+	need      transcode.RoomNeed
+	refusedBy string
+	refusedAt time.Time
+}
+
+// placementOf is the placement of the conversion being scheduled.
+func placementOf(ec *ExecutionContext) placement {
+	return placement{need: conversionRoomNeed(ec), refusedBy: getString(ec.State, roomRefusedByKey), refusedAt: parseStoreTime(getString(ec.State, roomRefusedAtKey))}
+}
+
+// waiterPlacement is the placement of a conversion waiting in the queue.
+func waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
+	return placement{need: roomNeed(w.Standalone, w.SourceBytes, w.ReserveBytes), refusedBy: w.RefusedBy, refusedAt: parseStoreTime(w.RefusedAt)}
+}
+
+// refusedRecently says whether the node refused the conversion so lately that
+// its room report may not show it yet.
+func (e *Engine) refusedRecently(p placement, node string) bool {
+	return node != "" && p.refusedBy == node && !p.refusedAt.IsZero() && e.now().Sub(p.refusedAt) < roomRefusedFor
+}
+
+// placeableOn says, for each worker, whether the conversion may be given it
+// now, free slot or not: the worker is ready, open and reports room for it,
+// and did not refuse it a moment ago. It is the one place that decides this
+// (see I1 and I2 above).
+func (e *Engine) placeableOn(ctx context.Context, workers []transcode.NamedWorker, ready []bool, p placement) []bool {
+	eligible := e.retentionEligible(ctx, workers, p.need)
+	out := make([]bool, len(workers))
+	for i, w := range workers {
+		out[i] = ready[i] && eligible[i] && !e.refusedRecently(p, w.Name)
+	}
+	return out
+}
+
+// claimFor is the claim of a conversion with the placement p.
+func (e *Engine) claimFor(ctx context.Context, q queueSlots, p placement) queueClaim {
+	c := queueClaim{reach: e.placeableOn(ctx, q.workers, q.ready, p), usable: make([]bool, len(q.workers))}
 	for i, w := range q.workers {
-		c.reach[i] = q.ready[i] && eligible[i]
 		c.usable[i] = c.reach[i] && q.free[w.Name] > 0
 	}
 	return c

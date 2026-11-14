@@ -64,16 +64,6 @@ func (e *Engine) applyRoomRequeue(ctx context.Context, inst *store.ActionInstanc
 	return e.finishPauseRequeue(ctx, inst, ec, jobID, store.WorkerPauseImmediate)
 }
 
-// roomRefusedRecently says whether the node refused this conversion so lately
-// that its room report may not show it yet.
-func (e *Engine) roomRefusedRecently(ec *ExecutionContext, node string) bool {
-	if node == "" || getString(ec.State, roomRefusedByKey) != node {
-		return false
-	}
-	at, err := time.Parse(time.RFC3339Nano, getString(ec.State, roomRefusedAtKey))
-	return err == nil && e.now().Sub(at) < roomRefusedFor
-}
-
 func roomRefusalText(err error) string {
 	if he, ok := transcodeHTTPError(err); ok && he.Message != "" {
 		return he.Message

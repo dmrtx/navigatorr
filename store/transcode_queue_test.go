@@ -144,3 +144,27 @@ func TestTranscodeQueueWaitersCarryTheirSizeAndWhetherTheyAreStandalone(t *testi
 		}
 	}
 }
+
+// A waiting conversion also carries the node that refused it for room and
+// when, so the queue's claim can leave that node out like the pick does.
+func TestTranscodeQueueWaitersCarryTheNodeThatRefusedThem(t *testing.T) {
+	s := openTest(t)
+	conv := func(id, state string) {
+		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusWaitingExternal, InputsJSON: `{}`, StateJSON: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conv("refused", `{"transcode_queue_order":"1|a","room_refused_by":"node-a","room_refused_at":"2026-01-02T03:04:05Z"}`)
+	conv("plain", `{"transcode_queue_order":"1|b"}`)
+	waiters, err := s.ListTranscodeQueueWaiters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]string{}
+	for _, w := range waiters {
+		got[w.ID] = [2]string{w.RefusedBy, w.RefusedAt}
+	}
+	if got["refused"] != [2]string{"node-a", "2026-01-02T03:04:05Z"} || got["plain"] != [2]string{} || len(got) != 2 {
+		t.Fatalf("waiters: %+v", got)
+	}
+}
