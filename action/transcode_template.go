@@ -473,6 +473,7 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 	e.recordSizeBudgetSiblings(ctx, ec, modeSnapshot, cleanPath, &rep, fi.Size())
 	ec.State["profile"] = profile
 	ec.State["plan"] = plan
+	recordRoomReserve(ec, plan)
 	ec.State["plan_source"] = "profile_base"
 	ec.State["candidate_extension"] = ext
 	ec.State["recipe_version"] = plan.RecipeVersion

@@ -211,6 +211,11 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 	if held != nil {
 		return *held, nil
 	}
+	if sourceSize > 0 {
+		// What the node reserves for the output, so a requeued conversion is
+		// placed by the figure its plan gives.
+		ec.State[roomReserveKey] = transcode.OutputReserveBytes(plan, sourceSize)
+	}
 	req := transcode.Request{ID: jobID, SourcePath: cleanPath, CandidatePath: candidatePath, Profile: profile, Plan: plan, IdempotencyKey: jobID, SourceSHA256: sourceSHA, SourceSizeBytes: sourceSize, PublishPolicy: publishPolicy, RetentionWait: publishPolicy != "" && getBool(ec.State, publishRetentionWaitKey)}
 
 	// Transport-uncertainty reconciliation before reuse. This is a read-only
@@ -346,15 +351,12 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
 	}
 	job, err := e.actionWorker(ec).Submit(actx, req)
-	if err != nil && canSpillRetentionRefusal(ec, &req, err) {
-		// The second submit creates a job like the first: it needs the parent
-		// lease the first one was checked against, which a slow refusal may
-		// have outlasted.
-		if !e.parentLeaseHeld(lease) {
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before resubmit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
-		}
-		spillRetentionRefusal(ec, &req, err)
-		job, err = e.actionWorker(ec).Submit(actx, req)
+	if err != nil && transcode.IsRoomRefusal(err) && ec.ActionName == "transcode_media" {
+		// The node has no room (or is paused, or held by a build) and created
+		// nothing: the conversion goes back in the queue for a node that has.
+		clearTranscodeReconcileFlags(ec)
+		clearWorkerBusy(ec)
+		return e.roomRequeue(ec, roomRefusalText(err)), nil
 	}
 	if err != nil {
 		if isRetryableWorkerPollError(err) {
@@ -784,6 +786,14 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 	}
 	switch st.Status {
 	case transcode.StatusRunning, transcode.StatusQueued:
+		if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" && ec.ActionName == "transcode_media" {
+			// The node had no room when the job's slot came up: back in the queue.
+			why := st.RoomNote
+			if why == "" {
+				why = "the node has no room for it"
+			}
+			return e.roomRequeue(ec, why), nil
+		}
 		mirrorTranscodeWorkerMetadata(ec, st)
 		meta := transcodeWorkerMetadataOutputs(ec, st)
 		mergeMap(meta, transcodeTelemetryOutputs(ec))
@@ -805,11 +815,28 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		if st.Phase != "" {
 			reason += "; phase: " + st.Phase
 		}
-		if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
-			reason += queuedRetentionNote(st.RetentionBlocked)
-		}
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:
+		if st.ReasonCode == diskFloorReason && ec.ActionName == "transcode_media" {
+			// The node's disk ran low under the encode: not the job's fault.
+			return e.roomRequeue(ec, "the node's free disk fell under its hard floor while encoding"), nil
+		}
+		if st.FailureClassification == runnerKilledClass && ec.ActionName == "transcode_media" {
+			// The worker restarted (or crashed) under the encode: the file is
+			// fine and the encode is lost. It goes back to the queue, up to
+			// maxRunnerKilled times in a row, then it fails with the reason.
+			// One failure counts once, however many polls see it: the worker
+			// job it belongs to is remembered.
+			n := getInt(ec.State, runnerKilledKey)
+			if getString(ec.State, runnerKilledJobKey) != jobID {
+				n++
+			}
+			if n < maxRunnerKilled {
+				ec.State[runnerKilledKey] = n
+				ec.State[runnerKilledJobKey] = jobID
+				return e.roomRequeue(ec, "the node restarted while it encoded"), nil
+			}
+		}
 		mirrorTranscodeWorkerMetadata(ec, st)
 		if getString(ec.Inputs, "mode") != "" {
 			switch st.ReasonCode {
@@ -956,12 +983,4 @@ func capabilityReadDeferred(err error) (StepResult, bool) {
 		WaitingCondition: "worker_unreachable",
 		WaitingReason:    fmt.Sprintf("Worker capabilities could not be read (%v); nothing was submitted, retrying when the worker answers", err),
 	}, true
-}
-
-// queuedRetentionNote words why a job the worker keeps queued is not starting.
-func queuedRetentionNote(blocked string) string {
-	if blocked == "retention_alone" {
-		return "; larger than the worker's whole retention budget: waiting for the worker to hold no other candidate, approve or discard the retained ones (retention_alone)"
-	}
-	return "; waiting for room on the worker to keep the candidate (" + blocked + ")"
 }

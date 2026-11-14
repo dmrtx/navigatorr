@@ -82,33 +82,6 @@ func TestActiveWorkerCountLeavesOutChildrenHeldBeforeSubmit(t *testing.T) {
 	}
 }
 
-// A conversion the worker keeps queued for lack of room to retain its
-// candidate runs nothing: its worker starts the next job, so one such job holds
-// no slot there. A second one does: when the room is short for everything, the
-// queue must not move wholesale onto that worker. Once the room is there a job
-// counts again.
-func TestActiveWorkerCountLeavesOutOneJobWaitingForRetentionRoomPerWorker(t *testing.T) {
-	s := openTest(t)
-	add := func(id, state string) {
-		if err := s.CreateActionInstance(ActionInstance{ID: id, ActionName: "transcode_media", Status: ActionStatusWaitingExternal, WaitingCondition: "transcode_complete", StateJSON: state}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	add("a-running", `{"worker":"node-a","job_id":"j1"}`)
-	add("a-no-room", `{"worker":"node-a","job_id":"j2","worker_retention_blocked":"retention_budget"}`)
-	add("a-no-disk", `{"worker":"node-a","job_id":"j3","worker_retention_blocked":"free_disk"}`)
-	add("a-started", `{"worker":"node-a","job_id":"j4","worker_retention_blocked":""}`)
-	add("b-no-room", `{"worker":"node-b","job_id":"j5","worker_retention_blocked":"retention_budget"}`)
-	add("c-running", `{"worker":"node-c","job_id":"j6"}`)
-	counts, err := s.CountActiveWorkerActions("transcode_media")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if counts["node-a"] != 3 || counts["node-b"] != 0 || counts["node-c"] != 1 {
-		t.Fatalf("counts %v, want node-a=3 (one of its two blocked jobs left out), node-b=0, node-c=1", counts)
-	}
-}
-
 func TestQueuedBatchItemsCarryTheBatchPriority(t *testing.T) {
 	s := openTest(t)
 	for id, inputs := range map[string]string{"first": `{"queue_priority":true}`, "plain": `{}`} {

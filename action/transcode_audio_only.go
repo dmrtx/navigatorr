@@ -178,6 +178,7 @@ func (e *Engine) commitAudioOnlyPlan(ctx context.Context, ec *ExecutionContext, 
 		return StepResult{Status: StepFailed, Error: fmt.Sprintf("building audio-only plan: %v", err)}, true
 	}
 	ec.State["plan"] = plan
+	recordRoomReserve(ec, plan)
 	ec.State["plan_source"] = "audio_only"
 	ec.State["plan_digest"] = plan.PlanDigest
 	ec.State["size_audio_only"] = true

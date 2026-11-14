@@ -54,6 +54,9 @@ type TranscodeQueueWaiterRow struct {
 	// (0 when unknown); Standalone is a conversion that belongs to no batch.
 	SourceBytes int64
 	Standalone  bool
+	// ReserveBytes is the output reserve its plan asked for (0 until the plan
+	// is built).
+	ReserveBytes int64
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
@@ -65,7 +68,8 @@ func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT a.id, json_extract(a.state_json, '$.transcode_queue_order'), a.updated_at,
 			CAST(COALESCE(json_extract(a.state_json, '$.submitted_source_bytes'), 0) AS INTEGER),
-			COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '') = ''
+			COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '') = '',
+			CAST(COALESCE(json_extract(a.state_json, '$.room_reserve_bytes'), 0) AS INTEGER)
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
 		WHERE a.action_name = 'transcode_media'
@@ -86,7 +90,7 @@ func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
 	var out []TranscodeQueueWaiterRow
 	for rows.Next() {
 		var r TranscodeQueueWaiterRow
-		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone); err != nil {
+		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

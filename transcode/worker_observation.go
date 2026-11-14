@@ -32,54 +32,134 @@ type SchedulerObservation struct {
 	Retention *RetentionRoom `json:"retention,omitempty"`
 }
 
-// RetentionRoom is how many bytes of candidates a worker can still retain,
-// measured the way it admits a job when its slot comes up: the candidates it
-// holds, and the source size reserved for each job that has started and not
-// written its candidate yet. The free-disk floor is not part of it.
+// RetentionRoom is what a worker can take now, measured the way it admits a
+// job (see docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md, "Room"): the
+// retention budget left, and the disk it could offer a job: free space plus the
+// cached sources it would delete, less its free-disk floor and the reserves of
+// encodes that have not written their candidates yet.
 type RetentionRoom struct {
 	ObservedAt time.Time `json:"observed_at"`
-	// CapacityBytes is the worker's retained_candidates_max_bytes.
+	// CapacityBytes is the worker's retained_candidates_max_bytes (0: none).
 	CapacityBytes int64 `json:"capacity_bytes"`
 	// RoomBytes is what is left of it, never negative.
 	RoomBytes int64 `json:"room_bytes"`
+	// HeldBytes is what finished candidates waiting for approval hold.
+	HeldBytes int64 `json:"held_bytes,omitempty"`
+	// DiskCapacityBytes is the size of the work disk; zero when not reported.
+	DiskCapacityBytes int64 `json:"disk_capacity_bytes,omitempty"`
+	// FloorBytes is the free space the worker keeps for itself.
+	FloorBytes int64 `json:"floor_bytes,omitempty"`
+	// DiskRoomBytes is what the disk can give a job now, never negative.
+	DiskRoomBytes int64 `json:"disk_room_bytes,omitempty"`
+	// Hold is "paused" while the node takes no new job (a pause or a
+	// suspend) and "build" while a build holds it.
+	Hold string `json:"hold,omitempty"`
 }
 
-// RetentionRoomMaxAge is how long a worker's report of its retention room is
-// trusted. The worker takes it once per scheduler pass.
+// RetentionRoomMaxAge is how long a worker's report of its room is trusted.
+// The worker takes it once per scheduler pass.
 const RetentionRoomMaxAge = 45 * time.Second
 
-// RetentionFit says whether a candidate of need bytes can be retained by the
-// worker that reported r, as of now. A report that is missing or old says
-// nothing: the candidate is taken to fit, as before workers reported it.
-type RetentionFit int
+// RoomNeed is what a conversion asks of a node: the source it copies in and the
+// output it reserves. The node adds its own floor.
+type RoomNeed struct {
+	SourceBytes  int64
+	ReserveBytes int64
+	// Retained is true when the output waits on the node for approval, so it
+	// also counts against the retention budget. A conversion that publishes on
+	// encode (or may fall back to it) needs disk room only.
+	Retained bool
+}
+
+// RoomVerdict says whether a node can take a conversion now.
+type RoomVerdict int
 
 const (
-	// RetentionFits: the room is enough now, or unknown.
-	RetentionFits RetentionFit = iota
-	// RetentionFull: the budget could hold the candidate, but not with what the
-	// worker holds now; room comes back when a candidate is approved or
-	// discarded.
-	RetentionFull
-	// RetentionTooLarge: the candidate is larger than the whole budget.
-	RetentionTooLarge
+	// RoomFits: the node can take it, or says nothing (no report, an old one).
+	RoomFits RoomVerdict = iota
+	// RoomPaused: the node takes no new job.
+	RoomPaused
+	// RoomBuild: a build holds the node.
+	RoomBuild
+	// RoomApprovals: the retention budget is full; approving or discarding
+	// finished candidates frees it.
+	RoomApprovals
+	// RoomNoSpace: the disk cannot give the job its room now.
+	RoomNoSpace
+	// RoomNever: not even an empty node could take it.
+	RoomNever
 )
 
-func (r *RetentionRoom) Fit(need int64, now time.Time) RetentionFit {
-	if r == nil || need <= 0 || r.CapacityBytes <= 0 {
-		return RetentionFits
+// Fresh reports whether the report may be trusted at now. A report dated
+// further ahead than it may be old is as untrustworthy as an old one: the
+// worker's clock is off, and its age cannot be known.
+func (r *RetentionRoom) Fresh(now time.Time) bool {
+	if r == nil {
+		return false
 	}
-	// A report dated further ahead than it may be old is as untrustworthy as an
-	// old one: the worker's clock is off, and its age cannot be known.
-	if age := now.Sub(r.ObservedAt); age > RetentionRoomMaxAge || age < -RetentionRoomMaxAge {
-		return RetentionFits
+	age := now.Sub(r.ObservedAt)
+	return age <= RetentionRoomMaxAge && age >= -RetentionRoomMaxAge
+}
+
+// EverFits says whether an empty node of this report's size and budget could
+// take the conversion. A report without sizes says yes.
+func (r *RetentionRoom) EverFits(need RoomNeed) bool {
+	if r == nil {
+		return true
+	}
+	if r.DiskCapacityBytes > 0 && need.SourceBytes+need.ReserveBytes+r.FloorBytes > r.DiskCapacityBytes {
+		return false
+	}
+	return !need.Retained || r.CapacityBytes <= 0 || need.ReserveBytes <= r.CapacityBytes
+}
+
+// Judge says whether the node that reported r can take need now, and for
+// RoomNoSpace the bytes it can offer. A missing or old report says RoomFits: the
+// node decides, and refuses at once when it must. RoomNever, too, is said only
+// from a fresh report: an old one may describe a disk that has since changed.
+func (r *RetentionRoom) Judge(need RoomNeed, now time.Time) (RoomVerdict, int64) {
+	if r == nil {
+		return RoomFits, 0
+	}
+	if !r.Fresh(now) {
+		return RoomFits, 0
+	}
+	if !r.EverFits(need) {
+		return RoomNever, 0
 	}
 	switch {
-	case need > r.CapacityBytes:
-		return RetentionTooLarge
-	case need > r.RoomBytes:
-		return RetentionFull
+	case r.Hold == "paused":
+		return RoomPaused, 0
+	case r.Hold == "build":
+		return RoomBuild, 0
+	case need.Retained && r.CapacityBytes > 0 && need.ReserveBytes > r.RoomBytes:
+		return RoomApprovals, r.RoomBytes
+	case r.DiskCapacityBytes > 0 && need.SourceBytes+need.ReserveBytes > r.DiskRoomBytes:
+		return RoomNoSpace, r.DiskRoomBytes
 	}
-	return RetentionFits
+	return RoomFits, 0
+}
+
+// OutputReserveBytes is the disk a conversion reserves for its output. A size
+// goal reserves its byte budget; an audio-only goal (the video is copied) the
+// most the size policy accepts, the source less its minimum saving; every
+// other goal half the source. An output that grows past it is not compressing,
+// and the job fails at that point. A plan that carries no size policy reserves
+// half the source.
+func OutputReserveBytes(plan *Plan, sourceBytes int64) int64 {
+	if sourceBytes <= 0 {
+		return 0
+	}
+	if plan != nil && plan.SizePolicy != nil {
+		if IsSizeAudioOnlyPlan(plan) {
+			if limit, ok := MaxAcceptedCandidateBytes(sourceBytes, plan.SizePolicy); ok && limit > 0 {
+				return limit
+			}
+		} else if b := plan.SizePolicy.MaxCandidateBytes; b > 0 {
+			return min(b, sourceBytes)
+		}
+	}
+	return sourceBytes / 2
 }
 
 type WorkerObservation struct {

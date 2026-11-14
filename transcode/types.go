@@ -483,6 +483,8 @@ type JobStatus struct {
 	// RetentionBlocked says why a queued on_approval job is waiting for room
 	// to retain its candidate ("retention_budget" or "free_disk").
 	RetentionBlocked string `json:"retention_blocked,omitempty"`
+	// RoomNote words the numbers of that refusal.
+	RoomNote string `json:"room_note,omitempty"`
 }
 
 type PathMapping struct {

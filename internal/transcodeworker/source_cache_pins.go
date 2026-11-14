@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -93,67 +92,6 @@ func liveSourceCachePins(cacheDir string, ttl time.Duration, now time.Time) map[
 		live[sourceCacheKeyOfData(e.Name())] = true
 	}
 	return live
-}
-
-// freeSourceCacheRoom drops source cache entries to free short bytes for a job
-// the free-disk floor is holding back. Oldest first, pinned entries last: a pin
-// only saves a later retry a fresh download. Like the sweep it leaves an entry
-// populated within the last hour and a name that shares its bytes with a job's
-// link. When that cannot free enough it drops nothing, since the job would wait
-// anyway. It reports whether the room was freed.
-func (w *Worker) freeSourceCacheRoom(short int64) bool {
-	if short <= 0 || !w.sourceCacheEnabled() {
-		return false
-	}
-	cacheDir := w.sourceCacheDir()
-	names, err := os.ReadDir(cacheDir)
-	if err != nil {
-		return false
-	}
-	type entry struct {
-		name   string
-		size   int64
-		mod    time.Time
-		pinned bool
-	}
-	now := time.Now()
-	pinned := liveSourceCachePins(cacheDir, w.sourceCacheTTL(), now)
-	var entries []entry
-	var total int64
-	for _, e := range names {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		full := filepath.Join(cacheDir, name)
-		fi, err := os.Lstat(full)
-		if err != nil || !fi.Mode().IsRegular() || now.Sub(fi.ModTime()) < time.Hour || !unlinkFreesBlocks(full) {
-			continue
-		}
-		entries = append(entries, entry{name: name, size: fi.Size(), mod: fi.ModTime(), pinned: pinned[sourceCacheKeyOfData(name)]})
-		total += fi.Size()
-	}
-	if total < short {
-		return false
-	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		if entries[i].pinned != entries[j].pinned {
-			return !entries[i].pinned
-		}
-		return entries[i].mod.Before(entries[j].mod)
-	})
-	for _, d := range entries {
-		if short <= 0 {
-			break
-		}
-		if err := os.Remove(filepath.Join(cacheDir, d.name)); err != nil {
-			continue
-		}
-		_ = os.Remove(cacheMetaPathForData(cacheDir, d.name))
-		short -= d.size
-		log.Printf("source cache: removed %s (%d bytes) to make room for a job held by the free-disk floor", d.name, d.size)
-	}
-	return short <= 0
 }
 
 // effectiveSourceCacheMaxBytes keeps the configured bound but never lets it

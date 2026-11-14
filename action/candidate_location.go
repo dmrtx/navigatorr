@@ -165,59 +165,6 @@ func recordPublishFallback(ec *ExecutionContext, st transcode.JobStatus) {
 	log.Printf("action %s: the worker had no room to retain another candidate when job %s started; it publishes on encode", ec.InstanceID, st.ID)
 }
 
-// workerRetentionBlockedKey is why the worker keeps this action's queued job
-// from starting (retention_budget or free_disk). The store's count of the
-// actions on a worker reads it by this name.
-const workerRetentionBlockedKey = "worker_retention_blocked"
-
-// recordRetentionBlock marks an action whose job the worker holds queued for
-// lack of room to retain its candidate, and unmarks it once the job has room.
-// The worker starts the next job meanwhile, so a marked action holds no video
-// slot: counting it would leave the node idle behind a job that cannot start
-// while other conversions wait for a slot. The count leaves out one marked
-// action per worker (see Store.CountActiveWorkerActions), not every one.
-func recordRetentionBlock(ec *ExecutionContext, st transcode.JobStatus) {
-	if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
-		ec.State[workerRetentionBlockedKey] = st.RetentionBlocked
-		return
-	}
-	delete(ec.State, workerRetentionBlockedKey)
-}
-
-// spillRetentionRefusal handles a worker that refused a deferred submit because
-// it has no room left to retain another candidate. A batch child must not wait
-// for that room: nothing in a batch can be approved until every child has
-// encoded, so the retained candidates that fill the worker would never leave,
-// the remaining children would wait forever and the first candidates would
-// expire and be encoded again. The child publishes on encode instead, as it did
-// before deferral existed, and records why. A standalone attempt keeps waiting
-// (the caller's busy handling): its owner approves or discards the candidates
-// that fill the worker one by one.
-//
-// The worker's disk floor is not a retention refusal: a job that publishes on
-// encode needs that disk too, so that answer stays an ordinary wait.
-//
-// It reports whether the submit should be sent again with publish on encode.
-// The refused submit created no job (the worker may have left an empty job
-// directory with no state in it), so changing the policy cannot collide with a
-// job the worker already holds.
-func spillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err error) bool {
-	if !canSpillRetentionRefusal(ec, req, err) {
-		return false
-	}
-	req.PublishPolicy = ""
-	delete(ec.State, publishPolicyKey)
-	ec.State[publishPolicyFallbackKey] = fallbackRetentionFull
-	log.Printf("action %s: the worker has no room to retain another candidate (%v); this batch file publishes on encode", ec.InstanceID, err)
-	return true
-}
-
-// canSpillRetentionRefusal says whether err is a refusal spillRetentionRefusal
-// would act on, without acting on it.
-func canSpillRetentionRefusal(ec *ExecutionContext, req *transcode.Request, err error) bool {
-	return req.PublishPolicy == transcode.PublishPolicyOnApproval && isBatchChild(ec) && transcode.IsRetentionRefusal(err)
-}
-
 // retainedWaitResult finishes wait_transcode for a job whose encode is done and
 // whose candidate stays on the worker. The job holds no process, so its slot is
 // free; the action carries on with the worker's attestation in place of a file.

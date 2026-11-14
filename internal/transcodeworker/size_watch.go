@@ -78,6 +78,20 @@ type encodeSizeWatch struct {
 	// written before it (Matroska writes attachments such as fonts ahead of
 	// the first frame) are not scaled up with the encoded part.
 	base *sizeWatchPoint
+	// reserveBytes is the room the node admitted the job for (0: none). An
+	// output past it is not compressing.
+	reserveBytes int64
+	// floor reads the node's free disk and the hard floor under it (ok false
+	// when unknown); nil when the node keeps no floor.
+	floor func() (free, hard int64, ok bool)
+}
+
+// diskFloorStop ends an encode whose disk fell under the hard floor. The job is
+// not at fault: it goes back to the coordinator's queue.
+type diskFloorStop struct{ free, hard int64 }
+
+func (e *diskFloorStop) Error() string {
+	return fmt.Sprintf("disk_floor: free disk fell to %s, under the %s hard floor; the encode stopped and the job goes back to the queue", formatSizeWatchBytes(e.free), formatSizeWatchBytes(e.hard))
 }
 
 type sizeWatchContextKey struct{}
@@ -86,13 +100,17 @@ type sizeWatchContextKey struct{}
 // watch cannot judge (no size policy, unknown source size or duration) and
 // copied video, whose encode takes minutes, run unwatched.
 func withEncodeSizeWatch(ctx context.Context, job *JobRecord, outputPath, progressPath string) context.Context {
-	if job == nil || job.Plan == nil || job.Plan.SizePolicy == nil || job.SourceSizeBytes <= 0 || job.DurationSec <= 0 {
+	if job == nil || job.Plan == nil || job.SourceSizeBytes <= 0 || job.DurationSec <= 0 {
 		return ctx
 	}
 	if strings.EqualFold(strings.TrimSpace(job.Plan.VideoCodec), transcode.VideoCodecCopy) {
 		return ctx
 	}
-	if _, ok := transcode.MaxAcceptedCandidateBytes(job.SourceSizeBytes, job.Plan.SizePolicy); !ok {
+	policy := job.Plan.SizePolicy
+	if _, ok := transcode.MaxAcceptedCandidateBytes(job.SourceSizeBytes, policy); !ok {
+		policy = nil
+	}
+	if policy == nil && job.RetainReserveBytes <= 0 {
 		return ctx
 	}
 	rule := qualityModeProjection
@@ -102,10 +120,11 @@ func withEncodeSizeWatch(ctx context.Context, job *JobRecord, outputPath, progre
 	return context.WithValue(ctx, sizeWatchContextKey{}, &encodeSizeWatch{
 		sourceBytes:  job.SourceSizeBytes,
 		durationSec:  job.DurationSec,
-		policy:       job.Plan.SizePolicy,
+		policy:       policy,
 		rule:         rule,
 		outputPath:   outputPath,
 		progressPath: progressPath,
+		reserveBytes: job.RetainReserveBytes,
 	})
 }
 
@@ -144,15 +163,7 @@ func decideEarlySizeRefusal(sourceBytes int64, durationSec float64, policy *tran
 	if !ok || written <= 0 {
 		return nil
 	}
-	var fraction float64
-	if durationSec > 0 && encodedSec > 0 {
-		fraction = min(encodedSec/durationSec, 1)
-	}
-	reported, projecting := written, false
-	if fraction >= rule.minFraction && base != nil && encodedSec > base.encodedSec && written >= base.bytes {
-		rate := float64(written-base.bytes) / (encodedSec - base.encodedSec)
-		reported, projecting = max(written, written+int64(rate*max(durationSec-encodedSec, 0))), true
-	}
+	reported, fraction, projecting := projectSize(durationSec, base, written, encodedSec, rule)
 	accepts := fmt.Sprintf("the %s the frozen size policy accepts", formatSizeWatchBytes(limit))
 	projection := fmt.Sprintf("projected %s after %d%% of the encode", formatSizeWatchBytes(reported), int(math.Floor(fraction*100)))
 	var detail string
@@ -178,6 +189,40 @@ func decideEarlySizeRefusal(sourceBytes int64, durationSec float64, policy *tran
 	}
 }
 
+// projectSize is the size the output is reported at: what is written, or the
+// projected final size once the rule allows a projection.
+func projectSize(durationSec float64, base *sizeWatchPoint, written int64, encodedSec float64, rule sizeProjectionRule) (reported int64, fraction float64, projecting bool) {
+	if durationSec > 0 && encodedSec > 0 {
+		fraction = min(encodedSec/durationSec, 1)
+	}
+	reported = written
+	if fraction >= rule.minFraction && base != nil && encodedSec > base.encodedSec && written >= base.bytes {
+		rate := float64(written-base.bytes) / (encodedSec - base.encodedSec)
+		reported, projecting = max(written, written+int64(rate*max(durationSec-encodedSec, 0))), true
+	}
+	return reported, fraction, projecting
+}
+
+// decideReserveRefusal stops an encode whose output passes the room the node
+// admitted it for, or is projected to by more than the rule's margin: it is not
+// compressing. It says how big the output is against the source.
+func decideReserveRefusal(sourceBytes, reserve int64, durationSec float64, rule sizeProjectionRule, base *sizeWatchPoint, written int64, encodedSec float64) *encodeSizeRefusal {
+	if reserve <= 0 || written <= 0 {
+		return nil
+	}
+	reported, fraction, projecting := projectSize(durationSec, base, written, encodedSec, rule)
+	if written <= reserve && !(projecting && float64(reported) > float64(reserve)*(1+rule.margin)) {
+		return nil
+	}
+	pct := func(n int64) int { return int(math.Round(float64(n) * 100 / float64(max(sourceBytes, 1)))) }
+	detail := fmt.Sprintf("not compressing: the output is %s (%d%% of the %s source) after %d%% of the encode, past the %s (%d%% of the source) this job was given room for",
+		formatSizeWatchBytes(reported), pct(reported), formatSizeWatchBytes(sourceBytes), int(math.Floor(fraction*100)), formatSizeWatchBytes(reserve), pct(reserve))
+	return &encodeSizeRefusal{
+		Rejection:      &transcode.PolicyRejectionError{ReasonCode: "insufficient_savings", Message: "encode stopped early: " + detail},
+		CandidateBytes: reported,
+	}
+}
+
 func formatSizeWatchBytes(n int64) string {
 	if n >= 1e9 {
 		return fmt.Sprintf("%.2f GB", float64(n)/1e9)
@@ -186,7 +231,15 @@ func formatSizeWatchBytes(n int64) string {
 }
 
 // check reads the encode's current size and progress and decides on them.
-func (w *encodeSizeWatch) check() *encodeSizeRefusal {
+func (w *encodeSizeWatch) check() error {
+	if w.floor != nil {
+		if free, hard, ok := w.floor(); ok && free < hard {
+			return &diskFloorStop{free: free, hard: hard}
+		}
+	}
+	if w.policy == nil && w.reserveBytes <= 0 {
+		return nil
+	}
 	info, err := os.Stat(w.outputPath)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil
@@ -198,7 +251,17 @@ func (w *encodeSizeWatch) check() *encodeSizeRefusal {
 			w.base = &sizeWatchPoint{bytes: info.Size(), encodedSec: encodedSec}
 		}
 	}
-	return decideEarlySizeRefusal(w.sourceBytes, w.durationSec, w.policy, w.rule, w.base, info.Size(), encodedSec)
+	var r *encodeSizeRefusal
+	if w.policy != nil {
+		r = decideEarlySizeRefusal(w.sourceBytes, w.durationSec, w.policy, w.rule, w.base, info.Size(), encodedSec)
+	}
+	if r == nil {
+		r = decideReserveRefusal(w.sourceBytes, w.reserveBytes, w.durationSec, w.rule, w.base, info.Size(), encodedSec)
+	}
+	if r == nil {
+		return nil
+	}
+	return r
 }
 
 // runWatchedEncode runs the encode cmd like runCharged, watching its size when
@@ -220,7 +283,7 @@ func runWatchedEncode(ctx context.Context, cmd *exec.Cmd) error {
 		return err
 	}
 	var (
-		refusal *encodeSizeRefusal
+		refusal error
 		wg      sync.WaitGroup
 	)
 	done := make(chan struct{})

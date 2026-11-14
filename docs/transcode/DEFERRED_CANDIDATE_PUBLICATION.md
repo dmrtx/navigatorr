@@ -342,22 +342,12 @@ What the worker PR does where this document left a choice, or differs from it.
   either. The free-disk floor also subtracts the reservations of encodes that
   have not written their candidate yet; it budgets the source size only, not a
   staged copy on top of it.
-  Past the budget, a job submitted with `retention_wait` stays queued
-  (`retention_blocked: retention_budget` in its status). A job without it starts
-  and publishes on encode (`publish_fallback: retention_full`; `publish_policy`
-  keeps the requested value, so the execution-spec digest of a resubmit still
-  matches), with no floor check: a batch child must not wait on its siblings'
-  candidates. Within the budget, a job past the floor waits
-  (`retention_blocked: free_disk`). A waiting job never holds back the jobs queued behind it; the scheduler's
-  periodic sweep checks it again. The coordinator does the same: while it polls
-  a job queued with `retention_blocked`, it marks the action
-  (`worker_retention_blocked`) and leaves one such action per worker out of
-  that worker's count of assigned conversions, so the next conversion in the
-  transcode queue takes the slot instead of the node sitting idle. A second
-  blocked job on the same worker holds the slot, so a budget that is full for
-  everything does not move the whole queue onto one worker. The mark clears
-  once the job starts or has room, and it counts again. The worker advertises
-  `start_retention_admission` alongside `deferred_publication`.
+  Past the budget, a job submitted with `retention_wait` is refused at its slot
+  (see "Room admission"); a job without it starts and publishes on encode
+  (`publish_fallback: retention_full`; `publish_policy` keeps the requested
+  value, so the execution-spec digest of a resubmit still matches), with no
+  floor check: a batch child must not wait on its siblings' candidates. A node
+  never keeps a job waiting for room.
 - **Stale directories.** The sweep also removes a job directory older than an hour
   that holds nothing but its lock file. That is the whole collector: it never
   touches `_work`, scratch directories (names starting with `_`, or without a
@@ -405,92 +395,78 @@ submit rather than silently publishing on encode.
 admission). `publishPolicyFor` no longer looks at `parent_action_id`. "Batches"
 below gives the reasoning and the one rule that keeps a batch from stalling.
 
-**Giving a conversion only to a worker that can retain it.** A standalone
-conversion on a worker that publishes on approval waits, queued on the worker,
-until the worker has room for the candidate, and the worker reserves the size of
-the source for it. The conversion keeps the worker it was given, so the
-coordinator gives it one only if that worker reports room for it
-(`action/worker_retention_fit.go`):
+**Room admission (revision 7).** A node never waits for room. The rules, in
+plain words. They apply to every job that uses the node's disk, whether its
+output waits for approval or is published on encode (a batch child, say); only
+the retention budget is for jobs that keep a candidate:
 
-- The worker measures `retention` once per scheduler pass and publishes it in the
-  `scheduler` object of `GET /v1/health`: `observed_at`, `capacity_bytes`
-  (`retained_candidates_max_bytes`) and `room_bytes` (what is left of it after the
-  candidates it holds and the reservations of jobs that have not written theirs;
-  never negative). The probe only reads the last measure. A worker with no budget,
-  or with deferred publication off, reports none, and a measure that fails keeps
-  the previous one.
-- The coordinator needs `source bytes` (the size stamped at submit,
-  `submitted_source_bytes`) of room on that worker. A batch child needs none: the
-  worker starts it to publish on encode when the budget is full. A worker that
-  publishes on encode needs none either.
-- A report that is missing, older than 45 seconds, or dated more than 45 seconds
-  ahead of the coordinator's clock says nothing, and the worker is taken to have
-  room, as it was before workers reported it. Workers that have not been rolled
-  out yet behave as before, and so does a worker whose report stops arriving;
-  the clocks of the nodes must agree to within that margin.
-- Each conversion in the queue is a claim on the free slots of the workers it can
-  be given: the ready ones that report room for its file. A conversion takes a
-  slot only if that leaves every conversion ahead of it as well placed as it was
-  (a matching of the claims ahead to the free slots, `action/transcode_queue_claims.go`),
-  and only on a worker where that holds. So a file that fits one node never holds
-  a smaller one back from a slot on the other, and a smaller one never takes the
-  slot the file ahead of it is waiting for. The place shown in the queue counts
-  the conversions ahead that could be given the same workers, busy or not.
-- A conversion no ready worker has room for waits unassigned in the transcode
-  queue ("No node has room to retain its candidate"), and the ones behind it pass.
-  That is deliberate: a node's idle slot is worth more than strict order. It
-  also means a large file can wait a long time while smaller ones keep using the
-  room that frees up; room comes back when a retained candidate is approved or
-  discarded, and the file is placed ahead of later ones for the slot as soon as
-  a worker reports room for it.
-- A worker that is down for a moment still counts when deciding whether the file
-  fits anywhere, so the file waits for it instead of being left on a node that
-  can never hold it. A file larger than the whole budget of every worker fits
-  nowhere, and waiting for room would never help: it is still assigned, and runs
-  alone (below). Among the workers, the one holding nothing is preferred, then
-  one with room left, and a worker reporting no room is taken only when no other
-  is better.
-- **Run alone.** A standalone job that waits for room and reserves more than the
-  whole budget is admitted when the node holds nothing against the budget (no
-  retained candidate, no started-but-unwritten reservation). Until then it stays
-  queued on the worker as `retention_alone` ("waiting for the node to hold no
-  other candidate: approve or discard the retained ones"). It keeps its candidate
-  as usual; approval is unchanged. Which job the node empties for is judged each
-  scheduler pass from the queue itself (the first such job in queue order, against
-  the budget as configured now), not from the mark on the record, so a restart
-  with a bigger budget leaves no stale wait, and two such jobs run in queue
-  order. While it waits the node starts no other job that would keep a candidate:
-  a waiting standalone job stays queued behind it, and a batch child (or any job
-  that does not wait) starts to publish on encode, as it already does when the
-  budget is full. If the queue cannot be read, the node fails closed the same
-  way. The worker also reports room 0 meanwhile, so the coordinator sends other
-  standalone conversions to other nodes. The free-disk floor still applies, after
-  the source cache has given way.
-- **A floor that stays unmeetable.** If the node holds nothing, no other job is
-  running, no source cache entry could still be dropped (a young or in-use one
-  counts) and the job still cannot clear `min_free_disk_bytes`, the worker notes
-  when that began on the job (`floor_unmet_since`). The job keeps waiting as
-  `free_disk` and fails only once this has held continuously for 30 minutes
-  (`floorUnmetGrace`); any pass that does not measure it unmeetable (it was held
-  behind another job, the measurement failed, or the condition cleared) clears
-  the mark, and one not seen again for 5 minutes (no slot, a restart) starts the
-  30 minutes over, since a full disk may be a download or another process that
-  finishes. It applies to any on_approval job on an empty node, not only a
-  too-large one. The failure has
-  reason `retention_floor_unmet` and says what the job needs and what the node
-  offers above its floor now; the action fails with that text.
-- The report is read when the conversion is assigned, up to a pass (2 s) plus the
-  probe cache (5 s) after it was measured. A worker with more than one slot can
-  be given two conversions in that window that together do not fit; the second
-  stays queued on the worker (`retention_budget`), as before this existed, and
-  the worker's own slot accounting (see #381) keeps it from holding the slot.
-- The size is the one stamped when the conversion was admitted, before it is
-  first given a worker. A file whose size could not be read then (a stalled
-  mount; the stat is bounded) needs no room and is not kept off any node.
-- The free-disk floor is not part of the report. It depends on what else sits on
-  the work disk, so the worker still decides it when the job starts.
+1. At admission, under the capacity lock, the node works out what the job needs:
+   its source (nothing when this job's own source is already cached here), plus
+   the output reserve, plus `min_free_disk_bytes`. It can offer its free disk
+   plus the source-cache entries it may delete. A deletable entry is a cached
+   source that is not this job's, that no running job holds and that no admitted
+   job chose as its own copy. Finished outputs waiting for approval and the files
+   of running jobs are never deleted. What the node's admitted jobs have still to
+   write counts against the free disk: for each, the source it has not staged
+   yet (nothing when it reuses its own cached copy) and the output reserve it has
+   not written yet, so a byte already on disk is never counted twice. A job
+   recorded without its source size falls back to the size the node knows.
+2. If it fits, the node deletes only as many entries as needed, oldest first,
+   and starts the job. If a delete fails and the room is not there after all, it
+   refuses with the numbers instead of starting the job.
+3. If it does not fit (disk room or retention budget), or the node is paused or
+   held by a build, it refuses at once (`worker busy`, 429) and says why. The job
+   goes back to the coordinator's queue; nothing stays on the node.
+4. The coordinator sends the oldest queued job that fits some open node, using
+   the room each worker reports in `scheduler.retention` (`room_bytes`,
+   `held_bytes`, `disk_room_bytes`, `disk_capacity_bytes`, `floor_bytes`, `hold`).
+   A requeued job prefers the node that has its source cached, unless that node
+   just refused it (for 90 seconds it is skipped, so a stale report cannot
+   bounce it); after that the preference applies again. A report older than 45
+   seconds says nothing: that worker is taken to have room.
+5. A job that could not fit any node even when empty fails at submission with
+   "Too big for every node", judged only from fresh reports (a missing or old
+   one could fit) and only once the plan's exact reserve is recorded, never on
+   the half-the-source estimate. A node whose work directory does not exist
+   reports no capacity. Lack of room never fails a job otherwise.
+6. A job that does not fit now stays in the coordinator's queue with a plain
+   reason ("Node X paused", "Build running on X", "Waiting for approvals on X
+   (N GB held)", "No node has room: needs X, the most any node can offer is Y")
+   and is retried by itself.
+7. The output reserve follows the goal: a size goal its byte budget, a quality or
+   compact goal half of the source, an audio-only goal the most the size policy
+   accepts. The coordinator stores it as `room_reserve_bytes` and keeps it across
+   requeues. An output that passes its reserve fails as "not compressing" (the
+   output's size against the source), as soon as the projection knows.
+8. If free disk falls under the hard floor (half of `min_free_disk_bytes`) during
+   an encode, the most recently started encode on the node stops cleanly
+   (`disk_floor`) and its job goes back to the coordinator's queue; it is not
+   failed. The others go on and may finish once it has gone.
+9. An immediate pause sends running jobs back to the coordinator and clears the
+   node's deletable source cache (`PUT /v1/hold` with `clear_cache`; retained
+   outputs untouched), once per pause, under the node's pause lock and only while
+   the node is still under that immediate pause. A worker that does not know
+   `clear_cache` answers 400 and is held plainly. A graceful pause and a suspend
+   do not touch the cache. A node held by a build refuses new jobs.
+10. A restarted worker deletes the half copies in its source cache that no live
+    copy holds (a copy keeps an exclusive lock on its file while it writes; a
+    file written in the last 30 seconds is left alone), at start and before each
+    admission measures, and treats complete cached sources that nobody holds as
+    deletable. A job whose runner died with the worker (`runner_killed`) goes
+    back to the coordinator's queue; the first two failures of a request are
+    requeued and the third fails with that reason, so it cannot loop. One failure
+    counts once, however many times it is polled.
 
-**Where the candidate is.** `candidate_location` is `share` (or absent) or
+Removed in this revision: the run-alone gate (`retention_alone`), the too-large
+gate, the 30-minute `retention_floor_unmet` failure, the worker-side waiting
+(`retention_blocked` now only marks a refusal on the job record), the
+coordinator's spill branch and `worker_retention_blocked`. Records written before
+the change still load: `floor_unmet_since` and `floor_unmet_seen_at` are ignored.
+The design was model-checked with TLA+ before it was written. The coordinator
+stores the exact reserve (`transcode.OutputReserveBytes`, the same function the
+worker uses) as soon as the plan is resolved, so the queue places a conversion by
+its real need.
+
 `worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot
 freed) and copies the worker's attested size and SHA-256 into the attempt. A
 retained job that attests neither fails closed. `validate_result` trusts the
@@ -583,74 +559,21 @@ retention and its batch item turns `completed`; `batchAvailableSlots` counts onl
 child is admitted as soon as the encode ends. Slots are therefore never the
 limit; the worker's disk is.
 
-**Admission rule: a batch spills, it does not wait.** The worker's limits
-(`retained_candidates_max_bytes`, `min_free_disk_bytes`) answer a deferred submit
-that does not fit with `worker_busy` (nothing created), counting the candidates
-it holds and the encodes that have not written theirs. For a standalone attempt
-the answer is a wait: the owner approves or discards the candidates that fill the
-worker one by one, and room appears. A batch cannot wait. Nothing in it is
-approved before every child has encoded, so the candidates of its first children
-would stay on the worker, the others would wait for room that cannot appear, and
-when the first candidates reached `retained_ttl_hours` they would expire and be
-encoded again, in a loop. The alternatives considered:
+**Admission rule: a node never waits for room, a batch child included.** A node
+takes a job or refuses it at once with the ordinary `worker_busy` answer, tagged
+`no room here`; nothing is created on it and the coordinator keeps the job in its
+own queue. The rule is the same for every job, a batch child or a standalone
+conversion, whether its output waits for approval or is published on encode: the
+output is written on this disk either way. There is no spill (a child that
+publishes on encode because the budget is full) and no wait on the node; see
+"Room admission (revision 7)" for the rules, the reserve each goal asks for and
+the order the queue sends jobs in.
 
-- *Wait for room* (the standalone rule): deadlocks, as above.
-- *A cap per batch or per worker on the coordinator*: it stops the batch earlier
-  but the remaining children still wait for approvals that cannot come.
-- *Approve a batch in parts while it encodes*: a different feature (the plan, the
-  digest and the review are made for a finished batch) and not needed to be safe.
-- *Refuse deferral for batches* (revisions 1 to 3): safe, and a no-op for the
-  workload that matters, since nearly every file in production is a batch child.
-
-So the rule is: **a batch child the worker has no room to retain publishes on
-encode.** `spillRetentionRefusal` (`action/candidate_location.go`) recognises the
-refusal by its message (`transcode.IsRetentionRefusal`: `worker busy` plus the
-budget marker the worker writes for `retained_candidates_max_bytes`), clears the
-attempt's `publish_policy`, records `publish_policy_fallback: retention_full` and
-sends the same job again without a policy, once it has checked that the parent
-admission lease is still held (the second submit creates a job like the first).
-That is safe because a busy answer created no job (the worker may leave an empty
-job directory with no state in it), the job id and idempotency key are unchanged,
-and the digest of a job without a policy is the one it always had. Later submits of the attempt (a
-reconcile that finds no job) keep publishing on encode, and a manual retry decides
-again. A refusal for slots (`max parallel jobs`, from an older worker) is not
-touched. The cost is bounded and visible: a batch retains what the worker's
-budget allows, and the rest publishes up front, exactly as every batch did before.
-A worker with no limits configured never refuses, so it retains the whole batch
-and its disk is the only bound; set `retained_candidates_max_bytes` before using
-deferral for large batches. The free-disk floor (`min_free_disk_bytes`) does not
-spill: a job that publishes on encode stages and encodes on the same disk, so
-sending it there would only move the refusal to an out-of-space failure. That answer is an
-ordinary busy wait. It can only clear by itself if retained candidates are not
-what fills the disk, so keep `retained_candidates_max_bytes` below what the disk
-holds above the floor.
-
-The worker's message is the contract, not a new code: the strings are constants in
-`transcode/worker_errors.go`, the worker builds its messages from them, and a test
-on the worker side fails if either stops matching. Workers and servers of any
-age keep reading the answer as the busy it always was, and the server needs no
-new capability.
-
-**Revision 5: the budget is applied when the job starts.** Revisions 1 to 4
-checked the limits at submit and reserved each queued job's source size. The
-coordinator keeps many jobs queued on a worker that encodes one or two at a
-time, so the queue alone could fill the budget. Much of a worker's queue then
-spilled to publish on encode before any of it had started. The worker now takes every submit and applies
-the limits in its scheduler, just before it spawns the job. Only jobs that have
-started hold room (see "Admission" under the worker notes). The spill moves to
-the worker: the coordinator sends `retention_wait` for a standalone attempt
-(`publish_retention_wait` in its state), never for a batch child. A batch child
-that finds the budget full when its slot comes up starts and publishes on
-encode. The coordinator records the worker's `publish_fallback` in
-`publish_policy_fallback` and leaves `publish_policy` as it was sent. Old
-workers keep the submit-time refusal, and `spillRetentionRefusal` still handles
-it. A queued job submitted before the upgrade carries no `retention_wait`, so it
-falls back rather than waits: an old batch child cannot stall.
-
-While a batch holds the budget, standalone files on that worker wait for room,
-since their candidates are not the batch's to release. This is the same
-trade-off as before the change (a batch occupying the worker's slots) and is a
-reason to give a very large batch its own worker.
+A batch holds the retention budget only for the candidates it keeps for approval.
+Standalone files and later children are sent to a node that has room, or wait in
+the coordinator's queue. Old workers' refusals ("retained candidates would use"
+and "free bytes would fall below") are still read as room refusals, so a mixed
+fleet requeues instead of failing the conversion.
 
 **Revision 6: approved publications have a lane of their own.** Until now a
 publish request waited for a free video slot, like any finished encode. The

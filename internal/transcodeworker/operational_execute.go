@@ -280,6 +280,15 @@ func (w *Worker) executeOperational(ctx context.Context, jobDir, jobFile string,
 		// A failed encode still spent its CPU time, so it is recorded too.
 		w.persistPhaseCost(jobDir, jobFile, job, "encode", encodeStart, encodeCost)
 	}
+	var floorStop *diskFloorStop
+	if errors.As(ffmpegErr, &floorStop) {
+		// The disk ran low under the encode: the job is not at fault and the
+		// coordinator puts it back in its queue.
+		job.ReasonCode = "disk_floor"
+		job.FailureClassification = "disk_floor"
+		w.removeRefusedCandidate(job, r)
+		return w.failJobTerminal(jobDir, jobFile, job, ffmpegErr)
+	}
 	var refused *encodeSizeRefusal
 	if errors.As(ffmpegErr, &refused) {
 		// The size watch stopped an encode the policy would refuse: the job
@@ -1504,7 +1513,7 @@ func (w *Worker) probeInjected() bool {
 // production path with explicit operational input/output. Either way ctx
 // carries the encode's size watch when its plan can be judged.
 func (w *Worker) runOperationalFFmpeg(ctx context.Context, execPlan *ExecutionPlan, job *JobRecord, inputPath, outputPath, progressPath, logPath string) error {
-	ctx = withEncodeSizeWatch(ctx, job, outputPath, progressPath)
+	ctx = w.withDiskFloor(withEncodeSizeWatch(ctx, job, outputPath, progressPath), job, outputPath, progressPath)
 	if w.runFFmpeg != nil {
 		return w.runFFmpeg(ctx, execPlan, job, inputPath, outputPath, progressPath, logPath)
 	}

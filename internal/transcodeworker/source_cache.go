@@ -382,6 +382,15 @@ func populateSourceCacheFromLocal(ctx context.Context, cacheDir, cleanSource str
 	return dataPath, nil
 }
 
+// lockStageFile and stageCopyHook are seams for tests: the lock a live copy
+// holds on its stage file, and a call made once it holds it.
+var (
+	lockStageFile = func(f *os.File) error {
+		return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	}
+	stageCopyHook func(stagePath string)
+)
+
 // copySourceCacheEntry is the populate fallback for filesystems that refuse a
 // hard link: a local temp copy committed with no-clobber semantics.
 func copySourceCacheEntry(ctx context.Context, localPath, dataPath string, size int64) error {
@@ -398,6 +407,16 @@ func copySourceCacheEntry(ctx context.Context, localPath, dataPath string, size 
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// A live copy holds this lock until it ends (the process dying releases
+	// it), so a sweep for half copies never deletes one being written. A copy
+	// that cannot take it is not made: an unlocked live stage file could be
+	// swept from under it.
+	if err := lockStageFile(tmp); err != nil {
+		return fmt.Errorf("%w: locking cache temp %s: %v", ErrStorageIO, tmpName, err)
+	}
+	if stageCopyHook != nil {
+		stageCopyHook(tmpName)
+	}
 	if err := copyRegularFileTo(ctx, localPath, tmp, size, 0o644); err != nil {
 		return err
 	}

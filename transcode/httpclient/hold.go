@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 )
 
@@ -29,7 +30,34 @@ func (e *HTTPExecutor) Hold(ctx context.Context) (HoldStatus, error) {
 // not started. Running jobs are never interrupted. It returns the hold the
 // worker reports afterwards.
 func (e *HTTPExecutor) SetHold(ctx context.Context, hold bool) (HoldStatus, error) {
-	payload, err := json.Marshal(map[string]bool{"hold": hold})
+	return e.setHold(ctx, hold, false)
+}
+
+// SetHoldClearCache holds the queue like SetHold and also has the worker delete
+// the cached sources no running job holds (an immediate pause). A worker that
+// predates the field refuses the request with 400 (it reads its body with
+// unknown fields disallowed); the node is then held plainly, as before, and the
+// fall back is logged once per executor.
+func (e *HTTPExecutor) SetHoldClearCache(ctx context.Context) (HoldStatus, error) {
+	st, err := e.setHold(ctx, true, true)
+	if !errors.Is(err, errHoldRejected) {
+		return st, err
+	}
+	if e.clearCacheRejected.CompareAndSwap(false, true) {
+		log.Printf("worker hold: the worker does not accept clear_cache; holding without clearing its cache")
+	}
+	return e.setHold(ctx, true, false)
+}
+
+// errHoldRejected is a worker that answered a hold request with 400.
+var errHoldRejected = errors.New("worker rejected the hold request")
+
+func (e *HTTPExecutor) setHold(ctx context.Context, hold, clearCache bool) (HoldStatus, error) {
+	body := map[string]bool{"hold": hold}
+	if clearCache {
+		body["clear_cache"] = true
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return HoldStatus{}, err
 	}
@@ -61,6 +89,8 @@ func (e *HTTPExecutor) holdRequest(ctx context.Context, method string, payload [
 			st.Active, st.ActiveKnown = *out.Active, true
 		}
 		return st, nil
+	case code == http.StatusBadRequest:
+		return HoldStatus{}, fmt.Errorf("%w: HTTP 400", errHoldRejected)
 	case code == http.StatusNotFound || code == http.StatusMethodNotAllowed:
 		return HoldStatus{}, ErrHoldUnsupported
 	}

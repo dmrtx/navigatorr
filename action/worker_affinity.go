@@ -61,6 +61,10 @@ type workerState struct {
 	// waiting build with the dispatcher's recording of a job on the node
 	// (admitOnNode).
 	pauseMu sync.Mutex
+
+	// cacheClearedFor is the pause (its start and revision) whose cache the
+	// node has been told to clear, so a pause clears it once. Under pauseMu.
+	cacheClearedFor string
 }
 
 func (e *Engine) workerStateFor(name string) *workerState {
@@ -186,9 +190,15 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	// With one worker there is no choice to make: its readiness is checked by
 	// the steps, as the jobs are sent.
 	if all := e.deps.Workers.All(); len(all) == 1 {
+		// The one node that just refused it is not asked again at once: the
+		// conversion waits out the window instead of looping assign, refuse,
+		// requeue.
+		if e.roomRefusedRecently(ec, all[0].Name) {
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: "The only worker has no room for it yet; it is asked again shortly"}, true
+		}
 		return e.recordAssignedWorker(ctx, ec, all[0].Name)
 	}
-	name, condition, err := e.pickVideoWorker(ctx, conversionRetentionNeed(ec), within)
+	name, condition, err := e.pickVideoWorker(ctx, conversionRoomNeed(ec), within, ec)
 	if err != nil {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: condition, WaitingReason: err.Error()}, true
 	}
@@ -216,7 +226,11 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 // within (the workers the queue lets it take; nil for no restriction).
 // With nothing to choose it returns the waiting condition: worker_unreachable
 // when no worker is ready, worker_busy when every ready worker is full.
-func (e *Engine) pickVideoWorker(ctx context.Context, need int64, within map[string]bool) (string, string, error) {
+func (e *Engine) pickVideoWorker(ctx context.Context, need transcode.RoomNeed, within map[string]bool, ec *ExecutionContext) (string, string, error) {
+	// A requeued conversion prefers the node it came from. A node that just
+	// refused it is passed over below only within roomRefusedFor; after that
+	// the preference applies again.
+	prefer := getString(ec.State, requeuedFromKey)
 	workers := e.deps.Workers.All()
 	ready := e.workersReady(ctx, workers)
 	eligible := e.retentionEligible(ctx, workers, need)
@@ -243,11 +257,12 @@ func (e *Engine) pickVideoWorker(ctx context.Context, need int64, within map[str
 		if within != nil && !within[w.Name] {
 			continue
 		}
-		if !eligible[i] {
+		if !eligible[i] || e.roomRefusedRecently(ec, w.Name) {
 			noRoom = true
 			continue
 		}
-		if best < 0 || free > bestFree {
+		// A requeued conversion prefers the node that still has its source.
+		if best < 0 || (workers[best].Name != prefer && (w.Name == prefer || free > bestFree)) {
 			best, bestFree = i, free
 		}
 	}
@@ -255,7 +270,7 @@ func (e *Engine) pickVideoWorker(ctx context.Context, need int64, within map[str
 	case best >= 0:
 		return workers[best].Name, "", nil
 	case noRoom:
-		return "", "worker_busy", fmt.Errorf("%s", retentionNoRoomReason(need))
+		return "", "worker_busy", fmt.Errorf("%s", e.roomWaitReason(ctx, workers, need))
 	case anyReady:
 		return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
 	}

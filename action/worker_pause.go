@@ -10,6 +10,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // Node pause.
@@ -199,9 +200,14 @@ func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode
 	// One request per node at a time: a suspend that is written, synced,
 	// confirmed and possibly undone must not be interleaved with another
 	// request, or its undo would overwrite what that request set.
-	lock := &e.workerStateFor(w.Name).pauseMu
+	state := e.workerStateFor(w.Name)
+	lock := &state.pauseMu
 	lock.Lock()
 	defer lock.Unlock()
+	if mode != store.WorkerPauseImmediate {
+		// The next immediate pause is a new one: it clears the cache again.
+		state.cacheClearedFor = ""
+	}
 	if mode == store.WorkerPauseSuspend {
 		// The operator's own pause is what a failed suspend goes back to; a
 		// build's hold is not theirs to restore or clear.
@@ -278,6 +284,60 @@ func (e *Engine) sweepPausedNodes(ctx context.Context) {
 			log.Printf("worker pause: %s: %v", r.ID, err)
 		}
 	}
+	e.clearPausedCaches(ctx, pauses)
+}
+
+// cacheClearer is a node's executor that can be told to delete the cached
+// sources no running job holds.
+type cacheClearer interface {
+	SetHoldClearCache(ctx context.Context) (httpclient.HoldStatus, error)
+}
+
+// clearPausedCaches empties the source cache of every node under an immediate
+// pause, once its encodes have been sent back: the node is wanted for something
+// else and keeps no spare copies of files. Finished candidates waiting for
+// approval are not touched. A graceful pause or a suspend leaves the cache alone.
+// It is done once per pause, under the node's pause lock and only while the
+// pause in the store is still the immediate one, so a resume (or another pause
+// change) that lands first is never followed by a hold from this sweep.
+func (e *Engine) clearPausedCaches(ctx context.Context, pauses map[string]store.WorkerPause) {
+	for name, pause := range pauses {
+		if pause.Mode != store.WorkerPauseImmediate {
+			continue
+		}
+		w, ok := e.deps.Workers.Get(name)
+		if !ok {
+			continue
+		}
+		c, ok := w.Executor.(cacheClearer)
+		if !ok {
+			continue
+		}
+		e.clearPausedCache(ctx, w, pause, c)
+	}
+}
+
+func (e *Engine) clearPausedCache(ctx context.Context, w transcode.NamedWorker, listed store.WorkerPause, c cacheClearer) {
+	state := e.workerStateFor(w.Name)
+	state.pauseMu.Lock()
+	defer state.pauseMu.Unlock()
+	pauses, err := e.workerPauses()
+	if err != nil {
+		return
+	}
+	current, ok := pauses[w.Name]
+	if !ok || current.Mode != store.WorkerPauseImmediate || current.Revision != listed.Revision {
+		return
+	}
+	token := fmt.Sprintf("%s/%d", current.Since, current.Revision)
+	if state.cacheClearedFor == token {
+		return
+	}
+	if _, err := c.SetHoldClearCache(ctx); err != nil {
+		log.Printf("worker pause: clearing the source cache of %s: %v", w.Name, err)
+		return
+	}
+	state.cacheClearedFor = token
 }
 
 // requeueForPause sends one conversion back to the transcode queue because
@@ -432,7 +492,7 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 // own job identity, since the node still knows the cancelled one.
 func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, node string) error {
 	fresh := map[string]any{}
-	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey} {
+	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusedByKey, roomRefusedAtKey, runnerKilledKey, runnerKilledJobKey} {
 		if v, ok := ec.State[key]; ok {
 			fresh[key] = v
 		}
@@ -451,6 +511,9 @@ func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance
 	inst.CurrentStep = 0
 	inst.WaitingCondition = "worker_busy"
 	inst.WaitingReason = fmt.Sprintf("Node %s was paused; back in the transcode queue to start again on a free node", node)
+	if why := getString(ec.State, requeueWhyKey); why != "" {
+		inst.WaitingReason = fmt.Sprintf("Back in the transcode queue (%s): %s", node, why)
+	}
 	inst.WaitingOptionsJSON = "[]"
 	inst.ErrorJSON = ""
 	inst.StateJSON, inst.OutputsJSON = toJSON(fresh), toJSON(fresh)

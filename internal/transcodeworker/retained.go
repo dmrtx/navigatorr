@@ -5,13 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Deferred candidate publication (docs/transcode/DEFERRED_CANDIDATE_PUBLICATION.md).
@@ -720,23 +717,18 @@ func (w *Worker) findRetainedLocked(jobID, key string) (*JobRecord, error) {
 	return nil, nil
 }
 
-// retainedBytesLocked sums the disk held or reserved by deferred jobs that have
-// started and not finished: encoding ones by their admission reservation,
-// finished ones by their attested size. A queued job that has not been spawned
-// holds nothing yet; it is admitted when its slot comes up. Callers hold the
-// capacity lock.
-//
-// unwritten is the part of that total still only promised: reservations of
-// encodes that have not produced their candidate, which free disk space does
-// not reflect yet.
-func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
+// startedJobs lists the jobs that have been admitted and have not finished
+// their encode: running ones, and queued ones the scheduler has spawned. Callers
+// hold the capacity lock.
+func (w *Worker) startedJobs() ([]*JobRecord, error) {
 	entries, err := w.readJobDirs()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, 0, nil
+			return nil, nil
 		}
-		return 0, 0, err
+		return nil, err
 	}
+	var out []*JobRecord
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
@@ -756,22 +748,92 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return 0, 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
+			return nil, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
 		}
-		if job == nil || job.ID != id || !job.deferredPublication() || (job.Status != "queued" && job.Status != "running") {
+		if job == nil || job.ID != id || (job.Status != "queued" && job.Status != "running") {
 			continue
 		}
 		if job.Status == "queued" && job.PID == 0 {
 			continue
 		}
-		if job.CandidateSizeBytes > 0 {
-			total += job.CandidateSizeBytes
-		} else {
-			total += job.RetainReserveBytes
-			unwritten += job.RetainReserveBytes
+		out = append(out, job)
+	}
+	return out, nil
+}
+
+// retainedBytesLocked sums the disk held or reserved by deferred jobs that have
+// started and not finished: encoding ones by their admission reservation,
+// finished ones by their attested size. A queued job that has not been spawned
+// holds nothing yet; it is admitted when its slot comes up. Callers hold the
+// capacity lock.
+//
+// unwritten is the part still only promised, whatever the job's policy: for each
+// admitted job, the source it has not staged yet (none when it reuses its own
+// cached copy) and the output it has not written yet. Free disk space does not
+// show it, and counting a byte that is already on disk would count it twice.
+func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
+	jobs, err := w.startedJobs()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range jobs {
+		if job.deferredPublication() {
+			if job.CandidateSizeBytes > 0 {
+				total += job.CandidateSizeBytes
+			} else {
+				total += job.RetainReserveBytes
+				unwritten += w.promisedBytes(job)
+			}
+			continue
+		}
+		// A job that publishes on encode keeps no candidate and does not
+		// count against the retention budget, but its output still grows on
+		// this disk until it is moved.
+		if !job.EncodeComplete {
+			unwritten += w.promisedBytes(job)
 		}
 	}
 	return total, unwritten, nil
+}
+
+// promisedBytes is what an admitted job will still write to this disk: its
+// source, less what is already staged (nothing is promised for a source that
+// was an existing cached copy of its own), and its output reserve, less what
+// is already written.
+func (w *Worker) promisedBytes(job *JobRecord) int64 {
+	var promised int64
+	if job.RoomOwnKey == "" {
+		promised += max(0, job.sourceBytesKnown()-regularSize(job.StagedInputPath))
+	}
+	promised += max(0, job.RetainReserveBytes-regularSize(job.LocalCandidatePath))
+	return promised
+}
+
+// regularSize is the size of a regular file, 0 when there is none.
+func regularSize(path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return 0
+	}
+	return fi.Size()
+}
+
+// sourceBytesKnown is the size of the job's source as the node knows it: the
+// size recorded at submit or, for a job recorded before that, its source size
+// or a stat of the source. 0 when none is known.
+func (j *JobRecord) sourceBytesKnown() int64 {
+	switch {
+	case j.RoomSourceBytes > 0:
+		return j.RoomSourceBytes
+	case j.SourceSizeBytes > 0:
+		return j.SourceSizeBytes
+	case j.ExpectedSourceSizeBytes > 0:
+		return j.ExpectedSourceSizeBytes
+	}
+	return regularSize(j.Source)
 }
 
 // freeDiskBytes measures the free space of the filesystem holding the local
@@ -797,290 +859,4 @@ func (w *Worker) freeDiskBytes() (int64, error) {
 		return 0, fmt.Errorf("free disk space of %s is unknown", probe)
 	}
 	return int64(avail), nil
-}
-
-// Why a queued on_approval job is not starting (JobRecord.RetentionBlocked).
-const (
-	retentionBlockedBudget = "retention_budget"
-	retentionBlockedDisk   = "free_disk"
-	// retentionBlockedAlone: the job is larger than the whole retention
-	// budget, so it runs alone, and waits until the node holds no candidate.
-	retentionBlockedAlone = "retention_alone"
-)
-
-// retentionRefusal is a retention limit admitDeferredLocked enforced; reason
-// is retentionBlockedBudget, retentionBlockedDisk or retentionBlockedAlone.
-type retentionRefusal struct {
-	reason string
-	msg    string
-	short  int64 // bytes missing for the free-disk floor
-	held   int64 // bytes the node holds against the budget
-	free   int64 // free disk bytes measured (disk refusals only)
-}
-
-func (e *retentionRefusal) Error() string { return e.msg }
-
-// tooLargeForBudget says whether a job that waits for room reserves more than
-// the whole retention budget: no amount of approving or discarding makes it
-// fit, so it runs alone, once the node holds no other candidate.
-func (w *Worker) tooLargeForBudget(job *JobRecord) bool {
-	limit := w.cfg.RetainedCandidatesMaxBytes
-	return limit > 0 && job.RetentionWait && job.RetainReserveBytes > limit
-}
-
-// admitDeferredLocked applies the retention limits to an on_approval job
-// whose output is expected to take at most expected bytes. Past a limit it
-// answers a *retentionRefusal worded as the "worker busy" error the API maps
-// to 429 worker_busy; a measurement that fails refuses the job rather than
-// guessing. Callers hold the capacity lock.
-func (w *Worker) admitDeferredLocked(expected int64) error {
-	return w.admitDeferredAloneLocked(expected, false)
-}
-
-// admitDeferredAloneLocked is admitDeferredLocked for a job that may be larger
-// than the whole budget: such a job (alone) is admitted when the node holds
-// nothing against the budget, and refused (retentionBlockedAlone) until then.
-func (w *Worker) admitDeferredAloneLocked(expected int64, alone bool) error {
-	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
-		return nil // nothing to enforce: do not read every record to say so
-	}
-	held, unwritten, err := w.retainedBytesLocked()
-	if err != nil {
-		return fmt.Errorf("measuring retained candidates: %w", err)
-	}
-	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
-		switch {
-		case alone && held > 0:
-			return &retentionRefusal{reason: retentionBlockedAlone, held: held, msg: fmt.Sprintf("worker busy: larger than the whole retention budget (%d of %d bytes); runs alone when the node holds no other candidate", expected, limit)}
-		case alone:
-			// Nothing else is held: the job keeps its candidate on its own.
-		case held+expected > limit:
-			return &retentionRefusal{reason: retentionBlockedBudget, held: held, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
-		}
-	}
-	if floor := w.cfg.MinFreeDiskBytes; floor > 0 {
-		free, err := w.freeDiskBytes()
-		if err != nil {
-			return fmt.Errorf("measuring free disk: %w", err)
-		}
-		// Encodes admitted earlier have not written their candidates yet.
-		if left := free - unwritten - expected; left < floor {
-			return &retentionRefusal{reason: retentionBlockedDisk, short: floor - left, held: held, free: free, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
-		}
-	}
-	return nil
-}
-
-// floorUnmetGrace is how long the free-disk floor must stay unmeetable, with
-// nothing that could free the disk, before the job fails instead of waiting:
-// a full disk may be a download or another process that finishes.
-const floorUnmetGrace = 30 * time.Minute
-
-// floorMarkRefresh is how often a job's record is rewritten to say the floor
-// was seen unmeetable again; floorMarkGap is how long unseen before the mark
-// is stale and the grace starts over (a gate, a missed slot, a restart).
-const (
-	floorMarkRefresh = time.Minute
-	floorMarkGap     = 5 * time.Minute
-)
-
-// tooLargeGate names the job the node empties for: the first queued job, in
-// queue order, that waits for room and reserves more than the whole retention
-// budget as it stands now. While it waits, nothing else that would keep a
-// candidate starts, or the node would never empty. Judging the queue itself
-// (not a mark on the record) keeps a restart with a different budget honest.
-// "" when there is none. queued is the pass's sorted queue; scanErr is its read
-// error, logged once per streak: a record that cannot be read is skipped, never
-// a reason to stop the node or to publish a job on encode.
-func (w *Worker) tooLargeGate(queued []*JobRecord, scanErr error) string {
-	if w.cfg.RetainedCandidatesMaxBytes <= 0 {
-		return ""
-	}
-	if scanErr == nil {
-		w.retentionScanFailed = false
-	} else if !w.retentionScanFailed {
-		w.retentionScanFailed = true
-		log.Printf("reading some queued jobs failed (%v); judging the queue from the ones that read", scanErr)
-	}
-	for _, q := range queued {
-		if q.PID == 0 && q.deferredPublication() && w.tooLargeForBudget(q) {
-			return q.ID
-		}
-	}
-	return ""
-}
-
-// admitAtStartLocked applies the retention limits to a queued job whose slot
-// has come up, just before it is spawned. Only then does an on_approval job
-// take disk: its source is staged and its candidate written as it runs, and a
-// job still queued behind others must not hold the budget a running one needs.
-//
-// gate is the pass's tooLargeGate. It reports whether the job may start now.
-// The outcomes, for an on_approval job:
-//   - within the limits: it starts and keeps its candidate.
-//   - the retention budget is full and the job did not ask to wait: it starts
-//     and publishes on encode (PublishFallback), with no free-disk check. A
-//     batch child must not wait: nothing in its batch can be approved until
-//     every child has encoded, so its siblings' candidates would hold the disk
-//     it waits for.
-//   - the retention budget is full and the job asked to wait, or the budget has
-//     room and the free-disk floor would be crossed: it stays queued and the
-//     scheduler moves on to the next job. The slot is checked again on every
-//     pass.
-//   - the job asked to wait and is larger than the whole budget: it runs
-//     alone. It stays queued (retentionBlockedAlone) while the node holds any
-//     candidate or an earlier too-large job waits, and starts, keeping its
-//     candidate, once the node holds none. While it waits, no other job that
-//     would keep a candidate starts (a job that publishes on encode still does).
-//   - the free-disk floor cannot be met with the node holding nothing, no other
-//     job running and no cache entry that could still go, and stays so for
-//     floorUnmetGrace: the job fails with a message saying so.
-//   - the limits cannot be measured: it stays queued and err says why.
-//
-// The source cache gives way before a job waits for the floor: its entries can
-// be read again, and nothing else frees that disk while the worker sits idle.
-//
-// The job record is saved only when what it says changes, so a job that keeps
-// waiting does not rewrite its record (or the log) on every pass. Callers hold
-// the capacity lock and the job's lock.
-func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string) (bool, error) {
-	if !job.deferredPublication() {
-		return true, nil
-	}
-	alone := w.tooLargeForBudget(job)
-	dirty := false
-	// The floor mark survives only a pass that measured the floor unmeetable.
-	clearMark := func() {
-		if !job.FloorUnmetSince.IsZero() {
-			job.FloorUnmetSince, job.FloorUnmetSeenAt, dirty = time.Time{}, time.Time{}, true
-		}
-	}
-	if gate != "" && gate != job.ID {
-		clearMark()
-		// A too-large job is ahead: this one must not keep a candidate in its way.
-		if !job.RetentionWait {
-			job.PublishFallback = transcode.PublishFallbackRetentionFull
-			job.RetentionBlocked = ""
-			if serr := SaveJobAtomic(jobFile, job); serr != nil {
-				return false, serr
-			}
-			log.Printf("job %s: a larger job waits for the node to hold no candidate; starting it to publish on encode", job.ID)
-			return true, nil
-		}
-		reason := retentionBlockedBudget
-		if alone {
-			reason = retentionBlockedAlone
-		}
-		if job.RetentionBlocked == reason && !dirty {
-			return false, nil
-		}
-		job.RetentionBlocked = reason
-		log.Printf("job %s: a larger job waits for the node to hold no candidate; it waits in the queue behind it", job.ID)
-		return false, SaveJobAtomic(jobFile, job)
-	}
-	err := w.admitDeferredAloneLocked(job.RetainReserveBytes, alone)
-	var refusal *retentionRefusal
-	if errors.As(err, &refusal) && w.freeSourceCacheRoom(refusal.short) {
-		err = w.admitDeferredAloneLocked(job.RetainReserveBytes, alone)
-	}
-	unmet := errors.As(err, &refusal) && refusal.reason == retentionBlockedDisk && refusal.held == 0 && w.floorCanNeverBeMet(job)
-	failNow := false
-	if unmet {
-		since, seen := job.FloorUnmetSince, job.FloorUnmetSeenAt
-		failNow = w.noteFloorUnmet(job)
-		dirty = dirty || !since.Equal(job.FloorUnmetSince) || !seen.Equal(job.FloorUnmetSeenAt)
-	} else {
-		clearMark()
-	}
-	switch {
-	case err == nil:
-		if job.RetentionBlocked != "" {
-			// The spawn saves the record with its process identity.
-			job.RetentionBlocked = ""
-			log.Printf("job %s: there is room to retain its candidate now; starting", job.ID)
-		}
-		return true, nil
-	case !errors.As(err, &refusal):
-		if dirty {
-			if serr := SaveJobAtomic(jobFile, job); serr != nil {
-				return false, errors.Join(err, serr)
-			}
-		}
-		return false, err
-	case unmet && failNow:
-		free := max(0, refusal.free-w.cfg.MinFreeDiskBytes)
-		job.Status = "failed"
-		job.ReasonCode = "retention_floor_unmet"
-		job.Error = fmt.Sprintf("not enough free disk on this node for %s: the job needs %d bytes and the node offers %d bytes above its %d byte free-disk minimum now, with no candidate held, no other job running and nothing left to free", floorUnmetGrace, job.RetainReserveBytes, free, w.cfg.MinFreeDiskBytes)
-		job.RetentionBlocked = ""
-		job.FinishedAt = time.Now().UTC()
-		log.Printf("job %s: %s", job.ID, job.Error)
-		return false, SaveJobAtomic(jobFile, job)
-	case refusal.reason == retentionBlockedBudget && !job.RetentionWait:
-		// Saved before the spawn: the runner reads the policy it executes.
-		job.PublishFallback = transcode.PublishFallbackRetentionFull
-		job.RetentionBlocked = ""
-		if serr := SaveJobAtomic(jobFile, job); serr != nil {
-			return false, serr
-		}
-		log.Printf("job %s: %v; starting it to publish on encode", job.ID, err)
-		return true, nil
-	}
-	if job.RetentionBlocked == refusal.reason && !dirty {
-		return false, nil
-	}
-	if job.RetentionBlocked != refusal.reason {
-		log.Printf("job %s: %v; it waits in the queue for room", job.ID, err)
-	}
-	job.RetentionBlocked = refusal.reason
-	return false, SaveJobAtomic(jobFile, job)
-}
-
-// noteFloorUnmet records that the floor was just measured unmeetable and
-// reports whether it has been so, continuously, for floorUnmetGrace. A mark not
-// seen again for floorMarkGap is stale (the job was held behind another, had no
-// slot, or the worker restarted): the grace starts over.
-func (w *Worker) noteFloorUnmet(job *JobRecord) bool {
-	now := w.retentionClock()
-	if job.FloorUnmetSince.IsZero() || now.Sub(job.FloorUnmetSeenAt) > floorMarkGap {
-		job.FloorUnmetSince, job.FloorUnmetSeenAt = now, now
-	} else if now.Sub(job.FloorUnmetSeenAt) >= floorMarkRefresh {
-		job.FloorUnmetSeenAt = now
-	}
-	return now.Sub(job.FloorUnmetSince) >= floorUnmetGrace
-}
-
-// retentionClock is the time the floor rule is measured by.
-func (w *Worker) retentionClock() time.Time {
-	if w.retentionNow != nil {
-		return w.retentionNow()
-	}
-	return time.Now().UTC()
-}
-
-// floorCanNeverBeMet says whether nothing that could still happen on this node
-// would clear the free-disk floor for job: no other job is running or about to
-// be (their work files free when they end), and the source cache holds no entry
-// that may yet be dropped (one populated in the last hour, or sharing bytes
-// with a job, still ages out or is released). The cache has already been given
-// its chance to give way. Callers hold the capacity lock.
-func (w *Worker) floorCanNeverBeMet(job *JobRecord) bool {
-	active, err := w.countActiveJobs(job.ID)
-	if err != nil || active > 0 {
-		return false
-	}
-	if !w.sourceCacheEnabled() {
-		return true
-	}
-	names, err := os.ReadDir(w.sourceCacheDir())
-	if err != nil {
-		return errors.Is(err, fs.ErrNotExist)
-	}
-	for _, e := range names {
-		name := e.Name()
-		if !strings.HasPrefix(name, ".") && !strings.HasSuffix(name, ".meta.json") && !strings.HasSuffix(name, ".lock") {
-			return false
-		}
-	}
-	return true
 }

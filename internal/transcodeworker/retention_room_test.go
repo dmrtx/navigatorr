@@ -52,8 +52,7 @@ func TestRetentionRoomIsNeverNegative(t *testing.T) {
 
 func TestRetentionRoomIsDroppedWhenTheBudgetOrDeferredPublicationIsTurnedOff(t *testing.T) {
 	for name, turnOff := range map[string]func(*WorkerConfig){
-		"no limit":                 func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 0 },
-		"deferred publication off": func(c *WorkerConfig) { c.DeferredPublication = false },
+		"no limit": func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 1000 })
@@ -73,21 +72,6 @@ func TestRetentionRoomIsDroppedWhenTheBudgetOrDeferredPublicationIsTurnedOff(t *
 				t.Fatalf("health carries a retention field (%v): %s", err, data)
 			}
 		})
-	}
-}
-
-func TestRetentionRoomCountsTheReservationOfAStartedJobAndNothingForAQueuedOne(t *testing.T) {
-	srcSize := int64(len("dummy-media"))
-	budget := 10 * srcSize
-	f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = budget })
-	now := time.Now().UTC()
-
-	f.submit("job-a", "on_approval") // starts and reserves the size of its source
-	f.submit("job-b", "on_approval") // queued behind it: holds nothing yet
-	f.w.refreshRetentionRoom(now)
-	room := f.w.SchedulerObservation(now).Retention
-	if room == nil || room.CapacityBytes != budget || room.RoomBytes != budget-srcSize {
-		t.Fatalf("with one started and one queued job the worker reports %+v, want room %d", room, budget-srcSize)
 	}
 }
 

@@ -910,6 +910,9 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxHTTPHoldBodyBytes)
 		var body struct {
 			Hold *bool `json:"hold"`
+			// ClearCache also deletes the cached sources no running job holds:
+			// an immediate pause asks for it (retained candidates stay).
+			ClearCache bool `json:"clear_cache"`
 		}
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
@@ -921,6 +924,19 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 			log.Printf("hold not stored: %v", err)
 			writeHTTPError(w, http.StatusInternalServerError, "the worker could not store the hold")
 			return
+		}
+		if body.ClearCache {
+			clear := s.worker.ClearFreeableSourceCache
+			if s.worker.clearSourceCache != nil {
+				clear = s.worker.clearSourceCache
+			}
+			if _, err := clear(); err != nil {
+				// The hold is stored and a retry of this request is harmless:
+				// the server must not take the cache for cleared.
+				log.Printf("source cache not cleared: %v", err)
+				writeHTTPError(w, http.StatusInternalServerError, "the worker could not clear its source cache")
+				return
+			}
 		}
 	default:
 		writeHTTPError(w, http.StatusMethodNotAllowed, "use GET or PUT")

@@ -69,8 +69,7 @@ func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath str
 // measure that fails keeps the previous one, which the coordinator stops
 // trusting once it is old.
 func (w *Worker) refreshRetentionRoom(now time.Time) {
-	limit := w.cfg.RetainedCandidatesMaxBytes
-	if limit <= 0 || !w.cfg.DeferredPublication {
+	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
 		w.schedulerMu.Lock()
 		w.retentionRoom = nil
 		w.schedulerMu.Unlock()
@@ -80,21 +79,13 @@ func (w *Worker) refreshRetentionRoom(now time.Time) {
 	if err != nil {
 		return
 	}
-	held, _, err := w.retainedBytesLocked()
-	// A job larger than the whole budget waits for the node to hold nothing:
-	// no room is on offer until it has run.
-	queued, qerr := w.listQueuedJobsObserved()
-	blocked := err == nil && w.tooLargeGate(queued, qerr) != ""
+	room, err := w.roomReport(now)
 	capLock.Unlock()
 	if err != nil {
 		return
 	}
-	room := max(0, limit-held)
-	if blocked {
-		room = 0
-	}
 	w.schedulerMu.Lock()
-	w.retentionRoom = &transcode.RetentionRoom{ObservedAt: now, CapacityBytes: limit, RoomBytes: room}
+	w.retentionRoom = room
 	w.schedulerMu.Unlock()
 }
 func (w *Worker) recordSchedulerSweep(name string, start, now time.Time, count int, err error) {

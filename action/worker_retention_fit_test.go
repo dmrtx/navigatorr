@@ -15,13 +15,19 @@ import (
 
 const gib = int64(1) << 30
 
-// roomReporter is a worker that reports the room it has left to retain
-// candidates in its health, as a deferred-publication worker does.
+// roomReporter is a worker that reports what it can take now in its health, as
+// a deferred-publication worker does: the retention budget left and the disk it
+// could offer a job.
 type roomReporter struct {
 	*slotReportingExecutor
 	mu       sync.Mutex
-	capacity int64
-	room     int64
+	capacity int64 // retention budget
+	room     int64 // retention budget left
+	held     int64
+	disk     int64 // size of the work disk (0: not reported)
+	diskRoom int64 // what the disk can give a job now
+	floor    int64
+	hold     string
 	silent   bool
 	age      time.Duration
 }
@@ -32,20 +38,33 @@ func (r *roomReporter) Scheduler(context.Context) (transcode.SchedulerObservatio
 	now := time.Now().UTC()
 	obs := transcode.SchedulerObservation{Health: "ok", ObservedAt: now, LastSuccessAt: now, FreshUntil: now.Add(time.Minute)}
 	if !r.silent {
-		obs.Retention = &transcode.RetentionRoom{ObservedAt: now.Add(-r.age), CapacityBytes: r.capacity, RoomBytes: r.room}
+		obs.Retention = &transcode.RetentionRoom{ObservedAt: now.Add(-r.age), CapacityBytes: r.capacity, RoomBytes: r.room, HeldBytes: r.held,
+			DiskCapacityBytes: r.disk, DiskRoomBytes: r.diskRoom, FloorBytes: r.floor, Hold: r.hold}
 	}
 	return obs, nil
 }
 
-func (r *roomReporter) setRoom(e *Engine, name string, room int64) {
+// change edits the report and makes the engine read it again.
+func (r *roomReporter) change(e *Engine, name string, edit func(*roomReporter)) {
 	r.mu.Lock()
-	r.room = room
+	edit(r)
 	r.mu.Unlock()
-	e.workerStateFor(name).obs.CheckedAt = time.Time{} // read the report again
+	e.workerStateFor(name).obs.CheckedAt = time.Time{}
+}
+
+func (r *roomReporter) setRoom(e *Engine, name string, room int64) {
+	r.change(e, name, func(r *roomReporter) { r.room = room })
 }
 
 func newRoomReporter(capacity, room int64) *roomReporter {
 	return &roomReporter{slotReportingExecutor: poolWorker(2), capacity: capacity, room: room}
+}
+
+// diskNode reports a work disk of the given size, floor and room.
+func diskNode(disk, floor, room int64) *roomReporter {
+	r := newRoomReporter(0, 0)
+	r.disk, r.floor, r.diskRoom = disk, floor, room
+	return r
 }
 
 // retentionWorkers is m4 then m1, both publishing on approval: m4 would be
@@ -81,7 +100,7 @@ func convert(t *testing.T, e *Engine, id string, size int64, batch string) (stri
 		seedActionInstance(t, e.deps.Store, batch, "transcode_batch", StatusRunning, 0, "", map[string]any{}, map[string]any{})
 		inputs["parent_action_id"] = batch
 	}
-	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusRunning, 0, "", inputs, map[string]any{SubmittedSourceBytesKey: size})
+	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusRunning, 0, "", inputs, map[string]any{SubmittedSourceBytesKey: size, roomReserveKey: transcode.OutputReserveBytes(nil, size)})
 	ec := parseExecutionContextMust(t, e, id)
 	res, waiting := e.ensureWorkerAssigned(context.Background(), ec)
 	if waiting {
@@ -105,6 +124,14 @@ func finishAction(t *testing.T, e *Engine, id string) {
 	}
 }
 
+func assignAgain(t *testing.T, e *Engine, id string) (string, StepResult, bool) {
+	t.Helper()
+	res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, id))
+	return assignedWorker(parseExecutionContextMust(t, e, id).State), res, waiting
+}
+
+// A file the retention budget of one node cannot hold now goes to the node that
+// can; a smaller one still goes to the first node with a slot.
 func TestAFileTheWorkersRetentionRoomCannotHoldGoesToTheWorkerThatCan(t *testing.T) {
 	m4 := newRoomReporter(30*gib, 11*gib)
 	m1 := newRoomReporter(100*gib, 100*gib)
@@ -113,75 +140,107 @@ func TestAFileTheWorkersRetentionRoomCannotHoldGoesToTheWorkerThatCan(t *testing
 	if name, res, waiting := convert(t, e, "conv-a", 29*gib, ""); waiting || name != "m1" {
 		t.Fatalf("a 29 GiB file went to %q (waiting %v, %+v); m4 has 11 GiB of room", name, waiting, res)
 	}
-	// A file that fits m4's room still goes to the first worker with a slot.
 	if name, _, waiting := convert(t, e, "conv-b", 5*gib, ""); waiting || name != "m4" {
 		t.Fatalf("a 5 GiB file went to %q (waiting %v); it fits m4", name, waiting)
 	}
 }
 
-func TestAFileThatFitsNoFreeWorkerWaitsAndTheOnesBehindItPass(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 11*gib)
-	m1 := newRoomReporter(100*gib, 100*gib)
+// A file that fits only the big disk goes there.
+func TestAFileThatFitsOnlyTheBigNodeGoesThere(t *testing.T) {
+	small := diskNode(500*gib, 20*gib, 60*gib)
+	big := diskNode(4000*gib, 20*gib, 900*gib)
+	e := retentionWorkers(t, small, big)
+	if name, res, waiting := convert(t, e, "conv-a", 120*gib, ""); waiting || name != "m1" {
+		t.Fatalf("a 120 GiB file went to %q (waiting %v, %+v); only m1 has the room", name, waiting, res)
+	}
+}
+
+// A file no node could take even when empty fails when it is first placed,
+// with what it needs against what the largest node has.
+func TestAFileTooBigForEveryNodeFailsAtSubmission(t *testing.T) {
+	e := retentionWorkers(t, diskNode(400*gib, 20*gib, 300*gib), diskNode(600*gib, 20*gib, 500*gib))
+	// 500 GiB source + 250 GiB output + floor: more than any disk.
+	name, res, waiting := convert(t, e, "conv-a", 500*gib, "")
+	if !waiting || name != "" || res.Status != StepFailed || !strings.Contains(res.Error, "Too big for every node") {
+		t.Fatalf("assigned %q (waiting %v), %+v; want a failure naming every node", name, waiting, res)
+	}
+	// An output past every retention budget is as hopeless.
+	e = retentionWorkers(t, newRoomReporter(30*gib, 30*gib), newRoomReporter(40*gib, 40*gib))
+	_, res, waiting = convert(t, e, "conv-b", 100*gib, "")
+	if !waiting || res.Status != StepFailed {
+		t.Fatalf("an output over every retention budget: %+v (waiting %v)", res, waiting)
+	}
+	// The text names the budget that is too small, not a disk the nodes never reported.
+	if !strings.Contains(res.Error, "approval budget is "+gbText(40*gib)) || strings.Contains(res.Error, "to give a job") {
+		t.Fatalf("budget failure text = %q, want the output need and the largest approval budget", res.Error)
+	}
+	// One node that could take it empty keeps it waiting, not failed.
+	e = retentionWorkers(t, diskNode(400*gib, 20*gib, 0), diskNode(2000*gib, 20*gib, 0))
+	if _, res, waiting := convert(t, e, "conv-c", 500*gib, ""); !waiting || res.Status == StepFailed {
+		t.Fatalf("m1 could take it empty, so it waits: %+v (waiting %v)", res, waiting)
+	}
+}
+
+// A file no node has room for now stays in the server queue with a plain
+// reason, is not failed, and is placed once room appears.
+func TestAFileNoNodeHasRoomForNowWaitsInTheQueueAndIsPlacedWhenRoomAppears(t *testing.T) {
+	m4 := diskNode(1000*gib, 10*gib, 20*gib)
+	m1 := diskNode(1000*gib, 10*gib, 30*gib)
 	e := retentionWorkers(t, m4, m1)
+	name, res, waiting := convert(t, e, "conv-a", 60*gib, "")
+	need := transcode.RoomNeed{SourceBytes: 60 * gib, ReserveBytes: 30 * gib}
+	wantReason := "no node has room: needs " + gbText(need.SourceBytes+need.ReserveBytes) + ", the most any node can offer is " + gbText(30*gib)
+	if !waiting || name != "" || res.Status != StepWaitingExternal || res.WaitingCondition != "worker_busy" || !strings.Contains(strings.ToLower(res.WaitingReason), strings.ToLower(wantReason)) {
+		t.Fatalf("assigned %q (waiting %v), %+v; want a wait saying %q", name, waiting, res, wantReason)
+	}
+	m1.change(e, "m1", func(r *roomReporter) { r.diskRoom = 200 * gib }) // a cache entry went, or a candidate was approved
+	if name, res, waiting := assignAgain(t, e, "conv-a"); waiting || name != "m1" {
+		t.Fatalf("m1 has room now: assigned %q (waiting %v), %+v", name, waiting, res)
+	}
+}
+
+// The reasons a node is passed over are told in plain words.
+func TestTheWaitNamesWhyEachNodeIsPassedOver(t *testing.T) {
+	m4 := newRoomReporter(30*gib, 0)
+	m4.held = 30 * gib
+	m1 := newRoomReporter(100*gib, 100*gib)
+	m1.hold = "paused"
+	e := retentionWorkers(t, m4, m1)
+	_, res, waiting := convert(t, e, "conv-a", 20*gib, "")
+	reason := strings.ToLower(res.WaitingReason)
+	if !waiting || !strings.Contains(reason, strings.ToLower("waiting for approvals on m4 ("+gbText(30*gib)+" held)")) || !strings.Contains(reason, "node m1 paused") {
+		t.Fatalf("reason %q", res.WaitingReason)
+	}
+	m1.change(e, "m1", func(r *roomReporter) { r.hold = "build" })
+	if _, res, _ := assignAgain(t, e, "conv-a"); !strings.Contains(res.WaitingReason, "build running on m1") {
+		t.Fatalf("reason %q", res.WaitingReason)
+	}
+	// Resumed, the node takes it.
+	m1.change(e, "m1", func(r *roomReporter) { r.hold = "" })
+	if name, res, waiting := assignAgain(t, e, "conv-a"); waiting || name != "m1" {
+		t.Fatalf("resumed m1 did not take it: %q (waiting %v), %+v", name, waiting, res)
+	}
+}
+
+// Two conversions for one open node: the oldest gets it, the other waits in the
+// queue (the node would refuse it at once) and goes elsewhere when a slot opens.
+func TestTwoConversionsForOneNodeTheOldestGetsItAndTheOtherWaits(t *testing.T) {
+	e := retentionWorkers(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 	seedActionInstance(t, e.deps.Store, "busy-m1", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m1"})
-
-	name, res, waiting := convert(t, e, "conv-a", 29*gib, "")
-	if !waiting || name != "" || res.WaitingCondition != "worker_busy" || !strings.Contains(res.WaitingReason, "room to retain") {
-		t.Fatalf("m4 is the only free node and cannot hold the file: assigned %q, %+v", name, res)
+	if name, res, waiting := convert(t, e, "conv-a", 100*gib, ""); waiting || name != "m4" {
+		t.Fatalf("the oldest: assigned %q (waiting %v), %+v", name, waiting, res)
 	}
-	// m4's slot is free, so the conversion behind it takes it.
-	if name, res, waiting := convert(t, e, "conv-b", 5*gib, ""); waiting || name != "m4" {
-		t.Fatalf("the big file held m4's slot back: assigned %q (waiting %v), %+v", name, waiting, res)
+	if name, res, waiting := convert(t, e, "conv-b", 100*gib, ""); !waiting || name != "" {
+		t.Fatalf("the younger one took a node no slot of which is free: assigned %q, %+v", name, res)
 	}
-	// m1 frees and the big file is the next in line for it, ahead of a later one.
 	finishAction(t, e, "busy-m1")
-	if name, res, waiting := convert(t, e, "conv-c", 1*gib, ""); !waiting || name != "" {
-		t.Fatalf("a later conversion took the slot the big file waits for: assigned %q, %+v", name, res)
-	}
-	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-		t.Fatalf("the big file did not take m1: %+v", res)
-	} else if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
-		t.Fatalf("the big file went to %q (%+v)", got, res)
+	if name, res, waiting := assignAgain(t, e, "conv-b"); waiting || name != "m1" {
+		t.Fatalf("when m1 freed the waiting one went to %q (waiting %v), %+v", name, waiting, res)
 	}
 }
 
-func TestRoomThatComesBackLetsTheWaitingFileIn(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 2*gib)
-	m1 := newRoomReporter(100*gib, 0)
-	e := retentionWorkers(t, m4, m1)
-
-	if name, res, waiting := convert(t, e, "conv-a", 20*gib, ""); !waiting || name != "" {
-		t.Fatalf("no node has room: assigned %q, %+v", name, res)
-	}
-	m4.setRoom(e, "m4", 25*gib) // a candidate on m4 was approved
-	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-		t.Fatalf("m4 has room now: %+v", res)
-	}
-	if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m4" {
-		t.Fatalf("assigned %q", got)
-	}
-}
-
-func TestAFileLargerThanEveryBudgetIsLeftToTheWorkers(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 30*gib)
-	m1 := newRoomReporter(40*gib, 40*gib)
-	e := retentionWorkers(t, m4, m1)
-	// Waiting for room would never help: assigned as before, the worker says why.
-	if name, res, waiting := convert(t, e, "conv-a", 60*gib, ""); waiting || name != "m4" {
-		t.Fatalf("a file no budget holds: assigned %q (waiting %v), %+v", name, waiting, res)
-	}
-}
-
-func TestAFileThatNoBudgetOfAFreeNodeHoldsStillPicksTheOneThatCouldEver(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 30*gib)
-	m1 := newRoomReporter(100*gib, 100*gib)
-	e := retentionWorkers(t, m4, m1)
-	// 50 GiB can never be retained on m4, even empty.
-	if name, _, waiting := convert(t, e, "conv-a", 50*gib, ""); waiting || name != "m1" {
-		t.Fatalf("assigned %q (waiting %v), want m1", name, waiting)
-	}
-}
-
+// A worker that reports nothing, or an old report, is taken to have room: it
+// refuses at once if it has none.
 func TestAWorkerThatReportsNothingOrAnOldReportIsTakenToHaveRoom(t *testing.T) {
 	silent := newRoomReporter(30*gib, 0)
 	silent.silent = true
@@ -195,6 +254,13 @@ func TestAWorkerThatReportsNothingOrAnOldReportIsTakenToHaveRoom(t *testing.T) {
 	e = retentionWorkers(t, old, newRoomReporter(100*gib, 100*gib))
 	if name, _, waiting := convert(t, e, "conv-b", 29*gib, ""); waiting || name != "m4" {
 		t.Fatalf("an old report was trusted: assigned %q (waiting %v)", name, waiting)
+	}
+
+	ahead := newRoomReporter(30*gib, 0)
+	ahead.age = -2 * transcode.RetentionRoomMaxAge // observed "in the future"
+	e = retentionWorkers(t, ahead, newRoomReporter(100*gib, 100*gib))
+	if name, _, waiting := convert(t, e, "conv-c", 29*gib, ""); waiting || name != "m4" {
+		t.Fatalf("a report from the future was trusted: assigned %q (waiting %v)", name, waiting)
 	}
 }
 
@@ -222,62 +288,19 @@ func TestAWorkerThatPublishesOnEncodeNeedsNoRetentionRoom(t *testing.T) {
 	}
 }
 
-func TestAConversionBehindOneOnlyOneWorkerCanHoldDoesNotTakeThatWorkersSlot(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 11*gib)
-	m1 := newRoomReporter(100*gib, 100*gib)
-	// m1 comes first, so a tie between two free workers picks it.
-	e := retentionWorkersInOrder(t, false, m4, m1)
-	seedActionInstance(t, e.deps.Store, "busy-m1", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m1"})
-
-	// The big file fits m1 only, and waits for its slot.
-	if name, res, waiting := convert(t, e, "conv-a", 29*gib, ""); !waiting || name != "" {
-		t.Fatalf("m1 is busy and m4 cannot hold the file: assigned %q, %+v", name, res)
+// A requeued conversion goes back to the node it came from when that node has
+// room, and not at all to the one that just refused it.
+func TestARequeuedConversionPrefersItsNodeUnlessThatNodeJustRefusedIt(t *testing.T) {
+	e := retentionWorkers(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	seedActionInstance(t, e.deps.Store, "conv-a", "transcode_media", StatusRunning, 0, "", map[string]any{},
+		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1"})
+	if name, _, waiting := assignAgain(t, e, "conv-a"); waiting || name != "m1" {
+		t.Fatalf("a requeued conversion went to %q (waiting %v), want the node it came from", name, waiting)
 	}
-	finishAction(t, e, "busy-m1")
-	// m1 is free and the big file has not been polled yet: a small file, which
-	// fits both and would tie on m1, takes m4 and leaves m1 to the big one.
-	if name, res, waiting := convert(t, e, "conv-b", 1*gib, ""); waiting || name != "m4" {
-		t.Fatalf("the small file took the slot the big one waits for: assigned %q (waiting %v), %+v", name, waiting, res)
-	}
-	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-		t.Fatalf("the big file did not take m1: %+v", res)
-	} else if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
-		t.Fatalf("the big file went to %q (%+v)", got, res)
-	}
-}
-
-func TestTheQueuePositionCountsTheConversionsThatCouldUseTheSameWorkers(t *testing.T) {
-	m4 := newRoomReporter(30*gib, 30*gib)
-	m1 := newRoomReporter(100*gib, 100*gib)
-	e := retentionWorkers(t, m4, m1)
-	seedActionInstance(t, e.deps.Store, "busy-m4", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m4"})
-	seedActionInstance(t, e.deps.Store, "busy-m1", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m1"})
-
-	// Both slots are busy: where a conversion stands does not depend on which
-	// slot frees first.
-	for i, id := range []string{"conv-a", "conv-b", "conv-c"} {
-		name, res, waiting := convert(t, e, id, 5*gib, "")
-		if !waiting || name != "" {
-			t.Fatalf("%s: assigned %q (waiting %v), %+v", id, name, waiting, res)
-		}
-		if got := getInt(res.Outputs, workerSlotPositionKey); got != i+1 {
-			t.Fatalf("%s: position %d, want %d (%+v)", id, got, i+1, res)
-		}
-	}
-	// A slot frees: the first in line takes it, the others keep their places.
-	finishAction(t, e, "busy-m4")
-	if name, res, waiting := convert(t, e, "conv-d", 5*gib, ""); !waiting || name != "" || getInt(res.Outputs, workerSlotPositionKey) != 4 {
-		t.Fatalf("a later conversion took the slot ahead of the ones waiting: assigned %q (waiting %v), %+v", name, waiting, res)
-	}
-	if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-		t.Fatalf("the first in line did not take the free slot: %+v", res)
-	}
-	// Those left waiting each move up one place.
-	for id, want := range map[string]int{"conv-b": 1, "conv-c": 2, "conv-d": 3} {
-		res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, id))
-		if !waiting || getInt(res.Outputs, workerSlotPositionKey) != want {
-			t.Fatalf("%s: position %d (waiting %v), want %d", id, getInt(res.Outputs, workerSlotPositionKey), waiting, want)
-		}
+	seedActionInstance(t, e.deps.Store, "conv-b", "transcode_media", StatusRunning, 0, "", map[string]any{},
+		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1", roomRefusedByKey: "m1", roomRefusedAtKey: e.now().Format(time.RFC3339Nano)})
+	if name, _, waiting := assignAgain(t, e, "conv-b"); waiting || name != "m4" {
+		t.Fatalf("a conversion m1 just refused went to %q (waiting %v), want m4", name, waiting)
 	}
 }
 
@@ -300,8 +323,8 @@ func TestAnAdmittedConversionNeedsTheRoomOfItsFileBeforeItIsGivenAWorker(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if need := conversionRetentionNeed(parseExecutionContextMust(t, e, res.ID)); need != 29*gib {
-		t.Fatalf("the admitted conversion needs %d bytes of room, want %d", need, 29*gib)
+	if need := conversionRoomNeed(parseExecutionContextMust(t, e, res.ID)); need.SourceBytes != 29*gib || need.ReserveBytes != 29*gib/2 {
+		t.Fatalf("the admitted conversion needs %+v, want its source and half of it", need)
 	}
 }
 
@@ -315,93 +338,17 @@ func TestAFileOnlyAnOfflineWorkerCouldEverHoldWaitsForIt(t *testing.T) {
 			m1.doctorFunc = func(context.Context) error { return errors.New("offline") }
 			e := retentionWorkers(t, m4, m1)
 
-			// 50 GiB never fits m4, even empty; m1 could, once it is back. Leaving the
-			// file to m4 would strand it there.
-			if name, res, waiting := convert(t, e, "conv-a", 50*gib, ""); !waiting || name != "" || !strings.Contains(res.WaitingReason, "room to retain") {
+			// A 70 GiB file's output never fits m4's budget, even empty; m1 could
+			// take it once it is back. It is not failed (m1 could take it) and not
+			// left to m4.
+			if name, res, waiting := convert(t, e, "conv-a", 70*gib, ""); !waiting || name != "" || res.Status == StepFailed {
 				t.Fatalf("assigned %q (waiting %v), %+v", name, waiting, res)
 			}
 			m1.doctorFunc = nil
 			e.workerStateFor("m1").obs.CheckedAt = time.Time{} // check it again
-			if res, waiting := e.ensureWorkerAssigned(context.Background(), parseExecutionContextMust(t, e, "conv-a")); waiting {
-				t.Fatalf("m1 is back and holds the file: %+v", res)
-			}
-			if got := assignedWorker(parseExecutionContextMust(t, e, "conv-a").State); got != "m1" {
-				t.Fatalf("assigned %q, want m1", got)
+			if name, res, waiting := assignAgain(t, e, "conv-a"); waiting || name != "m1" {
+				t.Fatalf("m1 is back and holds the file: assigned %q (waiting %v), %+v", name, waiting, res)
 			}
 		})
-	}
-}
-
-func TestAReportDatedAheadOfTheClockIsNotTrusted(t *testing.T) {
-	ahead := newRoomReporter(30*gib, 0)
-	ahead.age = -2 * transcode.RetentionRoomMaxAge // observed "in the future"
-	e := retentionWorkers(t, ahead, newRoomReporter(100*gib, 100*gib))
-	if name, _, waiting := convert(t, e, "conv-a", 29*gib, ""); waiting || name != "m4" {
-		t.Fatalf("a report from the future was trusted: assigned %q (waiting %v)", name, waiting)
-	}
-}
-
-func TestAFileLargerThanEveryBudgetPrefersTheWorkerThatCanRunItAloneSoonest(t *testing.T) {
-	cases := []struct {
-		name         string
-		m4Room, m1Rm int64
-		want         string
-	}{
-		{"both report no room: the first still takes it", 0, 0, "m4"},
-		{"m4 holds candidates or has another large file waiting, m1 is empty", 0, 40 * gib, "m1"},
-		{"m4 has some room left, m1 none", 5 * gib, 0, "m4"},
-		{"m4 has none, m1 has some", 0, 5 * gib, "m1"},
-		{"m4 has some room, m1 is empty", 5 * gib, 40 * gib, "m1"},
-		{"both are empty: the first takes it", 30 * gib, 40 * gib, "m4"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			e := retentionWorkers(t, newRoomReporter(30*gib, tc.m4Room), newRoomReporter(40*gib, tc.m1Rm))
-			assertAlone(t, e, tc.want)
-		})
-	}
-}
-
-// A report that says nothing (missing, old or dated ahead) takes the worker to
-// have room for any file, so a large one goes to it over a fresh empty worker
-// that could only run it alone.
-func TestAReportThatSaysNothingTakesTheLargeFileOverAFreshEmptyWorker(t *testing.T) {
-	silent := func() *roomReporter { r := newRoomReporter(30*gib, 0); r.silent = true; return r }
-	old := func() *roomReporter {
-		r := newRoomReporter(30*gib, 0)
-		r.age = 2 * transcode.RetentionRoomMaxAge
-		return r
-	}
-	ahead := func() *roomReporter {
-		r := newRoomReporter(30*gib, 0)
-		r.age = -2 * transcode.RetentionRoomMaxAge
-		return r
-	}
-	for name, quiet := range map[string]func() *roomReporter{"missing": silent, "old": old, "dated ahead": ahead} {
-		t.Run(name, func(t *testing.T) {
-			assertAlone(t, retentionWorkers(t, newRoomReporter(40*gib, 40*gib), quiet()), "m1")
-		})
-	}
-}
-
-func assertAlone(t *testing.T, e *Engine, want string) {
-	t.Helper()
-	// 60 GiB is larger than both budgets: it still gets a worker.
-	if name, res, waiting := convert(t, e, "conv-a", 60*gib, ""); waiting || name != want {
-		t.Fatalf("assigned %q (waiting %v), want %q: %+v", name, waiting, want, res)
-	}
-}
-
-func TestAFileThatFitsSomewhereKeepsItsRoutingWhenAnotherFileIsTooLarge(t *testing.T) {
-	// m4 holds nothing and m1 reports no room because a file larger than its
-	// budget waits there: a file that fits m4 still goes to m4, and one that
-	// fits neither right now waits, as before.
-	e := retentionWorkers(t, newRoomReporter(30*gib, 30*gib), newRoomReporter(40*gib, 0))
-	if name, _, waiting := convert(t, e, "conv-a", 20*gib, ""); waiting || name != "m4" {
-		t.Fatalf("a file that fits m4: assigned %q (waiting %v)", name, waiting)
-	}
-	e = retentionWorkers(t, newRoomReporter(30*gib, 0), newRoomReporter(40*gib, 0))
-	if name, _, waiting := convert(t, e, "conv-b", 20*gib, ""); !waiting || name != "" {
-		t.Fatalf("a file no worker has room for now: assigned %q (waiting %v), want it to wait", name, waiting)
 	}
 }

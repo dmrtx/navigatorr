@@ -150,14 +150,14 @@ func TestConcurrentResumeAndReconcilerShareDurableClaim(t *testing.T) {
 	}
 }
 
-// The reconciler's poll of a job its worker keeps queued for lack of room to
-// retain the candidate marks the action in the store, which then leaves it out
-// of its worker's count; the poll that finds the job running clears the mark.
-func TestReconcilerPollMarksAJobQueuedForRetentionRoomInTheStore(t *testing.T) {
+// The reconciler's poll of a job its node refused at its slot (no room, pause,
+// build) puts the action back in the transcode queue instead of waiting on that
+// node.
+func TestReconcilerPollPutsAJobTheNodeRefusedBackInTheQueue(t *testing.T) {
 	st := setupTestStore(t)
 	now := time.Now().UTC()
 	var remote atomic.Value
-	remote.Store(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: "retention_budget"})
+	remote.Store(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: "free_disk", RoomNote: "needs 80.0 GB, this node can offer 20.0 GB"})
 	mock := &mockTranscodeExecutor{}
 	mock.submitFunc = func(ctx context.Context, req transcode.Request) (transcode.Job, error) {
 		return transcode.Job{ID: req.ID}, nil
@@ -183,29 +183,16 @@ func TestReconcilerPollMarksAJobQueuedForRetentionRoomInTheStore(t *testing.T) {
 	if err != nil || res.Status != StatusWaitingExternal {
 		t.Fatalf("run: %+v %v", res, err)
 	}
-	active := func() int {
-		t.Helper()
-		counts, err := st.CountActiveWorkerActions("transcode_media")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return counts[transcode.DefaultWorkerName]
+	now = now.Add(time.Minute)
+	if err := e.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
-	poll := func() {
-		t.Helper()
-		now = now.Add(time.Minute)
-		if err := e.ReconcileOnce(context.Background()); err != nil {
-			t.Fatal(err)
-		}
+	state := actionState(t, st, res.ID)
+	if getInt(state, requeueCountKey) < 1 || getString(state, requeuedFromKey) != transcode.DefaultWorkerName || getString(state, roomRefusedByKey) != transcode.DefaultWorkerName {
+		t.Fatalf("refused at its slot: state %v, want requeued once from the node that refused it", state)
 	}
-	poll()
-	if got := getString(actionState(t, st, res.ID), workerRetentionBlockedKey); got != "retention_budget" || active() != 0 {
-		t.Fatalf("queued for room: marked %q, %d counted on its worker", got, active())
-	}
-	remote.Store(transcode.JobStatus{Status: transcode.StatusRunning})
-	poll()
-	if _, ok := actionState(t, st, res.ID)[workerRetentionBlockedKey]; ok || active() != 1 {
-		t.Fatalf("running: state %v, %d counted on its worker", actionState(t, st, res.ID), active())
+	if _, ok := state["job_id"]; ok {
+		t.Fatalf("the refused attempt's job must not stay on the action: %v", state)
 	}
 }
 
