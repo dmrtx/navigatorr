@@ -188,7 +188,7 @@ func TestReconcilerPollPutsAJobTheNodeRefusedBackInTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := actionState(t, st, res.ID)
-	if getInt(state, requeueCountKey) < 1 || getString(state, requeuedFromKey) != transcode.DefaultWorkerName || getString(state, roomRefusedByKey) != transcode.DefaultWorkerName {
+	if getInt(state, requeueCountKey) < 1 || getString(state, requeuedFromKey) != transcode.DefaultWorkerName || refusalsFromState(state[roomRefusalsKey])[transcode.DefaultWorkerName].IsZero() {
 		t.Fatalf("refused at its slot: state %v, want requeued once from the node that refused it", state)
 	}
 	if _, ok := state["job_id"]; ok {

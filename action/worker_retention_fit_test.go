@@ -298,7 +298,7 @@ func TestARequeuedConversionPrefersItsNodeUnlessThatNodeJustRefusedIt(t *testing
 		t.Fatalf("a requeued conversion went to %q (waiting %v), want the node it came from", name, waiting)
 	}
 	seedActionInstance(t, e.deps.Store, "conv-b", "transcode_media", StatusRunning, 0, "", map[string]any{},
-		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1", roomRefusedByKey: "m1", roomRefusedAtKey: e.now().Format(time.RFC3339Nano)})
+		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1", roomRefusalsKey: map[string]any{"m1": e.now().Format(time.RFC3339Nano)}})
 	if name, _, waiting := assignAgain(t, e, "conv-b"); waiting || name != "m4" {
 		t.Fatalf("a conversion m1 just refused went to %q (waiting %v), want m4", name, waiting)
 	}
