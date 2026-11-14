@@ -113,6 +113,8 @@ func TestTwoRealRefusalsGoThroughTheRequeueToEachNodeOnce(t *testing.T) {
 		t.Fatalf("m4 was asked for the refused job %d times, want once", m4Lookups.Load())
 	}
 	m4RefusedAt := refusals["m4"]
+	// Time passes inside the window, so a second stamp on m4 would show.
+	clock.advance(10 * time.Second)
 
 	// The next turn passes m4 over and sends it to m1, which refuses too.
 	if w, cond, _ := turnWith(t, e, "big", tmpl); w != "" || cond != "worker_busy" {
