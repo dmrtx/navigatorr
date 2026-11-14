@@ -76,21 +76,6 @@ func TestRetentionRoomIsDroppedWhenTheBudgetOrDeferredPublicationIsTurnedOff(t *
 	}
 }
 
-func TestRetentionRoomCountsTheReservationOfAStartedJobAndNothingForAQueuedOne(t *testing.T) {
-	srcSize := int64(len("dummy-media"))
-	budget := 10 * srcSize
-	f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = budget })
-	now := time.Now().UTC()
-
-	f.submit("job-a", "on_approval") // starts and reserves the size of its source
-	f.submit("job-b", "on_approval") // queued behind it: holds nothing yet
-	f.w.refreshRetentionRoom(now)
-	room := f.w.SchedulerObservation(now).Retention
-	if room == nil || room.CapacityBytes != budget || room.RoomBytes != budget-srcSize {
-		t.Fatalf("with one started and one queued job the worker reports %+v, want room %d", room, budget-srcSize)
-	}
-}
-
 func TestRetentionRoomRidesOnTheSchedulerPassAndTheHealthPayload(t *testing.T) {
 	f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 1000 })
 	f.w.schedulerSweepHook = func(string) error { return nil }

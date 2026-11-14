@@ -107,14 +107,17 @@ type JobRecord struct {
 	// is full, instead of falling back to publish on encode. The coordinator
 	// asks for it for a standalone attempt only (a batch child must not wait).
 	RetentionWait bool `json:"retention_wait,omitempty"`
-	// RetentionBlocked is why a queued on_approval job is not starting
-	// (retentionBlockedBudget or retentionBlockedDisk); blank once it starts.
+	// RetentionBlocked is why the node refused a queued on_approval job at its
+	// slot (retentionBlockedBudget, retentionBlockedDisk or
+	// retentionBlockedHold) and RoomNote the numbers; the coordinator takes the
+	// job back. Blank once it starts. Old records may carry floor_unmet_*
+	// fields; they are ignored.
 	RetentionBlocked string `json:"retention_blocked,omitempty"`
-	// FloorUnmetSince is when the free-disk floor was first seen unmeetable
-	// with nothing that could free the disk, and FloorUnmetSeenAt the last
-	// time it was seen so; both blank whenever it is not (see noteFloorUnmet).
-	FloorUnmetSince  time.Time `json:"floor_unmet_since,omitzero"`
-	FloorUnmetSeenAt time.Time `json:"floor_unmet_seen_at,omitzero"`
+	RoomNote         string `json:"room_note,omitempty"`
+	// RoomSourceBytes and RoomSourceMTime (unix nanoseconds) identify the
+	// source at submit, to find this job's own copy in the source cache.
+	RoomSourceBytes int64 `json:"room_source_bytes,omitempty"`
+	RoomSourceMTime int64 `json:"room_source_mtime,omitempty"`
 	// RetainReserveBytes is the disk an on_approval job is admitted against
 	// once it starts, until its candidate exists and CandidateSizeBytes takes
 	// over.

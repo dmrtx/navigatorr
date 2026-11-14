@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,41 +108,6 @@ func TestABatchChildAcceptedByTheWorkerIsRetained(t *testing.T) {
 	}
 }
 
-// A batch cannot wait for room: nothing in it is approved before every child
-// has encoded, so the candidates that fill the worker would never leave.
-func TestABatchChildTheWorkerHasNoRoomToRetainPublishesOnEncode(t *testing.T) {
-	ec, res, w, e, _ := batchChildSubmit(t, retentionBusy(fmt.Sprintf("%s 90 of 80 allowed bytes", transcode.RetentionRefusalBudget)))
-	if res.Status != StepCompleted {
-		t.Fatalf("the child waited instead of publishing on encode: %+v", res)
-	}
-	if len(w.requests) != 2 || w.requests[0].PublishPolicy != transcode.PublishPolicyOnApproval || w.requests[1].PublishPolicy != "" {
-		t.Fatalf("requests: %+v", w.requests)
-	}
-	if w.requests[0].ID != w.requests[1].ID || w.requests[0].IdempotencyKey != w.requests[1].IdempotencyKey {
-		t.Fatalf("the second submit must name the same job: %+v", w.requests)
-	}
-	if _, ok := ec.State[publishPolicyKey]; ok || getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull {
-		t.Fatalf("state: %v", ec.State)
-	}
-	// The decision holds for later submits of the same attempt (a reconcile
-	// that finds no job), and the engine does not defer it again.
-	if policy, held := e.publishPolicyFor(context.Background(), ec); policy != "" || held != nil {
-		t.Fatalf("a spilled child deferred again: %q %v", policy, held)
-	}
-}
-
-// The disk floor is not a lack of room to retain: a job that publishes on
-// encode needs that disk too, so the child waits like any busy submit.
-func TestABatchChildWaitsWhenTheDiskFloorRefusesIt(t *testing.T) {
-	ec, res, w, _, _ := batchChildSubmit(t, retentionBusy(fmt.Sprintf("10 %s the 50 byte minimum", transcode.RetentionRefusalDisk)))
-	if res.Status != StepWaitingExternal || len(w.requests) != 1 {
-		t.Fatalf("%+v requests=%d", res, len(w.requests))
-	}
-	if _, ok := ec.State[publishPolicyFallbackKey]; ok || getString(ec.State, publishPolicyKey) != transcode.PublishPolicyOnApproval {
-		t.Fatalf("a disk refusal changed the policy: %v", ec.State)
-	}
-}
-
 // A worker that admits at start takes every submit and applies its budget when
 // the job's slot comes up. Only a standalone attempt asks it to wait for room
 // there; a batch child must not wait (it publishes on encode instead).
@@ -185,102 +149,14 @@ func TestTheWaitStepRecordsAFallbackTheWorkerChoseAtStart(t *testing.T) {
 	ec.State["job_id"] = "job-existing"
 	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
 	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
-		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusQueued, PublishPolicy: transcode.PublishPolicyOnApproval, RetentionBlocked: "free_disk"}, nil
-	}
-	res, err := e.stepTranscodeWait(context.Background(), ec)
-	if err != nil || res.Status != StepWaitingExternal || !strings.Contains(res.WaitingReason, "waiting for room on the worker") {
-		t.Fatalf("queued for room: %+v %v", res, err)
-	}
-	if _, ok := ec.State[publishPolicyFallbackKey]; ok {
-		t.Fatalf("a waiting job recorded a fallback: %v", ec.State)
-	}
-	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
 		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusRunning, PublishPolicy: transcode.PublishPolicyOnApproval, PublishFallback: transcode.PublishFallbackRetentionFull}, nil
 	}
-	if res, err = e.stepTranscodeWait(context.Background(), ec); err != nil || res.Status != StepWaitingExternal {
+	res, err := e.stepTranscodeWait(context.Background(), ec)
+	if err != nil || res.Status != StepWaitingExternal {
 		t.Fatalf("running: %+v %v", res, err)
 	}
 	if getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull || getString(ec.State, publishPolicyKey) != transcode.PublishPolicyOnApproval {
 		t.Fatalf("state: %v", ec.State)
-	}
-}
-
-// A job the worker keeps queued for lack of room to retain its candidate is
-// marked on the action while it waits, and unmarked once it starts, so the
-// server can give its slot to the next conversion in between.
-func TestTheWaitStepMarksAJobQueuedForRetentionRoomUntilItStarts(t *testing.T) {
-	w := newRetainedExecutor()
-	e := NewEngine(EngineDeps{Transcode: w})
-	ec := testReconcileEC("")
-	ec.State["job_id"] = "job-existing"
-	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
-	status := func(s transcode.JobStatus) {
-		s.ID, s.PublishPolicy = "job-existing", transcode.PublishPolicyOnApproval
-		w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) { return s, nil }
-		if res, err := e.stepTranscodeWait(context.Background(), ec); err != nil || res.Status != StepWaitingExternal {
-			t.Fatalf("%+v: %+v %v", s, res, err)
-		}
-	}
-	for _, reason := range []string{"retention_budget", "free_disk"} {
-		status(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: reason})
-		if got := getString(ec.State, workerRetentionBlockedKey); got != reason {
-			t.Fatalf("queued for %s: marked %q", reason, got)
-		}
-	}
-	// Queued behind a running job, with room: it holds the slot it waits for.
-	status(transcode.JobStatus{Status: transcode.StatusQueued})
-	if _, ok := ec.State[workerRetentionBlockedKey]; ok {
-		t.Fatalf("a job no longer short of room is still marked: %v", ec.State)
-	}
-	status(transcode.JobStatus{Status: transcode.StatusQueued, RetentionBlocked: "retention_budget"})
-	status(transcode.JobStatus{Status: transcode.StatusRunning})
-	if _, ok := ec.State[workerRetentionBlockedKey]; ok {
-		t.Fatalf("a running job is still marked: %v", ec.State)
-	}
-}
-
-func TestOnlyABatchChildSpillsAndOnlyForARetentionRefusal(t *testing.T) {
-	deferred := func() *transcode.Request { return &transcode.Request{PublishPolicy: transcode.PublishPolicyOnApproval} }
-	child := func() *ExecutionContext {
-		return &ExecutionContext{InstanceID: "c", Inputs: map[string]any{"parent_action_id": "batch"}, State: map[string]any{publishPolicyKey: transcode.PublishPolicyOnApproval}, Outputs: map[string]any{}}
-	}
-	room := retentionBusy(transcode.RetentionRefusalBudget + " 9 of 8 allowed bytes")
-	slots := retentionBusy("max parallel jobs reached")
-
-	if req := deferred(); !spillRetentionRefusal(child(), req, room) || req.PublishPolicy != "" {
-		t.Fatalf("a batch child must spill: %+v", req)
-	}
-	standalone := child()
-	standalone.Inputs = map[string]any{}
-	if req := deferred(); spillRetentionRefusal(standalone, req, room) || req.PublishPolicy == "" {
-		t.Fatal("a standalone attempt waits for room, it does not spill")
-	}
-	if req := deferred(); spillRetentionRefusal(child(), req, slots) || req.PublishPolicy == "" {
-		t.Fatal("a refusal for slots is not a refusal for room")
-	}
-	if req := deferred(); spillRetentionRefusal(child(), req, errors.New("connection refused")) {
-		t.Fatal("a transport error is not a refusal")
-	}
-	if req := (&transcode.Request{}); spillRetentionRefusal(child(), req, room) {
-		t.Fatal("a job that was not deferred has nothing to spill")
-	}
-}
-
-// A refusal on both submits is an ordinary busy answer: the child waits.
-func TestABatchChildStillWaitsWhenEvenPublishOnEncodeIsRefused(t *testing.T) {
-	ec, res, w, e, _ := batchChildSubmit(t,
-		retentionBusy(transcode.RetentionRefusalBudget+" 9 of 8 allowed bytes"),
-		retentionBusy("max parallel jobs reached"))
-	if res.Status != StepWaitingExternal || res.WaitingCondition != "worker_busy" || len(w.requests) != 2 {
-		t.Fatalf("%+v requests=%d", res, len(w.requests))
-	}
-	// The next submit goes straight out without a policy: the refusal that
-	// spilled it is remembered.
-	if getString(ec.State, publishPolicyFallbackKey) != fallbackRetentionFull {
-		t.Fatalf("state: %v", ec.State)
-	}
-	if policy, held := e.publishPolicyFor(context.Background(), ec); policy != "" || held != nil {
-		t.Fatalf("the next submit deferred again: %q %v", policy, held)
 	}
 }
 
@@ -585,30 +461,5 @@ func TestACandidateTheCancelledBatchCouldNotReleaseIsReportedAndListed(t *testin
 	}
 	if !getBool(rp.sourceState(), candidateRemovedKey) {
 		t.Fatalf("the discard was not recorded: %v", rp.sourceState())
-	}
-}
-
-// A job that runs alone says so while it waits, and the worker's floor failure
-// reaches the action as the failure text.
-func TestTheWaitStepTellsARunAloneWaitAndAFloorFailure(t *testing.T) {
-	w := newRetainedExecutor()
-	e := NewEngine(EngineDeps{Transcode: w})
-	ec := testReconcileEC("")
-	ec.State["job_id"] = "job-existing"
-	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
-	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
-		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusQueued, PublishPolicy: transcode.PublishPolicyOnApproval, RetentionBlocked: "retention_alone"}, nil
-	}
-	res, err := e.stepTranscodeWait(context.Background(), ec)
-	if err != nil || res.Status != StepWaitingExternal || !strings.Contains(res.WaitingReason, "hold no other candidate") || strings.Contains(res.WaitingReason, "waiting for room on the worker") {
-		t.Fatalf("run-alone wait: %+v %v", res, err)
-	}
-	const msg = "not enough free disk on this node for 30m0s: the job needs 50 bytes and the node offers 5 bytes above its 95 byte free-disk minimum now"
-	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
-		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusFailed, ReasonCode: "retention_floor_unmet", Error: msg}, nil
-	}
-	res, err = e.stepTranscodeWait(context.Background(), ec)
-	if err != nil || res.Status != StepFailed || !strings.Contains(res.Error, msg) {
-		t.Fatalf("floor failure: %+v %v", res, err)
 	}
 }

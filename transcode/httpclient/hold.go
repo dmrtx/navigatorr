@@ -29,7 +29,22 @@ func (e *HTTPExecutor) Hold(ctx context.Context) (HoldStatus, error) {
 // not started. Running jobs are never interrupted. It returns the hold the
 // worker reports afterwards.
 func (e *HTTPExecutor) SetHold(ctx context.Context, hold bool) (HoldStatus, error) {
-	payload, err := json.Marshal(map[string]bool{"hold": hold})
+	return e.setHold(ctx, hold, false)
+}
+
+// SetHoldClearCache holds the queue like SetHold and also has the worker delete
+// the cached sources no running job holds (an immediate pause). A worker that
+// predates the field ignores it.
+func (e *HTTPExecutor) SetHoldClearCache(ctx context.Context) (HoldStatus, error) {
+	return e.setHold(ctx, true, true)
+}
+
+func (e *HTTPExecutor) setHold(ctx context.Context, hold, clearCache bool) (HoldStatus, error) {
+	body := map[string]bool{"hold": hold}
+	if clearCache {
+		body["clear_cache"] = true
+	}
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return HoldStatus{}, err
 	}

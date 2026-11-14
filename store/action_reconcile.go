@@ -125,17 +125,11 @@ func (s *Store) ListWorkerSlotWaiters() ([]WorkerSlotWaiterRow, error) {
 // worker they were assigned. Actions without a worker yet are not counted,
 // nor a child held by its paused or decision-waiting batch before it sent
 // anything to its worker: it uses no slot there.
-//
-// One action per worker whose job the worker keeps queued for lack of room to
-// retain its candidate (worker_retention_blocked) is not counted either: the
-// worker starts the next job meanwhile. Only one, so that when the room is
-// short for everything, the conversions do not all move onto that worker, where
-// they stay: the second one that cannot start holds the slot.
 func (s *Store) CountActiveWorkerActions(actionName string) (map[string]int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT json_extract(state_json, '$.worker'),
-		COUNT(*) - MIN(1, SUM(COALESCE(json_extract(state_json, '$.worker_retention_blocked'), '') != ''))
+		COUNT(*)
 		FROM action_instances
 		WHERE status IN ('pending', 'waiting_external', 'running')
 		AND action_name = ?

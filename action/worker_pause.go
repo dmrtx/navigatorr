@@ -10,6 +10,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcode/httpclient"
 )
 
 // Node pause.
@@ -278,6 +279,34 @@ func (e *Engine) sweepPausedNodes(ctx context.Context) {
 			log.Printf("worker pause: %s: %v", r.ID, err)
 		}
 	}
+	e.clearPausedCaches(ctx, pauses)
+}
+
+// cacheClearer is a node's executor that can be told to delete the cached
+// sources no running job holds.
+type cacheClearer interface {
+	SetHoldClearCache(ctx context.Context) (httpclient.HoldStatus, error)
+}
+
+// clearPausedCaches empties the source cache of every node under an immediate
+// pause, once its encodes have been sent back: the node is wanted for something
+// else and keeps no spare copies of files. Finished candidates waiting for
+// approval are not touched. A graceful pause or a suspend leaves the cache alone.
+func (e *Engine) clearPausedCaches(ctx context.Context, pauses map[string]store.WorkerPause) {
+	for name, pause := range pauses {
+		if pause.Mode != store.WorkerPauseImmediate {
+			continue
+		}
+		w, ok := e.deps.Workers.Get(name)
+		if !ok {
+			continue
+		}
+		if c, ok := w.Executor.(cacheClearer); ok {
+			if _, err := c.SetHoldClearCache(ctx); err != nil {
+				log.Printf("worker pause: clearing the source cache of %s: %v", name, err)
+			}
+		}
+	}
 }
 
 // requeueForPause sends one conversion back to the transcode queue because
@@ -432,7 +461,7 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 // own job identity, since the node still knows the cancelled one.
 func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, node string) error {
 	fresh := map[string]any{}
-	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey} {
+	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusedByKey, roomRefusedAtKey} {
 		if v, ok := ec.State[key]; ok {
 			fresh[key] = v
 		}
@@ -451,6 +480,9 @@ func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance
 	inst.CurrentStep = 0
 	inst.WaitingCondition = "worker_busy"
 	inst.WaitingReason = fmt.Sprintf("Node %s was paused; back in the transcode queue to start again on a free node", node)
+	if why := getString(ec.State, requeueWhyKey); why != "" {
+		inst.WaitingReason = fmt.Sprintf("Back in the transcode queue (%s): %s", node, why)
+	}
 	inst.WaitingOptionsJSON = "[]"
 	inst.ErrorJSON = ""
 	inst.StateJSON, inst.OutputsJSON = toJSON(fresh), toJSON(fresh)

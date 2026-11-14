@@ -1,6 +1,10 @@
 package action
 
-import "context"
+import (
+	"context"
+
+	"github.com/jakenesler/navigatorr/transcode"
+)
 
 // Who may take which free slot.
 //
@@ -21,8 +25,8 @@ type queueClaim struct {
 	usable []bool
 }
 
-// claimFor is the claim of a conversion that needs need bytes of retention room.
-func (e *Engine) claimFor(ctx context.Context, q queueSlots, need int64) queueClaim {
+// claimFor is the claim of a conversion that needs the room need.
+func (e *Engine) claimFor(ctx context.Context, q queueSlots, need transcode.RoomNeed) queueClaim {
 	eligible := e.retentionEligible(ctx, q.workers, need)
 	c := queueClaim{reach: make([]bool, len(q.workers)), usable: make([]bool, len(q.workers))}
 	for i, w := range q.workers {

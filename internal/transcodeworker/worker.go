@@ -290,14 +290,9 @@ type Worker struct {
 	schedulerHealth transcode.SchedulerObservation
 	// retentionRoom is the last measure of the room left to retain candidates
 	// (see refreshRetentionRoom); guarded by schedulerMu.
-	retentionRoom *transcode.RetentionRoom
-	// retentionScanFailed remembers a failed queue read, to log it once;
-	// retentionNow replaces the clock of the floor rule in tests. Both are
-	// used under the capacity lock.
-	retentionScanFailed bool
-	retentionNow        func() time.Time
-	schedulerInterval   time.Duration
-	schedulerSweepHook  func(string) error
+	retentionRoom      *transcode.RetentionRoom
+	schedulerInterval  time.Duration
+	schedulerSweepHook func(string) error
 
 	cfg        *WorkerConfig
 	ffmpegPath string
@@ -359,6 +354,7 @@ type Worker struct {
 	// tests. retainedSweepMu guards retainedSweepAt, the last scheduler-driven
 	// retained-candidate sweep.
 	freeDisk        func(path string) (int64, error)
+	diskTotal       func(path string) (int64, error)
 	retainedSweepMu sync.Mutex
 	retainedSweepAt time.Time
 }
@@ -1206,8 +1202,13 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 			err := errors.New("publish_policy on_approval requires an external destination: this candidate is written in place")
 			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
 		}
-		// The retention limits are applied when the job's slot comes up
-		// (admitAtStartLocked), not here: a queued job holds no disk yet.
+		// A paused or build-held node takes no new job: it says so now and the
+		// coordinator keeps the job in its own queue. The disk and retention
+		// limits are applied when the slot comes up (admitAtStartLocked).
+		if _, msg := w.holdRefusal(); msg != "" {
+			_ = os.Remove(jobDir)
+			return SubmitResponse{ID: trimmedID, Error: msg}, errors.New(msg)
+		}
 	}
 
 	// Phase 6 is local-output-first: an external destination must not require
@@ -1245,9 +1246,12 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		PublishPolicy:       publishPolicy,
 	}
 	if publishPolicy != "" {
-		// The output is bounded by its source for admission: a candidate the
-		// size policy accepts is smaller, and the average is far below that.
-		job.RetainReserveBytes = fi.Size()
+		// The output is admitted against the reserve its goal allows
+		// (transcode.OutputReserveBytes); one that grows past it is not
+		// compressing and fails.
+		job.RetainReserveBytes = transcode.OutputReserveBytes(plan, fi.Size())
+		job.RoomSourceBytes = fi.Size()
+		job.RoomSourceMTime = fi.ModTime().UTC().UnixNano()
 		job.RetentionWait = req.RetentionWait
 	}
 	job.Phase = "queued"
@@ -1270,6 +1274,13 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	_, _ = w.scheduleQueuedLocked(ctx, selfExe, configPath)
 	if refreshed, rerr := LoadJob(jobFile); rerr == nil && refreshed != nil {
 		job = refreshed
+	}
+	if job.Status == "queued" && job.RetentionBlocked != "" && job.PID == 0 {
+		// No room on this node: it takes nothing it cannot run. The job is
+		// forgotten here and stays in the coordinator's queue.
+		msg := job.RoomNote
+		_ = os.RemoveAll(jobDir)
+		return SubmitResponse{ID: trimmedID, Error: msg}, errors.New(msg)
 	}
 
 	return SubmitResponse{
@@ -1491,8 +1502,6 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		if len(queued) == 0 {
 			return started, errors.Join(errs...)
 		}
-		// Once per pass: the job the node empties for, if any.
-		gate := w.tooLargeGate(queued, scanErr)
 		progressed := false
 		for _, q := range queued {
 			if !limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use) {
@@ -1543,7 +1552,7 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 				}
 				// A deferred job takes its retention room only now; one that
 				// must wait for it stays queued and the next job may start.
-				admitted, err := w.admitAtStartLocked(jobFile, latest, gate)
+				admitted, err := w.admitAtStartLocked(jobFile, latest)
 				if err != nil {
 					errs = append(errs, err)
 				}
@@ -2113,6 +2122,7 @@ type JobStatusResponse struct {
 	// RetentionBlocked says why a queued on_approval job is waiting for
 	// retention room ("retention_budget" or "free_disk").
 	RetentionBlocked string `json:"retention_blocked,omitempty"`
+	RoomNote         string `json:"room_note,omitempty"`
 }
 
 // Status reads the current status of a job.
@@ -2207,6 +2217,7 @@ func (w *Worker) Status(ctx context.Context, jobID string) (JobStatusResponse, e
 		PublishPolicy:    job.PublishPolicy,
 		PublishFallback:  job.PublishFallback,
 		RetentionBlocked: job.RetentionBlocked,
+		RoomNote:         job.RoomNote,
 		Retained:         job.deferredPublication() && FinalizationState(job.FinalizationState) == FinalizationStateRetained,
 		RetainedAt:       job.RetainedAt,
 		RetainedExpiresAt: func() time.Time {

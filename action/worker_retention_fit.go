@@ -3,124 +3,135 @@ package action
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
-// Keeping a conversion off a worker that cannot retain its candidate.
+// Which node has room for a conversion.
 //
-// A standalone conversion on a worker that publishes on approval waits, queued
-// on the worker, until the worker has room to retain its candidate (see
-// DEFERRED_CANDIDATE_PUBLICATION.md). The worker reserves the size of the
-// file for it, since the candidate's size is not known before the encode. A
-// worker whose retained candidates already fill most of its budget cannot take
-// a large file, while another may have room; and the conversion, once given a
-// worker, stays on it. So the coordinator gives a conversion only to a worker
-// that reports room for it, and one that fits nowhere waits in the queue
-// unassigned, out of the way of the conversions behind it (see
-// transcodeQueueTurn).
+// A node never waits for room (see DEFERRED_CANDIDATE_PUBLICATION.md, "Room"):
+// it takes a conversion or refuses it at once. So the coordinator keeps every
+// conversion that has no room in its own queue, in order, and gives the oldest
+// one that fits some open node to that node. Each node reports what it can take
+// now: its free disk plus the cached sources it would delete, less its floor
+// and the output reserves of encodes still writing, and the retention budget
+// left. A node that does not report, or whose report is old or dated ahead of
+// the coordinator's clock, is taken to have room; it refuses at once if it has
+// none, and the conversion comes back.
 //
-// A worker that does not report its room, or whose report is old or dated
-// ahead of the coordinator's clock, is taken to have it, as before workers
-// reported it. A file larger than the whole budget of every worker fits
-// nowhere, ever: waiting for room would never help, so it is given to a worker
-// that runs it alone, once the worker holds no other candidate (see
-// retentionEligible).
+// A conversion that no node could take even when empty, because its source,
+// output and the node's floor outgrow the disk or its output outgrows the
+// retention budget, fails when it is first placed.
+//
 // Who may take which free slot is worked out in transcode_queue_claims.go.
 
-// retentionNeed is the room a conversion needs on a worker that keeps its
-// candidate until it is approved: the size of its file. A batch child needs
-// none: the worker starts it to publish on encode when the budget is full.
-func retentionNeed(standalone bool, sourceBytes int64) int64 {
+// roomReserveKey is the output reserve the conversion's plan asks for, stored
+// when its plan is built so a requeued conversion is placed by the exact figure.
+const roomReserveKey = "room_reserve_bytes"
+
+// roomNeed is the room a conversion needs on a worker that keeps its candidate
+// until it is approved. A batch child needs none: its worker starts it to
+// publish on encode when the budget is full. Until the plan is known the
+// output reserve is the quality goal's half of the source.
+func roomNeed(standalone bool, sourceBytes, reserveBytes int64) transcode.RoomNeed {
 	if !standalone || sourceBytes <= 0 {
-		return 0
+		return transcode.RoomNeed{}
 	}
-	return sourceBytes
+	if reserveBytes <= 0 {
+		reserveBytes = transcode.OutputReserveBytes(nil, sourceBytes)
+	}
+	return transcode.RoomNeed{SourceBytes: sourceBytes, ReserveBytes: reserveBytes}
 }
 
-// conversionRetentionNeed is retentionNeed for the conversion being scheduled.
-func conversionRetentionNeed(ec *ExecutionContext) int64 {
-	return retentionNeed(getString(ec.Inputs, "parent_action_id") == "", getInt64(ec.State, SubmittedSourceBytesKey))
+// conversionRoomNeed is roomNeed for the conversion being scheduled.
+func conversionRoomNeed(ec *ExecutionContext) transcode.RoomNeed {
+	return roomNeed(getString(ec.Inputs, "parent_action_id") == "", getInt64(ec.State, SubmittedSourceBytesKey), getInt64(ec.State, roomReserveKey))
+}
+
+// roomOf is each worker's room report; nil for one that publishes on encode
+// (it needs no room) or reports none.
+func (e *Engine) roomOf(ctx context.Context, workers []transcode.NamedWorker) []*transcode.RetentionRoom {
+	rooms := make([]*transcode.RetentionRoom, len(workers))
+	for i, w := range workers {
+		if w.PublishPolicy == transcode.PublishPolicyOnApproval {
+			rooms[i] = e.workerObservation(ctx, w).Retention
+		}
+	}
+	return rooms
 }
 
 // retentionEligible says, for each worker, whether a conversion that needs
-// need bytes of retention room may be given it. Readiness is judged apart, but
-// a worker that is not ready still counts when deciding whether the file fits
-// anywhere: one that is down for a moment may be the only one big enough, and
-// the file must wait for it rather than be left on a worker that can never
-// hold it. A worker with no report from it is taken to be able to.
-//
-// A file larger than the whole budget of every on_approval worker still goes
-// to one: that worker runs it alone, once it holds no other candidate. The
-// worker that holds nothing is preferred, then one with room left; a worker
-// that reports none, since it holds candidates or another such file waits
-// there for it to empty, is the last choice.
-func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, need int64) []bool {
+// need may be given it now: the worker is open (not paused, no build) and
+// reports room. Readiness and free slots are judged apart.
+func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, need transcode.RoomNeed) []bool {
 	out := make([]bool, len(workers))
 	for i := range out {
 		out[i] = true
 	}
-	if need <= 0 {
+	if need.SourceBytes <= 0 {
 		return out
 	}
-	fits := make([]transcode.RetentionFit, len(workers))
-	rooms := make([]*transcode.RetentionRoom, len(workers))
-	holdsSomewhere := false
-	for i, w := range workers {
-		if w.PublishPolicy != transcode.PublishPolicyOnApproval {
-			holdsSomewhere = true // publishes on encode: needs no room
-			continue
-		}
-		rooms[i] = e.workerObservation(ctx, w).Retention
-		fits[i] = rooms[i].Fit(need, e.now())
-		if fits[i] != transcode.RetentionTooLarge {
-			holdsSomewhere = true
-		}
-	}
-	if !holdsSomewhere {
-		return retentionAloneChoice(rooms)
-	}
-	for i := range workers {
-		out[i] = fits[i] == transcode.RetentionFits
+	for i, r := range e.roomOf(ctx, workers) {
+		verdict, _ := r.Judge(need, e.now())
+		out[i] = verdict == transcode.RoomFits
 	}
 	return out
 }
 
-// retentionAloneChoice marks, for a file larger than every worker's budget,
-// the workers that suit it best: it runs alone on whichever takes it, so the
-// one holding nothing comes first, then one with room left, and a worker that
-// reports none (it holds candidates, or another such file waits there for it
-// to empty) last. A worker whose report is missing, old or dated ahead is
-// taken to fit the file, so it never gets here: every report seen is fresh.
-func retentionAloneChoice(rooms []*transcode.RetentionRoom) []bool {
-	rank := make([]int, len(rooms))
-	best := 3
-	for i, r := range rooms {
-		switch {
-		case r == nil || r.RoomBytes >= r.CapacityBytes:
-			rank[i] = 0
-		case r.RoomBytes > 0:
-			rank[i] = 1
-		default:
-			rank[i] = 2
+// roomNeverFits says whether no worker could take the conversion even empty,
+// and why. Every worker must say so: one that does not report, or publishes on
+// encode, could take it.
+func (e *Engine) roomNeverFits(ctx context.Context, workers []transcode.NamedWorker, need transcode.RoomNeed) (string, bool) {
+	if need.SourceBytes <= 0 || len(workers) == 0 {
+		return "", false
+	}
+	var biggest int64
+	for _, r := range e.roomOf(ctx, workers) {
+		if r == nil || r.EverFits(need) {
+			return "", false
 		}
-		best = min(best, rank[i])
+		biggest = max(biggest, r.DiskCapacityBytes-r.FloorBytes)
 	}
-	out := make([]bool, len(rooms))
-	for i := range out {
-		out[i] = rank[i] == best
-	}
-	return out
+	return fmt.Sprintf("Too big for every node: it needs %s (source %s and output %s) and the largest node has %s to give a job", gbText(need.SourceBytes+need.ReserveBytes), gbText(need.SourceBytes), gbText(need.ReserveBytes), gbText(biggest)), true
 }
 
-// retentionNoRoomReason words the wait of a conversion that no node has room
-// to retain.
-func retentionNoRoomReason(need int64) string {
-	return fmt.Sprintf("No node has room to retain its candidate (%.1f GiB); waiting for room, or for a node that has it", float64(need)/(1<<30))
+// roomWaitReason words why no node can take a conversion now, in plain terms:
+// which node is paused, which has a build, which waits for approvals and how
+// much it holds, and how much the best disk can offer against what is needed.
+func (e *Engine) roomWaitReason(ctx context.Context, workers []transcode.NamedWorker, need transcode.RoomNeed) string {
+	var parts []string
+	var bestOffer int64
+	space := false
+	for i, r := range e.roomOf(ctx, workers) {
+		name := workers[i].Name
+		verdict, offered := r.Judge(need, e.now())
+		switch verdict {
+		case transcode.RoomPaused:
+			parts = append(parts, fmt.Sprintf("node %s paused", name))
+		case transcode.RoomBuild:
+			parts = append(parts, fmt.Sprintf("build running on %s", name))
+		case transcode.RoomApprovals:
+			parts = append(parts, fmt.Sprintf("waiting for approvals on %s (%s held)", name, gbText(r.HeldBytes)))
+		case transcode.RoomNoSpace:
+			space = true
+			bestOffer = max(bestOffer, offered)
+		}
+	}
+	if space {
+		parts = append(parts, fmt.Sprintf("no node has room: needs %s, the most any node can offer is %s", gbText(need.SourceBytes+need.ReserveBytes), gbText(bestOffer)))
+	}
+	if len(parts) == 0 {
+		return "No node has room for it; waiting for room, or for a node that has it"
+	}
+	text := strings.Join(parts, "; ")
+	return strings.ToUpper(text[:1]) + text[1:]
 }
 
 // retentionNoSlotReason words the wait of a conversion that has a node with
-// room to retain it, but none with a free slot.
-func retentionNoSlotReason(need int64) string {
-	return fmt.Sprintf("Waiting for a free slot on a node with room to retain its candidate (%.1f GiB)", float64(need)/(1<<30))
+// room, but none with a free slot.
+func retentionNoSlotReason(need transcode.RoomNeed) string {
+	return fmt.Sprintf("Busy: waiting for a free slot on a node with room for it (%s)", gbText(need.SourceBytes+need.ReserveBytes))
 }
+
+func gbText(n int64) string { return fmt.Sprintf("%.1f GB", float64(max(n, 0))/1e9) }

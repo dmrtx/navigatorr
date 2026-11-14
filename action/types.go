@@ -54,6 +54,9 @@ type StepResult struct {
 	// this completed step, instead of the next one. It is how an action repeats
 	// its search; the step that sets it has already reset the state it repeats.
 	RewindTo string `json:"rewind_to,omitempty"`
+	// Requeue asks the engine to put the action back in the transcode queue
+	// (see room_requeue.go); the result's waiting reason says why.
+	Requeue bool `json:"requeue,omitempty"`
 }
 
 // ExecutionContext carries live state, inputs, outputs, and dependencies across steps

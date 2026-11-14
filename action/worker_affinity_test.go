@@ -94,57 +94,6 @@ func TestWorkersAtTheirCapMakeTheJobWait(t *testing.T) {
 	}
 }
 
-// A conversion its worker keeps queued for lack of room to retain the
-// candidate runs nothing there: the worker starts the next job, so the server
-// hands the slot to the next conversion instead of leaving the node idle
-// behind a job that cannot start. Only one such job is left out: when the room
-// is short for everything the queue does not move wholesale onto that node,
-// where the jobs would stay while the other node has room. Once a job has room
-// it holds a slot again.
-func TestAJobWaitingForRetentionRoomDoesNotHoldItsWorkersSlot(t *testing.T) {
-	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
-		{Name: "m1", Executor: poolWorker(2), MaxParallelJobs: 1},
-		{Name: "m4", Executor: poolWorker(2), MaxParallelJobs: 1, Podcast: true},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
-	for i, want := range []string{"m1", "m4"} {
-		if name, _, waiting := assignNew(t, e, fmt.Sprintf("conv-%d", i), "transcode_media"); waiting || name != want {
-			t.Fatalf("conv-%d: assigned %q (waiting %v), want %s", i, name, waiting, want)
-		}
-	}
-	mark := func(id, reason string) {
-		t.Helper()
-		ec := parseExecutionContextMust(t, e, id)
-		if reason == "" {
-			delete(ec.State, workerRetentionBlockedKey)
-		} else {
-			ec.State[workerRetentionBlockedKey] = reason
-		}
-		if err := e.persistExecutionState(context.Background(), ec); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mark("conv-1", "retention_budget")
-	if name, res, waiting := assignNew(t, e, "conv-next", "transcode_media"); waiting || name != "m4" {
-		t.Fatalf("m4 holds a job that cannot start: assigned %q (waiting %v), %+v", name, waiting, res)
-	}
-	// The room is short for that one too: m4 holds two jobs that cannot start,
-	// and the third waits in the server's queue instead of joining them.
-	mark("conv-next", "retention_budget")
-	if name, res, waiting := assignNew(t, e, "conv-third", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
-		t.Fatalf("a second blocked job on m4 holds its slot: assigned %q, %+v", name, res)
-	}
-	// Room again: both count, the node stays full.
-	mark("conv-1", "")
-	mark("conv-next", "")
-	if name, res, waiting := assignNew(t, e, "conv-later", "transcode_media"); !waiting || name != "" || res.WaitingCondition != "worker_busy" {
-		t.Fatalf("both jobs on m4 hold a slot again: assigned %q, %+v", name, res)
-	}
-}
-
 // A job from before workers had names stays on video-worker while one of that
 // name is configured, however much room another worker has, and admission
 // checks that worker.

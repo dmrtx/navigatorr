@@ -1175,6 +1175,13 @@ func (e *Engine) execute(ctx context.Context, inst *store.ActionInstance, ec *Ex
 		}
 
 		// Handle external waiting (e.g. torrent downloading)
+		if res.Status == StepWaitingExternal && res.Requeue {
+			if moved, err := e.applyRoomRequeue(ctx, inst, ec); err != nil {
+				return nil, err
+			} else if moved {
+				return buildActionResult(inst, totalSteps, ec), nil
+			}
+		}
 		if res.Status == StepWaitingExternal {
 			mergeMap(ec.State, res.Outputs)
 			mergeMap(ec.Outputs, res.Outputs)
