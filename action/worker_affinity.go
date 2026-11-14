@@ -179,6 +179,7 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 		w, _ := e.deps.Workers.Podcast()
 		return e.recordAssignedWorker(ctx, ec, w.Name)
 	}
+	e.ensureSourceSize(ec)
 	e.bindMu.Lock()
 	defer e.bindMu.Unlock()
 	// A conversion waits for its turn in the transcode queue (see
@@ -187,18 +188,7 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	if waiting {
 		return res, true
 	}
-	// With one worker there is no choice to make: its readiness is checked by
-	// the steps, as the jobs are sent.
-	if all := e.deps.Workers.All(); len(all) == 1 {
-		// The one node that just refused it is not asked again at once: the
-		// conversion waits out the window instead of looping assign, refuse,
-		// requeue.
-		if e.roomRefusedRecently(ec, all[0].Name) {
-			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: "The only worker has no room for it yet; it is asked again shortly"}, true
-		}
-		return e.recordAssignedWorker(ctx, ec, all[0].Name)
-	}
-	name, condition, err := e.pickVideoWorker(ctx, conversionRoomNeed(ec), within, ec)
+	name, condition, err := e.pickVideoWorker(ctx, ec, within)
 	if err != nil {
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: condition, WaitingReason: err.Error()}, true
 	}
@@ -218,22 +208,25 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 	return StepResult{}, false
 }
 
-// pickVideoWorker chooses the ready worker with the most free video slots,
-// the first in config order on a tie. A worker with no free slot is never
-// chosen, so no worker holds a backlog: the transcode queue keeps the order.
-// A worker that reports no room to retain the conversion's candidate (need
-// bytes; see worker_retention_fit.go) is never chosen for it, nor one outside
-// within (the workers the queue lets it take; nil for no restriction).
-// With nothing to choose it returns the waiting condition: worker_unreachable
-// when no worker is ready, worker_busy when every ready worker is full.
-func (e *Engine) pickVideoWorker(ctx context.Context, need transcode.RoomNeed, within map[string]bool, ec *ExecutionContext) (string, string, error) {
+// pickVideoWorker chooses, among the workers the conversion may be given, the
+// one with the most free video slots, the first in config order on a tie. A
+// worker with no free slot is never chosen, so no worker holds a backlog: the
+// transcode queue keeps the order. Which workers it may be given is the
+// placer's answer, the same one the queue's claims use (see
+// transcode_queue_claims.go), and within narrows it to the workers the queue
+// lets it take (nil for no restriction). This function only chooses among the
+// rest. With nothing to choose it returns the waiting condition and the
+// placer's reason (worker_unreachable when no worker is ready), or
+// worker_busy when every placeable worker is full.
+func (e *Engine) pickVideoWorker(ctx context.Context, ec *ExecutionContext, within map[string]bool) (string, string, error) {
 	// A requeued conversion prefers the node it came from. A node that just
-	// refused it is passed over below only within roomRefusedFor; after that
-	// the preference applies again.
+	// refused it is passed over only within roomRefusedFor; after that the
+	// preference applies again.
 	prefer := getString(ec.State, requeuedFromKey)
 	workers := e.deps.Workers.All()
-	ready := e.workersReady(ctx, workers)
-	eligible := e.retentionEligible(ctx, workers, need)
+	pl := e.newPlacer(ctx, workers, e.placementReady(ctx, workers))
+	p := e.placementOf(ec)
+	placeable := pl.placeable(p)
 	active := map[string]int{}
 	if e.deps.Store != nil {
 		counts, err := e.deps.Store.CountActiveWorkerActions("transcode_media")
@@ -244,12 +237,11 @@ func (e *Engine) pickVideoWorker(ctx context.Context, need transcode.RoomNeed, w
 			active[e.resolveWorker(name)] += n
 		}
 	}
-	best, bestFree, anyReady, noRoom := -1, 0, false, false
+	best, bestFree := -1, 0
 	for i, w := range workers {
-		if !ready[i] {
+		if !placeable[i] {
 			continue
 		}
-		anyReady = true
 		free := e.workerVideoCapacity(ctx, w) - active[w.Name]
 		if free <= 0 {
 			continue
@@ -257,24 +249,18 @@ func (e *Engine) pickVideoWorker(ctx context.Context, need transcode.RoomNeed, w
 		if within != nil && !within[w.Name] {
 			continue
 		}
-		if !eligible[i] || e.roomRefusedRecently(ec, w.Name) {
-			noRoom = true
-			continue
-		}
 		// A requeued conversion prefers the node that still has its source.
 		if best < 0 || (workers[best].Name != prefer && (w.Name == prefer || free > bestFree)) {
 			best, bestFree = i, free
 		}
 	}
-	switch {
-	case best >= 0:
+	if best >= 0 {
 		return workers[best].Name, "", nil
-	case noRoom:
-		return "", "worker_busy", fmt.Errorf("%s", e.roomWaitReason(ctx, workers, need))
-	case anyReady:
-		return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
 	}
-	return "", "worker_unreachable", fmt.Errorf("No video worker is ready; the job waits for one before it is assigned")
+	if condition, reason := pl.waitReason(p); reason != "" {
+		return "", condition, fmt.Errorf("%s", reason)
+	}
+	return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
 }
 
 // assignableWorkers are the workers a conversion could be assigned now: the

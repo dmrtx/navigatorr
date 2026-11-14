@@ -166,11 +166,12 @@ type queueSlots struct {
 	workers []transcode.NamedWorker
 	ready   []bool
 	free    map[string]int
+	placer  *placer
 }
 
 func (e *Engine) queueSlots(ctx context.Context) (queueSlots, error) {
 	workers := e.deps.Workers.All()
-	ready := e.readyForQueue(ctx, workers)
+	ready := e.placementReady(ctx, workers)
 	counts, err := e.deps.Store.CountActiveWorkerActions("transcode_media")
 	if err != nil {
 		return queueSlots{}, err
@@ -185,7 +186,7 @@ func (e *Engine) queueSlots(ctx context.Context) (queueSlots, error) {
 			free[w.Name] = max(0, e.workerVideoCapacity(ctx, w)-active[w.Name])
 		}
 	}
-	return queueSlots{workers: workers, ready: ready, free: free}, nil
+	return queueSlots{workers: workers, ready: ready, free: free, placer: e.newPlacer(ctx, workers, ready)}, nil
 }
 
 // total is how many more conversions the ready workers can take.
@@ -202,19 +203,10 @@ func (q queueSlots) total() int {
 // smaller key. ahead counts those that could be given a worker cur could also
 // be given, which is the place cur holds in the queue. A waiter no worker can
 // take goes first without holding anything back: it waits for room elsewhere.
-func (e *Engine) transcodeQueueBefore(ctx context.Context, q queueSlots, cur queueClaim, key, self string) ([]queueClaim, int, error) {
+func (e *Engine) transcodeQueueBefore(q queueSlots, cur queueClaim, key, self string) ([]queueClaim, int, error) {
 	waiters, err := e.deps.Store.ListTranscodeQueueWaiters()
 	if err != nil {
 		return nil, 0, err
-	}
-	claims := map[transcode.RoomNeed]queueClaim{}
-	claimOf := func(need transcode.RoomNeed) queueClaim {
-		c, ok := claims[need]
-		if !ok {
-			c = e.claimFor(ctx, q, need)
-			claims[need] = c
-		}
-		return c
 	}
 	var before []queueClaim
 	ahead := 0
@@ -227,7 +219,7 @@ func (e *Engine) transcodeQueueBefore(ctx context.Context, q queueSlots, cur que
 		if updated, err := time.Parse(time.RFC3339Nano, w.UpdatedAt); err == nil && e.now().Sub(updated) > slotWaiterStaleAfter {
 			continue
 		}
-		c := claimOf(roomNeed(w.Standalone, w.SourceBytes, w.ReserveBytes))
+		c := e.claimFor(q, e.waiterPlacement(w))
 		before = append(before, c)
 		if cur.competesWith(c) {
 			ahead++
@@ -239,7 +231,7 @@ func (e *Engine) transcodeQueueBefore(ctx context.Context, q queueSlots, cur que
 	}
 	for _, it := range items {
 		if batchItemQueueOrder(it) < key {
-			c := claimOf(transcode.RoomNeed{})
+			c := e.claimFor(q, placement{})
 			before = append(before, c)
 			if cur.competesWith(c) {
 				ahead++
@@ -249,23 +241,45 @@ func (e *Engine) transcodeQueueBefore(ctx context.Context, q queueSlots, cur que
 	return before, ahead, nil
 }
 
-// readyForQueue is which workers count for the queue: the ready ones, or all
-// of them when there is one or none is ready (the job then waits for its
-// worker as before).
-func (e *Engine) readyForQueue(ctx context.Context, workers []transcode.NamedWorker) []bool {
-	ready := make([]bool, len(workers))
-	if len(workers) > 1 {
-		ready = e.workersReady(ctx, workers)
+// sourceSizeRetry is how often the size of a source that could not be read is
+// read again.
+const sourceSizeRetry = time.Minute
+
+// sourceSizeCheckedKey is when the server last tried to read the source's size.
+const sourceSizeCheckedKey = "source_size_checked_at"
+
+// sourceSizeUnreadableKey marks a conversion whose source size the server
+// can never read (no path, outside the read roots, a missing, irregular or
+// empty file). It is then placed as needing no room, as it was before sizes
+// were read: the node it is given fails it with the real error. Without the
+// mark an unknown size reaches no node (placement.sizeUnknown).
+const sourceSizeUnreadableKey = "source_size_unreadable"
+
+// ensureSourceSize records the size of the conversion's source in its state
+// when it has none (I3): one created before sizes were recorded, or whose stat
+// did not answer then, is read at its turn, at most once per sourceSizeRetry.
+// A read that fails for good marks it unreadable; only a stat that does not
+// answer is tried again. Without a file resolver nothing can be read and the
+// conversion is placed as needing no room. The size, the mark and the time of
+// the attempt are saved with the state the turn leaves (a wait or the
+// assignment). It runs before the queue lock is taken: the stat is bounded but
+// is I/O.
+func (e *Engine) ensureSourceSize(ec *ExecutionContext) {
+	if ec.ActionName != "transcode_media" || e.deps.Fs == nil || getInt64(ec.State, SubmittedSourceBytesKey) > 0 || getBool(ec.State, sourceSizeUnreadableKey) {
+		return
 	}
-	for _, r := range ready {
-		if r {
-			return ready
-		}
+	now := e.now()
+	if at := parseStoreTime(getString(ec.State, sourceSizeCheckedKey)); !at.IsZero() && now.Sub(at) < sourceSizeRetry {
+		return
 	}
-	for i := range ready {
-		ready[i] = true
+	ec.State[sourceSizeCheckedKey] = now.Format(time.RFC3339Nano)
+	size, definitive := e.readFileSize(getString(ec.Inputs, "path"))
+	switch {
+	case size > 0:
+		ec.State[SubmittedSourceBytesKey] = size
+	case definitive:
+		ec.State[sourceSizeUnreadableKey] = true
 	}
-	return ready
 }
 
 // transcodeQueueTurn decides whether a conversion without a worker may be
@@ -299,12 +313,13 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	// Only the free slots on workers with room for it are its own. One that no
 	// node could take even empty fails now, not after waiting for a room that
 	// never comes.
-	need := conversionRoomNeed(ec)
+	p := e.placementOf(ec)
+	need := p.need
 	if why, never := e.roomNeverFits(ctx, q.workers, need, getInt64(ec.State, roomReserveKey) > 0); never {
 		return StepResult{Status: StepFailed, Error: why}, true, nil
 	}
-	cur := e.claimFor(ctx, q, need)
-	before, ahead, err := e.transcodeQueueBefore(ctx, q, cur, key, ec.InstanceID)
+	cur := e.claimFor(q, p)
+	before, ahead, err := e.transcodeQueueBefore(q, cur, key, ec.InstanceID)
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for %s: %v (assigning without queue order)", ec.InstanceID, err)
 		return StepResult{}, false, nil
@@ -317,18 +332,20 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	position := ahead + 1
 	ec.State[workerSlotPositionKey] = position
 	markWaitingForWorker(ec)
-	reason := fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
-	switch {
-	case need.SourceBytes > 0 && !cur.hasReach():
-		reason = e.roomWaitReason(ctx, q.workers, need)
-	case need.SourceBytes > 0 && !cur.hasUsable() && q.total() > 0:
-		reason = retentionNoSlotReason(need)
-	case ahead == 0:
-		reason = "Next in the transcode queue; waiting for a worker slot to free"
+	condition, reason := q.placer.waitReason(p)
+	if reason == "" {
+		condition = "worker_busy"
+		reason = fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
+		switch {
+		case need.SourceBytes > 0 && !cur.hasUsable() && q.total() > 0:
+			reason = retentionNoSlotReason(need)
+		case ahead == 0:
+			reason = "Next in the transcode queue; waiting for a worker slot to free"
+		}
 	}
 	return StepResult{
 		Status:           StepWaitingExternal,
-		WaitingCondition: "worker_busy",
+		WaitingCondition: condition,
 		WaitingReason:    reason,
 		Outputs:          map[string]any{"worker_busy": true, workerSlotPositionKey: position},
 	}, true, nil
@@ -362,7 +379,7 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 		log.Printf("transcode queue: counting free slots for batch %s: %v", batchID, err)
 		return math.MaxInt
 	}
-	before, _, err := e.transcodeQueueBefore(ctx, q, e.claimFor(ctx, q, transcode.RoomNeed{}), first, "")
+	before, _, err := e.transcodeQueueBefore(q, e.claimFor(q, placement{}), first, "")
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for batch %s: %v", batchID, err)
 		return math.MaxInt

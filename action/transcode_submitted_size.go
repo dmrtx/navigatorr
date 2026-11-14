@@ -38,10 +38,23 @@ func (e *Engine) submittedSourceBytes(name string, inputs map[string]any) int64 
 // read roots), or 0 when it cannot say: no resolver, a file it cannot stat,
 // or a stat that does not answer within submittedStatTimeout.
 func (e *Engine) boundedFileSize(raw string) int64 {
+	n, _ := e.readFileSize(raw)
+	return n
+}
+
+// readFileSize is boundedFileSize that also says whether a 0 is final.
+// definitive is true when the answer will not change by asking again: no
+// resolver, no path or one outside the read roots, a file that is missing,
+// not regular or empty. Only a stat that does not answer within
+// submittedStatTimeout leaves it false: a stalled mount may answer later.
+func (e *Engine) readFileSize(raw string) (size int64, definitive bool) {
 	if e.deps.Fs == nil {
-		return 0
+		return 0, true
 	}
 	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, true
+	}
 	// Buffered: a stat that answers after the timeout must not leak a goroutine
 	// blocked on the send.
 	done := make(chan int64, 1)
@@ -62,8 +75,8 @@ func (e *Engine) boundedFileSize(raw string) int64 {
 	defer timer.Stop()
 	select {
 	case n := <-done:
-		return n
+		return n, true
 	case <-timer.C:
-		return 0
+		return 0, false
 	}
 }

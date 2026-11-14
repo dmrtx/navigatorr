@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -18,11 +19,11 @@ const (
 	// requeueWhyKey is why the conversion is being put back, read once by
 	// resetForRequeue for the reason it shows.
 	requeueWhyKey = "requeue_why"
-	// roomRefusedByKey and roomRefusedAtKey name the node that refused or
-	// stopped it and when: that node is not picked again until its report has
-	// had time to change, so a stale report cannot bounce the conversion.
-	roomRefusedByKey = "room_refused_by"
-	roomRefusedAtKey = "room_refused_at"
+	// roomRefusalsKey holds, per node that refused or stopped the conversion,
+	// when it did: {"<node>": "<RFC3339Nano time>"}. A node is not picked
+	// again until its report has had time to change, so a stale report cannot
+	// bounce the conversion; each node has its own entry.
+	roomRefusalsKey = "room_refusals"
 	// diskFloorReason is the reason code of an encode stopped for free disk.
 	diskFloorReason = "disk_floor"
 	// runnerKilledClass is the failure class of a job whose runner died with
@@ -48,9 +49,64 @@ const roomRefusedFor = 2 * transcode.RetentionRoomMaxAge
 func (e *Engine) roomRequeue(ec *ExecutionContext, why string) StepResult {
 	why = strings.TrimSpace(why)
 	ec.State[requeueWhyKey] = why
-	ec.State[roomRefusedByKey] = e.instanceWorker(ec.State)
-	ec.State[roomRefusedAtKey] = e.now().Format(time.RFC3339Nano)
+	e.recordRoomRefusal(ec, e.instanceWorker(ec.State))
 	return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: why, Requeue: true}
+}
+
+// recordRoomRefusal adds (or overwrites) the refusing node's entry and drops
+// the entries that are past the window.
+func (e *Engine) recordRoomRefusal(ec *ExecutionContext, node string) {
+	now := e.now()
+	out := map[string]any{}
+	for n, at := range refusalsFromState(ec.State[roomRefusalsKey]) {
+		if now.Sub(at) < roomRefusedFor {
+			out[n] = at.Format(time.RFC3339Nano)
+		}
+	}
+	if node != "" {
+		out[node] = now.Format(time.RFC3339Nano)
+	}
+	ec.State[roomRefusalsKey] = out
+}
+
+// refusalsFromState reads the refusals kept in a conversion's state (an object
+// of node to time; anything else is no refusals).
+func refusalsFromState(v any) map[string]time.Time {
+	var out map[string]time.Time
+	add := func(node, at string) {
+		if t, err := time.Parse(time.RFC3339Nano, at); err == nil && node != "" {
+			if out == nil {
+				out = map[string]time.Time{}
+			}
+			out[node] = t
+		}
+	}
+	switch m := v.(type) {
+	case map[string]any:
+		for n, a := range m {
+			if s, ok := a.(string); ok {
+				add(n, s)
+			}
+		}
+	case map[string]string:
+		for n, a := range m {
+			add(n, a)
+		}
+	}
+	return out
+}
+
+// parseRefusals reads the raw JSON a waiter row carries; malformed text is no
+// refusals.
+func parseRefusals(raw string) map[string]time.Time {
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if json.Unmarshal([]byte(raw), &m) != nil {
+		return nil
+	}
+	return refusalsFromState(m)
 }
 
 // applyRoomRequeue finishes roomRequeue: the job is cancelled on its node (it
@@ -62,16 +118,6 @@ func (e *Engine) applyRoomRequeue(ctx context.Context, inst *store.ActionInstanc
 		jobID = getString(ec.State, "external_reference")
 	}
 	return e.finishPauseRequeue(ctx, inst, ec, jobID, store.WorkerPauseImmediate)
-}
-
-// roomRefusedRecently says whether the node refused this conversion so lately
-// that its room report may not show it yet.
-func (e *Engine) roomRefusedRecently(ec *ExecutionContext, node string) bool {
-	if node == "" || getString(ec.State, roomRefusedByKey) != node {
-		return false
-	}
-	at, err := time.Parse(time.RFC3339Nano, getString(ec.State, roomRefusedAtKey))
-	return err == nil && e.now().Sub(at) < roomRefusedFor
 }
 
 func roomRefusalText(err error) string {

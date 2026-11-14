@@ -75,7 +75,7 @@ func TestTheNodeThatRefusedAConversionIsPreferredAgainAfterTheWindow(t *testing.
 	e := retentionWorkers(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 	stale := e.now().Add(-roomRefusedFor - time.Second).Format(time.RFC3339Nano)
 	seedActionInstance(t, e.deps.Store, "conv-a", "transcode_media", StatusRunning, 0, "", map[string]any{},
-		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1", requeueWhyKey: "no room", roomRefusedByKey: "m1", roomRefusedAtKey: stale})
+		map[string]any{SubmittedSourceBytesKey: 50 * gib, requeuedFromKey: "m1", requeueWhyKey: "no room", roomRefusalsKey: map[string]any{"m1": stale}})
 	if name, _, waiting := assignAgain(t, e, "conv-a"); waiting || name != "m1" {
 		t.Fatalf("went to %q (waiting %v), want m1 again once its refusal is old", name, waiting)
 	}
@@ -90,13 +90,13 @@ func TestTheOnlyWorkerThatJustRefusedAConversionIsNotAskedAgainAtOnce(t *testing
 	}
 	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
 	seedActionInstance(t, e.deps.Store, "conv-a", "transcode_media", StatusRunning, 0, "", map[string]any{},
-		map[string]any{SubmittedSourceBytesKey: gib, roomRefusedByKey: "solo", roomRefusedAtKey: e.now().Format(time.RFC3339Nano)})
+		map[string]any{SubmittedSourceBytesKey: gib, roomRefusalsKey: map[string]any{"solo": e.now().Format(time.RFC3339Nano)}})
 	name, res, waiting := assignAgain(t, e, "conv-a")
 	if !waiting || name != "" || res.WaitingCondition != "worker_busy" {
 		t.Fatalf("assigned %q (waiting %v) %+v, want it to wait", name, waiting, res)
 	}
 	seedActionInstance(t, e.deps.Store, "conv-b", "transcode_media", StatusRunning, 0, "", map[string]any{},
-		map[string]any{SubmittedSourceBytesKey: gib, roomRefusedByKey: "solo", roomRefusedAtKey: e.now().Add(-roomRefusedFor - time.Second).Format(time.RFC3339Nano)})
+		map[string]any{SubmittedSourceBytesKey: gib, roomRefusalsKey: map[string]any{"solo": e.now().Add(-roomRefusedFor - time.Second).Format(time.RFC3339Nano)}})
 	if name, _, waiting := assignAgain(t, e, "conv-b"); waiting || name != "solo" {
 		t.Fatalf("assigned %q (waiting %v), want solo once the window has passed", name, waiting)
 	}
@@ -126,7 +126,7 @@ func TestARoomRefusalAtSubmitPutsTheConversionBackInTheQueue(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !res.Requeue || res.Status != StepWaitingExternal || getString(ec.State, requeueWhyKey) == "" || getString(ec.State, roomRefusedAtKey) == "" {
+			if !res.Requeue || res.Status != StepWaitingExternal || getString(ec.State, requeueWhyKey) == "" || len(refusalsFromState(ec.State[roomRefusalsKey])) == 0 {
 				t.Fatalf("result %+v state %v, want a requeue that says why", res, ec.State)
 			}
 		})
