@@ -22,6 +22,7 @@ func TestOutputReserveBytesFollowsTheGoal(t *testing.T) {
 		{"size goal: its byte budget", policy(10, 120), 1000, 120},
 		{"size goal: a budget over the source reserves the source", policy(10, 5000), 1000, 1000},
 		{"quality or compact goal: half the source", policy(15, 0), 1000, 500},
+		{"x265_preserve: the whole source", &Plan{Mode: "x265_preserve", SizePolicy: &SizePolicy{}}, 1000, 1000},
 		{"no plan: half the source", nil, 1000, 500},
 		{"no size policy: half the source", &Plan{}, 1000, 500},
 		{"audio-only goal: the most the policy accepts", audio, 1000, 900},

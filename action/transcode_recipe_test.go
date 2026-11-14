@@ -310,6 +310,28 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 			t.Fatalf("%s: message %q", name, rec.Message)
 		}
 	}
+	// A stop for passing the room the goal keeps for its output (half the
+	// original) says so; only an output that really is larger than the original
+	// says it is larger.
+	for name, tc := range map[string]struct {
+		candidate int64
+		reason    string
+		want      string
+		notWant   string
+	}{
+		"past the reserve":   {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (half the original)", "larger than the original"},
+		"larger than source": {25_000_000, "insufficient_savings", "is larger than the original", "keeps room"},
+		"size growth":        {12_000_000, "size_growth_exceeded", "is larger than the original", "keeps room"},
+	} {
+		c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
+		planRecipe(t, c)
+		c.ec.State[SubmittedSourceBytesKey] = int64(20_000_000)
+		c.ec.State[roomReserveKey] = int64(10_000_000)
+		advanceRung(t, c, transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: tc.reason, CandidateSizeBytes: tc.candidate})
+		if rec := QualityLadderOf(c.ec.State); !strings.Contains(rec.Message, tc.want) || strings.Contains(rec.Message, tc.notWant) {
+			t.Fatalf("%s: message %q", name, rec.Message)
+		}
+	}
 	// A quality miss without scores ends the goal rather than guessing.
 	c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
 	planRecipe(t, c)

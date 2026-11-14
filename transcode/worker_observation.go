@@ -150,6 +150,9 @@ func OutputReserveBytes(plan *Plan, sourceBytes int64) int64 {
 	if sourceBytes <= 0 {
 		return 0
 	}
+	if plan != nil && plan.Mode == "x265_preserve" {
+		return sourceBytes
+	}
 	if plan != nil && plan.SizePolicy != nil {
 		if IsSizeAudioOnlyPlan(plan) {
 			if limit, ok := MaxAcceptedCandidateBytes(sourceBytes, plan.SizePolicy); ok && limit > 0 {
