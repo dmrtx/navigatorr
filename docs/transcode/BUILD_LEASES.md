@@ -55,8 +55,9 @@ The state is `build-leases.json` in the state directory, written atomically.
 Runners read it like the suspend record, with the expiry evaluated at read time:
 an expired lease never freezes anything, even before the worker marked it lost.
 The freeze is the union of the server's suspend record and the leases.
-Only a record that is empty or not JSON is replaced by an empty one (by the
-tick, which runs even if the socket cannot open); any other read error fails
+Only a record that is empty or not JSON is replaced by an empty one (by
+whichever lease call reads it first, or the tick, which runs even if the
+socket cannot open); any other read error fails
 closed and is retried. A worker without `build_node` ignores the file.
 
 ## How the server learns about it

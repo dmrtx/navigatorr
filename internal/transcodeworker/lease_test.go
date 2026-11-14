@@ -45,7 +45,7 @@ func startFrozenWatcher(t *testing.T, w *Worker) (ctl *suspendControl, file stri
 // both, and an operator suspend that is also on keeps the freeze.
 func TestLeaseFreezesTheEncoderAndHoldsTheQueueUntilFinished(t *testing.T) {
 	stub := newStubSpawn()
-	w, _, _ := newPR3Worker(t, 2, stub)
+	w, _, _ := newLeaseWorker(t, 2, stub)
 	ctl, file, stop := startFrozenWatcher(t, w)
 	defer stop()
 
@@ -93,7 +93,7 @@ func ptr[T any](v T) *T { return &v }
 // tick, no socket and no server (the runners read the expiry from the record),
 // and the worker then marks it lost.
 func TestLeaseExpiryThawsTheEncoder(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	ctl, file, stop := startFrozenWatcher(t, w)
 	defer stop()
 
@@ -131,7 +131,7 @@ func TestLeaseExpiryThawsTheEncoder(t *testing.T) {
 // build: the freeze is in the record, the lease answers heartbeats on the new
 // worker, and it still expires there.
 func TestLeaseSurvivesAWorkerRestart(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	req := leaseReq("compile")
 	req.TTLSeconds = 2
 	l, err := w.LeaseCreate(req)
@@ -167,7 +167,7 @@ func TestLeaseSurvivesAWorkerRestart(t *testing.T) {
 
 // A lease that expired while the worker was down is not revived by the restart.
 func TestLeaseRestartDoesNotReviveAnExpiredLease(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	req := leaseReq("compile")
 	req.TTLSeconds = 1
 	l, err := w.LeaseCreate(req)
@@ -189,7 +189,7 @@ func TestLeaseRestartDoesNotReviveAnExpiredLease(t *testing.T) {
 // it runs. A second normal lease coexists; the freeze follows the normal one.
 func TestLowLeaseWaitsForIdleAndNeverFreezes(t *testing.T) {
 	stub := newStubSpawn()
-	w, tempDir, sourceFile := newPR3Worker(t, 2, stub)
+	w, tempDir, sourceFile := newLeaseWorker(t, 2, stub)
 	seed := &JobRecord{ID: "job-running", Status: "running", PID: stub.occupy("job-running"), Source: sourceFile, Candidate: filepath.Join(tempDir, "out.mkv"), CreatedAt: time.Now().UTC()}
 	if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, "job-running", "job.json"), seed); err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestLowLeaseWaitsForIdleAndNeverFreezes(t *testing.T) {
 // Without heartbeats a waiting low lease expires too, and never starts.
 func TestWaitingLowLeaseExpires(t *testing.T) {
 	stub := newStubSpawn()
-	w, tempDir, sourceFile := newPR3Worker(t, 2, stub)
+	w, tempDir, sourceFile := newLeaseWorker(t, 2, stub)
 	seed := &JobRecord{ID: "job-running", Status: "running", PID: stub.occupy("job-running"), Source: sourceFile, Candidate: filepath.Join(tempDir, "out.mkv"), CreatedAt: time.Now().UTC()}
 	if err := SaveJobAtomic(filepath.Join(w.cfg.StateDir, "job-running", "job.json"), seed); err != nil {
 		t.Fatal(err)
@@ -327,7 +327,7 @@ func (f *fakeReporter) Finish(id, status string, exit *int) error {
 // Pause builds is decided by the server and refused before anything is held;
 // an unreachable server never stops a build.
 func TestLeasePausedRefusesAndUnreachableDoesNot(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{paused: true}
 	w.leases.reporter = rep
 	if _, err := w.LeaseCreate(leaseReq("compile")); !errors.Is(err, errLeasesPaused) {
@@ -363,7 +363,7 @@ func TestLeasePausedRefusesAndUnreachableDoesNot(t *testing.T) {
 // failed. A cancel in the server ends the lease and the build is told on its
 // next heartbeat.
 func TestLeaseIsReportedToTheServer(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 	req := leaseReq("compile")
@@ -409,7 +409,7 @@ func TestLeaseIsReportedToTheServer(t *testing.T) {
 }
 
 func TestLeaseCancelledInTheServerEndsTheLease(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 	l, err := w.LeaseCreate(leaseReq("compile"))
@@ -437,7 +437,7 @@ func TestLeaseCancelledInTheServerEndsTheLease(t *testing.T) {
 }
 
 func TestLeaseRejectsBadRequests(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	for name, req := range map[string]LeaseRequest{
 		"no source":  {Title: "t"},
 		"no title":   {Source: "s"},
@@ -470,7 +470,7 @@ func leaseCall(t *testing.T, h http.Handler, method, path, body string) (int, ma
 // The socket speaks the shape of the server's builds API, including the codes
 // nbuild acts on.
 func TestLeaseHTTPSpeaksTheBuildsAPI(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	w.cfg.BuildNode = "nodeA"
 	h := w.leaseHandler()
 
@@ -520,7 +520,7 @@ func TestLeaseSocketIsPrivateAndServes(t *testing.T) {
 		t.Skip("no /tmp")
 	}
 	defer os.RemoveAll(dir)
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	w.cfg.BuildNode = "nodeA"
 	w.cfg.BuildSocket = filepath.Join(dir, "sub", "l.sock")
 

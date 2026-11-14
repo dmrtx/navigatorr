@@ -1,6 +1,7 @@
 package transcodeworker
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -202,10 +203,13 @@ func (w *Worker) leasesEnabled() bool {
 // with an encode is what the lease exists to prevent. Without any record
 // nothing is frozen.
 func (w *Worker) leaseFreeze() (bool, int64) {
+	if !w.leasesEnabled() {
+		// Without leases nothing ticks or heals the record: ignore the file.
+		return false, 0
+	}
 	f, err := w.readLeaseFile()
 	if err != nil {
-		// Without leases nothing would ever heal the record: ignore it.
-		return w.leasesEnabled(), unreadableSuspendGeneration
+		return true, unreadableSuspendGeneration
 	}
 	now := time.Now()
 	for _, l := range f.Leases {
@@ -221,9 +225,12 @@ func (w *Worker) leaseFreeze() (bool, int64) {
 
 // leaseHolds is whether a lease keeps the queue held now.
 func (w *Worker) leaseHolds() bool {
+	if !w.leasesEnabled() {
+		return false
+	}
 	f, err := w.readLeaseFile()
 	if err != nil {
-		return w.leasesEnabled()
+		return true
 	}
 	now := time.Now()
 	for _, l := range f.Leases {
@@ -459,6 +466,13 @@ var errLeaseFreeze = errors.New("the encoders did not freeze in time")
 // "running" for a lease whose freeze is not confirmed. A low lease waits for an
 // idle node and is promoted by the tick. The returned record is a copy.
 func (w *Worker) LeaseCreate(in LeaseRequest) (leaseRecord, error) {
+	return w.LeaseCreateContext(context.Background(), in)
+}
+
+// LeaseCreateContext is LeaseCreate for a caller that can go away: if ctx is
+// done before the answer, the lease is not left running. It ends as cancelled
+// (on record, for the report pass), like one whose freeze was not confirmed.
+func (w *Worker) LeaseCreateContext(ctx context.Context, in LeaseRequest) (leaseRecord, error) {
 	s := &w.leases
 	l, err := w.checkLeaseRequest(in)
 	if err != nil {
@@ -466,8 +480,11 @@ func (w *Worker) LeaseCreate(in LeaseRequest) (leaseRecord, error) {
 	}
 	s.create.Lock()
 	defer s.create.Unlock()
+	if err := ctx.Err(); err != nil {
+		return leaseRecord{}, err
+	}
 	if in.ID != "" {
-		if got, found, err := w.leaseKnown(l.ID); found || err != nil {
+		if got, found, err := w.leaseKnown(ctx, l.ID); found || err != nil {
 			return got, err
 		}
 	}
@@ -489,17 +506,22 @@ func (w *Worker) LeaseCreate(in LeaseRequest) (leaseRecord, error) {
 	if err != nil || !got.Freeze {
 		return got, err
 	}
-	return w.leaseConfirm(got.ID)
+	return w.leaseConfirm(ctx, got.ID)
 }
 
 // leaseKnown is the stored outcome of a client id. found is false for an id
 // never seen.
-func (w *Worker) leaseKnown(id string) (rec leaseRecord, found bool, err error) {
+func (w *Worker) leaseKnown(ctx context.Context, id string) (rec leaseRecord, found bool, err error) {
 	s := &w.leases
 	s.mu.Lock()
+	now := s.clock()
 	f, err := w.loadLeasesLocked()
 	for _, e := range f.Leases {
 		if err == nil && e.ID == id {
+			if e.active() && !e.ExpiresAt.After(now) {
+				// Past its expiry it is over, before the tick says so.
+				w.leaseLostLocked(&f, now)
+			}
 			rec, found = *e, true
 		}
 	}
@@ -517,7 +539,7 @@ func (w *Worker) leaseKnown(id string) (rec leaseRecord, found bool, err error) 
 		return rec, true, nil
 	}
 	// Granted but never confirmed (the worker died in between): confirm now.
-	rec, err = w.leaseConfirm(id)
+	rec, err = w.leaseConfirm(ctx, id)
 	return rec, true, err
 }
 
@@ -556,17 +578,22 @@ func (w *Worker) leaseInsert(l *leaseRecord, grant bool) (leaseRecord, error) {
 }
 
 // leaseConfirm waits for the running encoders to report themselves frozen and
-// then confirms the lease (its ttl starts now) or, on a timeout, ends it.
-func (w *Worker) leaseConfirm(id string) (leaseRecord, error) {
+// then confirms the lease (its ttl starts now) or, on a timeout or when ctx is
+// done (the caller left), ends it as cancelled.
+func (w *Worker) leaseConfirm(ctx context.Context, id string) (leaseRecord, error) {
 	deadline := time.Now().Add(leaseFreezeWait)
 	frozen := false
-	for {
+	for ctx.Err() == nil {
 		active, n, err := w.suspendCounts()
 		if frozen = err == nil && n >= active; frozen || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
+	gone := ctx.Err()
 	s := &w.leases
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -582,19 +609,30 @@ func (w *Worker) leaseConfirm(id string) (leaseRecord, error) {
 		if !l.active() {
 			return *l, errLeaseEnded
 		}
-		if frozen {
+		if !l.ExpiresAt.After(now) {
+			// Too late to confirm: it was lost first, not revived.
+			w.leaseLostLocked(&f, now)
+			return *l, errLeaseEnded
+		}
+		if frozen && gone == nil {
 			l.Confirmed = true
 			l.LastHeartbeatAt = now.UTC()
 			l.ExpiresAt = now.Add(l.ttl()).UTC()
 		} else {
 			t := now.UTC()
 			l.Status, l.EndedAt, l.EndReason = leaseStatusCancelled, &t, "freeze"
+			if gone != nil {
+				l.EndReason = "client"
+			}
 		}
 		if err := w.saveLeasesLocked(&f, now); err != nil {
 			return leaseRecord{}, err
 		}
 		w.leaseKickReporter()
-		if !frozen {
+		switch {
+		case gone != nil:
+			return *l, gone
+		case !frozen:
 			return *l, errLeaseFreeze
 		}
 		return *l, nil
@@ -742,10 +780,20 @@ func (w *Worker) LeaseGet(id string) (leaseRecord, error) {
 				w.leaseLostLocked(&f, now)
 				return *l, errLeaseEnded
 			}
-			return *l, nil
+			return l.visible(), nil
 		}
 	}
 	return leaseRecord{}, errLeaseNotFound
+}
+
+// visible is the lease as a caller may see it: one granted but not yet
+// confirmed frozen is still waiting, never a lease to build under.
+func (l *leaseRecord) visible() leaseRecord {
+	c := *l
+	if c.active() && !c.Confirmed {
+		c.Status = leaseStatusWaiting
+	}
+	return c
 }
 
 // LeaseHeartbeat extends a lease and records its progress, its output lines
@@ -792,6 +840,11 @@ func (w *Worker) LeaseHeartbeat(id string, progress *string, ttlSeconds int, lin
 			// Past its expiry it is over, like on the server: lost, not revived.
 			w.leaseLostLocked(&f, now)
 			return *l, errLeaseEnded
+		}
+		if !l.Confirmed {
+			// Still waiting for the freeze: nothing to extend (that would
+			// eat the margin the grant gave it).
+			return l.visible(), nil
 		}
 		if ttl > 0 {
 			l.TTLSeconds = int(ttl / time.Second)

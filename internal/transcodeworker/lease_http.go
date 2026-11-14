@@ -68,6 +68,9 @@ func (w *Worker) StartBuildLeases(ctx context.Context) error {
 	if path == "" {
 		return nil
 	}
+	if leaseSocketLive(path) {
+		return errLeaseSocketTaken
+	}
 	s := &w.leases
 	s.mu.Lock()
 	if s.reporter == nil && strings.TrimSpace(w.cfg.BuildsURL) != "" && strings.TrimSpace(w.cfg.BuildsTokenFile) != "" {
@@ -112,6 +115,18 @@ func (w *Worker) leaseLoops(ctx context.Context) {
 	}()
 }
 
+var errLeaseSocketTaken = errors.New("another worker already serves the build socket")
+
+// leaseSocketLive is whether a live worker answers on the socket.
+func leaseSocketLive(path string) bool {
+	c, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
 func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if len(path) >= 100 {
 		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
@@ -121,9 +136,8 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	}
 	// A socket left by a worker that died: remove it. One that answers belongs
 	// to a live worker.
-	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
-		_ = c.Close()
-		return errors.New("another worker already serves the build socket")
+	if leaseSocketLive(path) {
+		return errLeaseSocketTaken
 	}
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
 		_ = os.Remove(path)
@@ -263,7 +277,7 @@ func (w *Worker) handleLeaseCreate(rw http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(rw, http.StatusConflict, map[string]string{"error": "this socket serves another node", "code": "wrong_node"})
 		return
 	}
-	l, err := w.LeaseCreate(LeaseRequest{ID: body.ID, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title,
+	l, err := w.LeaseCreateContext(r.Context(), LeaseRequest{ID: body.ID, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title,
 		PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, TTLSeconds: body.TTLSeconds})
 	if err != nil {
 		w.leaseError(rw, l, err)

@@ -32,7 +32,7 @@ func seedRunningJob(t *testing.T, w *Worker, id string) (jobDir, jobFile string)
 // A normal lease is answered "running" only once the runner of a running
 // encode reported itself frozen: when the build starts, nothing encodes.
 func TestLeaseIsAnsweredOnlyOnceTheRunnersFroze(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, nil)
+	w, _, _ := newLeaseWorker(t, 2, nil)
 	jobDir, jobFile := seedRunningJob(t, w, "job1")
 	ctl, file, stop := startFrozenWatcher(t, w)
 	defer stop()
@@ -71,7 +71,7 @@ func TestLeaseFreezeTimeoutEndsTheLeaseAndTheReporterFinishesIt(t *testing.T) {
 	old := leaseFreezeWait
 	leaseFreezeWait = 300 * time.Millisecond
 	defer func() { leaseFreezeWait = old }()
-	w, _, _ := newPR3Worker(t, 2, nil)
+	w, _, _ := newLeaseWorker(t, 2, nil)
 	w.cfg.BuildNode = "nodeA"
 	seedRunningJob(t, w, "job1")
 	rep := &fakeReporter{}
@@ -122,7 +122,7 @@ func TestLeaseFreezeTimeoutEndsTheLeaseAndTheReporterFinishesIt(t *testing.T) {
 func TestLeaseTickHealsAnUnreadableRecord(t *testing.T) {
 	for name, content := range map[string]string{"corrupt": "{not json", "empty": ""} {
 		t.Run(name, func(t *testing.T) {
-			w, _, _ := newPR3Worker(t, 2, nil)
+			w, _, _ := newLeaseWorker(t, 2, nil)
 			w.cfg.BuildNode = "nodeA"
 			ctl, _, stop := startFrozenWatcher(t, w)
 			defer stop()
@@ -148,7 +148,7 @@ func TestLeaseTickHealsAnUnreadableRecord(t *testing.T) {
 // A lease past its expiry is lost for whoever finds it first, not only for the
 // tick: asking, or finishing "succeeded", does not revive it.
 func TestLeaseExpiredIsLostOnReadAndOnFinish(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	var skew time.Duration
 	w.leases.now = func() time.Time { return time.Now().Add(skew) }
 
@@ -182,7 +182,7 @@ func TestLeaseExpiredIsLostOnReadAndOnFinish(t *testing.T) {
 // Asking again with the same client id returns the same lease: one record, one
 // server build.
 func TestLeaseCreateWithAClientIDIsIdempotent(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 	req := leaseReq("compile")
@@ -207,7 +207,7 @@ func TestLeaseCreateWithAClientIDIsIdempotent(t *testing.T) {
 // Ended leases leave the record an hour after the server has the end (or at
 // once without a server), a day after when the server cannot be reached.
 func TestEndedLeasesArePruned(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	var skew time.Duration
 	w.leases.now = func() time.Time { return time.Now().Add(skew) }
 	rep := &fakeReporter{}
@@ -247,7 +247,7 @@ func TestEndedLeasesArePruned(t *testing.T) {
 // The server hears the lease's ttl, and an idle lease is kept alive well
 // inside it.
 func TestLeaseForwardsItsTTL(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 	l, err := w.LeaseCreate(leaseReq("compile"))
@@ -331,7 +331,7 @@ func TestLeaseSocketDirectories(t *testing.T) {
 
 // Two creates of one id at once make one lease and one server build.
 func TestConcurrentCreatesOfOneIDMakeOneLease(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{onRegister: func() { time.Sleep(100 * time.Millisecond) }}
 	w.leases.reporter = rep
 	req := leaseReq("compile")
@@ -357,7 +357,7 @@ func TestConcurrentCreatesOfOneIDMakeOneLease(t *testing.T) {
 // A retry while the first create waits for the freeze is not answered
 // "running" before the encoder is frozen.
 func TestRetryDuringTheFreezeWaitIsNotAnsweredEarly(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, nil)
+	w, _, _ := newLeaseWorker(t, 2, nil)
 	jobDir, jobFile := seedRunningJob(t, w, "job1")
 	ctl, _, stop := startFrozenWatcher(t, w)
 	defer stop()
@@ -400,7 +400,7 @@ func TestShortTTLSurvivesTheFreezeWait(t *testing.T) {
 	old := leaseFreezeWait
 	leaseFreezeWait = 3 * time.Second
 	defer func() { leaseFreezeWait = old }()
-	w, _, _ := newPR3Worker(t, 2, nil)
+	w, _, _ := newLeaseWorker(t, 2, nil)
 	jobDir, jobFile := seedRunningJob(t, w, "job1")
 	_, _, stop := startFrozenWatcher(t, w)
 	defer stop()
@@ -431,7 +431,7 @@ func TestShortTTLSurvivesTheFreezeWait(t *testing.T) {
 // Only a record that is empty or not JSON is rewritten. A record that cannot be
 // read (here: a directory) is left alone and fails closed.
 func TestAnIOErrorIsNotHealed(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	w.cfg.BuildNode = "nodeA"
 	if err := os.MkdirAll(w.leasePath(), 0o755); err != nil {
 		t.Fatal(err)
@@ -465,7 +465,7 @@ func TestUnreadableRecordIsIgnoredWithoutLeases(t *testing.T) {
 // The reporter's "ended" (a 404) leaves the lease running and registers it
 // again.
 func TestForgottenServerBuildIsRegisteredAgain(t *testing.T) {
-	w, _, _ := newPR3Worker(t, 2, newStubSpawn())
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{}
 	w.leases.reporter = rep
 	l, err := w.LeaseCreate(leaseReq("compile"))
@@ -487,5 +487,138 @@ func TestForgottenServerBuildIsRegisteredAgain(t *testing.T) {
 	w.leaseReportPass()
 	if got, _ = w.LeaseGet(l.ID); got.ServerID == "" || len(rep.registers) != 2 {
 		t.Fatalf("not registered again: %+v %v", got, rep.registers)
+	}
+}
+
+// newLeaseWorker is a worker with leases on (a build_node).
+func newLeaseWorker(t *testing.T, maxJobs int, stub *stubSpawn) (*Worker, string, string) {
+	t.Helper()
+	w, dir, src := newPR3Worker(t, maxJobs, stub)
+	w.cfg.BuildNode = "nodeA"
+	return w, dir, src
+}
+
+// A lease granted but not yet confirmed frozen is "waiting" to a reader and a
+// heartbeat does not touch it (the freeze-wait margin of its expiry stays).
+func TestUnconfirmedLeaseIsNotAdvertisedRunning(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, nil)
+	l, err := w.checkLeaseRequest(leaseReq("compile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.leaseInsert(l, true); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := w.readLeaseFile()
+	got, err := w.LeaseGet(l.ID)
+	if err != nil || got.Status != leaseStatusWaiting {
+		t.Fatalf("get: %+v %v", got, err)
+	}
+	got, err = w.LeaseHeartbeat(l.ID, nil, 0, nil)
+	if err != nil || got.Status != leaseStatusWaiting {
+		t.Fatalf("heartbeat: %+v %v", got, err)
+	}
+	after, _ := w.readLeaseFile()
+	if !after.Leases[0].ExpiresAt.Equal(before.Leases[0].ExpiresAt) || after.Leases[0].Status != leaseStatusRunning {
+		t.Fatalf("the record must not change: %+v -> %+v", before.Leases[0], after.Leases[0])
+	}
+}
+
+// A lease past its expiry is lost, not answered to a retry and not confirmed.
+func TestExpiredLeaseIsNotKnownOrConfirmed(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	var skew time.Duration
+	w.leases.now = func() time.Time { return time.Now().Add(skew) }
+	req := leaseReq("compile")
+	req.ID = "bld_cexpired001"
+	if _, err := w.LeaseCreate(req); err != nil {
+		t.Fatal(err)
+	}
+	skew = 2 * time.Minute
+	if got, err := w.LeaseCreate(req); !errors.Is(err, errLeaseEnded) || got.Status != leaseStatusLost {
+		t.Fatalf("retry of an expired lease: %+v %v", got, err)
+	}
+
+	skew = 0
+	l, err := w.checkLeaseRequest(leaseReq("other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.leaseInsert(l, true); err != nil {
+		t.Fatal(err)
+	}
+	skew = 2 * time.Minute
+	if got, err := w.leaseConfirm(context.Background(), l.ID); !errors.Is(err, errLeaseEnded) || got.Confirmed || got.Status != leaseStatusLost {
+		t.Fatalf("confirm of an expired lease: %+v %v", got, err)
+	}
+}
+
+// Without a build_node a leftover lease record freezes and holds nothing.
+func TestLeftoverLeaseRecordIsIgnoredWithoutLeases(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	if _, err := w.LeaseCreate(leaseReq("compile")); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := w.leaseFreeze(); !on || !w.leaseHolds() {
+		t.Fatal("setup: the lease must freeze and hold")
+	}
+	w.cfg.BuildNode = ""
+	if on, _ := w.leaseFreeze(); on || w.leaseHolds() {
+		t.Fatal("leases are off: the file must be ignored")
+	}
+}
+
+// A second worker finding the socket served starts nothing: no restart pass
+// and no loops that would write the record next to the live worker.
+func TestSecondWorkerOnALiveSocketStartsNoLoops(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "nbs")
+	if err != nil {
+		t.Skip("no /tmp")
+	}
+	defer os.RemoveAll(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := &WorkerConfig{StateDir: filepath.Join(dir, "st"), BuildNode: "nodeA"}
+	if err := NewWorker(cfg).StartBuildLeases(ctx); err != nil {
+		t.Fatal(err)
+	}
+	second := NewWorker(cfg)
+	if err := second.StartBuildLeases(ctx); err == nil {
+		t.Fatal("a live socket must not be taken over")
+	}
+	if second.leases.kick != nil {
+		t.Fatal("the loops were set up before the socket was found taken")
+	}
+}
+
+// The client leaving during the freeze wait ends the lease: nothing is frozen.
+func TestLeaseCreateEndsWhenTheClientLeaves(t *testing.T) {
+	old := leaseFreezeWait
+	leaseFreezeWait = 5 * time.Second
+	defer func() { leaseFreezeWait = old }()
+	w, _, _ := newLeaseWorker(t, 2, nil)
+	seedRunningJob(t, w, "job1")
+	rep := &fakeReporter{}
+	w.leases.reporter = rep
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	start := time.Now()
+	l, err := w.LeaseCreateContext(ctx, leaseReq("compile"))
+	if !errors.Is(err, context.Canceled) || time.Since(start) > 3*time.Second {
+		t.Fatalf("create: %+v %v after %v", l, err, time.Since(start))
+	}
+	f, _ := w.readLeaseFile()
+	if len(f.Leases) != 1 || f.Leases[0].Status != leaseStatusCancelled || f.Leases[0].ServerID == "" {
+		t.Fatalf("the lease ends on record for the reporter: %+v", f.Leases)
+	}
+	if on, _ := w.leaseFreeze(); on || w.leaseHolds() {
+		t.Fatal("an abandoned lease freezes and holds nothing")
+	}
+	w.leaseReportPass()
+	if len(rep.finished) != 1 {
+		t.Fatalf("finished: %v", rep.finished)
 	}
 }
