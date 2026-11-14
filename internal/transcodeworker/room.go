@@ -70,12 +70,15 @@ func (w *Worker) freeableCacheEntries(own string) []cacheEntry {
 	}
 	// A cached source some admitted job chose as its own copy is that job's
 	// until it links it, whoever asks.
+	// When the jobs cannot be read nothing is known to be spare.
 	taken := map[string]bool{}
-	if jobs, err := w.startedJobs(); err == nil {
-		for _, j := range jobs {
-			if j.RoomOwnKey != "" {
-				taken[j.RoomOwnKey] = true
-			}
+	jobs, err := w.startedJobs()
+	if err != nil {
+		return nil
+	}
+	for _, j := range jobs {
+		if j.RoomOwnKey != "" {
+			taken[j.RoomOwnKey] = true
 		}
 	}
 	var out []cacheEntry
@@ -366,6 +369,7 @@ func (w *Worker) withDiskFloor(ctx context.Context, job *JobRecord, outputPath, 
 		ctx = context.WithValue(ctx, sizeWatchContextKey{}, watch)
 	}
 	id := job.ID
+	w.armFloor(ctx, id)
 	watch.floor = func() (int64, int64, bool) {
 		free, err := w.freeDiskBytes()
 		// Only the encode started last stops: the others may well finish
@@ -420,28 +424,41 @@ func (w *Worker) dropHalfCopies() int64 {
 	return freed
 }
 
-// newestEncode says whether job id is the most recently started encode on this
-// node (the one that stops first when the disk runs under its hard floor). A
-// job the node cannot find counts as the newest.
+// armFloor records that the encode of job id has a disk-floor watch, until ctx
+// ends. Only encodes with a watch can be stopped, so only they are compared.
+func (w *Worker) armFloor(ctx context.Context, id string) {
+	w.armedMu.Lock()
+	if w.armedFloors == nil {
+		w.armedFloors = map[string]int64{}
+	}
+	w.armedSeq++
+	seq := w.armedSeq
+	w.armedFloors[id] = seq
+	w.armedMu.Unlock()
+	context.AfterFunc(ctx, func() {
+		w.armedMu.Lock()
+		defer w.armedMu.Unlock()
+		if w.armedFloors[id] == seq {
+			delete(w.armedFloors, id)
+		}
+	})
+}
+
+// newestEncode says whether job id is the encode armed last on this node (the
+// one that stops first when the disk runs under its hard floor). A job with no
+// armed watch is never compared: a newer job still copying its source cannot
+// be stopped, so it must not spare an older encode.
 func (w *Worker) newestEncode(id string) bool {
-	jobs, err := w.startedJobs()
-	if err != nil {
+	w.armedMu.Lock()
+	defer w.armedMu.Unlock()
+	mine, ok := w.armedFloors[id]
+	if !ok {
 		return true
 	}
-	started := func(j *JobRecord) time.Time {
-		if !j.StartedAt.IsZero() {
-			return j.StartedAt
-		}
-		return j.CreatedAt
-	}
-	var newest *JobRecord
-	for _, j := range jobs {
-		if j.Status != "running" || j.EncodeComplete {
-			continue
-		}
-		if newest == nil || started(j).After(started(newest)) || (started(j).Equal(started(newest)) && j.ID > newest.ID) {
-			newest = j
+	for _, seq := range w.armedFloors {
+		if seq > mine {
+			return false
 		}
 	}
-	return newest == nil || newest.ID == id
+	return true
 }

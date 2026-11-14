@@ -2,6 +2,7 @@ package action
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -67,10 +68,15 @@ func TestARunnerKilledByARestartIsRequeuedUpToThreeTimesInARow(t *testing.T) {
 type clearingExecutor struct {
 	*mockTranscodeExecutor
 	cleared int
+	// failFirst is how many calls fail before one succeeds.
+	failFirst int
 }
 
 func (c *clearingExecutor) SetHoldClearCache(context.Context) (httpclient.HoldStatus, error) {
 	c.cleared++
+	if c.cleared <= c.failFirst {
+		return httpclient.HoldStatus{}, errors.New("worker hold HTTP 500")
+	}
 	return httpclient.HoldStatus{Hold: true}, nil
 }
 
@@ -108,6 +114,34 @@ func TestAnImmediatePauseClearsTheNodesSourceCacheOnceAndAGracefulOneDoesNot(t *
 	sweepCaches(t, e)
 	if immediate.cleared != 2 {
 		t.Fatalf("a new immediate pause cleared %d times in all, want 2", immediate.cleared)
+	}
+}
+
+// A clear the node failed is tried again on the next sweep and stops once it works.
+func TestAFailedCacheClearIsRetriedByTheNextSweep(t *testing.T) {
+	e, immediate, _ := clearingEngine(t)
+	immediate.failFirst = 2
+	pauseNode(t, e, "m1", store.WorkerPauseImmediate)
+	for range 5 {
+		sweepCaches(t, e)
+	}
+	if immediate.cleared != 3 {
+		t.Fatalf("the node was asked %d times, want 3 (two failures, then one success and no more)", immediate.cleared)
+	}
+}
+
+// The worker answering 500 reaches the caller as an error.
+func TestAWorkerThatFailsToClearItsCacheIsReportedAsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"the worker could not clear its source cache"}`, http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	exec, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.SetHoldClearCache(context.Background()); err == nil {
+		t.Fatal("a 500 from the worker must be an error")
 	}
 }
 

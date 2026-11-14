@@ -306,13 +306,80 @@ func TestRoom_TheHardFloorStopsOnlyTheNewestEncode(t *testing.T) {
 		}
 	}
 	f.free.Store(roomFloor/2 - 1)
-	for id, stops := range map[string]bool{"job-old": false, "job-new": true} {
+	ctxs := map[string]context.Context{}
+	for _, id := range []string{"job-old", "job-new"} { // each encode arms its watch as it starts
 		job := &JobRecord{ID: id, PublishPolicy: transcode.PublishPolicyOnApproval, RetainReserveBytes: roomReserve}
-		ctx := f.w.withDiskFloor(context.Background(), job, filepath.Join(t.TempDir(), "out.mkv"), "")
-		err := encodeSizeWatchFrom(ctx).check()
+		ctxs[id] = f.w.withDiskFloor(context.Background(), job, filepath.Join(t.TempDir(), "out.mkv"), "")
+	}
+	for id, stops := range map[string]bool{"job-old": false, "job-new": true} {
+		err := encodeSizeWatchFrom(ctxs[id]).check()
 		if _, stopped := err.(*diskFloorStop); stopped != stops {
 			t.Fatalf("%s: check = %v, want stop = %v", id, err, stops)
 		}
+	}
+}
+
+// K2. A newer job that has armed no watch (still copying its source, or not an
+// ffmpeg job) never takes the floor stop away from the encode that has.
+func TestRoom_ANewerJobWithoutAWatchDoesNotDisableTheEncodesFloorStop(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	now := time.Now().UTC()
+	for id, started := range map[string]time.Time{"job-encoding": now.Add(-time.Hour), "job-copying": now} {
+		dir := filepath.Join(f.cfg.StateDir, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		job := &JobRecord{ID: id, Status: "running", PID: 1, StartedAt: started, CreatedAt: started, RetainReserveBytes: roomReserve, PublishPolicy: transcode.PublishPolicyOnApproval}
+		if err := SaveJobAtomic(filepath.Join(dir, "job.json"), job); err != nil {
+			t.Fatal(err)
+		}
+	}
+	job := &JobRecord{ID: "job-encoding", PublishPolicy: transcode.PublishPolicyOnApproval, RetainReserveBytes: roomReserve}
+	ctx := f.w.withDiskFloor(context.Background(), job, filepath.Join(t.TempDir(), "out.mkv"), "")
+	f.free.Store(roomFloor/2 - 1)
+	if _, stopped := encodeSizeWatchFrom(ctx).check().(*diskFloorStop); !stopped {
+		t.Fatal("the only encode with a watch must stop under the hard floor")
+	}
+}
+
+// The floor watch is forgotten when its encode's context ends.
+func TestRoom_AnEndedEncodeNoLongerCountsAsTheNewest(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	older := &JobRecord{ID: "job-a", PublishPolicy: transcode.PublishPolicyOnApproval, RetainReserveBytes: roomReserve}
+	newer := &JobRecord{ID: "job-b", PublishPolicy: transcode.PublishPolicyOnApproval, RetainReserveBytes: roomReserve}
+	f.w.withDiskFloor(context.Background(), older, filepath.Join(t.TempDir(), "a.mkv"), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	f.w.withDiskFloor(ctx, newer, filepath.Join(t.TempDir(), "b.mkv"), "")
+	if f.w.newestEncode("job-a") {
+		t.Fatal("job-a is older than the armed job-b")
+	}
+	cancel()
+	deadline := time.Now().Add(2 * time.Second)
+	for !f.w.newestEncode("job-a") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !f.w.newestEncode("job-a") {
+		t.Fatal("job-a must be the newest once job-b's encode has ended")
+	}
+}
+
+// A job record the node cannot read leaves nothing freeable: an admitted job's
+// own copy must not be deletable on a guess.
+func TestRoom_NothingIsFreeableWhenTheStartedJobsCannotBeRead(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	entry := f.cacheEntry("spare", 400, time.Hour)
+	dir := filepath.Join(f.cfg.StateDir, "job-broken")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "job.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.w.freeableCacheEntries(""); len(got) != 0 {
+		t.Fatalf("freeable entries %v, want none while the job records cannot be read", got)
+	}
+	if freed, _ := f.w.ClearFreeableSourceCache(); freed != 0 || !exists(entry) {
+		t.Fatalf("freed %d, entry kept %v, want nothing deleted", freed, exists(entry))
 	}
 }
 

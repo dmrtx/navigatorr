@@ -166,8 +166,13 @@ func TestAFileTooBigForEveryNodeFailsAtSubmission(t *testing.T) {
 	}
 	// An output past every retention budget is as hopeless.
 	e = retentionWorkers(t, newRoomReporter(30*gib, 30*gib), newRoomReporter(40*gib, 40*gib))
-	if _, res, waiting := convert(t, e, "conv-b", 100*gib, ""); !waiting || res.Status != StepFailed {
+	_, res, waiting = convert(t, e, "conv-b", 100*gib, "")
+	if !waiting || res.Status != StepFailed {
 		t.Fatalf("an output over every retention budget: %+v (waiting %v)", res, waiting)
+	}
+	// The text names the budget that is too small, not a disk the nodes never reported.
+	if !strings.Contains(res.Error, "approval budget is "+gbText(40*gib)) || strings.Contains(res.Error, "to give a job") {
+		t.Fatalf("budget failure text = %q, want the output need and the largest approval budget", res.Error)
 	}
 	// One node that could take it empty keeps it waiting, not failed.
 	e = retentionWorkers(t, diskNode(400*gib, 20*gib, 0), diskNode(2000*gib, 20*gib, 0))

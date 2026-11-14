@@ -96,12 +96,22 @@ func (e *Engine) roomNeverFits(ctx context.Context, workers []transcode.NamedWor
 	if !exact || need.SourceBytes <= 0 || len(workers) == 0 {
 		return "", false
 	}
-	var biggest int64
+	var biggest, biggestBudget int64
+	diskLimited := true
 	for i, r := range e.roomOf(ctx, workers) {
 		if !r.Fresh(e.now()) || r.EverFits(needOn(need, workers[i])) {
 			return "", false
 		}
 		biggest = max(biggest, r.DiskCapacityBytes-r.FloorBytes)
+		biggestBudget = max(biggestBudget, r.CapacityBytes)
+		// A node that could hold the files on its disk is held back by its
+		// approval budget alone.
+		if !(r.DiskCapacityBytes > 0 && need.SourceBytes+need.ReserveBytes+r.FloorBytes > r.DiskCapacityBytes) {
+			diskLimited = false
+		}
+	}
+	if !diskLimited {
+		return fmt.Sprintf("Too big for every node: the output needs %s kept for approval and the largest approval budget is %s", gbText(need.ReserveBytes), gbText(biggestBudget)), true
 	}
 	return fmt.Sprintf("Too big for every node: it needs %s (source %s and output %s) and the largest node has %s to give a job", gbText(need.SourceBytes+need.ReserveBytes), gbText(need.SourceBytes), gbText(need.ReserveBytes), gbText(biggest)), true
 }

@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -351,6 +352,21 @@ func TestRoom_TheHoldRequestCanClearTheCache(t *testing.T) {
 	srv.handleHold(rec, req)
 	if rec.Code != http.StatusOK || exists(spare) || !f.w.Held() {
 		t.Fatalf("code %d, spare kept %v, held %v: %s", rec.Code, exists(spare), f.w.Held(), rec.Body.String())
+	}
+}
+
+// A cache clear that fails is not answered as done: the server would never ask
+// again. The hold itself is stored, so a retry is harmless.
+func TestRoom_AFailedCacheClearIsAnsweredWithAnError(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	f.cacheEntry("spare", 400, time.Hour)
+	f.w.clearSourceCache = func() (int64, error) { return 0, errors.New("cache not readable") }
+	srv := &Server{worker: f.w}
+	req, _ := http.NewRequest(http.MethodPut, "/v1/hold", strings.NewReader(`{"hold":true,"clear_cache":true}`))
+	rec := httptest.NewRecorder()
+	srv.handleHold(rec, req)
+	if rec.Code != http.StatusInternalServerError || !f.w.Held() {
+		t.Fatalf("code %d, held %v: %s; want a 500 with the hold stored", rec.Code, f.w.Held(), rec.Body.String())
 	}
 }
 

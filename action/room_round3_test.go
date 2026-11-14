@@ -3,7 +3,6 @@ package action
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -156,5 +155,4 @@ func TestIsRoomRefusalRecognisesOldAndNewWorkers(t *testing.T) {
 			t.Errorf("IsRoomRefusal(%q) = %v, want %v", msg, got, want)
 		}
 	}
-	_ = strings.ToLower
 }

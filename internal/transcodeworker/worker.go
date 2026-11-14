@@ -281,6 +281,15 @@ func cleanRootPaths(roots []string) []string {
 
 // Worker manages the local transcode execution on the node.
 type Worker struct {
+	// clearSourceCache replaces ClearFreeableSourceCache when set (tests).
+	clearSourceCache func() (int64, error)
+
+	// armedFloors lists the encodes whose disk-floor watch is armed, newest
+	// last, so only the encode armed last is stopped (see withDiskFloor).
+	armedMu     sync.Mutex
+	armedFloors map[string]int64
+	armedSeq    int64
+
 	// partialCleanup tracks best-effort background SMB partial removals. The
 	// long-lived server never waits for them; a one-shot CLI process waits
 	// through WaitBackgroundCleanup, or it would exit before they ran.

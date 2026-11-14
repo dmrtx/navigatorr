@@ -926,8 +926,16 @@ func (s *Server) handleHold(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.ClearCache {
-			if _, err := s.worker.ClearFreeableSourceCache(); err != nil {
+			clear := s.worker.ClearFreeableSourceCache
+			if s.worker.clearSourceCache != nil {
+				clear = s.worker.clearSourceCache
+			}
+			if _, err := clear(); err != nil {
+				// The hold is stored and a retry of this request is harmless:
+				// the server must not take the cache for cleared.
 				log.Printf("source cache not cleared: %v", err)
+				writeHTTPError(w, http.StatusInternalServerError, "the worker could not clear its source cache")
+				return
 			}
 		}
 	default:
