@@ -655,3 +655,22 @@ func TestRoom_AStartupDropsHalfCopiesACrashLeft(t *testing.T) {
 		t.Fatal("the half copy a crash left must go at start")
 	}
 }
+
+// A preserve conversion keeps quality: its output may be most of the source and
+// only one larger than the source is not compressing. A compact job at the same
+// size is stopped by its half-source reserve.
+func TestRoom_APreserveOutputAtSixtyPercentIsNotStopped(t *testing.T) {
+	const source = int64(20_000_000)
+	preserve := &transcode.Plan{Mode: "x265_preserve", SizePolicy: &transcode.SizePolicy{}}
+	compact := &transcode.Plan{Mode: "compact", SizePolicy: &transcode.SizePolicy{MinSavingsPercent: 10}}
+	written := source * 60 / 100
+	if r := decideReserveRefusal(source, transcode.OutputReserveBytes(preserve, source), 100, qualityModeProjection, nil, written, 10); r != nil {
+		t.Fatalf("a preserve output at 60%% of the source was stopped: %+v", r)
+	}
+	if r := decideReserveRefusal(source, transcode.OutputReserveBytes(compact, source), 100, qualityModeProjection, nil, written, 10); r == nil || r.Rejection.ReasonCode != "insufficient_savings" {
+		t.Fatalf("a compact output at 60%% of the source must stop, got %+v", r)
+	}
+	if r := decideReserveRefusal(source, transcode.OutputReserveBytes(preserve, source), 100, qualityModeProjection, nil, source+1, 10); r == nil {
+		t.Fatal("a preserve output larger than the source must stop")
+	}
+}

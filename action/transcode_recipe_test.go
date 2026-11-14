@@ -310,6 +310,41 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 			t.Fatalf("%s: message %q", name, rec.Message)
 		}
 	}
+	// A stop for passing the room the goal keeps for its output (half the
+	// original) says so; only an output that really is larger than the original
+	// says it is larger.
+	for name, tc := range map[string]struct {
+		candidate int64
+		reason    string
+		want      string
+		notWant   string
+		mode      string
+	}{
+		"past the reserve":         {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (50% of the original)", "larger than the original", "quality"},
+		"larger than source":       {25_000_000, "insufficient_savings", "is larger than the original", "keeps room", "quality"},
+		"size growth":              {22_000_000, "size_growth_exceeded", "is larger than the original", "keeps room", "quality"},
+		"compact past the reserve": {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (50% of the original)", "does not save", "compact"},
+		// Growth is never put down to the reserve, whatever the candidate's size.
+		"size growth under source": {12_000_000, "size_growth_exceeded", "is larger than the original", "keeps room", "quality"},
+	} {
+		c := newRecipeCase(t, map[string]any{"mode": tc.mode}, nil)
+		planRecipe(t, c)
+		c.ec.State[SubmittedSourceBytesKey] = int64(20_000_000)
+		c.ec.State[roomReserveKey] = int64(10_000_000)
+		advanceRung(t, c, transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: tc.reason, CandidateSizeBytes: tc.candidate})
+		if rec := QualityLadderOf(c.ec.State); !strings.Contains(rec.Message, tc.want) || strings.Contains(rec.Message, tc.notWant) {
+			t.Fatalf("%s: message %q", name, rec.Message)
+		}
+	}
+	// The share is the reserve's, not a fixed half.
+	c33 := newRecipeCase(t, map[string]any{"mode": "compact"}, nil)
+	planRecipe(t, c33)
+	c33.ec.State[SubmittedSourceBytesKey] = int64(30_000_000)
+	c33.ec.State[roomReserveKey] = int64(10_000_000)
+	advanceRung(t, c33, transcode.JobStatus{Status: transcode.StatusFailed, ReasonCode: "insufficient_savings", CandidateSizeBytes: 12_000_000})
+	if rec := QualityLadderOf(c33.ec.State); !strings.Contains(rec.Message, "(33% of the original)") {
+		t.Fatalf("a third: message %q", rec.Message)
+	}
 	// A quality miss without scores ends the goal rather than guessing.
 	c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
 	planRecipe(t, c)

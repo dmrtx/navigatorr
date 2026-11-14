@@ -434,8 +434,9 @@ the retention budget is for jobs that keep a candidate:
    (N GB held)", "No node has room: needs X, the most any node can offer is Y")
    and is retried by itself.
 7. The output reserve follows the goal: a size goal its byte budget, a quality or
-   compact goal half of the source, an audio-only goal the most the size policy
-   accepts. The coordinator stores it as `room_reserve_bytes` and keeps it across
+   compact goal half of the source, an `x265_preserve` goal the whole source (it
+   fails only when the output is larger than the original), an audio-only goal the
+   most the size policy accepts. The coordinator stores it as `room_reserve_bytes` and keeps it across
    requeues. An output that passes its reserve fails as "not compressing" (the
    output's size against the source), as soon as the projection knows.
 8. If free disk falls under the hard floor (half of `min_free_disk_bytes`) during
