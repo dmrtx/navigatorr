@@ -24,8 +24,11 @@ import (
 //	    against the ones behind it.
 //	I3  With a file resolver, a conversion whose size is unknown reaches no
 //	    node and so holds no slot; its size is read again at most once a
-//	    minute (sourceSizeRetry). Without a resolver it is placed as needing no
-//	    room: the only exception.
+//	    minute (sourceSizeRetry) while the read only timed out. A source that
+//	    can never be read (no path, outside the read roots, missing, irregular
+//	    or empty) is marked source_size_unreadable and placed as needing no
+//	    room, so the node fails it with the real error instead of it waiting
+//	    forever. Without a resolver it is placed as needing no room too.
 //	I4  Batch items not yet started as children are disk-only (placement{}):
 //	    they are not waiter rows and have no size to read.
 
@@ -63,7 +66,7 @@ func (e *Engine) placementOf(ec *ExecutionContext) placement {
 	return placement{
 		need:        conversionRoomNeed(ec),
 		refusals:    refusalsFromState(ec.State[roomRefusalsKey]),
-		sizeUnknown: e.deps.Fs != nil && size <= 0,
+		sizeUnknown: e.deps.Fs != nil && size <= 0 && !getBool(ec.State, sourceSizeUnreadableKey),
 	}
 }
 
@@ -72,7 +75,7 @@ func (e *Engine) waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
 	return placement{
 		need:        roomNeed(w.Standalone, w.SourceBytes, w.ReserveBytes),
 		refusals:    parseRefusals(w.Refusals),
-		sizeUnknown: e.deps.Fs != nil && w.SourceBytes <= 0,
+		sizeUnknown: e.deps.Fs != nil && w.SourceBytes <= 0 && !w.SizeUnreadable,
 	}
 }
 

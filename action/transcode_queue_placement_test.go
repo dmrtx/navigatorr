@@ -228,14 +228,19 @@ func TestAnOldUnsizedConversionTheIdleNodeCannotHoldDoesNotHoldItsSlot(t *testin
 // A size that cannot be read with a file resolver configured is not "needs
 // nothing": the conversion waits, holds no slot, and the read is repeated at
 // most once a minute.
-func TestAnUnreadableSizeWaitsHoldsNoSlotAndIsReadOncePerMinute(t *testing.T) {
+// A stat that does not answer (a stalled mount) leaves the size unknown: the
+// conversion waits, holds no slot, and is read again at most once a minute.
+func TestAStalledSizeReadWaitsHoldsNoSlotAndIsReadOncePerMinute(t *testing.T) {
 	dir := t.TempDir()
-	src := filepath.Join(dir, "gone.mkv")
+	src := filepath.Join(dir, "stalled.mkv")
 	sparseFile(t, src, gib)
 	var calls atomic.Int32
-	oldStat := submittedStat
-	submittedStat = func(string) (os.FileInfo, error) { calls.Add(1); return nil, os.ErrNotExist }
-	defer func() { submittedStat = oldStat }()
+	release := make(chan struct{})
+	defer close(release)
+	oldStat, oldTimeout := submittedStat, submittedStatTimeout
+	submittedStat = func(string) (os.FileInfo, error) { calls.Add(1); <-release; return nil, os.ErrDeadlineExceeded }
+	submittedStatTimeout = 20 * time.Millisecond
+	defer func() { submittedStat, submittedStatTimeout = oldStat, oldTimeout }()
 
 	e, clock := placementEngine(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 	e.deps.Fs = resolverFor(t, dir)
@@ -259,6 +264,37 @@ func TestAnUnreadableSizeWaitsHoldsNoSlotAndIsReadOncePerMinute(t *testing.T) {
 	turn(t, e, "old-a")
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("the size was read %d times after a minute, want 2", n)
+	}
+}
+
+// A source that can never be read (here, missing) does not wait forever: it
+// is marked unreadable and placed as needing no room, so the node it is given
+// fails it with the real error, and it is not read again.
+func TestAMissingSourceIsPlacedNotKeptWaiting(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int32
+	oldStat := submittedStat
+	submittedStat = func(string) (os.FileInfo, error) { calls.Add(1); return nil, os.ErrNotExist }
+	defer func() { submittedStat = oldStat }()
+
+	e, clock := placementEngine(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	e.deps.Fs = resolverFor(t, dir)
+	busy(t, e, "busy-m1", "m1")
+	waiter(t, e, "old-a", 10*time.Minute, map[string]any{"path": filepath.Join(dir, "gone.mkv")}, nil)
+
+	if w, cond, reason := turn(t, e, "old-a"); w != "m4" {
+		t.Fatalf("worker %q (%s %q), want m4: a missing source must not wait forever", w, cond, reason)
+	}
+	clock.advance(2 * time.Minute)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("the missing source was read %d times, want 1", n)
+	}
+	inst, err := e.deps.Store.GetActionInstance("old-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(inst.StateJSON, `"source_size_unreadable":true`) {
+		t.Fatalf("state does not mark the source unreadable: %s", inst.StateJSON)
 	}
 }
 

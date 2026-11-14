@@ -248,17 +248,24 @@ const sourceSizeRetry = time.Minute
 // sourceSizeCheckedKey is when the server last tried to read the source's size.
 const sourceSizeCheckedKey = "source_size_checked_at"
 
+// sourceSizeUnreadableKey marks a conversion whose source size the server
+// can never read (no path, outside the read roots, a missing, irregular or
+// empty file). It is then placed as needing no room, as it was before sizes
+// were read: the node it is given fails it with the real error. Without the
+// mark an unknown size reaches no node (placement.sizeUnknown).
+const sourceSizeUnreadableKey = "source_size_unreadable"
+
 // ensureSourceSize records the size of the conversion's source in its state
 // when it has none (I3): one created before sizes were recorded, or whose stat
 // did not answer then, is read at its turn, at most once per sourceSizeRetry.
-// While the size stays unknown the conversion reaches no node (see
-// placement.sizeUnknown). Without a file resolver nothing can be read and the
-// conversion is placed as needing no room: the only exception. The size and
-// the time of the attempt are saved with the state the turn leaves (a wait or
-// the assignment). It runs before the queue lock is taken: the stat is
-// bounded but is I/O.
+// A read that fails for good marks it unreadable; only a stat that does not
+// answer is tried again. Without a file resolver nothing can be read and the
+// conversion is placed as needing no room. The size, the mark and the time of
+// the attempt are saved with the state the turn leaves (a wait or the
+// assignment). It runs before the queue lock is taken: the stat is bounded but
+// is I/O.
 func (e *Engine) ensureSourceSize(ec *ExecutionContext) {
-	if ec.ActionName != "transcode_media" || e.deps.Fs == nil || getInt64(ec.State, SubmittedSourceBytesKey) > 0 {
+	if ec.ActionName != "transcode_media" || e.deps.Fs == nil || getInt64(ec.State, SubmittedSourceBytesKey) > 0 || getBool(ec.State, sourceSizeUnreadableKey) {
 		return
 	}
 	now := e.now()
@@ -266,8 +273,12 @@ func (e *Engine) ensureSourceSize(ec *ExecutionContext) {
 		return
 	}
 	ec.State[sourceSizeCheckedKey] = now.Format(time.RFC3339Nano)
-	if size := e.submittedSourceBytes(ec.ActionName, ec.Inputs); size > 0 {
+	size, definitive := e.readFileSize(getString(ec.Inputs, "path"))
+	switch {
+	case size > 0:
 		ec.State[SubmittedSourceBytesKey] = size
+	case definitive:
+		ec.State[sourceSizeUnreadableKey] = true
 	}
 }
 
