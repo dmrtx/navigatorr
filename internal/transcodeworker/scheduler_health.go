@@ -69,7 +69,7 @@ func (w *Worker) runSchedulerSweeps(ctx context.Context, selfExe, configPath str
 // measure that fails keeps the previous one, which the coordinator stops
 // trusting once it is old.
 func (w *Worker) refreshRetentionRoom(now time.Time) {
-	if !w.cfg.DeferredPublication || (w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0) {
+	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
 		w.schedulerMu.Lock()
 		w.retentionRoom = nil
 		w.schedulerMu.Unlock()

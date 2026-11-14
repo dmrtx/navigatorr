@@ -821,6 +821,15 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			// The node's disk ran low under the encode: not the job's fault.
 			return e.roomRequeue(ec, "the node's free disk fell under its hard floor while encoding"), nil
 		}
+		if st.FailureClassification == runnerKilledClass && ec.ActionName == "transcode_media" {
+			// The worker restarted (or crashed) under the encode: the file is
+			// fine and the encode is lost. It goes back to the queue, up to
+			// maxRunnerKilled times in a row, then it fails with the reason.
+			if n := getInt(ec.State, runnerKilledKey) + 1; n < maxRunnerKilled {
+				ec.State[runnerKilledKey] = n
+				return e.roomRequeue(ec, "the node restarted while it encoded"), nil
+			}
+		}
 		mirrorTranscodeWorkerMetadata(ec, st)
 		if getString(ec.Inputs, "mode") != "" {
 			switch st.ReasonCode {

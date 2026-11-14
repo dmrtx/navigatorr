@@ -1197,18 +1197,16 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		return SubmitResponse{ID: trimmedID, Error: fmt.Sprintf("resolving operational storage metadata: %v", metaErr)}, metaErr
 	}
 
-	if publishPolicy != "" {
-		if meta.FinalizationState == FinalizationStateNotRequired {
-			err := errors.New("publish_policy on_approval requires an external destination: this candidate is written in place")
-			return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
-		}
-		// A paused or build-held node takes no new job: it says so now and the
-		// coordinator keeps the job in its own queue. The disk and retention
-		// limits are applied when the slot comes up (admitAtStartLocked).
-		if _, msg := w.holdRefusal(); msg != "" {
-			_ = os.Remove(jobDir)
-			return SubmitResponse{ID: trimmedID, Error: msg}, errors.New(msg)
-		}
+	if publishPolicy != "" && meta.FinalizationState == FinalizationStateNotRequired {
+		err := errors.New("publish_policy on_approval requires an external destination: this candidate is written in place")
+		return SubmitResponse{ID: trimmedID, Error: err.Error()}, err
+	}
+	// A paused or build-held node takes no new job: it says so now and the
+	// coordinator keeps the job in its own queue. The disk and retention
+	// limits are applied when the slot comes up (admitAtStartLocked).
+	if _, msg := w.holdRefusal(); msg != "" {
+		_ = os.Remove(jobDir)
+		return SubmitResponse{ID: trimmedID, Error: msg}, errors.New(msg)
 	}
 
 	// Phase 6 is local-output-first: an external destination must not require
@@ -1245,13 +1243,13 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 		PartialPath:         meta.PartialPath,
 		PublishPolicy:       publishPolicy,
 	}
+	// Every job writes its output to this disk: it is admitted against the
+	// reserve its goal allows (transcode.OutputReserveBytes), and an output
+	// that grows past it is not compressing and fails.
+	job.RetainReserveBytes = transcode.OutputReserveBytes(plan, fi.Size())
+	job.RoomSourceBytes = fi.Size()
+	job.RoomSourceMTime = fi.ModTime().UTC().UnixNano()
 	if publishPolicy != "" {
-		// The output is admitted against the reserve its goal allows
-		// (transcode.OutputReserveBytes); one that grows past it is not
-		// compressing and fails.
-		job.RetainReserveBytes = transcode.OutputReserveBytes(plan, fi.Size())
-		job.RoomSourceBytes = fi.Size()
-		job.RoomSourceMTime = fi.ModTime().UTC().UnixNano()
 		job.RetentionWait = req.RetentionWait
 	}
 	job.Phase = "queued"
@@ -1954,6 +1952,8 @@ func (w *Worker) ReconcileStartup(ctx context.Context) error {
 			return err
 		}
 	}
+	// A copy into the source cache a crash cut short is free disk again.
+	w.dropHalfCopies()
 	// Finish retains and publish requests a crash interrupted, and expire what
 	// is due. A failure here must not keep the scheduler from starting: the
 	// periodic sweep retries.

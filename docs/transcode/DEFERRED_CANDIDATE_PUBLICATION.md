@@ -396,7 +396,9 @@ admission). `publishPolicyFor` no longer looks at `parent_action_id`. "Batches"
 below gives the reasoning and the one rule that keeps a batch from stalling.
 
 **Room admission (revision 7).** A node never waits for room. The rules, in
-plain words:
+plain words. They apply to every job that uses the node's disk, whether its
+output waits for approval or is published on encode (a batch child, say); only
+the retention budget is for jobs that keep a candidate:
 
 1. At admission, under the capacity lock, the node works out what the job needs:
    its source (nothing when this job's own source is already cached here), plus
@@ -434,19 +436,23 @@ plain words:
    node's deletable source cache (`PUT /v1/hold` with `clear_cache`; retained
    outputs untouched). A graceful pause and a suspend do not touch the cache. A
    node held by a build refuses new jobs.
-10. A restarted worker sends running jobs back, ignores a half-copied source and
-    treats complete cached sources that nobody holds as deletable.
+10. A restarted worker deletes the half copies in its source cache that no live
+    copy holds (a copy keeps an exclusive lock on its file while it writes; a
+    file written in the last 30 seconds is left alone), at start and before each
+    admission measures, and treats complete cached sources that nobody holds as
+    deletable. A job whose runner died with the worker (`runner_killed`) goes
+    back to the coordinator's queue; after three in a row for the same request it
+    fails with that reason, so it cannot loop.
 
 Removed in this revision: the run-alone gate (`retention_alone`), the too-large
 gate, the 30-minute `retention_floor_unmet` failure, the worker-side waiting
 (`retention_blocked` now only marks a refusal on the job record), the
 coordinator's spill branch and `worker_retention_blocked`. Records written before
 the change still load: `floor_unmet_since` and `floor_unmet_seen_at` are ignored.
-The design was model-checked with TLA+ before it was written. Where the code
-differs from the model: room admission applies to deferred (`on_approval`) jobs
-only, since a job that publishes on encode keeps no candidate; the coordinator
-first reserves half of the source and stores the exact reserve at submit, so a
-size-goal job can have one wasted first attempt.
+The design was model-checked with TLA+ before it was written. The coordinator
+stores the exact reserve (`transcode.OutputReserveBytes`, the same function the
+worker uses) as soon as the plan is resolved, so the queue places a conversion by
+its real need.
 
 `worker`. `wait_transcode` completes at retention (`transcode_done` true, the slot
 freed) and copies the worker's attested size and SHA-256 into the attempt. A

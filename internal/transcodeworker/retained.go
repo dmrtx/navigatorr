@@ -755,10 +755,21 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 			}
 			return 0, 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
 		}
-		if job == nil || job.ID != id || !job.deferredPublication() || (job.Status != "queued" && job.Status != "running") {
+		if job == nil || job.ID != id || (job.Status != "queued" && job.Status != "running") {
 			continue
 		}
 		if job.Status == "queued" && job.PID == 0 {
+			continue
+		}
+		if !job.deferredPublication() {
+			// A job that publishes on encode keeps no candidate, but its
+			// output still grows on this disk until it is moved: its reserve
+			// is promised room free space does not show yet. It does not
+			// count against the retention budget.
+			if job.EncodeComplete {
+				continue
+			}
+			unwritten += job.RetainReserveBytes
 			continue
 		}
 		if job.CandidateSizeBytes > 0 {

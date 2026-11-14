@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -61,8 +62,12 @@ func (f *roomFixture) restart() {
 }
 
 // try submits an on_approval job and returns the node's answer.
-func (f *roomFixture) try(id string) error {
-	_, err := f.w.Submit(context.Background(), f.request(id, "on_approval"), "test-exe", "")
+func (f *roomFixture) try(id string) error { return f.tryPolicy(id, "on_approval") }
+
+// tryPolicy submits a job with the given publish policy ("" publishes on
+// encode, as every batch child may).
+func (f *roomFixture) tryPolicy(id, policy string) error {
+	_, err := f.w.Submit(context.Background(), f.request(id, policy), "test-exe", "")
 	return err
 }
 
@@ -78,7 +83,12 @@ func (f *roomFixture) mustAdmit(id string) {
 
 func (f *roomFixture) mustRefuse(id string) error {
 	f.t.Helper()
-	err := f.try(id)
+	return f.mustRefusePolicy(id, "on_approval")
+}
+
+func (f *roomFixture) mustRefusePolicy(id, policy string) error {
+	f.t.Helper()
+	err := f.tryPolicy(id, policy)
 	if err == nil || !transcode.IsRoomRefusal(err) {
 		f.t.Fatalf("%s: err = %v, want a room refusal", id, err)
 	}
@@ -460,5 +470,172 @@ func TestRoom_OldRecordsWithTheFloorUnmetFieldsStillLoad(t *testing.T) {
 	job, err := LoadJob(path)
 	if err != nil || job.ID != "job-old" || job.RetainReserveBytes != 9 {
 		t.Fatalf("job = %+v (%v)", job, err)
+	}
+}
+
+// Every job uses this node's disk, whether its output waits for approval or is
+// published on encode: a publish-on-encode job (a batch child, say) takes the
+// same room admission, with the same oldest-first eviction.
+func TestRoom_APublishOnEncodeJobEvictsOtherCachedSourcesOldestFirst(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	oldest := f.cacheEntry("oldest", 400, 5*time.Hour)
+	middle := f.cacheEntry("middle", 500, 3*time.Hour)
+	newest := f.cacheEntry("newest", 600, time.Hour)
+	f.free.Store(300) // needs 1150: the oldest two are enough
+	if err := f.tryPolicy("job-plain", ""); err != nil {
+		t.Fatal(err)
+	}
+	if job := f.loadQueued("job-plain"); job.PID == 0 || job.RetainReserveBytes != roomReserve {
+		t.Fatalf("job = pid %d reserve %d, want started with its reserve", job.PID, job.RetainReserveBytes)
+	}
+	if exists(oldest) || exists(middle) || !exists(newest) {
+		t.Fatalf("oldest %v middle %v newest %v: only the two oldest may go", exists(oldest), exists(middle), exists(newest))
+	}
+}
+
+func TestRoom_APublishOnEncodeJobThatCannotFitIsRefusedAtOnce(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	spare := f.cacheEntry("spare", 200, time.Hour)
+	f.free.Store(100)
+	err := f.mustRefusePolicy("job-plain-big", "")
+	if !strings.Contains(err.Error(), "needs") {
+		t.Fatalf("refusal %q must say what is needed", err)
+	}
+	if !exists(spare) {
+		t.Fatal("nothing may be deleted for a job that would not fit")
+	}
+	f.free.Store(10_000)
+	if err := f.tryPolicy("job-plain-big", ""); err != nil {
+		t.Fatalf("with room it is admitted: %v", err)
+	}
+}
+
+// A running publish-on-encode job's output is promised room too: the next job
+// sees it as unwritten and is refused if the rest does not fit.
+func TestRoom_APublishOnEncodeJobsUnwrittenOutputIsPromisedRoom(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	f.free.Store(1_300)
+	if err := f.tryPolicy("job-first", ""); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRefusePolicy("job-second", "on_approval")
+}
+
+func TestRoom_APausedNodeRefusesAPublishOnEncodeJobToo(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	if err := f.w.SetHold(true); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRefusePolicy("job-plain-held", "")
+	if err := f.w.SetHold(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.tryPolicy("job-plain-held", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hard floor and the reserve watch apply to a publish-on-encode job.
+func TestRoom_APublishOnEncodeJobIsWatchedForTheHardFloorAndItsReserve(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	job := &JobRecord{ID: "job-plain-encoding", RetainReserveBytes: roomReserve, SourceSizeBytes: roomSource, DurationSec: 100, Plan: &transcode.Plan{}}
+	ctx := f.w.withDiskFloor(withEncodeSizeWatch(context.Background(), job, filepath.Join(t.TempDir(), "out.mkv"), ""), job, "", "")
+	watch := encodeSizeWatchFrom(ctx)
+	if watch == nil || watch.reserveBytes != roomReserve {
+		t.Fatalf("watch = %+v, want one holding the reserve", watch)
+	}
+	f.free.Store(roomFloor / 2)
+	if err := watch.check(); err != nil {
+		t.Fatalf("at the hard floor: %v", err)
+	}
+	f.free.Store(roomFloor/2 - 1)
+	if _, ok := watch.check().(*diskFloorStop); !ok {
+		t.Fatal("under the hard floor the encode must stop for a requeue")
+	}
+}
+
+// A half copy in the source cache that no live copy holds is free disk again:
+// it goes before admission measures, and at start.
+func TestRoom_AStaleHalfCopyIsDroppedAndItsBytesCountAsFree(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	dir := f.w.sourceCacheDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	half := filepath.Join(dir, ".cache-stage-dead")
+	if err := os.WriteFile(half, make([]byte, 5_000), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(half, old, old); err != nil {
+		t.Fatal(err)
+	}
+	// The disk shows the half copy's bytes only while the file is there.
+	f.w.freeDisk = func(string) (int64, error) {
+		if exists(half) {
+			return 300, nil
+		}
+		return 5_300, nil
+	}
+	f.mustAdmit("job-after-half-copy")
+	if exists(half) {
+		t.Fatal("a half copy nobody holds must be deleted before admission measures")
+	}
+}
+
+func TestRoom_AHalfCopyALiveCopyHoldsOrJustWrittenIsKept(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	dir := f.w.sourceCacheDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	held := filepath.Join(dir, ".cache-stage-live")
+	young := filepath.Join(dir, ".cache-stage-young")
+	for _, p := range []string{held, young} {
+		if err := os.WriteFile(p, make([]byte, 100), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(held, old, old); err != nil {
+		t.Fatal(err)
+	}
+	live, err := os.Open(held) // the copy in progress holds its lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	if err := syscall.Flock(int(live.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if freed := f.w.dropHalfCopies(); freed != 0 || !exists(held) || !exists(young) {
+		t.Fatalf("freed %d, held kept %v, young kept %v: a live or fresh copy must stay", freed, exists(held), exists(young))
+	}
+	_ = syscall.Flock(int(live.Fd()), syscall.LOCK_UN) // the copy ended
+	if freed := f.w.dropHalfCopies(); freed != 100 || exists(held) || !exists(young) {
+		t.Fatalf("freed %d, held kept %v: an ended copy goes, a fresh one stays", freed, exists(held))
+	}
+}
+
+func TestRoom_AStartupDropsHalfCopiesACrashLeft(t *testing.T) {
+	f := newRoomFixture(t, nil)
+	dir := f.w.sourceCacheDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	half := filepath.Join(dir, ".cache-stage-crash")
+	if err := os.WriteFile(half, make([]byte, 50), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(half, old, old); err != nil {
+		t.Fatal(err)
+	}
+	f.restart()
+	if err := f.w.ReconcileStartup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if exists(half) {
+		t.Fatal("the half copy a crash left must go at start")
 	}
 }

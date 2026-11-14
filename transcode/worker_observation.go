@@ -65,6 +65,10 @@ const RetentionRoomMaxAge = 45 * time.Second
 type RoomNeed struct {
 	SourceBytes  int64
 	ReserveBytes int64
+	// Retained is true when the output waits on the node for approval, so it
+	// also counts against the retention budget. A conversion that publishes on
+	// encode (or may fall back to it) needs disk room only.
+	Retained bool
 }
 
 // RoomVerdict says whether a node can take a conversion now.
@@ -106,7 +110,7 @@ func (r *RetentionRoom) EverFits(need RoomNeed) bool {
 	if r.DiskCapacityBytes > 0 && need.SourceBytes+need.ReserveBytes+r.FloorBytes > r.DiskCapacityBytes {
 		return false
 	}
-	return r.CapacityBytes <= 0 || need.ReserveBytes <= r.CapacityBytes
+	return !need.Retained || r.CapacityBytes <= 0 || need.ReserveBytes <= r.CapacityBytes
 }
 
 // Judge says whether the node that reported r can take need now, and for
@@ -128,7 +132,7 @@ func (r *RetentionRoom) Judge(need RoomNeed, now time.Time) (RoomVerdict, int64)
 		return RoomPaused, 0
 	case r.Hold == "build":
 		return RoomBuild, 0
-	case r.CapacityBytes > 0 && need.ReserveBytes > r.RoomBytes:
+	case need.Retained && r.CapacityBytes > 0 && need.ReserveBytes > r.RoomBytes:
 		return RoomApprovals, r.RoomBytes
 	case r.DiskCapacityBytes > 0 && need.SourceBytes+need.ReserveBytes > r.DiskRoomBytes:
 		return RoomNoSpace, r.DiskRoomBytes

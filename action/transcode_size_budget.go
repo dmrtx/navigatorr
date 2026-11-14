@@ -658,6 +658,7 @@ func (e *Engine) commitSizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicy
 	ec.State[sizeBudgetKey] = rec
 	outputs[sizeBudgetKey] = rec
 	ec.State["plan"] = plan
+	recordRoomReserve(ec, plan)
 	ec.State["plan_source"] = sizeBudgetPlanSource
 	ec.State["plan_digest"] = plan.PlanDigest
 	outputs["plan"] = plan

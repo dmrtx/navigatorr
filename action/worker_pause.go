@@ -461,7 +461,7 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 // own job identity, since the node still knows the cancelled one.
 func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, node string) error {
 	fresh := map[string]any{}
-	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusedByKey, roomRefusedAtKey} {
+	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusedByKey, roomRefusedAtKey, runnerKilledKey} {
 		if v, ok := ec.State[key]; ok {
 			fresh[key] = v
 		}

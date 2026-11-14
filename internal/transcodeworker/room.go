@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
@@ -187,12 +188,15 @@ func (w *Worker) admitRoomLocked(job *JobRecord) (fallback bool, err error) {
 	if limit <= 0 && floor <= 0 {
 		return false, nil
 	}
+	w.dropHalfCopies()
 	held, unwritten, err := w.retainedBytesLocked()
 	if err != nil {
 		return false, fmt.Errorf("measuring retained candidates: %w", err)
 	}
 	reserve := job.RetainReserveBytes
-	if limit > 0 && held+reserve > limit {
+	// The retention budget is only for a job whose candidate waits for
+	// approval; one that publishes on encode keeps nothing here.
+	if limit > 0 && job.deferredPublication() && held+reserve > limit {
 		if job.RetentionWait {
 			return false, &retentionRefusal{reason: retentionBlockedBudget, msg: fmt.Sprintf("worker busy (%s): waiting for approvals on this node (%s held of %s allowed, this job needs %s)", transcode.RoomRefusalTag, gb(held), gb(limit), gb(reserve))}
 		}
@@ -243,9 +247,6 @@ func (w *Worker) admitRoomLocked(job *JobRecord) (fallback bool, err error) {
 // reads it and takes the job back. Nothing here waits for room. Callers hold
 // the capacity lock and the job's lock.
 func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error) {
-	if !job.deferredPublication() {
-		return true, nil
-	}
 	var fallback bool
 	var err error
 	if reason, msg := w.holdRefusal(); reason != "" {
@@ -342,7 +343,7 @@ func (w *Worker) diskHardFloor() int64 { return w.cfg.MinFreeDiskBytes / 2 }
 // the hard floor. It arms a watch of its own when the plan has nothing else to
 // judge.
 func (w *Worker) withDiskFloor(ctx context.Context, job *JobRecord, outputPath, progressPath string) context.Context {
-	if job == nil || !job.deferredPublication() || w.diskHardFloor() <= 0 {
+	if job == nil || w.diskHardFloor() <= 0 {
 		return ctx
 	}
 	watch := encodeSizeWatchFrom(ctx)
@@ -355,4 +356,49 @@ func (w *Worker) withDiskFloor(ctx context.Context, job *JobRecord, outputPath, 
 		return free, w.diskHardFloor(), err == nil
 	}
 	return ctx
+}
+
+// halfCopyIdle is how long a partial cache file must have gone unwritten before
+// a sweep may take it, so a copy that has only just been created is never
+// raced.
+const halfCopyIdle = 30 * time.Second
+
+// dropHalfCopies deletes partial cache files (.cache-stage-* and .cache-meta-*)
+// that no live copy holds. A running copy keeps an exclusive lock on its file
+// and keeps writing it; a copy whose process died holds neither, so its
+// leftover is free disk again. It returns the bytes it freed. Callers hold the
+// capacity lock or run at start.
+func (w *Worker) dropHalfCopies() int64 {
+	if !w.sourceCacheEnabled() {
+		return 0
+	}
+	dir := w.sourceCacheDir()
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	var freed int64
+	for _, e := range names {
+		name := e.Name()
+		if !strings.HasPrefix(name, ".cache-stage-") && !strings.HasPrefix(name, ".cache-meta-") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		f, err := os.Open(full)
+		if err != nil {
+			continue
+		}
+		fi, serr := f.Stat()
+		if serr != nil || !fi.Mode().IsRegular() || time.Since(fi.ModTime()) < halfCopyIdle ||
+			syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+			_ = f.Close()
+			continue
+		}
+		if os.Remove(full) == nil {
+			freed += fi.Size()
+			log.Printf("source cache: removed the half copy %s (%d bytes)", name, fi.Size())
+		}
+		_ = f.Close()
+	}
+	return freed
 }

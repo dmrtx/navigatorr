@@ -398,6 +398,9 @@ func copySourceCacheEntry(ctx context.Context, localPath, dataPath string, size 
 			_ = os.Remove(tmpName)
 		}
 	}()
+	// A live copy holds this lock until it ends (the process dying releases
+	// it), so a sweep for half copies never deletes one being written.
+	_ = syscall.Flock(int(tmp.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err := copyRegularFileTo(ctx, localPath, tmp, size, 0o644); err != nil {
 		return err
 	}

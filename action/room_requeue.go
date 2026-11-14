@@ -25,6 +25,14 @@ const (
 	roomRefusedAtKey = "room_refused_at"
 	// diskFloorReason is the reason code of an encode stopped for free disk.
 	diskFloorReason = "disk_floor"
+	// runnerKilledClass is the failure class of a job whose runner died with
+	// its worker (a restart or a crash): the encode is lost, not wrong.
+	runnerKilledClass = "runner_killed"
+	// runnerKilledKey counts the times in a row it happened to this request.
+	runnerKilledKey = "runner_killed_count"
+	// maxRunnerKilled is how many in a row go back to the queue; the next one
+	// fails with the worker's reason so a job that kills its runner cannot loop.
+	maxRunnerKilled = 3
 )
 
 // roomRefusedFor is how long the node that refused a conversion is passed over.

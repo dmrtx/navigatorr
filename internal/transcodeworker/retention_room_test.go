@@ -52,8 +52,7 @@ func TestRetentionRoomIsNeverNegative(t *testing.T) {
 
 func TestRetentionRoomIsDroppedWhenTheBudgetOrDeferredPublicationIsTurnedOff(t *testing.T) {
 	for name, turnOff := range map[string]func(*WorkerConfig){
-		"no limit":                 func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 0 },
-		"deferred publication off": func(c *WorkerConfig) { c.DeferredPublication = false },
+		"no limit": func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newRetainedFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 1000 })
