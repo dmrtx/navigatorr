@@ -233,24 +233,76 @@ func TestAStaleTooLargeMarkIsIgnoredAfterARestartWithABiggerBudget(t *testing.T)
 	}
 }
 
-func TestAQueueThatCannotBeReadFailsClosed(t *testing.T) {
-	f := newTooLargeFixture(t, nil)
-	gate := f.w.tooLargeGate(nil, errors.New("read failed"))
-	if gate != retentionGateUnknown {
-		t.Fatalf("gate = %q, want the unknown gate", gate)
+// A record that cannot be read is no reason to gate the node or to make a batch
+// child publish without approval. (Admission itself still fails closed on it,
+// as it always did: the retained bytes cannot be measured, so the job stays
+// queued; it starts once the record is gone.) A submit refuses to run past such
+// a record, so the jobs are queued first (the queue held) and it is damaged after.
+func TestACorruptJobRecordDoesNotFreezeTheNode(t *testing.T) {
+	ctx := context.Background()
+	corruptAndRelease := func(f *retainedFixture) {
+		dir := filepath.Join(f.cfg.StateDir, "corrupt")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "job.json"), []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.w.SetHold(false); err != nil {
+			t.Fatal(err)
+		}
+		// The pass reports the unreadable record but still works the queue.
+		if _, err := f.w.ScheduleQueued(ctx, "test-exe", ""); err == nil {
+			t.Fatal("the unreadable record must be reported")
+		}
 	}
-	f.submitFrom("later", f.source("later.mkv", smallSize), true)
-	job := f.loadQueued("later")
-	// Started by the Submit pass; judged again with a queue that cannot be read.
-	job.PID = 0
-	jobFile := filepath.Join(f.cfg.StateDir, "later", "job.json")
-	if ok, err := f.w.admitAtStartLocked(jobFile, job, gate); ok || err != nil {
-		t.Fatalf("waiting job admitted = %v (%v) with an unreadable queue", ok, err)
-	}
-	job.RetentionWait = false
-	if ok, err := f.w.admitAtStartLocked(jobFile, job, gate); !ok || err != nil || job.PublishFallback != transcode.PublishFallbackRetentionFull {
-		t.Fatalf("no-wait job admitted = %v (%v) fallback %q; want publish on encode", ok, err, job.PublishFallback)
-	}
+	t.Run("nothing too large waits", func(t *testing.T) {
+		f := newTooLargeFixture(t, nil)
+		if err := f.w.SetHold(true); err != nil {
+			t.Fatal(err)
+		}
+		f.submitFrom("small", f.source("small.mkv", smallSize), true)
+		f.submitFrom("child", f.source("child.mkv", smallSize), false)
+		corruptAndRelease(f)
+		for _, id := range []string{"small", "child"} {
+			if job := f.loadQueued(id); job.PID != 0 || job.PublishFallback != "" || job.RetentionBlocked != "" {
+				t.Fatalf("%s = pid %d fallback %q blocked %q; want queued, untouched by the unreadable record", id, job.PID, job.PublishFallback, job.RetentionBlocked)
+			}
+		}
+		if err := os.RemoveAll(filepath.Join(f.cfg.StateDir, "corrupt")); err != nil {
+			t.Fatal(err)
+		}
+		f.schedule()
+		if job := f.loadQueued("small"); job.PID == 0 || !job.deferredPublication() {
+			t.Fatalf("small = pid %d deferred %v; want started normally", job.PID, job.deferredPublication())
+		}
+		if job := f.loadQueued("child"); job.PID == 0 || job.PublishFallback != "" || !job.deferredPublication() {
+			t.Fatalf("child = pid %d fallback %q deferred %v; want started keeping its candidate", job.PID, job.PublishFallback, job.deferredPublication())
+		}
+	})
+	t.Run("a readable too-large job still gates", func(t *testing.T) {
+		f := newTooLargeFixture(t, nil)
+		f.submitFrom("held", f.source("held.mkv", smallSize), true)
+		if err := f.w.InternalRun(ctx, "held"); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.w.SetHold(true); err != nil {
+			t.Fatal(err)
+		}
+		f.submitFrom("big", f.source("big.mkv", tooLargeSize), true)
+		f.submitFrom("later", f.source("later.mkv", smallSize), true)
+		f.submitFrom("child", f.source("child.mkv", smallSize), false)
+		corruptAndRelease(f)
+		if job := f.loadQueued("big"); job.PID != 0 {
+			t.Fatalf("big = pid %d; want waiting", job.PID)
+		}
+		if job := f.loadQueued("later"); job.PID != 0 || job.RetentionBlocked != retentionBlockedBudget {
+			t.Fatalf("later = pid %d blocked %q; want waiting behind the readable too-large job", job.PID, job.RetentionBlocked)
+		}
+		if job := f.loadQueued("child"); job.PID == 0 || job.PublishFallback != transcode.PublishFallbackRetentionFull {
+			t.Fatalf("child = pid %d fallback %q; want it to publish on encode behind the gate", job.PID, job.PublishFallback)
+		}
+	})
 }
 
 func TestAFloorThatCanNeverBeMetFailsTheJobOnlyAfterItHeldForAWhile(t *testing.T) {
@@ -271,10 +323,12 @@ func TestAFloorThatCanNeverBeMetFailsTheJobOnlyAfterItHeldForAWhile(t *testing.T
 		if job.Status != "queued" || job.RetentionBlocked != retentionBlockedDisk || !job.FloorUnmetSince.Equal(start) {
 			t.Fatalf("big = %s blocked %q since %v; want queued on the floor, mark set", job.Status, job.RetentionBlocked, job.FloorUnmetSince)
 		}
-		*now = start.Add(floorUnmetGrace - time.Minute)
-		f.schedule()
-		if job := f.loadQueued("big"); job.Status != "queued" {
-			t.Fatalf("big = %s before the grace ran out", job.Status)
+		for d := 4 * time.Minute; d < floorUnmetGrace; d += 4 * time.Minute {
+			*now = start.Add(d)
+			f.schedule()
+			if job := f.loadQueued("big"); job.Status != "queued" {
+				t.Fatalf("big = %s after %s, before the grace ran out", job.Status, d)
+			}
 		}
 		*now = start.Add(floorUnmetGrace)
 		f.schedule()
@@ -353,6 +407,71 @@ func TestAFloorThatCanNeverBeMetFailsTheJobOnlyAfterItHeldForAWhile(t *testing.T
 		f.schedule()
 		if job := f.loadQueued("waits"); job.PID == 0 {
 			t.Fatal("the job must start once the disk has room")
+		}
+	})
+	notFailedAfter := func(t *testing.T, f *retainedFixture, now *time.Time, at time.Duration) {
+		t.Helper()
+		*now = start.Add(at)
+		f.schedule()
+		job := f.loadQueued("big")
+		if job.Status != "queued" || !job.FloorUnmetSince.Equal(*now) {
+			t.Fatalf("big = %s since %v at %s; want waiting with the grace started over", job.Status, job.FloorUnmetSince, at)
+		}
+	}
+	t.Run("a gate in between starts the grace over", func(t *testing.T) {
+		free := int64(100)
+		f, now := setup(t, &free)
+		f.submitFrom("big", f.source("big.mkv", tooLargeSize), true)
+		*now = start.Add(20 * time.Minute)
+		job := f.loadQueued("big")
+		jobFile := filepath.Join(f.cfg.StateDir, "big", "job.json")
+		if ok, err := f.w.admitAtStartLocked(jobFile, job, "someone-ahead"); ok || err != nil {
+			t.Fatalf("admitted = %v (%v) behind a gate", ok, err)
+		}
+		if job := f.loadQueued("big"); !job.FloorUnmetSince.IsZero() {
+			t.Fatal("a pass held behind a gate must clear the mark")
+		}
+		notFailedAfter(t, f, now, floorUnmetGrace+time.Minute)
+	})
+	t.Run("a measurement error in between starts the grace over", func(t *testing.T) {
+		free := int64(100)
+		f, now := setup(t, &free)
+		f.submitFrom("big", f.source("big.mkv", tooLargeSize), true)
+		f.w.freeDisk = func(string) (int64, error) { return 0, errors.New("statfs failed") }
+		*now = start.Add(20 * time.Minute)
+		if _, err := f.w.ScheduleQueued(ctx, "test-exe", ""); err == nil {
+			t.Fatal("an unknown free space must be reported")
+		}
+		if job := f.loadQueued("big"); !job.FloorUnmetSince.IsZero() {
+			t.Fatal("an unmeasured pass must clear the mark")
+		}
+		f.w.freeDisk = func(string) (int64, error) { return free, nil }
+		notFailedAfter(t, f, now, floorUnmetGrace+time.Minute)
+	})
+	t.Run("a restart with a persisted mark starts the grace over", func(t *testing.T) {
+		free := int64(100)
+		f, now := setup(t, &free)
+		f.submitFrom("big", f.source("big.mkv", tooLargeSize), true)
+		f.w = f.newWorker()
+		f.w.retentionNow = func() time.Time { return *now }
+		f.w.freeDisk = func(string) (int64, error) { return free, nil }
+		notFailedAfter(t, f, now, floorUnmetGrace+time.Minute)
+	})
+	t.Run("it applies to any on_approval job, not only a too-large one", func(t *testing.T) {
+		free := int64(100) // 11 bytes of source would leave 89, under the floor
+		f, now := setup(t, &free)
+		f.submit("small", "on_approval")
+		for d := 4 * time.Minute; d < floorUnmetGrace; d += 4 * time.Minute {
+			*now = start.Add(d)
+			f.schedule()
+		}
+		if job := f.loadQueued("small"); job.Status != "queued" {
+			t.Fatalf("small = %s before the grace ran out", job.Status)
+		}
+		*now = start.Add(floorUnmetGrace)
+		f.schedule()
+		if job := f.loadQueued("small"); job.Status != "failed" || job.ReasonCode != "retention_floor_unmet" {
+			t.Fatalf("small = %s %q; want failed retention_floor_unmet", job.Status, job.ReasonCode)
 		}
 	})
 	t.Run("a source cache that can give way satisfies it", func(t *testing.T) {

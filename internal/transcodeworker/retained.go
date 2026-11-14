@@ -876,34 +876,37 @@ func (w *Worker) admitDeferredAloneLocked(expected int64, alone bool) error {
 // a full disk may be a download or another process that finishes.
 const floorUnmetGrace = 30 * time.Minute
 
-// retentionGateUnknown is the gate when the queue could not be read whole: a
-// too-large job may be waiting in it, so no job that keeps a candidate starts.
-const retentionGateUnknown = "?"
+// floorMarkRefresh is how often a job's record is rewritten to say the floor
+// was seen unmeetable again; floorMarkGap is how long unseen before the mark
+// is stale and the grace starts over (a gate, a missed slot, a restart).
+const (
+	floorMarkRefresh = time.Minute
+	floorMarkGap     = 5 * time.Minute
+)
 
 // tooLargeGate names the job the node empties for: the first queued job, in
 // queue order, that waits for room and reserves more than the whole retention
 // budget as it stands now. While it waits, nothing else that would keep a
 // candidate starts, or the node would never empty. Judging the queue itself
 // (not a mark on the record) keeps a restart with a different budget honest.
-// "" when there is none. queued is the pass's sorted queue; scanErr is its
-// read error, which fails closed.
+// "" when there is none. queued is the pass's sorted queue; scanErr is its read
+// error, logged once per streak: a record that cannot be read is skipped, never
+// a reason to stop the node or to publish a job on encode.
 func (w *Worker) tooLargeGate(queued []*JobRecord, scanErr error) string {
 	if w.cfg.RetainedCandidatesMaxBytes <= 0 {
 		return ""
+	}
+	if scanErr == nil {
+		w.retentionScanFailed = false
+	} else if !w.retentionScanFailed {
+		w.retentionScanFailed = true
+		log.Printf("reading some queued jobs failed (%v); judging the queue from the ones that read", scanErr)
 	}
 	for _, q := range queued {
 		if q.PID == 0 && q.deferredPublication() && w.tooLargeForBudget(q) {
 			return q.ID
 		}
 	}
-	if scanErr != nil {
-		if !w.retentionScanFailed {
-			w.retentionScanFailed = true
-			log.Printf("reading the queue failed (%v); starting nothing that keeps a candidate until it reads", scanErr)
-		}
-		return retentionGateUnknown
-	}
-	w.retentionScanFailed = false
 	return ""
 }
 
@@ -945,7 +948,15 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string)
 		return true, nil
 	}
 	alone := w.tooLargeForBudget(job)
+	dirty := false
+	// The floor mark survives only a pass that measured the floor unmeetable.
+	clearMark := func() {
+		if !job.FloorUnmetSince.IsZero() {
+			job.FloorUnmetSince, job.FloorUnmetSeenAt, dirty = time.Time{}, time.Time{}, true
+		}
+	}
 	if gate != "" && gate != job.ID {
+		clearMark()
 		// A too-large job is ahead: this one must not keep a candidate in its way.
 		if !job.RetentionWait {
 			job.PublishFallback = transcode.PublishFallbackRetentionFull
@@ -960,7 +971,7 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string)
 		if alone {
 			reason = retentionBlockedAlone
 		}
-		if job.RetentionBlocked == reason {
+		if job.RetentionBlocked == reason && !dirty {
 			return false, nil
 		}
 		job.RetentionBlocked = reason
@@ -972,10 +983,14 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string)
 	if errors.As(err, &refusal) && w.freeSourceCacheRoom(refusal.short) {
 		err = w.admitDeferredAloneLocked(job.RetainReserveBytes, alone)
 	}
-	dirty := false
 	unmet := errors.As(err, &refusal) && refusal.reason == retentionBlockedDisk && refusal.held == 0 && w.floorCanNeverBeMet(job)
-	if !unmet && !job.FloorUnmetSince.IsZero() {
-		job.FloorUnmetSince, dirty = time.Time{}, true
+	failNow := false
+	if unmet {
+		since, seen := job.FloorUnmetSince, job.FloorUnmetSeenAt
+		failNow = w.noteFloorUnmet(job)
+		dirty = dirty || !since.Equal(job.FloorUnmetSince) || !seen.Equal(job.FloorUnmetSeenAt)
+	} else {
+		clearMark()
 	}
 	switch {
 	case err == nil:
@@ -986,10 +1001,13 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string)
 		}
 		return true, nil
 	case !errors.As(err, &refusal):
+		if dirty {
+			if serr := SaveJobAtomic(jobFile, job); serr != nil {
+				return false, errors.Join(err, serr)
+			}
+		}
 		return false, err
-	case unmet && job.FloorUnmetSince.IsZero():
-		job.FloorUnmetSince, dirty = w.retentionClock(), true
-	case unmet && w.retentionClock().Sub(job.FloorUnmetSince) >= floorUnmetGrace:
+	case unmet && failNow:
 		free := max(0, refusal.free-w.cfg.MinFreeDiskBytes)
 		job.Status = "failed"
 		job.ReasonCode = "retention_floor_unmet"
@@ -1016,6 +1034,20 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord, gate string)
 	}
 	job.RetentionBlocked = refusal.reason
 	return false, SaveJobAtomic(jobFile, job)
+}
+
+// noteFloorUnmet records that the floor was just measured unmeetable and
+// reports whether it has been so, continuously, for floorUnmetGrace. A mark not
+// seen again for floorMarkGap is stale (the job was held behind another, had no
+// slot, or the worker restarted): the grace starts over.
+func (w *Worker) noteFloorUnmet(job *JobRecord) bool {
+	now := w.retentionClock()
+	if job.FloorUnmetSince.IsZero() || now.Sub(job.FloorUnmetSeenAt) > floorMarkGap {
+		job.FloorUnmetSince, job.FloorUnmetSeenAt = now, now
+	} else if now.Sub(job.FloorUnmetSeenAt) >= floorMarkRefresh {
+		job.FloorUnmetSeenAt = now
+	}
+	return now.Sub(job.FloorUnmetSince) >= floorUnmetGrace
 }
 
 // retentionClock is the time the floor rule is measured by.

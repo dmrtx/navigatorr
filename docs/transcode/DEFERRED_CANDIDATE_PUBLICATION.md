@@ -471,8 +471,12 @@ coordinator gives it one only if that worker reports room for it
   counts) and the job still cannot clear `min_free_disk_bytes`, the worker notes
   when that began on the job (`floor_unmet_since`). The job keeps waiting as
   `free_disk` and fails only once this has held continuously for 30 minutes
-  (`floorUnmetGrace`); any pass where it does not hold clears the mark, since a
-  full disk may be a download or another process that finishes. The failure has
+  (`floorUnmetGrace`); any pass that does not measure it unmeetable (it was held
+  behind another job, the measurement failed, or the condition cleared) clears
+  the mark, and one not seen again for 5 minutes (no slot, a restart) starts the
+  30 minutes over, since a full disk may be a download or another process that
+  finishes. It applies to any on_approval job on an empty node, not only a
+  too-large one. The failure has
   reason `retention_floor_unmet` and says what the job needs and what the node
   offers above its floor now; the action fails with that text.
 - The report is read when the conversion is assigned, up to a pass (2 s) plus the
