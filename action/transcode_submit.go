@@ -809,8 +809,14 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 		if st.Suspended {
 			// Frozen on purpose by a suspend of its node: still assigned, not
-			// stalled, and it continues where it was on resume.
-			reason = fmt.Sprintf("Transcoding media (suspended: its node is paused and the encode continues on resume; progress: %.1f%%)", st.Progress)
+			// stalled, and it continues where it was on resume. Say what froze
+			// it, so a build is told apart from an operator's pause.
+			by, why := e.suspendedBy(assignedWorker(ec.State))
+			meta["suspended_by"] = by
+			ec.State["suspended_by"] = by
+			reason = fmt.Sprintf("Transcoding media (suspended: %s; progress: %.1f%%)", why, st.Progress)
+		} else {
+			delete(ec.State, "suspended_by")
 		}
 		if st.Phase != "" {
 			reason += "; phase: " + st.Phase

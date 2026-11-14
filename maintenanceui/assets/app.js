@@ -6150,6 +6150,21 @@ function workerRoomWait(job) {
   if (reason.includes("(retention_alone)")) return {status: "Waiting for the node to be free", message: "This file is larger than the worker's whole space for converted copies, so it runs alone. It starts by itself when the worker holds no other converted copy; approve or reject the ones it keeps."};
   return null;
 }
+// suspended:start
+// What froze an encode, in words for the person watching it: a build, the
+// operator's pause, or a freeze the server holds no record of. Null when the
+// encode is not frozen.
+function suspensionNote(w) {
+  if (!w || w.worker_suspended !== true) return null;
+  const by = w.suspended_by || {};
+  if (by.kind === "build") {
+    const what = [by.title ? `“${by.title}”` : "", by.source ? `from ${by.source}` : ""].filter(Boolean).join(" ");
+    return {status: "Paused by a build", message: `Frozen where it was: a build${what ? ` (${what})` : ""} holds this node. It continues by itself when the build ends.`};
+  }
+  if (by.kind === "operator") return {status: "Paused", message: "Frozen where it was: this node is paused. It continues when the node is resumed."};
+  return {status: "Paused", message: "Frozen where it was by its node, for a build the server has no record of. It continues when that build ends."};
+}
+// suspended:end
 function workerProgressObservation(job) {
   const w = job.worker || {};
   const phase = w.transcode_phase || w.phase;
@@ -6158,6 +6173,8 @@ function workerProgressObservation(job) {
   if (!["running", "waiting_external"].includes(job.status)) return result;
   if (workerUnavailable(job)) return {...result, warning: true, status: "Worker offline", message: "Worker unreachable. Retrying connection automatically."};
   if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
+  const frozen = suspensionNote(w);
+  if (frozen) return {...result, ...frozen};
   const room = workerRoomWait(job);
   if (room) return {...result, ...room};
   const waiting = job.activity_waiting_condition || job.waiting_condition;

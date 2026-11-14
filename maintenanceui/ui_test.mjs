@@ -11020,3 +11020,23 @@ test("no state of the node actions leaves a lone button in a row", () => {
   assert.match(css, /\n\.worker-pause-actions button \{\s*width: 100%;/);
   assert.match(css, /\.badge\[data-state="paused"\] \{\s*color: var\(--warning-strong\);\s*background: var\(--warning-wash\);/);
 });
+
+// An encode frozen for a build says so, and which build.
+{
+  const src = await readFile(new URL("./assets/app.js", import.meta.url), "utf8");
+  const a = src.indexOf("// suspended:start"), b = src.indexOf("// suspended:end");
+  assert.ok(a >= 0 && b > a, "suspension block found");
+  const ctx = vm.createContext({});
+  vm.runInContext(src.slice(a, b) + "\nthis.suspensionNote = suspensionNote;", ctx);
+  test("a frozen encode names the build, the operator's pause or an unknown freeze", () => {
+    assert.equal(ctx.suspensionNote({worker_suspended: false}), null);
+    assert.equal(ctx.suspensionNote(null), null);
+    const build = ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "build", title: "scripts/verify.sh", source: "Davids-MacBook-Air"}});
+    assert.equal(build.status, "Paused by a build");
+    assert.match(build.message, /“scripts\/verify\.sh” from Davids-MacBook-Air/);
+    assert.match(build.message, /continues by itself when the build ends/);
+    assert.equal(ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "build"}}).status, "Paused by a build");
+    assert.match(ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "operator"}}).message, /node is paused/);
+    assert.match(ctx.suspensionNote({worker_suspended: true}).message, /no record/);
+  });
+}
