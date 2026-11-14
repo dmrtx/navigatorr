@@ -101,7 +101,7 @@ func (w *Worker) Suspended() bool {
 
 // queueHeld is whether the scheduler must start nothing: the hold, or a
 // suspended node (which is also held).
-func (w *Worker) queueHeld() bool { return w.Held() || w.Suspended() }
+func (w *Worker) queueHeld() bool { return w.Held() || w.Suspended() || w.leaseHolds() }
 
 // SetSuspend turns the suspend on or off. Turning it on waits for a scheduler
 // pass in progress, like SetHold, so a job started by that pass finds the
@@ -160,7 +160,7 @@ func (w *Worker) SetSuspend(suspend bool) error {
 // suspendCounts is how many jobs the worker is running and how many of those
 // their runners report frozen.
 func (w *Worker) suspendCounts() (active, frozen int, err error) {
-	on, generation := w.suspendState()
+	on, generation := w.freezeState() // the server's suspend or a build lease
 	entries, err := w.readJobDirs()
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -462,7 +462,7 @@ func startGated(ctx context.Context, cmd *exec.Cmd) (func(), error) {
 func (w *Worker) watchSuspend(ctx context.Context, c *suspendControl) {
 	c.onChange = func(generation int64) { w.suspendedGen.Store(generation) }
 	apply := func() {
-		on, generation := w.suspendState()
+		on, generation := w.freezeState()
 		c.applyGeneration(on, generation)
 	}
 	apply()
