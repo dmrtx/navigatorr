@@ -23,7 +23,9 @@ import (
 // A worker that does not report its room, or whose report is old or dated
 // ahead of the coordinator's clock, is taken to have it, as before workers
 // reported it. A file larger than the whole budget of every worker fits
-// nowhere, ever: waiting would never help, so the workers decide it as before.
+// nowhere, ever: waiting for room would never help, so it is given to a worker
+// that runs it alone, once the worker holds no other candidate (see
+// retentionEligible).
 // Who may take which free slot is worked out in transcode_queue_claims.go.
 
 // retentionNeed is the room a conversion needs on a worker that keeps its
@@ -47,6 +49,12 @@ func conversionRetentionNeed(ec *ExecutionContext) int64 {
 // anywhere: one that is down for a moment may be the only one big enough, and
 // the file must wait for it rather than be left on a worker that can never
 // hold it. A worker with no report from it is taken to be able to.
+//
+// A file larger than the whole budget of every on_approval worker still goes
+// to one: that worker runs it alone, once it holds no other candidate. The
+// worker that holds nothing is preferred, then one with room left; a worker
+// that reports none, since it holds candidates or another such file waits
+// there for it to empty, is the last choice.
 func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, need int64) []bool {
 	out := make([]bool, len(workers))
 	for i := range out {
@@ -56,22 +64,51 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 		return out
 	}
 	fits := make([]transcode.RetentionFit, len(workers))
+	rooms := make([]*transcode.RetentionRoom, len(workers))
 	holdsSomewhere := false
 	for i, w := range workers {
 		if w.PublishPolicy != transcode.PublishPolicyOnApproval {
 			holdsSomewhere = true // publishes on encode: needs no room
 			continue
 		}
-		fits[i] = e.workerObservation(ctx, w).Retention.Fit(need, e.now())
+		rooms[i] = e.workerObservation(ctx, w).Retention
+		fits[i] = rooms[i].Fit(need, e.now())
 		if fits[i] != transcode.RetentionTooLarge {
 			holdsSomewhere = true
 		}
 	}
 	if !holdsSomewhere {
-		return out
+		return retentionAloneChoice(rooms)
 	}
 	for i := range workers {
 		out[i] = fits[i] == transcode.RetentionFits
+	}
+	return out
+}
+
+// retentionAloneChoice marks, for a file larger than every worker's budget,
+// the workers that suit it best: it runs alone on whichever takes it, so the
+// one holding nothing comes first, then one with room left, and a worker that
+// reports none (it holds candidates, or another such file waits there for it
+// to empty) last. A worker whose report is missing, old or dated ahead is
+// taken to fit the file, so it never gets here: every report seen is fresh.
+func retentionAloneChoice(rooms []*transcode.RetentionRoom) []bool {
+	rank := make([]int, len(rooms))
+	best := 3
+	for i, r := range rooms {
+		switch {
+		case r == nil || r.RoomBytes >= r.CapacityBytes:
+			rank[i] = 0
+		case r.RoomBytes > 0:
+			rank[i] = 1
+		default:
+			rank[i] = 2
+		}
+		best = min(best, rank[i])
+	}
+	out := make([]bool, len(rooms))
+	for i := range out {
+		out[i] = rank[i] == best
 	}
 	return out
 }

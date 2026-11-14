@@ -446,8 +446,39 @@ coordinator gives it one only if that worker reports room for it
 - A worker that is down for a moment still counts when deciding whether the file
   fits anywhere, so the file waits for it instead of being left on a node that
   can never hold it. A file larger than the whole budget of every worker fits
-  nowhere, and waiting for room would never help: it is assigned as before and
-  the worker decides.
+  nowhere, and waiting for room would never help: it is still assigned, and runs
+  alone (below). Among the workers, the one holding nothing is preferred, then
+  one with room left, and a worker reporting no room is taken only when no other
+  is better.
+- **Run alone.** A standalone job that waits for room and reserves more than the
+  whole budget is admitted when the node holds nothing against the budget (no
+  retained candidate, no started-but-unwritten reservation). Until then it stays
+  queued on the worker as `retention_alone` ("waiting for the node to hold no
+  other candidate: approve or discard the retained ones"). It keeps its candidate
+  as usual; approval is unchanged. Which job the node empties for is judged each
+  scheduler pass from the queue itself (the first such job in queue order, against
+  the budget as configured now), not from the mark on the record, so a restart
+  with a bigger budget leaves no stale wait, and two such jobs run in queue
+  order. While it waits the node starts no other job that would keep a candidate:
+  a waiting standalone job stays queued behind it, and a batch child (or any job
+  that does not wait) starts to publish on encode, as it already does when the
+  budget is full. If the queue cannot be read, the node fails closed the same
+  way. The worker also reports room 0 meanwhile, so the coordinator sends other
+  standalone conversions to other nodes. The free-disk floor still applies, after
+  the source cache has given way.
+- **A floor that stays unmeetable.** If the node holds nothing, no other job is
+  running, no source cache entry could still be dropped (a young or in-use one
+  counts) and the job still cannot clear `min_free_disk_bytes`, the worker notes
+  when that began on the job (`floor_unmet_since`). The job keeps waiting as
+  `free_disk` and fails only once this has held continuously for 30 minutes
+  (`floorUnmetGrace`); any pass that does not measure it unmeetable (it was held
+  behind another job, the measurement failed, or the condition cleared) clears
+  the mark, and one not seen again for 5 minutes (no slot, a restart) starts the
+  30 minutes over, since a full disk may be a download or another process that
+  finishes. It applies to any on_approval job on an empty node, not only a
+  too-large one. The failure has
+  reason `retention_floor_unmet` and says what the job needs and what the node
+  offers above its floor now; the action fails with that text.
 - The report is read when the conversion is assigned, up to a pass (2 s) plus the
   probe cache (5 s) after it was measured. A worker with more than one slot can
   be given two conversions in that window that together do not fit; the second

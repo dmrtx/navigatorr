@@ -340,3 +340,68 @@ func TestAReportDatedAheadOfTheClockIsNotTrusted(t *testing.T) {
 		t.Fatalf("a report from the future was trusted: assigned %q (waiting %v)", name, waiting)
 	}
 }
+
+func TestAFileLargerThanEveryBudgetPrefersTheWorkerThatCanRunItAloneSoonest(t *testing.T) {
+	cases := []struct {
+		name         string
+		m4Room, m1Rm int64
+		want         string
+	}{
+		{"both report no room: the first still takes it", 0, 0, "m4"},
+		{"m4 holds candidates or has another large file waiting, m1 is empty", 0, 40 * gib, "m1"},
+		{"m4 has some room left, m1 none", 5 * gib, 0, "m4"},
+		{"m4 has none, m1 has some", 0, 5 * gib, "m1"},
+		{"m4 has some room, m1 is empty", 5 * gib, 40 * gib, "m1"},
+		{"both are empty: the first takes it", 30 * gib, 40 * gib, "m4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := retentionWorkers(t, newRoomReporter(30*gib, tc.m4Room), newRoomReporter(40*gib, tc.m1Rm))
+			assertAlone(t, e, tc.want)
+		})
+	}
+}
+
+// A report that says nothing (missing, old or dated ahead) takes the worker to
+// have room for any file, so a large one goes to it over a fresh empty worker
+// that could only run it alone.
+func TestAReportThatSaysNothingTakesTheLargeFileOverAFreshEmptyWorker(t *testing.T) {
+	silent := func() *roomReporter { r := newRoomReporter(30*gib, 0); r.silent = true; return r }
+	old := func() *roomReporter {
+		r := newRoomReporter(30*gib, 0)
+		r.age = 2 * transcode.RetentionRoomMaxAge
+		return r
+	}
+	ahead := func() *roomReporter {
+		r := newRoomReporter(30*gib, 0)
+		r.age = -2 * transcode.RetentionRoomMaxAge
+		return r
+	}
+	for name, quiet := range map[string]func() *roomReporter{"missing": silent, "old": old, "dated ahead": ahead} {
+		t.Run(name, func(t *testing.T) {
+			assertAlone(t, retentionWorkers(t, newRoomReporter(40*gib, 40*gib), quiet()), "m1")
+		})
+	}
+}
+
+func assertAlone(t *testing.T, e *Engine, want string) {
+	t.Helper()
+	// 60 GiB is larger than both budgets: it still gets a worker.
+	if name, res, waiting := convert(t, e, "conv-a", 60*gib, ""); waiting || name != want {
+		t.Fatalf("assigned %q (waiting %v), want %q: %+v", name, waiting, want, res)
+	}
+}
+
+func TestAFileThatFitsSomewhereKeepsItsRoutingWhenAnotherFileIsTooLarge(t *testing.T) {
+	// m4 holds nothing and m1 reports no room because a file larger than its
+	// budget waits there: a file that fits m4 still goes to m4, and one that
+	// fits neither right now waits, as before.
+	e := retentionWorkers(t, newRoomReporter(30*gib, 30*gib), newRoomReporter(40*gib, 0))
+	if name, _, waiting := convert(t, e, "conv-a", 20*gib, ""); waiting || name != "m4" {
+		t.Fatalf("a file that fits m4: assigned %q (waiting %v)", name, waiting)
+	}
+	e = retentionWorkers(t, newRoomReporter(30*gib, 0), newRoomReporter(40*gib, 0))
+	if name, _, waiting := convert(t, e, "conv-b", 20*gib, ""); !waiting || name != "" {
+		t.Fatalf("a file no worker has room for now: assigned %q (waiting %v), want it to wait", name, waiting)
+	}
+}

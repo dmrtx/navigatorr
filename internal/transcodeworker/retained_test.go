@@ -824,17 +824,20 @@ func TestRetained_AdmissionLimits(t *testing.T) {
 	})
 	t.Run("free disk", func(t *testing.T) {
 		free := int64(100)
-		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 95 })
+		f := newRetainedFixture(t, func(c *WorkerConfig) { c.MinFreeDiskBytes = 95; c.MaxParallelJobs = 2 })
 		f.w.freeDisk = func(string) (int64, error) { return free, nil }
+		// An on_encode job is not subject to the free-disk floor. It runs, so
+		// the disk may still free up and the job below waits for it (an idle
+		// node that can never meet the floor fails the job instead).
+		f.submit("job-disk-2", "")
+		if job := f.loadQueued("job-disk-2"); job.PID == 0 {
+			t.Fatal("an on_encode job is not subject to the free-disk floor")
+		}
 		// Below the floor even a job that did not ask to wait waits: a job
 		// that publishes on encode needs that disk too.
 		f.submit("job-disk-1", "on_approval")
 		if job := f.loadQueued("job-disk-1"); job.PID != 0 || job.RetentionBlocked != retentionBlockedDisk || job.PublishFallback != "" {
 			t.Fatalf("job-disk-1 = pid %d blocked %q fallback %q, want waiting on the disk floor", job.PID, job.RetentionBlocked, job.PublishFallback)
-		}
-		f.submit("job-disk-2", "")
-		if job := f.loadQueued("job-disk-2"); job.PID == 0 {
-			t.Fatal("an on_encode job is not subject to the free-disk floor")
 		}
 		if err := f.w.InternalRun(ctx, "job-disk-2"); err != nil {
 			t.Fatal(err)
