@@ -23,7 +23,9 @@ import (
 // A worker that does not report its room, or whose report is old or dated
 // ahead of the coordinator's clock, is taken to have it, as before workers
 // reported it. A file larger than the whole budget of every worker fits
-// nowhere, ever: waiting would never help, so the workers decide it as before.
+// nowhere, ever: waiting for room would never help, so it is given to a worker
+// that runs it alone, once the worker holds no other candidate (see
+// retentionEligible).
 // Who may take which free slot is worked out in transcode_queue_claims.go.
 
 // retentionNeed is the room a conversion needs on a worker that keeps its
@@ -47,6 +49,12 @@ func conversionRetentionNeed(ec *ExecutionContext) int64 {
 // anywhere: one that is down for a moment may be the only one big enough, and
 // the file must wait for it rather than be left on a worker that can never
 // hold it. A worker with no report from it is taken to be able to.
+//
+// A file larger than the whole budget of every on_approval worker still goes
+// to one: that worker runs it alone, once it holds no other candidate. The
+// worker that holds nothing is preferred, then one with room left; a worker
+// that reports none, since it holds candidates or another such file waits
+// there for it to empty, is the last choice.
 func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.NamedWorker, need int64) []bool {
 	out := make([]bool, len(workers))
 	for i := range out {
@@ -68,10 +76,39 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 		}
 	}
 	if !holdsSomewhere {
-		return out
+		return e.retentionAloneChoice(ctx, workers)
 	}
 	for i := range workers {
 		out[i] = fits[i] == transcode.RetentionFits
+	}
+	return out
+}
+
+// retentionAloneChoice marks, for a file larger than every worker's budget,
+// the workers that suit it best: it runs alone on whichever takes it, so those
+// holding nothing come first, then those with room left, and a worker that
+// reports no room (or a stale report) is taken only when none is better.
+func (e *Engine) retentionAloneChoice(ctx context.Context, workers []transcode.NamedWorker) []bool {
+	rank := make([]int, len(workers))
+	best := 2
+	now := e.now()
+	for i, w := range workers {
+		r := e.workerObservation(ctx, w).Retention
+		switch {
+		case r == nil || r.CapacityBytes <= 0 || now.Sub(r.ObservedAt) > transcode.RetentionRoomMaxAge || now.Sub(r.ObservedAt) < -transcode.RetentionRoomMaxAge:
+			rank[i] = 0 // unknown: taken to be able to, as ever
+		case r.RoomBytes >= r.CapacityBytes:
+			rank[i] = 0
+		case r.RoomBytes > 0:
+			rank[i] = 1
+		default:
+			rank[i] = 2
+		}
+		best = min(best, rank[i])
+	}
+	out := make([]bool, len(workers))
+	for i := range out {
+		out[i] = rank[i] == best
 	}
 	return out
 }

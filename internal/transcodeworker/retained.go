@@ -803,17 +803,30 @@ func (w *Worker) freeDiskBytes() (int64, error) {
 const (
 	retentionBlockedBudget = "retention_budget"
 	retentionBlockedDisk   = "free_disk"
+	// retentionBlockedAlone: the job is larger than the whole retention
+	// budget, so it runs alone, and waits until the node holds no candidate.
+	retentionBlockedAlone = "retention_alone"
 )
 
 // retentionRefusal is a retention limit admitDeferredLocked enforced; reason
-// is retentionBlockedBudget or retentionBlockedDisk.
+// is retentionBlockedBudget, retentionBlockedDisk or retentionBlockedAlone.
 type retentionRefusal struct {
 	reason string
 	msg    string
 	short  int64 // bytes missing for the free-disk floor
+	held   int64 // bytes the node holds against the budget
+	free   int64 // free disk bytes measured (disk refusals only)
 }
 
 func (e *retentionRefusal) Error() string { return e.msg }
+
+// tooLargeForBudget says whether a job that waits for room reserves more than
+// the whole retention budget: no amount of approving or discarding makes it
+// fit, so it runs alone, once the node holds no other candidate.
+func (w *Worker) tooLargeForBudget(job *JobRecord) bool {
+	limit := w.cfg.RetainedCandidatesMaxBytes
+	return limit > 0 && job.RetentionWait && job.RetainReserveBytes > limit
+}
 
 // admitDeferredLocked applies the retention limits to an on_approval job
 // whose output is expected to take at most expected bytes. Past a limit it
@@ -821,6 +834,13 @@ func (e *retentionRefusal) Error() string { return e.msg }
 // to 429 worker_busy; a measurement that fails refuses the job rather than
 // guessing. Callers hold the capacity lock.
 func (w *Worker) admitDeferredLocked(expected int64) error {
+	return w.admitDeferredAloneLocked(expected, false)
+}
+
+// admitDeferredAloneLocked is admitDeferredLocked for a job that may be larger
+// than the whole budget: such a job (alone) is admitted when the node holds
+// nothing against the budget, and refused (retentionBlockedAlone) until then.
+func (w *Worker) admitDeferredAloneLocked(expected int64, alone bool) error {
 	if w.cfg.RetainedCandidatesMaxBytes <= 0 && w.cfg.MinFreeDiskBytes <= 0 {
 		return nil // nothing to enforce: do not read every record to say so
 	}
@@ -829,8 +849,13 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		return fmt.Errorf("measuring retained candidates: %w", err)
 	}
 	if limit := w.cfg.RetainedCandidatesMaxBytes; limit > 0 {
-		if held+expected > limit {
-			return &retentionRefusal{reason: retentionBlockedBudget, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
+		switch {
+		case alone && held > 0:
+			return &retentionRefusal{reason: retentionBlockedAlone, held: held, msg: fmt.Sprintf("worker busy: larger than the whole retention budget (%d of %d bytes); runs alone when the node holds no other candidate", expected, limit)}
+		case alone:
+			// Nothing else is held: the job keeps its candidate on its own.
+		case held+expected > limit:
+			return &retentionRefusal{reason: retentionBlockedBudget, held: held, msg: fmt.Sprintf("worker busy: %s %d of %d allowed bytes", transcode.RetentionRefusalBudget, held+expected, limit)}
 		}
 	}
 	if floor := w.cfg.MinFreeDiskBytes; floor > 0 {
@@ -840,10 +865,38 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 		}
 		// Encodes admitted earlier have not written their candidates yet.
 		if left := free - unwritten - expected; left < floor {
-			return &retentionRefusal{reason: retentionBlockedDisk, short: floor - left, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
+			return &retentionRefusal{reason: retentionBlockedDisk, short: floor - left, held: held, free: free, msg: fmt.Sprintf("worker busy: %d %s the %d byte minimum", left, transcode.RetentionRefusalDisk, floor)}
 		}
 	}
 	return nil
+}
+
+// tooLargeWaitingLocked says whether a queued job other than excludeID waits
+// for the node to hold no candidate (retentionBlockedAlone). While one does,
+// the node admits nothing that would keep a candidate ahead of it, or the node
+// would never empty. Callers hold the capacity lock.
+func (w *Worker) tooLargeWaitingLocked(excludeID string) bool {
+	if w.cfg.RetainedCandidatesMaxBytes <= 0 {
+		return false
+	}
+	entries, err := w.readJobDirs()
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") || name == excludeID {
+			continue
+		}
+		job, err := peekJob(filepath.Join(w.cfg.StateDir, name, "job.json"))
+		if err != nil || job == nil || job.ID != name {
+			continue
+		}
+		if job.Status == "queued" && job.PID == 0 && job.RetentionBlocked == retentionBlockedAlone && job.deferredPublication() {
+			return true
+		}
+	}
+	return false
 }
 
 // admitAtStartLocked applies the retention limits to a queued job whose slot
@@ -863,6 +916,14 @@ func (w *Worker) admitDeferredLocked(expected int64) error {
 //     room and the free-disk floor would be crossed: it stays queued and the
 //     scheduler moves on to the next job. The slot is checked again on every
 //     pass.
+//   - the job asked to wait and is larger than the whole budget: it runs
+//     alone. It stays queued (retentionBlockedAlone) while the node holds any
+//     candidate, and starts, keeping its candidate, once the node holds none.
+//     While it waits, no other job that would keep a candidate starts ahead of
+//     it (a job that publishes on encode still does).
+//   - the free-disk floor cannot be met even with the node holding nothing,
+//     no other job running and the source cache emptied: waiting cannot help,
+//     so the job fails with a message saying so.
 //   - the limits cannot be measured: it stays queued and err says why.
 //
 // The source cache gives way before a job waits for the floor: its entries can
@@ -875,10 +936,30 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 	if !job.deferredPublication() {
 		return true, nil
 	}
-	err := w.admitDeferredLocked(job.RetainReserveBytes)
+	alone := w.tooLargeForBudget(job)
+	if !alone && w.tooLargeWaitingLocked(job.ID) {
+		// A larger job waits for the node to empty: this one must not keep a
+		// candidate in its way.
+		if !job.RetentionWait {
+			job.PublishFallback = transcode.PublishFallbackRetentionFull
+			job.RetentionBlocked = ""
+			if serr := SaveJobAtomic(jobFile, job); serr != nil {
+				return false, serr
+			}
+			log.Printf("job %s: a larger job waits for the node to hold no candidate; starting it to publish on encode", job.ID)
+			return true, nil
+		}
+		if job.RetentionBlocked == retentionBlockedBudget {
+			return false, nil
+		}
+		job.RetentionBlocked = retentionBlockedBudget
+		log.Printf("job %s: a larger job waits for the node to hold no candidate; it waits in the queue behind it", job.ID)
+		return false, SaveJobAtomic(jobFile, job)
+	}
+	err := w.admitDeferredAloneLocked(job.RetainReserveBytes, alone)
 	var refusal *retentionRefusal
 	if errors.As(err, &refusal) && w.freeSourceCacheRoom(refusal.short) {
-		err = w.admitDeferredLocked(job.RetainReserveBytes)
+		err = w.admitDeferredAloneLocked(job.RetainReserveBytes, alone)
 	}
 	switch {
 	case err == nil:
@@ -890,6 +971,15 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 		return true, nil
 	case !errors.As(err, &refusal):
 		return false, err
+	case refusal.reason == retentionBlockedDisk && refusal.held == 0 && w.floorCanNeverBeMet(job):
+		free := max(0, refusal.free-w.cfg.MinFreeDiskBytes)
+		job.Status = "failed"
+		job.ReasonCode = "retention_floor_unmet"
+		job.Error = fmt.Sprintf("not enough free disk on this node: the job needs %d bytes, and the node can offer at most %d bytes above its %d byte free-disk minimum, with no candidate held and nothing left to free", job.RetainReserveBytes, free, w.cfg.MinFreeDiskBytes)
+		job.RetentionBlocked = ""
+		job.FinishedAt = time.Now().UTC()
+		log.Printf("job %s: %s", job.ID, job.Error)
+		return false, SaveJobAtomic(jobFile, job)
 	case refusal.reason == retentionBlockedBudget && !job.RetentionWait:
 		// Saved before the spawn: the runner reads the policy it executes.
 		job.PublishFallback = transcode.PublishFallbackRetentionFull
@@ -907,4 +997,31 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 		log.Printf("job %s: %v; it waits in the queue for room", job.ID, err)
 		return false, SaveJobAtomic(jobFile, job)
 	}
+}
+
+// floorCanNeverBeMet says whether nothing that could still happen on this node
+// would clear the free-disk floor for job: no other job is running or about to
+// be (their work files free when they end), and the source cache holds no entry
+// that may yet be dropped (one populated in the last hour, or sharing bytes
+// with a job, still ages out or is released). The cache has already been given
+// its chance to give way. Callers hold the capacity lock.
+func (w *Worker) floorCanNeverBeMet(job *JobRecord) bool {
+	active, err := w.countActiveJobs(job.ID)
+	if err != nil || active > 0 {
+		return false
+	}
+	if !w.sourceCacheEnabled() {
+		return true
+	}
+	names, err := os.ReadDir(w.sourceCacheDir())
+	if err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	for _, e := range names {
+		name := e.Name()
+		if !strings.HasPrefix(name, ".") && !strings.HasSuffix(name, ".meta.json") && !strings.HasSuffix(name, ".lock") {
+			return false
+		}
+	}
+	return true
 }

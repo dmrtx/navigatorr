@@ -446,8 +446,26 @@ coordinator gives it one only if that worker reports room for it
 - A worker that is down for a moment still counts when deciding whether the file
   fits anywhere, so the file waits for it instead of being left on a node that
   can never hold it. A file larger than the whole budget of every worker fits
-  nowhere, and waiting for room would never help: it is assigned as before and
-  the worker decides.
+  nowhere, and waiting for room would never help: it is still assigned, and runs
+  alone (below). Among the workers, the one holding nothing is preferred, then
+  one with room left, and a worker reporting no room is taken only when no other
+  is better.
+- **Run alone.** A standalone job that waits for room and reserves more than the
+  whole budget is admitted when the node holds nothing against the budget (no
+  retained candidate, no started-but-unwritten reservation). Until then it stays
+  queued on the worker as `retention_alone` ("waiting for the node to hold no
+  other candidate: approve or discard the retained ones"). It keeps its candidate
+  as usual; approval is unchanged. While it waits the node starts no other job
+  that would keep a candidate: a waiting standalone job stays queued behind it,
+  and a batch child (or any job that does not wait) starts to publish on encode.
+  The worker also reports room 0 meanwhile, so the coordinator sends other
+  standalone conversions to other nodes. The free-disk floor still applies, after
+  the source cache has given way.
+- **A floor that can never be met.** If the node holds nothing, no other job is
+  running, the source cache has nothing left to free and the job still cannot
+  clear `min_free_disk_bytes`, waiting cannot help. The worker fails the job with
+  reason `retention_floor_unmet` and a message saying what it needs and the most
+  the node can offer above its floor; the action fails with that text.
 - The report is read when the conversion is assigned, up to a pass (2 s) plus the
   probe cache (5 s) after it was measured. A worker with more than one slot can
   be given two conversions in that window that together do not fit; the second

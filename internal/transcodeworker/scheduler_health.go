@@ -81,12 +81,19 @@ func (w *Worker) refreshRetentionRoom(now time.Time) {
 		return
 	}
 	held, _, err := w.retainedBytesLocked()
+	// A job larger than the whole budget waits for the node to hold nothing:
+	// no room is on offer until it has run.
+	blocked := err == nil && w.tooLargeWaitingLocked("")
 	capLock.Unlock()
 	if err != nil {
 		return
 	}
+	room := max(0, limit-held)
+	if blocked {
+		room = 0
+	}
 	w.schedulerMu.Lock()
-	w.retentionRoom = &transcode.RetentionRoom{ObservedAt: now, CapacityBytes: limit, RoomBytes: max(0, limit-held)}
+	w.retentionRoom = &transcode.RetentionRoom{ObservedAt: now, CapacityBytes: limit, RoomBytes: room}
 	w.schedulerMu.Unlock()
 }
 func (w *Worker) recordSchedulerSweep(name string, start, now time.Time, count int, err error) {

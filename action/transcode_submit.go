@@ -807,6 +807,9 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 		}
 		if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
 			reason += "; waiting for room on the worker to keep the candidate (" + st.RetentionBlocked + ")"
+			if st.RetentionBlocked == "retention_alone" {
+				reason = strings.Replace(reason, "waiting for room on the worker to keep the candidate", "larger than the worker's whole retention budget: waiting for the worker to hold no other candidate (approve or discard the retained ones)", 1)
+			}
 		}
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:
