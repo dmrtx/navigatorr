@@ -752,12 +752,12 @@ func (e *Engine) advanceQualityLadder(ctx context.Context, ec *ExecutionContext,
 		why := fmt.Sprintf("does not save the %.0f%% this goal needs", snapshot.MinSavingsPercent)
 		if reason == "size_growth" || snapshot.MinSavingsPercent <= 0 {
 			why = "is larger than the original"
-			// A worker stop for passing the room the goal keeps for its
-			// output is not growth past the original.
-			reserve, source := getInt64(ec.State, roomReserveKey), getInt64(ec.State, SubmittedSourceBytesKey)
-			if reason != "size_growth" && reserve > 0 && source > 0 && st.CandidateSizeBytes > reserve && st.CandidateSizeBytes <= source {
-				why = fmt.Sprintf("passes the %s this goal keeps room for its output (half the original)", formatBudgetBytes(reserve))
-			}
+		}
+		// A worker stop for passing the room the goal keeps for its output is
+		// neither growth past the original nor, necessarily, a missed saving.
+		reserve, source := getInt64(ec.State, roomReserveKey), getInt64(ec.State, SubmittedSourceBytesKey)
+		if reason != "size_growth" && reserve > 0 && reserve < source && st.CandidateSizeBytes > reserve && st.CandidateSizeBytes <= source {
+			why = fmt.Sprintf("passes the %s this goal keeps room for its output (%.0f%% of the original)", formatBudgetBytes(reserve), float64(reserve)*100/float64(source))
 		}
 		msg := fmt.Sprintf("%s %s, which %s. A better setting would only make it larger, so the goal stops here. Original preserved.", was, size, why)
 		return e.endQualityLadder(ctx, ec, snapshot, st, rec, reason, msg), true

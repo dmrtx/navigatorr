@@ -318,12 +318,14 @@ func TestQualityLadderStopsOnSize(t *testing.T) {
 		reason    string
 		want      string
 		notWant   string
+		mode      string
 	}{
-		"past the reserve":   {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (half the original)", "larger than the original"},
-		"larger than source": {25_000_000, "insufficient_savings", "is larger than the original", "keeps room"},
-		"size growth":        {12_000_000, "size_growth_exceeded", "is larger than the original", "keeps room"},
+		"past the reserve":         {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (50% of the original)", "larger than the original", "quality"},
+		"larger than source":       {25_000_000, "insufficient_savings", "is larger than the original", "keeps room", "quality"},
+		"size growth":              {22_000_000, "size_growth_exceeded", "is larger than the original", "keeps room", "quality"},
+		"compact past the reserve": {12_000_000, "insufficient_savings", "passes the 10 MB this goal keeps room for its output (50% of the original)", "does not save", "compact"},
 	} {
-		c := newRecipeCase(t, map[string]any{"mode": "quality"}, nil)
+		c := newRecipeCase(t, map[string]any{"mode": tc.mode}, nil)
 		planRecipe(t, c)
 		c.ec.State[SubmittedSourceBytesKey] = int64(20_000_000)
 		c.ec.State[roomReserveKey] = int64(10_000_000)
