@@ -57,10 +57,9 @@ type TranscodeQueueWaiterRow struct {
 	// ReserveBytes is the output reserve its plan asked for (0 until the plan
 	// is built).
 	ReserveBytes int64
-	// RefusedBy and RefusedAt are the node that last refused or stopped it
-	// for room and when ("" when none did).
-	RefusedBy string
-	RefusedAt string
+	// Refusals is the raw JSON object of the nodes that refused or stopped it
+	// for room, each with the time ("" when none did).
+	Refusals string
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
@@ -74,8 +73,7 @@ func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
 			CAST(COALESCE(json_extract(a.state_json, '$.submitted_source_bytes'), 0) AS INTEGER),
 			COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '') = '',
 			CAST(COALESCE(json_extract(a.state_json, '$.room_reserve_bytes'), 0) AS INTEGER),
-			COALESCE(json_extract(a.state_json, '$.room_refused_by'), ''),
-			COALESCE(json_extract(a.state_json, '$.room_refused_at'), '')
+			COALESCE(json_extract(a.state_json, '$.room_refusals'), '')
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
 		WHERE a.action_name = 'transcode_media'
@@ -96,7 +94,7 @@ func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
 	var out []TranscodeQueueWaiterRow
 	for rows.Next() {
 		var r TranscodeQueueWaiterRow
-		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.RefusedBy, &r.RefusedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

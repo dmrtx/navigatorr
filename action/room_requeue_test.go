@@ -42,7 +42,7 @@ func TestADiskFloorStopPutsTheConversionBackInTheQueue(t *testing.T) {
 	if res.Status != StepWaitingExternal || !res.Requeue {
 		t.Fatalf("result = %+v, want a requeue", res)
 	}
-	if getString(ec.State, requeueWhyKey) == "" || getString(ec.State, roomRefusedByKey) == "" {
+	if getString(ec.State, requeueWhyKey) == "" || len(refusalsFromState(ec.State[roomRefusalsKey])) == 0 {
 		t.Fatalf("state %v: the requeue must say why and which node stopped it", ec.State)
 	}
 }
