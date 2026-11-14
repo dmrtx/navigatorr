@@ -290,9 +290,14 @@ type Worker struct {
 	schedulerHealth transcode.SchedulerObservation
 	// retentionRoom is the last measure of the room left to retain candidates
 	// (see refreshRetentionRoom); guarded by schedulerMu.
-	retentionRoom      *transcode.RetentionRoom
-	schedulerInterval  time.Duration
-	schedulerSweepHook func(string) error
+	retentionRoom *transcode.RetentionRoom
+	// retentionScanFailed remembers a failed queue read, to log it once;
+	// retentionNow replaces the clock of the floor rule in tests. Both are
+	// used under the capacity lock.
+	retentionScanFailed bool
+	retentionNow        func() time.Time
+	schedulerInterval   time.Duration
+	schedulerSweepHook  func(string) error
 
 	cfg        *WorkerConfig
 	ffmpegPath string
@@ -1486,6 +1491,8 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		if len(queued) == 0 {
 			return started, errors.Join(errs...)
 		}
+		// Once per pass: the job the node empties for, if any.
+		gate := w.tooLargeGate(queued, scanErr)
 		progressed := false
 		for _, q := range queued {
 			if !limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use) {
@@ -1536,7 +1543,7 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 				}
 				// A deferred job takes its retention room only now; one that
 				// must wait for it stays queued and the next job may start.
-				admitted, err := w.admitAtStartLocked(jobFile, latest)
+				admitted, err := w.admitAtStartLocked(jobFile, latest, gate)
 				if err != nil {
 					errs = append(errs, err)
 				}

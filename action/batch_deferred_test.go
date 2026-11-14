@@ -587,3 +587,28 @@ func TestACandidateTheCancelledBatchCouldNotReleaseIsReportedAndListed(t *testin
 		t.Fatalf("the discard was not recorded: %v", rp.sourceState())
 	}
 }
+
+// A job that runs alone says so while it waits, and the worker's floor failure
+// reaches the action as the failure text.
+func TestTheWaitStepTellsARunAloneWaitAndAFloorFailure(t *testing.T) {
+	w := newRetainedExecutor()
+	e := NewEngine(EngineDeps{Transcode: w})
+	ec := testReconcileEC("")
+	ec.State["job_id"] = "job-existing"
+	ec.State[publishPolicyKey] = transcode.PublishPolicyOnApproval
+	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusQueued, PublishPolicy: transcode.PublishPolicyOnApproval, RetentionBlocked: "retention_alone"}, nil
+	}
+	res, err := e.stepTranscodeWait(context.Background(), ec)
+	if err != nil || res.Status != StepWaitingExternal || !strings.Contains(res.WaitingReason, "hold no other candidate") || strings.Contains(res.WaitingReason, "waiting for room on the worker") {
+		t.Fatalf("run-alone wait: %+v %v", res, err)
+	}
+	const msg = "not enough free disk on this node for 30m0s: the job needs 50 bytes and the node offers 5 bytes above its 95 byte free-disk minimum now"
+	w.statusFunc = func(context.Context, string) (transcode.JobStatus, error) {
+		return transcode.JobStatus{ID: "job-existing", Status: transcode.StatusFailed, ReasonCode: "retention_floor_unmet", Error: msg}, nil
+	}
+	res, err = e.stepTranscodeWait(context.Background(), ec)
+	if err != nil || res.Status != StepFailed || !strings.Contains(res.Error, msg) {
+		t.Fatalf("floor failure: %+v %v", res, err)
+	}
+}

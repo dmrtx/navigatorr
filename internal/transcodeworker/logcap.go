@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -73,6 +74,42 @@ func (c *CappedLog) Write(p []byte) (int, error) {
 	n, err := c.f.Write(p)
 	c.size += int64(n)
 	return n, err
+}
+
+// Check re-reads the file's size and rotates it when it is past the cap. The
+// size is otherwise looked at only when the daemon itself logs, so a quiet
+// daemon would let another writer on the same file (a child process sharing
+// the service manager's stderr file) grow it without bound. It is called from
+// the scheduler tick that already runs, costs one fstat at most every
+// logRecheckEvery, and does nothing during the backoff after a failed truncate.
+func (c *CappedLog) Check() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	if now.Sub(c.statAt) <= logRecheckEvery || now.Before(c.backoff) {
+		return
+	}
+	c.statAt = now
+	fi, err := c.f.Stat()
+	if err != nil {
+		return
+	}
+	c.size = fi.Size()
+	if c.size > c.max {
+		c.rotateLocked()
+	}
+}
+
+// stderrCap is the cap CapStderrLog installed, for CheckStderrLog.
+var stderrCap atomic.Pointer[CappedLog]
+
+// CheckStderrLog enforces the cap installed by CapStderrLog, if any, without
+// the daemon having to log anything. It is cheap and safe to call on every
+// scheduler pass.
+func CheckStderrLog() {
+	if c := stderrCap.Load(); c != nil {
+		c.Check()
+	}
 }
 
 // rotateLocked is best effort: a failure to keep the old text must never stop
@@ -144,6 +181,7 @@ func CapStderrLog(maxMB int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	stderrCap.Store(c)
 	log.SetOutput(c)
 	return true, nil
 }

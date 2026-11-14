@@ -6147,6 +6147,7 @@ function workerRoomWait(job) {
   const reason = String(job.waiting_reason || "");
   if (reason.includes("(free_disk)")) return {status: "Waiting for disk space", message: "The worker needs more free disk before it can keep this file's converted copy. The job stays in line and starts by itself when there is room."};
   if (reason.includes("(retention_budget)")) return {status: "Waiting for candidate space", message: "The worker's space for converted copies waiting for your decision is full. The job starts by itself when one is approved or rejected."};
+  if (reason.includes("(retention_alone)")) return {status: "Waiting for the node to be free", message: "This file is larger than the worker's whole space for converted copies, so it runs alone. It starts by itself when the worker holds no other converted copy; approve or reject the ones it keeps."};
   return null;
 }
 function workerProgressObservation(job) {
