@@ -59,3 +59,19 @@ func TestJudgeAppliesTheRetentionBudgetOnlyToARetainedConversion(t *testing.T) {
 		t.Fatalf("an old report says nothing: %v", v)
 	}
 }
+
+// An old report may describe a disk that has since changed: it never says a job
+// can never fit. A fresh one does.
+func TestJudgeSaysNeverOnlyFromAFreshReport(t *testing.T) {
+	now := time.Now()
+	need := RoomNeed{SourceBytes: 900, ReserveBytes: 450}
+	report := func(at time.Time) *RetentionRoom {
+		return &RetentionRoom{ObservedAt: at, DiskCapacityBytes: 1000, FloorBytes: 100, DiskRoomBytes: 900}
+	}
+	if v, _ := report(now).Judge(need, now); v != RoomNever {
+		t.Fatalf("fresh report: %v, want never", v)
+	}
+	if v, _ := report(now.Add(-2*RetentionRoomMaxAge)).Judge(need, now); v != RoomFits {
+		t.Fatalf("old report: %v, want fits (the node decides)", v)
+	}
+}

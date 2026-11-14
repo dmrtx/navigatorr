@@ -33,6 +33,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
@@ -325,6 +326,10 @@ type HTTPExecutor struct {
 	reqTO  time.Duration
 	subTO  time.Duration
 	pubTO  time.Duration
+
+	// clearCacheRejected is set once a worker answered the clear_cache field
+	// with 400, so the fall back to a plain hold is logged once.
+	clearCacheRejected atomic.Bool
 }
 
 // NewHTTPExecutor builds an HTTPExecutor. BaseURL must be an http/https URL;

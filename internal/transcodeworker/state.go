@@ -117,7 +117,11 @@ type JobRecord struct {
 	// RoomSourceBytes and RoomSourceMTime (unix nanoseconds) identify the
 	// source at submit, to find this job's own copy in the source cache.
 	RoomSourceBytes int64 `json:"room_source_bytes,omitempty"`
-	RoomSourceMTime int64 `json:"room_source_mtime,omitempty"`
+	// RoomOwnKey is the cache key of this job's own cached copy when
+	// admission reused it, so it is neither promised again nor freeable
+	// for another job before this one links it.
+	RoomOwnKey      string `json:"room_own_key,omitempty"`
+	RoomSourceMTime int64  `json:"room_source_mtime,omitempty"`
 	// RetainReserveBytes is the disk an on_approval job is admitted against
 	// once it starts, until its candidate exists and CandidateSizeBytes takes
 	// over.

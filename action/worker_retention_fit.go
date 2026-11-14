@@ -88,15 +88,17 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 }
 
 // roomNeverFits says whether no worker could take the conversion even empty,
-// and why. Every worker must say so: one that does not report, or publishes on
-// encode, could take it.
-func (e *Engine) roomNeverFits(ctx context.Context, workers []transcode.NamedWorker, need transcode.RoomNeed) (string, bool) {
-	if need.SourceBytes <= 0 || len(workers) == 0 {
+// and why. It judges only once the exact reserve is recorded (exact): until
+// then the reserve is an estimate, and a conversion is never failed on one.
+// Every worker must say so from a fresh report: one that does not report, has
+// an old report, or publishes on encode, could take it.
+func (e *Engine) roomNeverFits(ctx context.Context, workers []transcode.NamedWorker, need transcode.RoomNeed, exact bool) (string, bool) {
+	if !exact || need.SourceBytes <= 0 || len(workers) == 0 {
 		return "", false
 	}
 	var biggest int64
 	for i, r := range e.roomOf(ctx, workers) {
-		if r == nil || r.EverFits(needOn(need, workers[i])) {
+		if !r.Fresh(e.now()) || r.EverFits(needOn(need, workers[i])) {
 			return "", false
 		}
 		biggest = max(biggest, r.DiskCapacityBytes-r.FloorBytes)

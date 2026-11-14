@@ -100,7 +100,7 @@ func convert(t *testing.T, e *Engine, id string, size int64, batch string) (stri
 		seedActionInstance(t, e.deps.Store, batch, "transcode_batch", StatusRunning, 0, "", map[string]any{}, map[string]any{})
 		inputs["parent_action_id"] = batch
 	}
-	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusRunning, 0, "", inputs, map[string]any{SubmittedSourceBytesKey: size})
+	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusRunning, 0, "", inputs, map[string]any{SubmittedSourceBytesKey: size, roomReserveKey: transcode.OutputReserveBytes(nil, size)})
 	ec := parseExecutionContextMust(t, e, id)
 	res, waiting := e.ensureWorkerAssigned(context.Background(), ec)
 	if waiting {

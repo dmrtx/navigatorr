@@ -717,23 +717,18 @@ func (w *Worker) findRetainedLocked(jobID, key string) (*JobRecord, error) {
 	return nil, nil
 }
 
-// retainedBytesLocked sums the disk held or reserved by deferred jobs that have
-// started and not finished: encoding ones by their admission reservation,
-// finished ones by their attested size. A queued job that has not been spawned
-// holds nothing yet; it is admitted when its slot comes up. Callers hold the
-// capacity lock.
-//
-// unwritten is the part of that total still only promised: reservations of
-// encodes that have not produced their candidate, which free disk space does
-// not reflect yet.
-func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
+// startedJobs lists the jobs that have been admitted and have not finished
+// their encode: running ones, and queued ones the scheduler has spawned. Callers
+// hold the capacity lock.
+func (w *Worker) startedJobs() ([]*JobRecord, error) {
 	entries, err := w.readJobDirs()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, 0, nil
+			return nil, nil
 		}
-		return 0, 0, err
+		return nil, err
 	}
+	var out []*JobRecord
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() {
@@ -753,7 +748,7 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			return 0, 0, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
+			return nil, fmt.Errorf("loading %s to measure retained candidates (fail closed): %w", name, err)
 		}
 		if job == nil || job.ID != id || (job.Status != "queued" && job.Status != "running") {
 			continue
@@ -761,25 +756,84 @@ func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
 		if job.Status == "queued" && job.PID == 0 {
 			continue
 		}
-		if !job.deferredPublication() {
-			// A job that publishes on encode keeps no candidate, but its
-			// output still grows on this disk until it is moved: its reserve
-			// is promised room free space does not show yet. It does not
-			// count against the retention budget.
-			if job.EncodeComplete {
-				continue
+		out = append(out, job)
+	}
+	return out, nil
+}
+
+// retainedBytesLocked sums the disk held or reserved by deferred jobs that have
+// started and not finished: encoding ones by their admission reservation,
+// finished ones by their attested size. A queued job that has not been spawned
+// holds nothing yet; it is admitted when its slot comes up. Callers hold the
+// capacity lock.
+//
+// unwritten is the part still only promised, whatever the job's policy: for each
+// admitted job, the source it has not staged yet (none when it reuses its own
+// cached copy) and the output it has not written yet. Free disk space does not
+// show it, and counting a byte that is already on disk would count it twice.
+func (w *Worker) retainedBytesLocked() (total, unwritten int64, err error) {
+	jobs, err := w.startedJobs()
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range jobs {
+		if job.deferredPublication() {
+			if job.CandidateSizeBytes > 0 {
+				total += job.CandidateSizeBytes
+			} else {
+				total += job.RetainReserveBytes
+				unwritten += w.promisedBytes(job)
 			}
-			unwritten += job.RetainReserveBytes
 			continue
 		}
-		if job.CandidateSizeBytes > 0 {
-			total += job.CandidateSizeBytes
-		} else {
-			total += job.RetainReserveBytes
-			unwritten += job.RetainReserveBytes
+		// A job that publishes on encode keeps no candidate and does not
+		// count against the retention budget, but its output still grows on
+		// this disk until it is moved.
+		if !job.EncodeComplete {
+			unwritten += w.promisedBytes(job)
 		}
 	}
 	return total, unwritten, nil
+}
+
+// promisedBytes is what an admitted job will still write to this disk: its
+// source, less what is already staged (nothing is promised for a source that
+// was an existing cached copy of its own), and its output reserve, less what
+// is already written.
+func (w *Worker) promisedBytes(job *JobRecord) int64 {
+	var promised int64
+	if job.RoomOwnKey == "" {
+		promised += max(0, job.sourceBytesKnown()-regularSize(job.StagedInputPath))
+	}
+	promised += max(0, job.RetainReserveBytes-regularSize(job.LocalCandidatePath))
+	return promised
+}
+
+// regularSize is the size of a regular file, 0 when there is none.
+func regularSize(path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	fi, err := os.Stat(path)
+	if err != nil || !fi.Mode().IsRegular() {
+		return 0
+	}
+	return fi.Size()
+}
+
+// sourceBytesKnown is the size of the job's source as the node knows it: the
+// size recorded at submit or, for a job recorded before that, its source size
+// or a stat of the source. 0 when none is known.
+func (j *JobRecord) sourceBytesKnown() int64 {
+	switch {
+	case j.RoomSourceBytes > 0:
+		return j.RoomSourceBytes
+	case j.SourceSizeBytes > 0:
+		return j.SourceSizeBytes
+	case j.ExpectedSourceSizeBytes > 0:
+		return j.ExpectedSourceSizeBytes
+	}
+	return regularSize(j.Source)
 }
 
 // freeDiskBytes measures the free space of the filesystem holding the local

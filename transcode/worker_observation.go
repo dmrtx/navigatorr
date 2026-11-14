@@ -115,17 +115,17 @@ func (r *RetentionRoom) EverFits(need RoomNeed) bool {
 
 // Judge says whether the node that reported r can take need now, and for
 // RoomNoSpace the bytes it can offer. A missing or old report says RoomFits: the
-// node decides, and refuses at once when it must. RoomNever is judged from the
-// sizes alone, so an old report still gives it.
+// node decides, and refuses at once when it must. RoomNever, too, is said only
+// from a fresh report: an old one may describe a disk that has since changed.
 func (r *RetentionRoom) Judge(need RoomNeed, now time.Time) (RoomVerdict, int64) {
 	if r == nil {
 		return RoomFits, 0
 	}
-	if !r.EverFits(need) {
-		return RoomNever, 0
-	}
 	if !r.Fresh(now) {
 		return RoomFits, 0
+	}
+	if !r.EverFits(need) {
+		return RoomNever, 0
 	}
 	switch {
 	case r.Hold == "paused":

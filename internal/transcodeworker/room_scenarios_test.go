@@ -270,10 +270,10 @@ func TestRoom_TheNodeReportsWhatItCanTake(t *testing.T) {
 	f := newRoomFixture(t, func(c *WorkerConfig) { c.RetainedCandidatesMaxBytes = 5_000 })
 	f.cacheEntry("spare", 300, time.Hour)
 	f.free.Store(2_000)
-	f.mustAdmit("job-running") // reserves 350 it has not written yet
+	f.mustAdmit("job-running") // promises its 700 source and 350 reserve, none written yet
 	room := roomOf(t, f)
-	// 2000 free - 350 unwritten + 300 deletable - 100 floor
-	if room.DiskRoomBytes != 1_850 || room.DiskCapacityBytes != 100_000 || room.FloorBytes != roomFloor || room.CapacityBytes != 5_000 || room.RoomBytes != 4_650 || room.HeldBytes != 350 || room.Hold != "" {
+	// 2000 free - 1050 promised + 300 deletable - 100 floor
+	if room.DiskRoomBytes != 1_150 || room.DiskCapacityBytes != 100_000 || room.FloorBytes != roomFloor || room.CapacityBytes != 5_000 || room.RoomBytes != 4_650 || room.HeldBytes != 350 || room.Hold != "" {
 		t.Fatalf("report = %+v", room)
 	}
 	if err := f.w.SetHold(true); err != nil {

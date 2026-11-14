@@ -58,6 +58,12 @@ const JobIDHeader = "X-Navigatorr-Job-ID"
 // and coordinators of any age keep treating the answer as busy.
 const RoomRefusalTag = "no room here"
 
+// The texts workers used for room refusals before the tag existed.
+const (
+	legacyRoomRefusalBudget = "retained candidates would use"
+	legacyRoomRefusalDisk   = "free bytes would fall below"
+)
+
 // IsRoomRefusal reports a worker_busy refusal that came from the node's room
 // limits, its pause or a build, not from a full set of slots.
 func IsRoomRefusal(err error) bool {
@@ -65,5 +71,12 @@ func IsRoomRefusal(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "worker busy") && strings.Contains(msg, RoomRefusalTag)
+	if !strings.Contains(msg, "worker busy") {
+		return false
+	}
+	// A worker from before the tag refuses with its retention texts; a mixed
+	// fleet must requeue on those too instead of failing the conversion.
+	return strings.Contains(msg, RoomRefusalTag) ||
+		strings.Contains(msg, legacyRoomRefusalBudget) ||
+		strings.Contains(msg, legacyRoomRefusalDisk)
 }

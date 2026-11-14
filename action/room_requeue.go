@@ -30,8 +30,12 @@ const (
 	runnerKilledClass = "runner_killed"
 	// runnerKilledKey counts the times in a row it happened to this request.
 	runnerKilledKey = "runner_killed_count"
-	// maxRunnerKilled is how many in a row go back to the queue; the next one
-	// fails with the worker's reason so a job that kills its runner cannot loop.
+	// runnerKilledJobKey is the worker job whose failure was last counted, so
+	// polling the same failure again does not count it twice.
+	runnerKilledJobKey = "runner_killed_job"
+	// maxRunnerKilled is the failure that is not requeued: the first two go
+	// back to the queue and the third fails with the worker's reason, so a job
+	// that kills its runner cannot loop.
 	maxRunnerKilled = 3
 )
 

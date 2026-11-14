@@ -351,7 +351,7 @@ func (e *Engine) stepTranscodeSubmit(ctx context.Context, ec *ExecutionContext) 
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "parent_busy", WaitingReason: fmt.Sprintf("Parent admission lease lost before submit for job %s; deferring without resubmit", jobID), Outputs: map[string]any{"job_id": jobID, "external_reference": jobID, "candidate_path": candidatePath, "output_path": candidatePath}}, nil
 	}
 	job, err := e.actionWorker(ec).Submit(actx, req)
-	if err != nil && transcode.IsRoomRefusal(err) {
+	if err != nil && transcode.IsRoomRefusal(err) && ec.ActionName == "transcode_media" {
 		// The node has no room (or is paused, or held by a build) and created
 		// nothing: the conversion goes back in the queue for a node that has.
 		clearTranscodeReconcileFlags(ec)
@@ -825,8 +825,15 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			// The worker restarted (or crashed) under the encode: the file is
 			// fine and the encode is lost. It goes back to the queue, up to
 			// maxRunnerKilled times in a row, then it fails with the reason.
-			if n := getInt(ec.State, runnerKilledKey) + 1; n < maxRunnerKilled {
+			// One failure counts once, however many polls see it: the worker
+			// job it belongs to is remembered.
+			n := getInt(ec.State, runnerKilledKey)
+			if getString(ec.State, runnerKilledJobKey) != jobID {
+				n++
+			}
+			if n < maxRunnerKilled {
 				ec.State[runnerKilledKey] = n
+				ec.State[runnerKilledJobKey] = jobID
 				return e.roomRequeue(ec, "the node restarted while it encoded"), nil
 			}
 		}

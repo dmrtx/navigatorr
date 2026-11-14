@@ -68,9 +68,22 @@ func (w *Worker) freeableCacheEntries(own string) []cacheEntry {
 	if err != nil {
 		return nil
 	}
+	// A cached source some admitted job chose as its own copy is that job's
+	// until it links it, whoever asks.
+	taken := map[string]bool{}
+	if jobs, err := w.startedJobs(); err == nil {
+		for _, j := range jobs {
+			if j.RoomOwnKey != "" {
+				taken[j.RoomOwnKey] = true
+			}
+		}
+	}
 	var out []cacheEntry
 	for _, e := range names {
 		name := e.Name()
+		if taken[sourceCacheKeyOfData(name)] {
+			continue
+		}
 		if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".meta.json") || strings.HasSuffix(name, ".lock") || strings.HasSuffix(name, ".part") {
 			continue
 		}
@@ -93,7 +106,7 @@ func (w *Worker) freeableCacheEntries(own string) []cacheEntry {
 // records (path, size, modification time), since a request that carries no
 // digest does not know the key before the copy.
 func (w *Worker) ownCacheKey(job *JobRecord) string {
-	if !w.sourceCacheEnabled() || job.RoomSourceBytes <= 0 {
+	if !w.sourceCacheEnabled() || job.sourceBytesKnown() <= 0 || job.RoomSourceMTime == 0 {
 		return ""
 	}
 	dir := w.sourceCacheDir()
@@ -115,7 +128,7 @@ func (w *Worker) ownCacheKey(job *JobRecord) string {
 		if json.Unmarshal(raw, &meta) != nil {
 			continue
 		}
-		if meta.Source != src || meta.Size != job.RoomSourceBytes || meta.ModTime != job.RoomSourceMTime {
+		if meta.Source != src || meta.Size != job.sourceBytesKnown() || meta.ModTime != job.RoomSourceMTime {
 			continue
 		}
 		key := strings.TrimSuffix(name, ".meta.json")
@@ -210,7 +223,8 @@ func (w *Worker) admitRoomLocked(job *JobRecord) (fallback bool, err error) {
 		return false, fmt.Errorf("measuring free disk: %w", err)
 	}
 	own := w.ownCacheKey(job)
-	source := job.RoomSourceBytes
+	job.RoomOwnKey = own
+	source := job.sourceBytesKnown()
 	if own != "" {
 		source = 0 // already here
 	}
@@ -236,6 +250,10 @@ func (w *Worker) admitRoomLocked(job *JobRecord) (fallback bool, err error) {
 			log.Printf("source cache: removed %s (%d bytes) to make room for job %s", e.name, e.size, job.ID)
 		}
 	}
+	if have < need {
+		// A delete failed: never admit on room the node does not have.
+		return false, &retentionRefusal{reason: retentionBlockedDisk, msg: fmt.Sprintf("worker busy (%s): the job needs %s (source %s, output %s, floor %s) and this node could free only %s", transcode.RoomRefusalTag, gb(need), gb(source), gb(reserve), gb(floor), gb(have))}
+	}
 	return fallback, nil
 }
 
@@ -249,6 +267,7 @@ func (w *Worker) admitRoomLocked(job *JobRecord) (fallback bool, err error) {
 func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error) {
 	var fallback bool
 	var err error
+	prevOwn := job.RoomOwnKey
 	if reason, msg := w.holdRefusal(); reason != "" {
 		err = &retentionRefusal{reason: reason, msg: msg}
 	} else {
@@ -271,7 +290,7 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 		job.PublishFallback = transcode.PublishFallbackRetentionFull
 		log.Printf("job %s: the retention budget is full; starting it to publish on encode", job.ID)
 	}
-	if fallback || job.RetentionBlocked != "" {
+	if fallback || job.RetentionBlocked != "" || job.RoomOwnKey != prevOwn {
 		job.RetentionBlocked, job.RoomNote = "", ""
 		return true, SaveJobAtomic(jobFile, job)
 	}
@@ -316,17 +335,12 @@ func (w *Worker) diskTotalBytes() (int64, error) {
 	if w.diskTotal != nil {
 		return w.diskTotal(dir)
 	}
-	probe := dir
-	for {
-		if _, err := os.Stat(probe); err == nil {
-			break
-		}
-		parent := filepath.Dir(probe)
-		if parent == probe {
-			break
-		}
-		probe = parent
+	// A work directory that does not exist yet reports no capacity: the
+	// coordinator then cannot say the job never fits.
+	if _, err := os.Stat(dir); err != nil {
+		return 0, err
 	}
+	probe := dir
 	_, total, ok := diskSpace(probe)
 	if !ok {
 		return 0, fmt.Errorf("disk size of %s is unknown", probe)
@@ -351,9 +365,12 @@ func (w *Worker) withDiskFloor(ctx context.Context, job *JobRecord, outputPath, 
 		watch = &encodeSizeWatch{outputPath: outputPath, progressPath: progressPath}
 		ctx = context.WithValue(ctx, sizeWatchContextKey{}, watch)
 	}
+	id := job.ID
 	watch.floor = func() (int64, int64, bool) {
 		free, err := w.freeDiskBytes()
-		return free, w.diskHardFloor(), err == nil
+		// Only the encode started last stops: the others may well finish
+		// once it has gone, and stopping them all would lose all that work.
+		return free, w.diskHardFloor(), err == nil && w.newestEncode(id)
 	}
 	return ctx
 }
@@ -401,4 +418,30 @@ func (w *Worker) dropHalfCopies() int64 {
 		_ = f.Close()
 	}
 	return freed
+}
+
+// newestEncode says whether job id is the most recently started encode on this
+// node (the one that stops first when the disk runs under its hard floor). A
+// job the node cannot find counts as the newest.
+func (w *Worker) newestEncode(id string) bool {
+	jobs, err := w.startedJobs()
+	if err != nil {
+		return true
+	}
+	started := func(j *JobRecord) time.Time {
+		if !j.StartedAt.IsZero() {
+			return j.StartedAt
+		}
+		return j.CreatedAt
+	}
+	var newest *JobRecord
+	for _, j := range jobs {
+		if j.Status != "running" || j.EncodeComplete {
+			continue
+		}
+		if newest == nil || started(j).After(started(newest)) || (started(j).Equal(started(newest)) && j.ID > newest.ID) {
+			newest = j
+		}
+	}
+	return newest == nil || newest.ID == id
 }

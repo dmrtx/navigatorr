@@ -61,6 +61,10 @@ type workerState struct {
 	// waiting build with the dispatcher's recording of a job on the node
 	// (admitOnNode).
 	pauseMu sync.Mutex
+
+	// cacheClearedFor is the pause (its start and revision) whose cache the
+	// node has been told to clear, so a pause clears it once. Under pauseMu.
+	cacheClearedFor string
 }
 
 func (e *Engine) workerStateFor(name string) *workerState {
@@ -186,6 +190,12 @@ func (e *Engine) ensureWorkerAssigned(ctx context.Context, ec *ExecutionContext)
 	// With one worker there is no choice to make: its readiness is checked by
 	// the steps, as the jobs are sent.
 	if all := e.deps.Workers.All(); len(all) == 1 {
+		// The one node that just refused it is not asked again at once: the
+		// conversion waits out the window instead of looping assign, refuse,
+		// requeue.
+		if e.roomRefusedRecently(ec, all[0].Name) {
+			return StepResult{Status: StepWaitingExternal, WaitingCondition: "worker_busy", WaitingReason: "The only worker has no room for it yet; it is asked again shortly"}, true
+		}
 		return e.recordAssignedWorker(ctx, ec, all[0].Name)
 	}
 	name, condition, err := e.pickVideoWorker(ctx, conversionRoomNeed(ec), within, ec)
@@ -217,10 +227,10 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 // With nothing to choose it returns the waiting condition: worker_unreachable
 // when no worker is ready, worker_busy when every ready worker is full.
 func (e *Engine) pickVideoWorker(ctx context.Context, need transcode.RoomNeed, within map[string]bool, ec *ExecutionContext) (string, string, error) {
-	prefer := ""
-	if getString(ec.State, requeueWhyKey) == "" && getString(ec.State, roomRefusedByKey) == "" {
-		prefer = getString(ec.State, requeuedFromKey)
-	}
+	// A requeued conversion prefers the node it came from. A node that just
+	// refused it is passed over below only within roomRefusedFor; after that
+	// the preference applies again.
+	prefer := getString(ec.State, requeuedFromKey)
 	workers := e.deps.Workers.All()
 	ready := e.workersReady(ctx, workers)
 	eligible := e.retentionEligible(ctx, workers, need)

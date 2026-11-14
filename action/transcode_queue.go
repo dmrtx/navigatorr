@@ -300,7 +300,7 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	// node could take even empty fails now, not after waiting for a room that
 	// never comes.
 	need := conversionRoomNeed(ec)
-	if why, never := e.roomNeverFits(ctx, q.workers, need); never {
+	if why, never := e.roomNeverFits(ctx, q.workers, need, getInt64(ec.State, roomReserveKey) > 0); never {
 		return StepResult{Status: StepFailed, Error: why}, true, nil
 	}
 	cur := e.claimFor(ctx, q, need)
