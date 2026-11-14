@@ -49,9 +49,10 @@ func turnWith(t *testing.T, e *Engine, id string, tmpl ActionTemplate) (worker, 
 
 // refusingNode makes a node refuse every submit for lack of room until accept
 // is set, and counts the submits it got. Like a real worker, a node that
-// refused a job has no such job: asking for it answers 404.
-func refusingNode(node *roomReporter) (submits *atomic.Int32, accept *atomic.Bool) {
-	submits, accept = &atomic.Int32{}, &atomic.Bool{}
+// refused a job has no such job: asking for it answers 404, and lookups counts
+// those answers.
+func refusingNode(node *roomReporter) (submits, lookups *atomic.Int32, accept *atomic.Bool) {
+	submits, lookups, accept = &atomic.Int32{}, &atomic.Int32{}, &atomic.Bool{}
 	node.submitFunc = func(_ context.Context, req transcode.Request) (transcode.Job, error) {
 		submits.Add(1)
 		if accept.Load() {
@@ -63,9 +64,10 @@ func refusingNode(node *roomReporter) (submits *atomic.Int32, accept *atomic.Boo
 		if accept.Load() {
 			return transcode.JobStatus{ID: jobID, Status: transcode.StatusQueued}, nil
 		}
+		lookups.Add(1)
 		return transcode.JobStatus{}, &httpclient.HTTPError{StatusCode: 404, Code: transcode.WorkerErrorNotFound}
 	}
-	return submits, accept
+	return submits, lookups, accept
 }
 
 // Two real refusals through the requeue, end to end. Both nodes report room
@@ -76,30 +78,49 @@ func refusingNode(node *roomReporter) (submits *atomic.Int32, accept *atomic.Boo
 // placed again and sent to a node.
 func TestTwoRealRefusalsGoThroughTheRequeueToEachNodeOnce(t *testing.T) {
 	m4, m1 := diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib)
-	m4Submits, m4Accept := refusingNode(m4)
-	m1Submits, m1Accept := refusingNode(m1)
+	m4Submits, m4Lookups, m4Accept := refusingNode(m4)
+	m1Submits, m1Lookups, m1Accept := refusingNode(m1)
 	e, clock := placementEngine(t, m4, m1)
 
 	waiter(t, e, "big", 10*time.Minute, map[string]any{"path": "/Volumes/media/ep.mkv"}, map[string]any{SubmittedSourceBytesKey: int64(30 * gib)})
 	tmpl := submitTemplate(e)
+
+	// requeuedFrom checks the conversion is back in the queue from node, with
+	// nothing of the refused job left on it, and returns its refusals.
+	requeuedFrom := func(node string) map[string]time.Time {
+		t.Helper()
+		st := actionState(t, e.deps.Store, "big")
+		if got := getString(st, requeuedFromKey); got != node {
+			t.Fatalf("requeued from %q, want %s", got, node)
+		}
+		if st["job_id"] != nil || st["plan"] != nil || assignedWorker(st) != "" {
+			t.Fatalf("the requeue kept the refused job: %v", st)
+		}
+		return refusalsFromState(st[roomRefusalsKey])
+	}
 
 	// m4 is first on a tie: it is picked, refuses, and the conversion is back
 	// in the queue with m4's refusal recorded.
 	if w, cond, _ := turnWith(t, e, "big", tmpl); w != "" || cond != "worker_busy" {
 		t.Fatalf("after m4's refusal: worker %q, wait %q; want it back in the queue", w, cond)
 	}
-	refusals := refusalsFromState(actionState(t, e.deps.Store, "big")[roomRefusalsKey])
+	refusals := requeuedFrom("m4")
 	if m4Submits.Load() != 1 || m1Submits.Load() != 0 || refusals["m4"].IsZero() || !refusals["m1"].IsZero() {
 		t.Fatalf("after the first turn: submits m4=%d m1=%d, refusals %v", m4Submits.Load(), m1Submits.Load(), refusals)
 	}
+	// Before moving it, the engine asked m4 for the job and was told it has none.
+	if m4Lookups.Load() != 1 {
+		t.Fatalf("m4 was asked for the refused job %d times, want once", m4Lookups.Load())
+	}
+	m4RefusedAt := refusals["m4"]
 
 	// The next turn passes m4 over and sends it to m1, which refuses too.
 	if w, cond, _ := turnWith(t, e, "big", tmpl); w != "" || cond != "worker_busy" {
 		t.Fatalf("after m1's refusal: worker %q, wait %q; want it back in the queue", w, cond)
 	}
-	refusals = refusalsFromState(actionState(t, e.deps.Store, "big")[roomRefusalsKey])
-	if m4Submits.Load() != 1 || m1Submits.Load() != 1 || refusals["m4"].IsZero() || refusals["m1"].IsZero() {
-		t.Fatalf("after the second turn: submits m4=%d m1=%d, refusals %v", m4Submits.Load(), m1Submits.Load(), refusals)
+	refusals = requeuedFrom("m1")
+	if m4Submits.Load() != 1 || m1Submits.Load() != 1 || !refusals["m4"].Equal(m4RefusedAt) || refusals["m1"].IsZero() || m1Lookups.Load() != 1 {
+		t.Fatalf("after the second turn: submits m4=%d m1=%d, m1 lookups %d, refusals %v (m4's was %v)", m4Submits.Load(), m1Submits.Load(), m1Lookups.Load(), refusals, m4RefusedAt)
 	}
 
 	// Refused by both: it reaches no node and is sent nowhere.
@@ -123,12 +144,16 @@ func TestTwoRealRefusalsGoThroughTheRequeueToEachNodeOnce(t *testing.T) {
 	clock.advance(roomRefusedFor + time.Second)
 	m4Accept.Store(true)
 	m1Accept.Store(true)
-	free := map[string]string{"m4": "m1", "m1": "m4"}[small]
-	before := m4Submits.Load() + m1Submits.Load()
+	free, busyNode := map[string]string{"m4": "m1", "m1": "m4"}[small], small
+	submits := map[string]*atomic.Int32{"m4": m4Submits, "m1": m1Submits}
+	freeBefore, busyBefore := submits[free].Load(), submits[busyNode].Load()
 	if w, _, _ := turnWith(t, e, "big", tmpl); w != free {
 		t.Fatalf("past the window: given %q, want %s (the free node)", w, free)
 	}
-	if m4Submits.Load()+m1Submits.Load() != before+1 {
-		t.Fatalf("past the window the job was not sent: submits m4=%d m1=%d", m4Submits.Load(), m1Submits.Load())
+	if submits[free].Load() != freeBefore+1 || submits[busyNode].Load() != busyBefore {
+		t.Fatalf("past the window the job went to the wrong node: submits m4=%d m1=%d, want one more on %s", m4Submits.Load(), m1Submits.Load(), free)
+	}
+	if inst, err := e.deps.Store.GetActionInstance("big"); err != nil || inst.Status == StatusFailed {
+		t.Fatalf("the conversion ended failed after its refusals: %v %v", inst, err)
 	}
 }
