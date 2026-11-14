@@ -357,11 +357,38 @@ func TestAFileLargerThanEveryBudgetPrefersTheWorkerThatCanRunItAloneSoonest(t *t
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := retentionWorkers(t, newRoomReporter(30*gib, tc.m4Room), newRoomReporter(40*gib, tc.m1Rm))
-			// 60 GiB is larger than both budgets: it still gets a worker.
-			if name, res, waiting := convert(t, e, "conv-a", 60*gib, ""); waiting || name != tc.want {
-				t.Fatalf("assigned %q (waiting %v), want %q: %+v", name, waiting, tc.want, res)
-			}
+			assertAlone(t, e, tc.want)
 		})
+	}
+}
+
+// A report that says nothing (missing, old or dated ahead) takes the worker to
+// have room for any file, so a large one goes to it over a fresh empty worker
+// that could only run it alone.
+func TestAReportThatSaysNothingTakesTheLargeFileOverAFreshEmptyWorker(t *testing.T) {
+	silent := func() *roomReporter { r := newRoomReporter(30*gib, 0); r.silent = true; return r }
+	old := func() *roomReporter {
+		r := newRoomReporter(30*gib, 0)
+		r.age = 2 * transcode.RetentionRoomMaxAge
+		return r
+	}
+	ahead := func() *roomReporter {
+		r := newRoomReporter(30*gib, 0)
+		r.age = -2 * transcode.RetentionRoomMaxAge
+		return r
+	}
+	for name, quiet := range map[string]func() *roomReporter{"missing": silent, "old": old, "dated ahead": ahead} {
+		t.Run(name, func(t *testing.T) {
+			assertAlone(t, retentionWorkers(t, newRoomReporter(40*gib, 40*gib), quiet()), "m1")
+		})
+	}
+}
+
+func assertAlone(t *testing.T, e *Engine, want string) {
+	t.Helper()
+	// 60 GiB is larger than both budgets: it still gets a worker.
+	if name, res, waiting := convert(t, e, "conv-a", 60*gib, ""); waiting || name != want {
+		t.Fatalf("assigned %q (waiting %v), want %q: %+v", name, waiting, want, res)
 	}
 }
 

@@ -110,6 +110,9 @@ type JobRecord struct {
 	// RetentionBlocked is why a queued on_approval job is not starting
 	// (retentionBlockedBudget or retentionBlockedDisk); blank once it starts.
 	RetentionBlocked string `json:"retention_blocked,omitempty"`
+	// FloorUnmetSince is when the free-disk floor was first seen unmeetable
+	// with nothing that could free the disk; blank whenever it is not so.
+	FloorUnmetSince time.Time `json:"floor_unmet_since,omitempty"`
 	// RetainReserveBytes is the disk an on_approval job is admitted against
 	// once it starts, until its candidate exists and CandidateSizeBytes takes
 	// over.

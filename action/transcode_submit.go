@@ -806,10 +806,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			reason += "; phase: " + st.Phase
 		}
 		if st.Status == transcode.StatusQueued && st.RetentionBlocked != "" {
-			reason += "; waiting for room on the worker to keep the candidate (" + st.RetentionBlocked + ")"
-			if st.RetentionBlocked == "retention_alone" {
-				reason = strings.Replace(reason, "waiting for room on the worker to keep the candidate", "larger than the worker's whole retention budget: waiting for the worker to hold no other candidate (approve or discard the retained ones)", 1)
-			}
+			reason += queuedRetentionNote(st.RetentionBlocked)
 		}
 		return StepResult{Status: StepWaitingExternal, WaitingCondition: "transcode_complete", WaitingReason: reason, Outputs: meta}, nil
 	case transcode.StatusFailed:
@@ -959,4 +956,12 @@ func capabilityReadDeferred(err error) (StepResult, bool) {
 		WaitingCondition: "worker_unreachable",
 		WaitingReason:    fmt.Sprintf("Worker capabilities could not be read (%v); nothing was submitted, retrying when the worker answers", err),
 	}, true
+}
+
+// queuedRetentionNote words why a job the worker keeps queued is not starting.
+func queuedRetentionNote(blocked string) string {
+	if blocked == "retention_alone" {
+		return "; larger than the worker's whole retention budget: waiting for the worker to hold no other candidate, approve or discard the retained ones (retention_alone)"
+	}
+	return "; waiting for room on the worker to keep the candidate (" + blocked + ")"
 }

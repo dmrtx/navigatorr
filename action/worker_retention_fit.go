@@ -64,19 +64,21 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 		return out
 	}
 	fits := make([]transcode.RetentionFit, len(workers))
+	rooms := make([]*transcode.RetentionRoom, len(workers))
 	holdsSomewhere := false
 	for i, w := range workers {
 		if w.PublishPolicy != transcode.PublishPolicyOnApproval {
 			holdsSomewhere = true // publishes on encode: needs no room
 			continue
 		}
-		fits[i] = e.workerObservation(ctx, w).Retention.Fit(need, e.now())
+		rooms[i] = e.workerObservation(ctx, w).Retention
+		fits[i] = rooms[i].Fit(need, e.now())
 		if fits[i] != transcode.RetentionTooLarge {
 			holdsSomewhere = true
 		}
 	}
 	if !holdsSomewhere {
-		return e.retentionAloneChoice(ctx, workers)
+		return retentionAloneChoice(rooms)
 	}
 	for i := range workers {
 		out[i] = fits[i] == transcode.RetentionFits
@@ -85,19 +87,17 @@ func (e *Engine) retentionEligible(ctx context.Context, workers []transcode.Name
 }
 
 // retentionAloneChoice marks, for a file larger than every worker's budget,
-// the workers that suit it best: it runs alone on whichever takes it, so those
-// holding nothing come first, then those with room left, and a worker that
-// reports no room (or a stale report) is taken only when none is better.
-func (e *Engine) retentionAloneChoice(ctx context.Context, workers []transcode.NamedWorker) []bool {
-	rank := make([]int, len(workers))
-	best := 2
-	now := e.now()
-	for i, w := range workers {
-		r := e.workerObservation(ctx, w).Retention
+// the workers that suit it best: it runs alone on whichever takes it, so the
+// one holding nothing comes first, then one with room left, and a worker that
+// reports none (it holds candidates, or another such file waits there for it
+// to empty) last. A worker whose report is missing, old or dated ahead is
+// taken to fit the file, so it never gets here: every report seen is fresh.
+func retentionAloneChoice(rooms []*transcode.RetentionRoom) []bool {
+	rank := make([]int, len(rooms))
+	best := 3
+	for i, r := range rooms {
 		switch {
-		case r == nil || r.CapacityBytes <= 0 || now.Sub(r.ObservedAt) > transcode.RetentionRoomMaxAge || now.Sub(r.ObservedAt) < -transcode.RetentionRoomMaxAge:
-			rank[i] = 0 // unknown: taken to be able to, as ever
-		case r.RoomBytes >= r.CapacityBytes:
+		case r == nil || r.RoomBytes >= r.CapacityBytes:
 			rank[i] = 0
 		case r.RoomBytes > 0:
 			rank[i] = 1
@@ -106,7 +106,7 @@ func (e *Engine) retentionAloneChoice(ctx context.Context, workers []transcode.N
 		}
 		best = min(best, rank[i])
 	}
-	out := make([]bool, len(workers))
+	out := make([]bool, len(rooms))
 	for i := range out {
 		out[i] = rank[i] == best
 	}

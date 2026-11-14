@@ -83,7 +83,8 @@ func (w *Worker) refreshRetentionRoom(now time.Time) {
 	held, _, err := w.retainedBytesLocked()
 	// A job larger than the whole budget waits for the node to hold nothing:
 	// no room is on offer until it has run.
-	blocked := err == nil && w.tooLargeWaitingLocked("")
+	queued, qerr := w.listQueuedJobsObserved()
+	blocked := err == nil && w.tooLargeGate(queued, qerr) != ""
 	capLock.Unlock()
 	if err != nil {
 		return
