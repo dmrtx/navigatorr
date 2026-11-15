@@ -71,9 +71,11 @@ func EstimateConversion(rep *mediainspect.DetailedReport, s EstimateSettings) *C
 	rest := streams.Totals.AudioAfter + streams.Totals.SubtitlesAfter
 	video := streams.Video.BeforeBytes
 	switch {
-	case s.AudioOnly:
+	case s.AudioOnly || s.Mode == "size" && s.BudgetBytes <= 0 && s.BudgetPercent <= 0 && compactVideoSource(rep):
+		// A size goal copies a video that is already compact
+		// (startCompactSourceAudioOnly).
 		out.VideoBasis = "copied"
-		streams.Video.AfterCodec = streams.Video.Codec
+		streams.Video.AfterCodec, streams.Video.Fate = streams.Video.Codec, "copied"
 	case s.BudgetBytes > 0 || s.BudgetPercent > 0:
 		out.VideoBasis = "size_budget"
 		target := s.BudgetBytes

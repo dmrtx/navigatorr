@@ -110,6 +110,9 @@ func (e *Engine) stepPlanEncode(ctx context.Context, ec *ExecutionContext) (Step
 	if result, handled := e.startSizeBudgetLadder(ctx, ec, cleanPath); handled {
 		return result, nil
 	}
+	if result, handled := e.startCompactSourceAudioOnly(ctx, ec); handled {
+		return result, nil
+	}
 	if result, handled := e.startQualityLadder(ctx, ec, cleanPath); handled {
 		return result, nil
 	}

@@ -1,6 +1,8 @@
 package action
 
 import (
+	"strings"
+
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -37,6 +39,9 @@ type ConversionVideo struct {
 	BeforeBytes int64  `json:"before_bytes,omitempty"`
 	AfterCodec  string `json:"after_codec,omitempty"`
 	AfterBytes  int64  `json:"after_bytes,omitempty"`
+	// Fate is copied when the plan keeps the video stream as it is, converted
+	// otherwise.
+	Fate string `json:"fate"`
 }
 
 // ConversionAudioTrack is one source audio track and its fate: copied,
@@ -92,9 +97,10 @@ func conversionStreams(rep *mediainspect.DetailedReport, plan *transcode.Plan, c
 	if main := rep.MainVideo(); len(main) > 0 {
 		out.Video.Codec = main[0].Codec
 	}
-	out.Video.AfterCodec = plan.VideoCodec
-	if transcode.IsSizeAudioOnlyPlan(plan) {
-		out.Video.AfterCodec = out.Video.Codec
+	out.Video.AfterCodec, out.Video.Fate = plan.VideoCodec, "converted"
+	copied := strings.EqualFold(strings.TrimSpace(plan.VideoCodec), transcode.VideoCodecCopy)
+	if copied {
+		out.Video.AfterCodec, out.Video.Fate = out.Video.Codec, "copied"
 	}
 	rest, known := candidateBytes, candidateBytes > 0
 	for _, a := range rep.Audio {
@@ -133,7 +139,12 @@ func conversionStreams(rep *mediainspect.DetailedReport, plan *transcode.Plan, c
 		}
 		out.Subtitles.Tracks = append(out.Subtitles.Tracks, t)
 	}
-	if known && rest > 0 {
+	switch {
+	case copied:
+		// A copied stream keeps its size; the new file less its audio would
+		// count the container's overhead as video.
+		out.Video.AfterBytes = out.Video.BeforeBytes
+	case known && rest > 0:
 		out.Video.AfterBytes = rest
 	}
 	out.Totals.VideoBefore, out.Totals.VideoAfter = out.Video.BeforeBytes, out.Video.AfterBytes
