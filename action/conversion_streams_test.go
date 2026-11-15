@@ -49,6 +49,15 @@ func TestConversionStreamsSayWhatBecameOfEachTrack(t *testing.T) {
 			t.Fatalf("kept-all %+v", a)
 		}
 	}
+	if all.Video.Fate != "converted" {
+		t.Fatalf("re-encoded video %+v", all.Video)
+	}
+
+	// A copied video says so and keeps its size, whatever the new file weighs.
+	copied := conversionStreams(rep, &transcode.Plan{VideoCodec: transcode.VideoCodecCopy, AudioMode: transcode.AudioModeSizeAACBed}, 1_900_000_000)
+	if v := copied.Video; v.Fate != "copied" || v.AfterCodec != "h264" || v.BeforeBytes <= 0 || v.AfterBytes != v.BeforeBytes || copied.Totals.VideoAfter != v.BeforeBytes {
+		t.Fatalf("copied video %+v", v)
+	}
 	if ConversionStreamsOf(map[string]any{}, 1) != nil {
 		t.Fatal("no probe, no streams")
 	}
