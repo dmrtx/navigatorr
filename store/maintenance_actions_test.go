@@ -48,6 +48,33 @@ func TestMaintenanceSnapshotProjectsWithoutChangingHistory(t *testing.T) {
 	}
 }
 
+// The queue wait estimate reads these from the snapshot, so they must survive
+// the projection: the encode time, the worker, its slot count and the height
+// of the original.
+func TestMaintenanceSnapshotKeepsTheQueueEstimateInputs(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	state := `{"worker":"node-a","encode_duration_ms":90000,"worker_slots_total":2,"original":{"duration_sec":3600,"resolution":"3840x2160","video":[{"width":3840}],"audio":[1,2]}}`
+	if err := s.CreateActionInstance(ActionInstance{ID: "done", ActionName: "transcode_media", Status: ActionStatusCompleted, InputsJSON: "{}", OutputsJSON: "{}", StateJSON: state}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListMaintenanceActionSnapshot()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("%v %v", rows, err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(rows[0].StateJSON), &got); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := got["original"].(map[string]any)
+	if got["worker"] != "node-a" || got["encode_duration_ms"] != float64(90000) || got["worker_slots_total"] != float64(2) || original["resolution"] != "3840x2160" || original["duration_sec"] != float64(3600) || original["audio"] != nil {
+		t.Fatalf("queue estimate inputs lost or original not trimmed: %v", got)
+	}
+}
+
 func TestMaintenanceMemoTracksSameSizeWritesAndFreshMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.db")
 	s, err := Open(path)
