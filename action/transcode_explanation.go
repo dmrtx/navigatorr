@@ -206,6 +206,9 @@ func ExplainTranscode(res *ActionResult) *TranscodeExplanation {
 			e.PreservationFailure = detail
 			e.Message = "The original was refused before anything was encoded: " + detail + ". Original preserved."
 		}
+	case reason == reasonVideoAlreadyCompact:
+		e.Outcome = "no_changes"
+		e.Message = "The video is already compact, so re-encoding it would not make it smaller, and converting only the audio would not save enough. Nothing was encoded; original preserved."
 	case reason == "audio_compaction_insufficient":
 		e.Outcome = "size_rejected"
 		e.Message = "No video encode met this goal, and compacting the lossless audio alone would not save enough. Original preserved."
