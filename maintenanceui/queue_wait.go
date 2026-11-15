@@ -94,8 +94,8 @@ type queueWaiter struct {
 
 // simulateQueueWait returns each waiter's wait in seconds. free is when each
 // slot of the worker frees up, in seconds from now (0 for an idle slot).
-// Jobs already in the worker's own line go first, then the coordinator's
-// queue by position. A waiter whose own encode time is unknown, or a gap in
+// Jobs already in the worker's own line go first, by the place the worker
+// reports, then the coordinator's queue by position. A waiter whose own encode time is unknown, or a gap in
 // the positions (a waiter ahead that this page cannot see), leaves everyone
 // from there on without a number.
 func simulateQueueWait(free []float64, waiters []queueWaiter) map[string]float64 {
@@ -113,14 +113,14 @@ func simulateQueueWait(free []float64, waiters []queueWaiter) map[string]float64
 		}
 		return waiters[i].position < waiters[j].position
 	})
-	next := 1
-	for _, w := range waiters {
-		if !w.onWorker {
-			if w.position != next {
-				break
-			}
-			next++
+	// Each line must be numbered 1, 2, 3... with no gap or tie: otherwise
+	// the order is not known and nobody from there on gets a number.
+	next := map[bool]int{true: 1, false: 1}
+	for i, w := range waiters {
+		if w.position != next[w.onWorker] || i+1 < len(waiters) && waiters[i+1].onWorker == w.onWorker && waiters[i+1].position == w.position {
+			break
 		}
+		next[w.onWorker]++
 		sort.Float64s(free)
 		if !w.onWorker {
 			out[w.id] = free[0]
@@ -198,7 +198,15 @@ func queueWaits(records []operationRecord) map[string]int64 {
 		// after the encode itself there is nothing to measure it by.
 		phase := operationString(operationValue(r, "transcode_phase"))
 		if phase == "queued" {
-			n.waiters = append(n.waiters, queueWaiter{id: r.inst.ID, encode: estimate, known: estimated, onWorker: true})
+			// Held for room (free disk, the retention budget) rather than a
+			// slot: when it starts is not a matter of encode times.
+			if reason := r.inst.WaitingReason; strings.Contains(reason, "(free_disk)") || strings.Contains(reason, "(retention_budget)") || strings.Contains(reason, "(retention_alone)") {
+				n.unknown = true
+				continue
+			}
+			// The worker reports the job's place in its own line.
+			position := int(operationNumber(operationValue(r, "queue_position")))
+			n.waiters = append(n.waiters, queueWaiter{id: r.inst.ID, position: position, encode: estimate, known: estimated, onWorker: true})
 			continue
 		}
 		// Before submission (preflight) or after the worker finished, the job
@@ -209,7 +217,7 @@ func queueWaits(records []operationRecord) map[string]int64 {
 		switch progress := operationNumber(operationValue(r, "progress")); {
 		case r.savings.ETASeconds != nil:
 			n.busy = append(n.busy, float64(*r.savings.ETASeconds))
-		case phase == "encoding" && estimated && progress >= 0 && progress < 100:
+		case phase == "encoding" && estimated && operationValue(r, "progress_is_stale") != true && progress >= 0 && progress < 100:
 			n.busy = append(n.busy, estimate*(1-progress/100))
 		default:
 			n.unknown = true
@@ -217,7 +225,8 @@ func queueWaits(records []operationRecord) map[string]int64 {
 	}
 	out := map[string]int64{}
 	for _, n := range nodes {
-		if n.unknown || n.slots == 0 || len(n.waiters) == 0 {
+		// More jobs on the slots than the slot count: the count is out of date.
+		if n.unknown || n.slots == 0 || len(n.waiters) == 0 || len(n.busy) > n.slots {
 			continue
 		}
 		free := append([]float64(nil), n.busy...)

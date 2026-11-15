@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/jakenesler/navigatorr/store"
 	"strings"
 	"testing"
 	"time"
@@ -43,13 +44,35 @@ func TestSimulateQueueWaitPutsTheWorkersOwnLineFirst(t *testing.T) {
 	// first (100..400), so the coordinator's first waiter starts at 400.
 	got := simulateQueueWait([]float64{100}, []queueWaiter{
 		{id: "a", position: 1, encode: 50, known: true},
-		{id: "w", encode: 300, known: true, onWorker: true},
+		{id: "w", position: 1, encode: 300, known: true, onWorker: true},
 	})
 	if len(got) != 1 || got["a"] != 400 {
 		t.Fatalf("waits %v", got)
 	}
 	// A job on the worker's line with no estimate leaves the queue without numbers.
-	if got := simulateQueueWait([]float64{100}, []queueWaiter{{id: "a", position: 1, known: true}, {id: "w", onWorker: true}}); len(got) != 0 {
+	if got := simulateQueueWait([]float64{100}, []queueWaiter{{id: "a", position: 1, known: true}, {id: "w", position: 1, onWorker: true}}); len(got) != 0 {
+		t.Fatalf("waits %v", got)
+	}
+}
+
+func TestSimulateQueueWaitFollowsTheWorkersOrderAndRefusesTies(t *testing.T) {
+	// Slots free at 10 and 100. The worker runs its own line in its order:
+	// the long job (place 1) takes the slot at 10, the short one the slot at
+	// 100, so the coordinator's first waiter starts at 110, whatever the ids.
+	got := simulateQueueWait([]float64{10, 100}, []queueWaiter{
+		{id: "a-short", position: 2, encode: 10, known: true, onWorker: true},
+		{id: "z-long", position: 1, encode: 1000, known: true, onWorker: true},
+		{id: "c", position: 1, known: true},
+	})
+	if got["c"] != 110 {
+		t.Fatalf("waits %v", got)
+	}
+	// A job on the worker's line without a place, or two waiters on the same
+	// place, leave the order unknown: no number.
+	if got := simulateQueueWait([]float64{0}, []queueWaiter{{id: "w", encode: 5, known: true, onWorker: true}, {id: "c", position: 1, known: true}}); len(got) != 0 {
+		t.Fatalf("waits %v", got)
+	}
+	if got := simulateQueueWait([]float64{0}, []queueWaiter{{id: "a", position: 1, encode: 5, known: true}, {id: "b", position: 1, encode: 5, known: true}}); len(got) != 0 {
 		t.Fatalf("waits %v", got)
 	}
 }
@@ -137,5 +160,37 @@ func TestOperationsGivesNoQueueWaitWithoutHistoryOrSlots(t *testing.T) {
 	w := request(h, "GET", "/api/maintenance/operations?id=waiter", "", true)
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &struct{}{}) != nil || strings.Contains(w.Body.String(), "queue_wait_seconds") {
 		t.Fatal("an estimate without its inputs", w.Code, w.Body.String())
+	}
+}
+
+func TestQueueWaitsCountsTheWorkersLineAndGivesUpOnHeldNodes(t *testing.T) {
+	rec := func(id, status string, state map[string]any) operationRecord {
+		// Through JSON, as the snapshot decodes it: numbers become float64.
+		raw, _ := json.Marshal(state)
+		return operationRecord{inst: store.ActionInstance{ID: id, ActionName: "transcode_media", Status: status, UpdatedAt: "2026-11-15T10:00:00Z"}, inputs: map[string]any{}, outputs: map[string]any{}, state: decodeOperationJSON(string(raw))}
+	}
+	eta := int64(750)
+	build := func(onWorker map[string]any, reason string) []operationRecord {
+		busy := rec("busy", "waiting_external", transcodeSeed("node-a", "3840x2160", 3000, map[string]any{"transcode_phase": "encoding", "worker_slots_total": 1}))
+		busy.savings.ETASeconds = &eta
+		queued := rec("queued", "waiting_external", transcodeSeed("node-a", "3840x2160", 3600, onWorker))
+		queued.inst.WaitingReason = reason
+		return []operationRecord{
+			rec("done-1", "completed", transcodeSeed("node-a", "3840x2160", 3600, map[string]any{"encode_duration_ms": 3600000})),
+			rec("done-2", "completed", transcodeSeed("node-a", "3840x2160", 3600, map[string]any{"encode_duration_ms": 3600000})),
+			busy, queued,
+			rec("first", "waiting_external", transcodeSeed("node-a", "3840x2160", 3600, map[string]any{"work_progress": map[string]any{"phase": "waiting_for_worker", "queue_position": 1}})),
+		}
+	}
+	// The job in the worker's own line takes the slot at 750 s for 3600 s.
+	if got := queueWaits(build(map[string]any{"transcode_phase": "queued", "queue_position": 1}, "")); got["first"] != 4350 || len(got) != 1 {
+		t.Fatalf("waits %v", got)
+	}
+	// Held for room, or on a frozen node: no number.
+	if got := queueWaits(build(map[string]any{"transcode_phase": "queued", "queue_position": 1}, "worker queue (free_disk)")); len(got) != 0 {
+		t.Fatalf("room wait: %v", got)
+	}
+	if got := queueWaits(build(map[string]any{"transcode_phase": "queued", "queue_position": 1, "worker_suspended": true}, "")); len(got) != 0 {
+		t.Fatalf("suspended: %v", got)
 	}
 }
