@@ -266,10 +266,13 @@ func (w *Worker) leaseReportPass() {
 			id, err := rep.Register(&l)
 			if err == nil {
 				w.leaseSetServerID(l.ID, id)
+				w.leaseNoteRegister(l.ID, "")
 			} else if errors.Is(err, errLeasesPaused) {
 				// The operator paused builds after the lease was granted: the
 				// build already runs; it is not stopped for that.
 				log.Printf("build lease %s: server reports builds paused; not recorded", l.ID)
+			} else {
+				w.leaseNoteRegister(l.ID, err.Error())
 			}
 		case l.active():
 			ended, err := rep.Heartbeat(l.ServerID, j.p.progress, l.TTLSeconds, j.p.log)
@@ -299,6 +302,7 @@ func (w *Worker) leaseReportPass() {
 			}
 		default:
 			if l.ServerID == "" {
+				log.Printf("build lease %s ended (%s) without the server having a record of it", l.ID, l.Status)
 				w.leaseMarkReported(l.ID)
 				continue
 			}

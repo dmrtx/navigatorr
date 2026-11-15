@@ -817,6 +817,7 @@ func (e *Engine) stepTranscodeWait(ctx context.Context, ec *ExecutionContext) (S
 			reason = fmt.Sprintf("Transcoding media (suspended: %s; progress: %.1f%%)", why, st.Progress)
 		} else {
 			delete(ec.State, "suspended_by")
+			delete(ec.Outputs, "suspended_by")
 		}
 		if st.Phase != "" {
 			reason += "; phase: " + st.Phase

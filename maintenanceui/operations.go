@@ -1137,6 +1137,14 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 			if worker := operationString(r.state["worker"]); worker != "" {
 				job["worker"], job["worker_name"] = worker, worker
 			}
+			// A job frozen for its node says what froze it, whatever shape its
+			// worker takes (a name here, the worker's report on a batch's child).
+			if operationActive(r.inst.Status) && operationValue(r, "worker_suspended") == true {
+				job["worker_suspended"] = true
+				if by := operationMap(operationValue(r, "suspended_by")); by != nil {
+					job["suspended_by"] = by
+				}
+			}
 			job["logs_available"] = httpWorker && (operationString(r.state["job_id"]) != "" || operationString(r.state["transcode_job_id"]) != "")
 			if r.inst.ActionName == "transcode_batch" {
 				if r.inputs["dry_run"] == true && r.inst.Status == store.ActionStatusCompleted {

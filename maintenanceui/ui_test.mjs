@@ -11031,9 +11031,9 @@ test("no state of the node actions leaves a lone button in a row", () => {
   test("a frozen encode names the build, the operator's pause or an unknown freeze", () => {
     assert.equal(ctx.suspensionNote({worker_suspended: false}), null);
     assert.equal(ctx.suspensionNote(null), null);
-    const build = ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "build", title: "scripts/verify.sh", source: "Davids-MacBook-Air"}});
+    const build = ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "build", title: "scripts/verify.sh", source: "dev-laptop"}});
     assert.equal(build.status, "Paused by a build");
-    assert.match(build.message, /“scripts\/verify\.sh” from Davids-MacBook-Air/);
+    assert.match(build.message, /“scripts\/verify\.sh” from dev-laptop/);
     assert.match(build.message, /continues by itself when the build ends/);
     assert.equal(ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "build"}}).status, "Paused by a build");
     assert.match(ctx.suspensionNote({worker_suspended: true, suspended_by: {kind: "operator"}}).message, /node is paused/);

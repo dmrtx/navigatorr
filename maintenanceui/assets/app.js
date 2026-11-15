@@ -6173,7 +6173,7 @@ function workerProgressObservation(job) {
   if (!["running", "waiting_external"].includes(job.status)) return result;
   if (workerUnavailable(job)) return {...result, warning: true, status: "Worker offline", message: "Worker unreachable. Retrying connection automatically."};
   if (w.recovery_required) return {...result, warning: true, status: "Needs decision", message: job.waiting_reason || "Candidate preserved; publication requires intervention."};
-  const frozen = suspensionNote(w);
+  const frozen = suspensionNote({worker_suspended: job.worker_suspended === true || w.worker_suspended === true, suspended_by: job.suspended_by || w.suspended_by});
   if (frozen) return {...result, ...frozen};
   const room = workerRoomWait(job);
   if (room) return {...result, ...room};

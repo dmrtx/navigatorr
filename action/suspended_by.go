@@ -53,7 +53,7 @@ func (e *Engine) holdingBuild(worker string) (transcode.NodeBuild, bool) {
 		if b.Status != store.BuildRunning {
 			continue
 		}
-		if !found || (b.StartedAt != "" && b.StartedAt < best.StartedAt) {
+		if !found || (b.StartedAt != "" && (best.StartedAt == "" || b.StartedAt < best.StartedAt)) {
 			best, found = b, true
 		}
 	}

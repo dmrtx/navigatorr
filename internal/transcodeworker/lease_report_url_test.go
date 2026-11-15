@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // builds_url names the server. A URL that already ends with the builds path
@@ -65,12 +66,15 @@ func TestHTTPLeaseReporterRegistersAtTheBuildsRouteWhateverTheConfiguredURL(t *t
 	}
 }
 
-// A lease the server cannot record is no longer silent: the failure is logged
-// once for each cause, and again when it works.
-func TestLeaseRegistrationFailureIsLoggedOncePerCause(t *testing.T) {
+// A lease the server cannot record is no longer silent: the real report pass
+// logs the failure once for each cause however often it retries, says when it
+// works, and a lease that ends without ever being recorded says so.
+func TestLeaseReportPassLogsRegistrationFailureOncePerCause(t *testing.T) {
 	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{down: true}
 	w.leases.reporter = rep
+	var offset time.Duration
+	w.leases.now = func() time.Time { return time.Now().Add(offset) }
 	var buf bytes.Buffer
 	prev := log.Writer()
 	log.SetOutput(&buf)
@@ -80,25 +84,37 @@ func TestLeaseRegistrationFailureIsLoggedOncePerCause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l.ServerID != "" {
-		t.Fatalf("the server is down: %+v", l)
+	pass := func() {
+		offset += leaseRegisterTries + time.Second // the next attempt is due
+		w.leaseReportPass()
 	}
 	for i := 0; i < 3; i++ {
-		w.leaseNoteRegister(l.ID, "the server answered HTTP 404")
+		pass()
 	}
-	out := buf.String()
-	if n := strings.Count(out, "not registered with the server (the server answered HTTP 404)"); n != 1 {
-		t.Fatalf("one line for a repeated cause, got %d:\n%s", n, out)
+	const cause = "not registered with the server (the server is unreachable)"
+	if n := strings.Count(buf.String(), cause); n != 1 {
+		t.Fatalf("one line for a repeated cause, got %d:\n%s", n, buf.String())
 	}
-	w.leaseNoteRegister(l.ID, "the builds token is not readable")
-	if !strings.Contains(buf.String(), "the builds token is not readable") {
-		t.Fatalf("a different cause is logged:\n%s", buf.String())
+	rep.mu.Lock()
+	rep.down = false
+	rep.mu.Unlock()
+	pass()
+	if !strings.Contains(buf.String(), "registered with the server") || strings.Contains(buf.String(), "http://") {
+		t.Fatalf("recovery is logged, without a URL:\n%s", buf.String())
 	}
-	w.leaseNoteRegister(l.ID, "")
-	if !strings.Contains(buf.String(), "registered with the server") {
-		t.Fatalf("recovery is logged:\n%s", buf.String())
+
+	// A lease that ends before the server ever recorded it says so.
+	rep.mu.Lock()
+	rep.down = true
+	rep.mu.Unlock()
+	l2, err := w.LeaseCreate(leaseReq("second"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "http://") {
-		t.Fatalf("no URL in the log:\n%s", buf.String())
+	_, _ = w.LeaseFinish(l2.ID, leaseStatusSucceeded, ptr(0))
+	pass()
+	if !strings.Contains(buf.String(), "build lease "+l2.ID+" ended (succeeded) without the server having a record of it") {
+		t.Fatalf("an unrecorded end is logged:\n%s", buf.String())
 	}
+	_ = l
 }
