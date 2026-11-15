@@ -38,6 +38,33 @@ func TestSimulateQueueWaitHandsSlotsToWaitersInOrder(t *testing.T) {
 	}
 }
 
+func TestSimulateQueueWaitPutsTheWorkersOwnLineFirst(t *testing.T) {
+	// One slot freeing at 100 s; a job already queued on the worker takes it
+	// first (100..400), so the coordinator's first waiter starts at 400.
+	got := simulateQueueWait([]float64{100}, []queueWaiter{
+		{id: "a", position: 1, encode: 50, known: true},
+		{id: "w", encode: 300, known: true, onWorker: true},
+	})
+	if len(got) != 1 || got["a"] != 400 {
+		t.Fatalf("waits %v", got)
+	}
+	// A job on the worker's line with no estimate leaves the queue without numbers.
+	if got := simulateQueueWait([]float64{100}, []queueWaiter{{id: "a", position: 1, known: true}, {id: "w", onWorker: true}}); len(got) != 0 {
+		t.Fatalf("waits %v", got)
+	}
+}
+
+func TestSimulateQueueWaitStopsAtAPositionGap(t *testing.T) {
+	// Position 2 is not on this page: whoever it is, its encode is unknown.
+	got := simulateQueueWait([]float64{0}, []queueWaiter{
+		{id: "a", position: 1, encode: 50, known: true},
+		{id: "c", position: 3, encode: 50, known: true},
+	})
+	if len(got) != 1 || got["a"] != 0 {
+		t.Fatalf("waits %v", got)
+	}
+}
+
 // transcodeSeed is the state of a transcode job in the shape the engine saves.
 func transcodeSeed(worker string, resolution string, duration float64, extra map[string]any) map[string]any {
 	state := map[string]any{

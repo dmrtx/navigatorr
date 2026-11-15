@@ -31,16 +31,14 @@ func TestEstimateEncodeSecondsUsesTheMedianRealtimeRatio(t *testing.T) {
 	}
 }
 
-func TestEstimateEncodeSecondsFallsBackToAnyWorkerOnlyForTooFewOwnSamples(t *testing.T) {
+func TestEstimateEncodeSecondsNeverBorrowsAnotherWorkersSpeed(t *testing.T) {
 	samples := []EncodeSample{sample("a", 2), sample("b", 0.5), sample("b", 0.5), sample("c", 0.5)}
-	// One sample on a is too few: the three others set the pace (ratio 0.5).
-	got, ok := EstimateEncodeSeconds(samples, "a", "uhd", "x265", 1000)
-	if !ok || math.Abs(got-2000) > 1e-6 {
-		t.Fatalf("fallback: %v %v", got, ok)
+	// One sample on a is too few, and the other nodes' pace does not count.
+	if got, ok := EstimateEncodeSeconds(samples, "a", "uhd", "x265", 1000); ok {
+		t.Fatalf("borrowed: %v", got)
 	}
-	// Two own samples win over the rest.
 	samples = append([]EncodeSample{sample("a", 2)}, samples...)
-	got, ok = EstimateEncodeSeconds(samples, "a", "uhd", "x265", 1000)
+	got, ok := EstimateEncodeSeconds(samples, "a", "uhd", "x265", 1000)
 	if !ok || math.Abs(got-500) > 1e-6 {
 		t.Fatalf("own samples: %v %v", got, ok)
 	}

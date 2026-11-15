@@ -87,12 +87,17 @@ type queueWaiter struct {
 	position int
 	encode   float64
 	known    bool
+	// onWorker is a job already handed to the worker and waiting in its own
+	// line: it goes before every coordinator waiter and gets no number shown.
+	onWorker bool
 }
 
 // simulateQueueWait returns each waiter's wait in seconds. free is when each
 // slot of the worker frees up, in seconds from now (0 for an idle slot).
-// Waiters take the earliest slot in queue order; a waiter whose own encode
-// time is unknown leaves everyone behind it without a number.
+// Jobs already in the worker's own line go first, then the coordinator's
+// queue by position. A waiter whose own encode time is unknown, or a gap in
+// the positions (a waiter ahead that this page cannot see), leaves everyone
+// from there on without a number.
 func simulateQueueWait(free []float64, waiters []queueWaiter) map[string]float64 {
 	out := map[string]float64{}
 	if len(free) == 0 {
@@ -100,14 +105,26 @@ func simulateQueueWait(free []float64, waiters []queueWaiter) map[string]float64
 	}
 	free = append([]float64(nil), free...)
 	sort.Slice(waiters, func(i, j int) bool {
+		if waiters[i].onWorker != waiters[j].onWorker {
+			return waiters[i].onWorker
+		}
 		if waiters[i].position == waiters[j].position {
 			return waiters[i].id < waiters[j].id
 		}
 		return waiters[i].position < waiters[j].position
 	})
+	next := 1
 	for _, w := range waiters {
+		if !w.onWorker {
+			if w.position != next {
+				break
+			}
+			next++
+		}
 		sort.Float64s(free)
-		out[w.id] = free[0]
+		if !w.onWorker {
+			out[w.id] = free[0]
+		}
 		if !w.known {
 			break
 		}
@@ -127,6 +144,17 @@ func queueWaits(records []operationRecord) map[string]int64 {
 		waiters []queueWaiter
 	}
 	nodes := map[string]*node{}
+	// Most reads have nobody waiting for a slot; skip the history then.
+	waiting := false
+	for _, r := range records {
+		if r.inst.ActionName == "transcode_media" && operationActive(r.inst.Status) && operationString(operationMap(operationValue(r, "work_progress"))["phase"]) == "waiting_for_worker" {
+			waiting = true
+			break
+		}
+	}
+	if !waiting {
+		return map[string]int64{}
+	}
 	samples := encodeSamples(records)
 	for _, r := range records {
 		if r.inst.ActionName != "transcode_media" || !operationActive(r.inst.Status) {
@@ -149,18 +177,33 @@ func queueWaits(records []operationRecord) map[string]int64 {
 		if shaped {
 			estimate, estimated = action.EstimateEncodeSeconds(samples, worker, shape.class, shape.family, shape.durationSec)
 		}
+		// A frozen node or a paused job starts nothing on a clock this page
+		// can see: no numbers for that worker.
+		if operationValue(r, "worker_suspended") == true || operationValue(r, "paused") == true {
+			n.unknown = true
+			continue
+		}
 		work := operationMap(operationValue(r, "work_progress"))
 		if operationString(work["phase"]) == "waiting_for_worker" {
-			if position := int(operationNumber(work["queue_position"])); position > 0 {
-				n.waiters = append(n.waiters, queueWaiter{id: r.inst.ID, position: position, encode: estimate, known: estimated})
+			position := int(operationNumber(work["queue_position"]))
+			if position <= 0 {
+				n.unknown = true
+				continue
 			}
+			n.waiters = append(n.waiters, queueWaiter{id: r.inst.ID, position: position, encode: estimate, known: estimated})
 			continue
 		}
 		// A job past submission holds a slot. Its remaining time is its
 		// measured ETA, else the estimate less the progress made; before or
 		// after the encode itself there is nothing to measure it by.
 		phase := operationString(operationValue(r, "transcode_phase"))
-		if phase == "" || phase == "queued" || phase == "completed" {
+		if phase == "queued" {
+			n.waiters = append(n.waiters, queueWaiter{id: r.inst.ID, encode: estimate, known: estimated, onWorker: true})
+			continue
+		}
+		// Before submission (preflight) or after the worker finished, the job
+		// holds no worker slot.
+		if phase == "" || phase == "completed" {
 			continue
 		}
 		switch progress := operationNumber(operationValue(r, "progress")); {

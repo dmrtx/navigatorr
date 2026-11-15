@@ -20,7 +20,7 @@ const encodeEstimateMinSamples = 2
 // the worker spent encoding it.
 type EncodeSample struct {
 	Worker      string
-	Class string
+	Class       string
 	Family      string
 	DurationSec float64
 	EncodeSec   float64
@@ -50,33 +50,31 @@ func EncodeFamily(videoCodec string) string {
 
 // EstimateEncodeSeconds estimates how long durationSec of video takes to
 // encode: durationSec over the median realtime ratio of the newest samples
-// (callers pass them newest first) of the same worker, class and family, or of
-// any worker when this one has too few. It reports false rather than guess.
+// (callers pass them newest first) of the same worker, class and family. Nodes
+// differ too much (one is throttled by day) to borrow another's speed, so too
+// few samples of its own reports false rather than guess.
 func EstimateEncodeSeconds(samples []EncodeSample, worker, class, family string, durationSec float64) (float64, bool) {
 	if durationSec <= 0 || class == "" || family == "" {
 		return 0, false
 	}
-	for _, anyWorker := range []bool{false, true} {
-		var ratios []float64
-		for _, s := range samples {
-			if len(ratios) == encodeEstimateWindow {
-				break
-			}
-			if s.DurationSec <= 0 || s.EncodeSec <= 0 || s.Class != class || s.Family != family || (!anyWorker && s.Worker != worker) {
-				continue
-			}
-			ratios = append(ratios, s.DurationSec/s.EncodeSec)
+	var ratios []float64
+	for _, s := range samples {
+		if len(ratios) == encodeEstimateWindow {
+			break
 		}
-		if len(ratios) < encodeEstimateMinSamples {
+		if s.DurationSec <= 0 || s.EncodeSec <= 0 || s.Class != class || s.Family != family || s.Worker != worker {
 			continue
 		}
-		sort.Float64s(ratios)
-		mid := len(ratios) / 2
-		median := ratios[mid]
-		if len(ratios)%2 == 0 {
-			median = (ratios[mid-1] + ratios[mid]) / 2
-		}
-		return durationSec / median, true
+		ratios = append(ratios, s.DurationSec/s.EncodeSec)
 	}
-	return 0, false
+	if len(ratios) < encodeEstimateMinSamples {
+		return 0, false
+	}
+	sort.Float64s(ratios)
+	mid := len(ratios) / 2
+	median := ratios[mid]
+	if len(ratios)%2 == 0 {
+		median = (ratios[mid-1] + ratios[mid]) / 2
+	}
+	return durationSec / median, true
 }
