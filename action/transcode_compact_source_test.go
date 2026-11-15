@@ -25,6 +25,7 @@ func TestCompactVideoSource(t *testing.T) {
 		"H.264":              func(r *mediainspect.DetailedReport) { r.Video[0].Codec = "h264" },
 		"6 Mbps HEVC":        func(r *mediainspect.DetailedReport) { r.Video[0].BitRate = 6_000_000 },
 		"unknown frame rate": func(r *mediainspect.DetailedReport) { r.Video[0].FPS = 0 },
+		"timebase as fps":    func(r *mediainspect.DetailedReport) { r.Video[0].FPS = 90000 },
 		"unknown size":       func(r *mediainspect.DetailedReport) { r.SizeBytes, r.Video[0].BitRate = 0, 0 },
 	} {
 		rep := compactReport()
@@ -47,8 +48,14 @@ func TestSizeGoalCopiesACompactVideo(t *testing.T) {
 	if !handled || result.Status != StepCompleted || getBool(c.ec.State, "skip_transcode") || QualityLadderOf(c.ec.State) != nil {
 		t.Fatalf("result %+v handled=%v state %+v", result, handled, c.ec.State)
 	}
-	if plan := getPlan(c.ec.State["plan"]); !transcode.IsSizeAudioOnlyPlan(plan) || !getBool(c.ec.State, compactVideoSourceKey) || result.Outputs["plan_note"] == nil {
+	plan := getPlan(c.ec.State["plan"])
+	if !transcode.IsSizeAudioOnlyPlan(plan) || !getBool(c.ec.State, compactVideoSourceKey) || result.Outputs["plan_note"] == nil {
 		t.Fatalf("plan %+v outputs %+v", plan, result.Outputs)
+	}
+	// The plan step running again keeps the audio-only plan and never falls
+	// through to the ladder.
+	if result, handled = c.engine.startCompactSourceAudioOnly(context.Background(), c.ec); !handled || result.Status != StepCompleted || getPlan(c.ec.State["plan"]).PlanDigest != plan.PlanDigest {
+		t.Fatalf("re-run result %+v handled=%v plan %+v", result, handled, getPlan(c.ec.State["plan"]))
 	}
 
 	// The audio alone would not save enough: the job ends without an encode.
@@ -59,6 +66,9 @@ func TestSizeGoalCopiesACompactVideo(t *testing.T) {
 	result, handled = c.engine.startCompactSourceAudioOnly(context.Background(), c.ec)
 	if !handled || result.Status != StepCompleted || !getBool(c.ec.State, "skip_transcode") || getString(c.ec.State, "reason_code") != reasonVideoAlreadyCompact {
 		t.Fatalf("lossy-only result %+v state %+v", result, c.ec.State)
+	}
+	if result, handled = c.engine.startCompactSourceAudioOnly(context.Background(), c.ec); !handled || result.Status != StepCompleted || getString(c.ec.State, "reason_code") != reasonVideoAlreadyCompact {
+		t.Fatalf("re-run after the skip: %+v handled=%v", result, handled)
 	}
 	c = newAudioOnlyCase(t, audioOnlyCaps(), nil)
 	c.ec.State["source_report"] = compactReport()

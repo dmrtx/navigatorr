@@ -12,14 +12,18 @@ import (
 const compactVideoSourceKey = "compact_video_source"
 
 // reasonVideoAlreadyCompact ends a size goal whose video is already compact
-// and whose audio alone would not save enough.
+// and whose audio alone would not save enough (or has nothing to convert).
 const reasonVideoAlreadyCompact = "video_already_compact"
+
+// maxPlausibleFPS bounds the frame rate compactVideoSource trusts.
+const maxPlausibleFPS = 120
 
 // compactVideoSource reports a source whose programme video is already HEVC or
 // AV1 at or below sizeBudgetGoodBitsPerPixel. A size goal's x265 ladder starts
 // at a CRF that rarely makes such a stream smaller, and on a film each rung is
 // hours of encoding, so the goal copies the video and converts the audio only.
-// A size or frame rate that is unknown never counts as compact.
+// A size or frame rate that is unknown or implausible (a container's timebase
+// read as the frame rate) never counts as compact.
 func compactVideoSource(rep *mediainspect.DetailedReport) bool {
 	if rep == nil || rep.DurationSec <= 0 {
 		return false
@@ -32,6 +36,9 @@ func compactVideoSource(rep *mediainspect.DetailedReport) bool {
 	switch strings.ToLower(v.Codec) {
 	case "hevc", "av1":
 	default:
+		return false
+	}
+	if v.FPS <= 0 || v.FPS > maxPlausibleFPS {
 		return false
 	}
 	pixels := float64(v.Width) * float64(v.Height) * v.FPS
@@ -47,7 +54,13 @@ func compactVideoSource(rep *mediainspect.DetailedReport) bool {
 // converted, in place of the quality ladder. When the audio alone would not
 // save enough, the job ends at once without an encode.
 func (e *Engine) startCompactSourceAudioOnly(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
-	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || QualityLadderOf(ec.State) != nil || getBool(ec.State, "size_audio_only") {
+	if ec.ActionName != "transcode_media" || getString(ec.Inputs, "mode") != "size" || QualityLadderOf(ec.State) != nil {
+		return StepResult{}, false
+	}
+	if getBool(ec.State, compactVideoSourceKey) && (getBool(ec.State, "size_audio_only") || getBool(ec.State, "skip_transcode")) {
+		return StepResult{Status: StepCompleted}, true // planned already; this step ran again
+	}
+	if getBool(ec.State, "size_audio_only") {
 		return StepResult{}, false
 	}
 	snapshot, err := freezeModePolicy(ec)
@@ -70,7 +83,7 @@ func (e *Engine) startCompactSourceAudioOnly(ctx context.Context, ec *ExecutionC
 		res.Outputs = outputs
 	}
 	switch getString(ec.State, "reason_code") {
-	case "audio_compaction_insufficient", "audio_estimate_unavailable":
+	case "audio_compaction_insufficient":
 		ec.State["reason_code"], res.Outputs["reason_code"] = reasonVideoAlreadyCompact, reasonVideoAlreadyCompact
 	}
 	if getString(ec.State, "plan_source") == "audio_only" {
