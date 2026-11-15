@@ -5,14 +5,6 @@ import (
 	"testing"
 )
 
-func TestHeightClassBuckets(t *testing.T) {
-	for height, want := range map[int]string{2160: "uhd", 1800: "uhd", 1799: "hd", 1080: "hd", 900: "hd", 899: "sd", 480: "sd", 1: "sd", 0: "", -5: ""} {
-		if got := HeightClass(height); got != want {
-			t.Errorf("HeightClass(%d) = %q, want %q", height, got, want)
-		}
-	}
-}
-
 func TestEncodeFamilyNamesTheEncoder(t *testing.T) {
 	for codec, want := range map[string]string{"copy": "copy", "libx265": "x265", "hevc_videotoolbox": "hardware", "h264_videotoolbox": "hardware", "": "", "libx264": ""} {
 		if got := EncodeFamily(codec); got != want {
@@ -22,7 +14,7 @@ func TestEncodeFamilyNamesTheEncoder(t *testing.T) {
 }
 
 func sample(worker string, ratio float64) EncodeSample {
-	return EncodeSample{Worker: worker, HeightClass: "uhd", Family: "x265", DurationSec: 1000 * ratio, EncodeSec: 1000}
+	return EncodeSample{Worker: worker, Class: "uhd", Family: "x265", DurationSec: 1000 * ratio, EncodeSec: 1000}
 }
 
 func TestEstimateEncodeSecondsUsesTheMedianRealtimeRatio(t *testing.T) {
@@ -57,11 +49,11 @@ func TestEstimateEncodeSecondsFallsBackToAnyWorkerOnlyForTooFewOwnSamples(t *tes
 func TestEstimateEncodeSecondsNeedsEnoughMatchingGoodSamples(t *testing.T) {
 	good := sample("a", 1)
 	other := []EncodeSample{
-		{Worker: "a", HeightClass: "hd", Family: "x265", DurationSec: 1000, EncodeSec: 1000},
-		{Worker: "a", HeightClass: "uhd", Family: "hardware", DurationSec: 1000, EncodeSec: 1000},
-		{Worker: "a", HeightClass: "uhd", Family: "x265", DurationSec: 0, EncodeSec: 1000},
-		{Worker: "a", HeightClass: "uhd", Family: "x265", DurationSec: 1000, EncodeSec: 0},
-		{Worker: "a", HeightClass: "uhd", Family: "x265", DurationSec: -1, EncodeSec: -1},
+		{Worker: "a", Class: "hd", Family: "x265", DurationSec: 1000, EncodeSec: 1000},
+		{Worker: "a", Class: "uhd", Family: "hardware", DurationSec: 1000, EncodeSec: 1000},
+		{Worker: "a", Class: "uhd", Family: "x265", DurationSec: 0, EncodeSec: 1000},
+		{Worker: "a", Class: "uhd", Family: "x265", DurationSec: 1000, EncodeSec: 0},
+		{Worker: "a", Class: "uhd", Family: "x265", DurationSec: -1, EncodeSec: -1},
 	}
 	if _, ok := EstimateEncodeSeconds(append([]EncodeSample{good}, other...), "a", "uhd", "x265", 1000); ok {
 		t.Fatal("one usable sample must not make an estimate")

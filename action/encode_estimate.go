@@ -20,7 +20,7 @@ const encodeEstimateMinSamples = 2
 // the worker spent encoding it.
 type EncodeSample struct {
 	Worker      string
-	HeightClass string
+	Class string
 	Family      string
 	DurationSec float64
 	EncodeSec   float64
@@ -33,19 +33,6 @@ const (
 	EncodeFamilyX265     = "x265"
 	EncodeFamilyHardware = "hardware"
 )
-
-// HeightClass buckets a video height: uhd (4K), hd (1080p and 720p), sd.
-func HeightClass(h int) string {
-	switch {
-	case h >= 1800:
-		return "uhd"
-	case h >= 900:
-		return "hd"
-	case h > 0:
-		return "sd"
-	}
-	return ""
-}
 
 // EncodeFamily names the encoder family from the video codec of the plan a
 // job ran ("copy" for a copied video or audio-only job).
@@ -75,7 +62,7 @@ func EstimateEncodeSeconds(samples []EncodeSample, worker, class, family string,
 			if len(ratios) == encodeEstimateWindow {
 				break
 			}
-			if s.DurationSec <= 0 || s.EncodeSec <= 0 || s.HeightClass != class || s.Family != family || (!anyWorker && s.Worker != worker) {
+			if s.DurationSec <= 0 || s.EncodeSec <= 0 || s.Class != class || s.Family != family || (!anyWorker && s.Worker != worker) {
 				continue
 			}
 			ratios = append(ratios, s.DurationSec/s.EncodeSec)

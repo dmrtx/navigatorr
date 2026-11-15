@@ -1137,8 +1137,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 			_, httpWorker := s.engine.ActionWorkerExecutor(r.state).(*httpclient.HTTPExecutor)
+			// Only the name: the page reads job.worker as the worker's report,
+			// and a list row now carries the assigned worker for queue waits.
 			if worker := operationString(r.state["worker"]); worker != "" {
-				job["worker"], job["worker_name"] = worker, worker
+				job["worker_name"] = worker
 			}
 			// A job frozen for its node says what froze it, whatever shape its
 			// worker takes (a name here, the worker's report on a batch's child).

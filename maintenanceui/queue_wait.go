@@ -31,8 +31,9 @@ func recordEncodeShape(r operationRecord) (encodeShape, bool) {
 		return encodeShape{}, false
 	}
 	original := operationMap(operationValue(r, "original"))
-	height := 0
-	if _, h, ok := strings.Cut(operationString(original["resolution"]), "x"); ok {
+	width, height := 0, 0
+	if w, h, ok := strings.Cut(operationString(original["resolution"]), "x"); ok {
+		width, _ = strconv.Atoi(w)
 		height, _ = strconv.Atoi(h)
 	}
 	family := ""
@@ -43,9 +44,13 @@ func recordEncodeShape(r operationRecord) (encodeShape, bool) {
 		if codec == "" {
 			codec = operationString(operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])["video_codec"])
 		}
+		if codec == "" {
+			// A size goal without a budget runs the quality ladder instead.
+			codec = operationString(operationMap(operationValue(r, "quality_ladder"))["video_codec"])
+		}
 		family = action.EncodeFamily(codec)
 	}
-	s := encodeShape{worker: operationString(r.state["worker"]), class: action.HeightClass(height), family: family, durationSec: operationNumber(original["duration_sec"])}
+	s := encodeShape{worker: operationString(r.state["worker"]), class: action.ResolutionClass(width, height), family: family, durationSec: operationNumber(original["duration_sec"])}
 	return s, s.worker != "" && s.class != "" && s.family != "" && s.durationSec > 0
 }
 
@@ -70,7 +75,7 @@ func encodeSamples(records []operationRecord) []action.EncodeSample {
 		if ms <= 0 || !ok {
 			continue
 		}
-		out = append(out, action.EncodeSample{Worker: shape.worker, HeightClass: shape.class, Family: shape.family, DurationSec: shape.durationSec, EncodeSec: ms / 1000})
+		out = append(out, action.EncodeSample{Worker: shape.worker, Class: shape.class, Family: shape.family, DurationSec: shape.durationSec, EncodeSec: ms / 1000})
 	}
 	return out
 }
