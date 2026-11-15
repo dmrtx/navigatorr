@@ -16,8 +16,8 @@ import (
 // the smallest file that meets it; a hard source (dark, grainy) can end with
 // nothing that meets it, or with a passing file larger than the user accepts.
 // With a budget the action then encodes the file once at the bitrate that
-// lands on the budget (x265 two-pass ABR, which at an equal average bitrate
-// matches CRF quality and, unlike CRF, hits a size), measures it on the same
+// lands on the budget (single-pass x265 ABR, which, unlike CRF, aims at a
+// size), measures it on the same
 // final validation windows, and reports it as below the quality target. A
 // frozen floor refuses an outright bad result; the normal approval is still
 // needed before anything replaces the original.
@@ -67,7 +67,11 @@ const (
 // low bitrate produces on dark content, so the CAMBI limits are not lowered.
 var sizeBudgetFloor = SizeBudgetFloor{VMAFMean: 70, VMAFP5: 60, VMAFWorstWindow: 65}
 
-// sizeBudgetX265 are the bounded two-pass settings of the fallback encode:
+// sizeBudgetX265 are the bounded ABR settings of the fallback encode. Their
+// two_pass stays true so frozen policies, plans and older workers keep working;
+// workers that know single-pass encode every x265 ABR plan once, because an
+// analysis pass costs a large part of a whole x265 encode for a small gain in
+// how the bits are spread. The settings are
 // x265 medium's reference and B-frame counts with a longer lookahead for the
 // rate control, aq-mode 3 (variance AQ biased to dark scenes, which the default
 // mode starves of bits) and psy-rdoq 1 to keep grain from being smoothed away.
@@ -95,7 +99,7 @@ type SizeBudgetPolicy struct {
 	X265        transcode.X265Settings `json:"x265"`
 	Floor       SizeBudgetFloor        `json:"quality_floor"`
 	// Comparison is set when the operation allows the media engine: the
-	// fallback then measures VideoToolbox beside two-pass x265 at the budget
+	// fallback then measures VideoToolbox beside x265 at the budget
 	// and encodes with the one it picks. Absent, the fallback is x265 only,
 	// which is what snapshots frozen before the comparison carry.
 	Comparison *SizeBudgetComparison `json:"encoder_comparison,omitempty"`
@@ -571,7 +575,7 @@ func planSizeBudgetEncodeAt(policy *SizeBudgetPolicy, rep *mediainspect.Detailed
 	enc.NonVideoBytes = nonVideo
 	enc.TargetBytes = int64(math.Floor(float64(budget) * policy.FillPercent / 100))
 	enc.X265 = policy.X265
-	// A budget roomier than two-pass x265 can use is met at its ceiling; the
+	// A budget roomier than x265 ABR can use is met at its ceiling; the
 	// file then simply comes out smaller than the budget.
 	enc.X265.BitrateKbps = min(sizeBudgetVideoKbps(enc.TargetBytes, nonVideo, rep.DurationSec), transcode.X265MaxBitrateKbps)
 	if enc.X265.Validate(transcode.VideoCodecLibX265, 0) != nil {
@@ -690,7 +694,9 @@ func (e *Engine) sizeBudgetPlan(ec *ExecutionContext, snapshot *ModePolicySnapsh
 	if rec.Audio != nil {
 		p.AudioMode = rec.Audio.Mode
 	}
-	if sizeBudgetIsLadder(rec) && base.SizePolicy != nil {
+	// Every budget encode carries the budget as its byte ceiling, so the worker
+	// stops one that is heading over it instead of finishing it first.
+	if base.SizePolicy != nil {
 		sp := *base.SizePolicy
 		sp.MaxCandidateBytes = rec.BudgetBytes
 		p.SizePolicy = &sp
@@ -880,13 +886,13 @@ func sizeBudgetPlannedMessage(r *SizeBudgetRecord, policy *SizeBudgetPolicy, pla
 	if r.Trigger == sizeBudgetTriggerBudgetFirst {
 		// Policy v4: nothing was searched; the budget's one encode is the
 		// recipe.
-		return fmt.Sprintf("Encoding the whole file once with two-pass x265 at %d kbps of video for about %s of the %s budget. Its quality is checked on the final validation windows against the floor; below this goal's target it is reported as such.%s%s", r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), sizeBudgetAudioSentence(r.Audio), from)
+		return fmt.Sprintf("Encoding the whole file once with x265 at %d kbps of video for about %s of the %s budget. Its quality is checked on the final validation windows against the floor; below this goal's target it is reported as such.%s%s", r.VideoBitrateKbps, formatBudgetBytes(r.TargetBytes), formatBudgetBytes(r.BudgetBytes), sizeBudgetAudioSentence(r.Audio), from)
 	}
 	why := "No tested setting met this goal's quality limits"
 	if r.Trigger == sizeBudgetTriggerOverBudget {
 		why = fmt.Sprintf("The setting that met this goal's quality limits (%s, about %s) is larger than your size budget", r.OverBudgetCandidateID, formatBudgetBytes(r.OverBudgetEstimatedBytes))
 	}
-	encoder := "two-pass x265"
+	encoder := "x265"
 	if sizeBudgetChosenCodec(r) == transcode.VideoCodecHEVCVideoToolbox {
 		encoder = "VideoToolbox"
 	}

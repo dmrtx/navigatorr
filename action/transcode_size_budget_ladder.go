@@ -99,7 +99,7 @@ func newSizeBudgetRecord(snapshot *ModePolicySnapshot, rep *mediainspect.Detaile
 
 // startSizeBudgetLadder plans a size budget goal's first encode: the ladder's
 // first rung when the media engine is allowed and the worker has it, otherwise
-// one two-pass x265 encode at the budget. An audio-only result that fits the
+// one x265 encode at the budget. An audio-only result that fits the
 // budget is planned directly, and a budget that cannot be encoded ends the
 // action with the reason. It reports false when the goal has no size budget
 // recipe.
@@ -170,7 +170,7 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 		return decline(enc.Reason, enc.Message)
 	}
 	if !hardware && (!caps.X265TwoPass || !caps.Encoders[transcode.VideoCodecLibX265]) {
-		return decline("size_budget_worker_unsupported", "The size budget needs a worker that can encode two-pass x265; upgrade the worker to use it.")
+		return decline("size_budget_worker_unsupported", "The size budget needs a worker that can encode x265; upgrade the worker to use it.")
 	}
 	// The windows and limits final validation judges every encode on.
 	codec := transcode.VideoCodecLibX265
@@ -196,9 +196,9 @@ func (e *Engine) startSizeBudgetLadder(ctx context.Context, ec *ExecutionContext
 		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecHEVCVideoToolbox, Reason: SizeBudgetChoiceLadder,
 			Message: fmt.Sprintf("VideoToolbox encodes the whole file at quality %s, then at the budget's average bitrate, and the first result within the budget is checked against the quality floor.", joinLadder(policy.VTLadder))}
 	case snapshot.Size.Hardware == nil:
-		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecLibX265, Reason: SizeBudgetChoiceHardwareOff, Message: "This goal does not allow the media engine (allow_hardware=false), so the whole file is encoded once with two-pass x265 at the budget."}
+		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecLibX265, Reason: SizeBudgetChoiceHardwareOff, Message: "This goal does not allow the media engine (allow_hardware=false), so the whole file is encoded once with x265 at the budget."}
 	default:
-		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecLibX265, Reason: SizeBudgetChoiceWorkerUnsupported, Message: "The worker cannot encode with VideoToolbox, so the whole file is encoded once with two-pass x265 at the budget."}
+		rec.Choice = &SizeBudgetChoice{VideoCodec: transcode.VideoCodecLibX265, Reason: SizeBudgetChoiceWorkerUnsupported, Message: "The worker cannot encode with VideoToolbox, so the whole file is encoded once with x265 at the budget."}
 	}
 	outputs := map[string]any{"benchmark_request_digest": digest}
 	return e.commitSizeBudgetPlan(ec, snapshot, enc, rec, outputs)

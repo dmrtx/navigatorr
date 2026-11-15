@@ -85,7 +85,7 @@ func joyEncodeArgs(refPath, candPath string, plan *transcode.Plan) ([]string, er
 	return append(args, "-an", "-sn", "-dn", candPath), nil
 }
 
-func TestJoyTwoPassFailureNeverStartsSecondPass(t *testing.T) {
+func TestJoyEncodeFailureRunsOnce(t *testing.T) {
 	d := t.TempDir()
 	calls := filepath.Join(d, "calls")
 	stub := filepath.Join(d, "ffmpeg")
@@ -100,22 +100,20 @@ func TestJoyTwoPassFailureNeverStartsSecondPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(context.Background(), stub, args...)
-	if err := runEncoderCommand(context.Background(), cmd, args, p, out); err == nil {
-		t.Fatal("first pass failure ignored")
+	if err := runEncoderCommand(context.Background(), cmd, p); err == nil {
+		t.Fatal("encode failure ignored")
 	}
 	b, _ := os.ReadFile(calls)
 	if string(b) != "invoked\n" {
 		t.Fatalf("unexpected calls: %s", b)
 	}
-	if files, _ := filepath.Glob(filepath.Join(d, ".x265-stats-*")); len(files) != 0 {
-		t.Fatal("private stats leaked")
-	}
 }
 
-func TestJoyCancellationBeforeFinalPassPreservesSource(t *testing.T) {
+func TestJoyCancellationBeforeEncodePreservesSource(t *testing.T) {
 	d := t.TempDir()
+	calls := filepath.Join(d, "calls")
 	stub := filepath.Join(d, "ffmpeg")
-	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\necho invoked >> '"+calls+"'\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	p := joyPlan(t)
@@ -133,18 +131,18 @@ func TestJoyCancellationBeforeFinalPassPreservesSource(t *testing.T) {
 	var phases []string
 	ctx = context.WithValue(ctx, encoderPhaseContextKey{}, func(phase string) error {
 		phases = append(phases, phase)
-		if phase == "encoding" {
-			cancel()
-			return context.Canceled
-		}
-		return nil
+		cancel()
+		return context.Canceled
 	})
 	cmd := exec.CommandContext(ctx, stub, args...)
-	if err := runEncoderCommand(ctx, cmd, args, p, out); err != context.Canceled {
+	if err := runEncoderCommand(ctx, cmd, p); err != context.Canceled {
 		t.Fatalf("cancellation lost: %v", err)
 	}
-	if strings.Join(phases, ",") != "analysing_video,encoding" {
-		t.Fatalf("incorrect phase order: %v", phases)
+	if strings.Join(phases, ",") != "encoding" {
+		t.Fatalf("incorrect phases: %v", phases)
+	}
+	if _, err := os.Stat(calls); !os.IsNotExist(err) {
+		t.Fatal("encoder ran after cancellation")
 	}
 	if b, _ := os.ReadFile(source); string(b) != "original" {
 		t.Fatal("source changed")
@@ -172,7 +170,7 @@ func TestJoyFullEncodeUsesHEAACAndPreservesTracks(t *testing.T) {
 	}
 }
 
-func TestJoyNativeTwoPassAndHEAAC(t *testing.T) {
+func TestJoyNativeABRAndHEAAC(t *testing.T) {
 	ffmpeg, err := exec.LookPath("ffmpeg")
 	if err != nil {
 		t.Skip("ffmpeg unavailable")
@@ -197,15 +195,15 @@ func TestJoyNativeTwoPassAndHEAAC(t *testing.T) {
 	cmd := exec.CommandContext(ctx, ffmpeg, args...)
 	var log strings.Builder
 	cmd.Stderr = &log
-	if err := runEncoderCommand(ctx, cmd, args, p, out); err != nil {
-		t.Fatalf("two passes: %v %s", err, log.String())
+	if err := runEncoderCommand(ctx, cmd, p); err != nil {
+		t.Fatalf("ABR encode: %v %s", err, log.String())
 	}
 	probe := ResolveToolPath("", "ffprobe")
 	streams, _, err := ProbeSourceStreams(ctx, probe, out)
 	if err != nil || len(streams) != 1 || streams[0].BitDepth != 10 {
 		t.Fatalf("Main10 not verified: %+v %v", streams, err)
 	}
-	if !strings.Contains(log.String(), "stats-read") && !strings.Contains(log.String(), "kb/s") {
+	if !strings.Contains(log.String(), "kb/s") {
 		t.Fatal("missing encoder evidence")
 	}
 	if !enc["aac_at"] {

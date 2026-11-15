@@ -90,6 +90,9 @@ func TestEncodeSizeWatchIsArmedOnlyForJudgeablePlans(t *testing.T) {
 	if w := encodeSizeWatchFrom(withEncodeSizeWatch(context.Background(), job(func(j *JobRecord) { j.Plan.AverageBitrateKbps = 4000 }), "/out", "/progress")); w == nil || w.rule != rateControlledProjection {
 		t.Fatalf("watch = %+v, want a bitrate target at the rate control rule", w)
 	}
+	if w := encodeSizeWatchFrom(withEncodeSizeWatch(context.Background(), job(func(j *JobRecord) { j.Plan.X265 = &transcode.X265Settings{BitrateKbps: 4000} }), "/out", "/progress")); w == nil || w.rule != rateControlledProjection {
+		t.Fatalf("watch = %+v, want an x265 ABR target at the rate control rule", w)
+	}
 	for name, mutate := range map[string]func(*JobRecord){
 		"no size policy":    func(j *JobRecord) { j.Plan.SizePolicy = nil },
 		"no source size":    func(j *JobRecord) { j.SourceSizeBytes = 0 },

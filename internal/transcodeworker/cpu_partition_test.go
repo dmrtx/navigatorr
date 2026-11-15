@@ -3,7 +3,6 @@ package transcodeworker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -123,9 +122,9 @@ func TestX265ThreadParamsOf(t *testing.T) {
 	}
 }
 
-// The two-pass analysis pass is rebuilt from the plan; it must keep the
-// partition of the encode it belongs to.
-func TestTwoPassAnalysisKeepsThreadPartition(t *testing.T) {
+// An x265 ABR plan runs ffmpeg once with the encode's thread partition, even
+// when it says two_pass: there is no analysis pass.
+func TestX265ABRRunsOnce(t *testing.T) {
 	d := t.TempDir()
 	calls := filepath.Join(d, "calls")
 	stub := filepath.Join(d, "ffmpeg")
@@ -133,28 +132,28 @@ func TestTwoPassAnalysisKeepsThreadPartition(t *testing.T) {
 	if err := os.WriteFile(stub, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	p := joyPlan(t)
-	out := filepath.Join(d, "output.mkv")
-	args, err := joyEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	args = withX265ThreadParams(args, "pools=5:frame-threads=3")
-	cmd := exec.CommandContext(context.Background(), stub, args...)
-	if err := runEncoderCommand(context.Background(), cmd, args, p, out); err != nil {
-		t.Fatal(err)
-	}
-	b, err := os.ReadFile(calls)
-	if err != nil {
-		t.Fatal(err)
-	}
-	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want two passes, got %q", lines)
-	}
-	for i, line := range lines {
-		if strings.Count(line, "pools=5") != 1 || strings.Count(line, "frame-threads=3") != 1 || !strings.Contains(line, fmt.Sprintf("pass=%d", i+1)) {
-			t.Errorf("pass %d lacks the partition: %s", i+1, line)
+	for _, twoPass := range []bool{true, false} {
+		p := joyPlan(t)
+		p.X265.TwoPass = twoPass
+		os.Remove(calls)
+		out := filepath.Join(d, "output.mkv")
+		args, err := joyEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args = withX265ThreadParams(args, "pools=5:frame-threads=3")
+		cmd := exec.CommandContext(context.Background(), stub, args...)
+		if err := runEncoderCommand(context.Background(), cmd, p); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(calls)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+		if len(lines) != 1 || strings.Contains(lines[0], "pass=") || !strings.Contains(lines[0], "-b:v") ||
+			strings.Count(lines[0], "pools=5") != 1 || strings.Count(lines[0], "frame-threads=3") != 1 {
+			t.Fatalf("two_pass=%v: want one partitioned ABR encode without passes, got %q", twoPass, lines)
 		}
 	}
 }

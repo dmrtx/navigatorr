@@ -45,9 +45,8 @@ func TestBuildExecutionPlanLeavesPreviewTrackOut(t *testing.T) {
 	}
 }
 
-// Two-pass x265 analyses the first video stream that is not cover art, so a
-// preview track after the programme video is left out like in any other plan,
-// and one before it is refused: it would be analysed in the programme's place.
+// An x265 ABR plan (two_pass or not) encodes once, so a preview track is left
+// out like in any other plan wherever it sits.
 func TestTwoPassPlanWithPreviewTrack(t *testing.T) {
 	twoPass := coverArtPlan()
 	twoPass.Quality = 0
@@ -68,8 +67,14 @@ func TestTwoPassPlanWithPreviewTrack(t *testing.T) {
 	streams := previewTrackStreams()
 	previewFirst := []SourceStream{streams[2], streams[0], streams[1]}
 	previewFirst[0].Index, previewFirst[1].Index, previewFirst[2].Index = 0, 1, 2
-	if _, err := BuildExecutionPlan(twoPass, previewFirst, 60); err == nil || !strings.Contains(err.Error(), "preview image track") {
-		t.Fatalf("two-pass accepted a preview track before the programme video: %v", err)
+	// The plan encodes once with the preview unmapped, so a preview track
+	// before the programme is no longer analysed in its place.
+	ep, err = BuildExecutionPlan(twoPass, previewFirst, 60)
+	if err != nil {
+		t.Fatalf("x265 ABR refused a preview track before the programme video: %v", err)
+	}
+	if !reflect.DeepEqual(ep.Thumbnails, []int{0}) {
+		t.Fatalf("thumbnails with the preview first = %v", ep.Thumbnails)
 	}
 
 	// Cover art before the programme is not analysed: 0:V skips it.
