@@ -122,8 +122,8 @@ func TestX265ThreadParamsOf(t *testing.T) {
 	}
 }
 
-// An x265 ABR plan runs ffmpeg once with the encode's thread partition, even
-// when it says two_pass: there is no analysis pass.
+// An x265 ABR plan (always two_pass) runs ffmpeg once with the encode's thread
+// partition: there is no analysis pass.
 func TestX265ABRRunsOnce(t *testing.T) {
 	d := t.TempDir()
 	calls := filepath.Join(d, "calls")
@@ -132,10 +132,8 @@ func TestX265ABRRunsOnce(t *testing.T) {
 	if err := os.WriteFile(stub, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, twoPass := range []bool{true, false} {
+	{
 		p := joyPlan(t)
-		p.X265.TwoPass = twoPass
-		os.Remove(calls)
 		out := filepath.Join(d, "output.mkv")
 		args, err := joyEncodeArgs(filepath.Join(d, "reference.mkv"), out, p)
 		if err != nil {
@@ -153,7 +151,7 @@ func TestX265ABRRunsOnce(t *testing.T) {
 		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 		if len(lines) != 1 || strings.Contains(lines[0], "pass=") || !strings.Contains(lines[0], "-b:v") ||
 			strings.Count(lines[0], "pools=5") != 1 || strings.Count(lines[0], "frame-threads=3") != 1 {
-			t.Fatalf("two_pass=%v: want one partitioned ABR encode without passes, got %q", twoPass, lines)
+			t.Fatalf("want one partitioned ABR encode without passes, got %q", lines)
 		}
 	}
 }
