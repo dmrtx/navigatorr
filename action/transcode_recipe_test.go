@@ -660,7 +660,7 @@ func TestQualityLadderValidation(t *testing.T) {
 	}
 }
 
-// With the media engine off, a budget is one two-pass x265 encode at the
+// With the media engine off, a budget is one x265 ABR encode at the
 // budget, planned without a search; over the budget it ends as exceeded.
 func TestX265SizeBudgetRecipe(t *testing.T) {
 	c := newRecipeCase(t, map[string]any{"size_budget_percent": 40.0, "allow_hardware": false}, nil)
@@ -678,6 +678,9 @@ func TestX265SizeBudgetRecipe(t *testing.T) {
 	}
 	if !sizeBudgetPlanMatches(c.snapshot, c.ec.State, plan, rec) {
 		t.Fatal("the budget encode does not rebuild from the frozen policy")
+	}
+	if plan.SizePolicy.MaxCandidateBytes != rec.BudgetBytes {
+		t.Fatalf("x265 budget ceiling %d, want the budget %d", plan.SizePolicy.MaxCandidateBytes, rec.BudgetBytes)
 	}
 	if !strings.Contains(rec.Choice.Message, "allow_hardware=false") {
 		t.Fatalf("choice %q", rec.Choice.Message)

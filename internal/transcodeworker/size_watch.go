@@ -114,7 +114,8 @@ func withEncodeSizeWatch(ctx context.Context, job *JobRecord, outputPath, progre
 		return ctx
 	}
 	rule := qualityModeProjection
-	if job.Plan.AverageBitrateKbps > 0 {
+	if job.Plan.AverageBitrateKbps > 0 || job.Plan.X265 != nil {
+		// x265 ABR carries its bitrate target in Plan.X265.
 		rule = rateControlledProjection
 	}
 	return context.WithValue(ctx, sizeWatchContextKey{}, &encodeSizeWatch{

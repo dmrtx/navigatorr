@@ -376,19 +376,7 @@ func BuildExecutionPlan(plan *transcode.Plan, streams []SourceStream, duration f
 	programme, thumbnails := splitProgrammeVideo(streams)
 	if plan.X265 != nil {
 		if len(programme) != 1 {
-			return nil, fmt.Errorf("two-pass x265 requires exactly one video stream")
-		}
-		// The analysis pass maps the first video stream that is not cover art
-		// (0:V:0), so a preview track listed before the programme would be
-		// analysed in its place. After it, the pass reads the programme and the
-		// encode pass unmaps the track.
-		for _, s := range streams {
-			if strings.EqualFold(strings.TrimSpace(s.Kind), "video") && !s.IsAttachedPicture() {
-				if s.Index != programme[0].Index {
-					return nil, fmt.Errorf("two-pass x265 analyses the first video stream, which is a preview image track here")
-				}
-				break
-			}
+			return nil, fmt.Errorf("x265 ABR requires exactly one video stream")
 		}
 	}
 	ep := &ExecutionPlan{Plan: plan, DurationSec: duration}

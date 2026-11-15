@@ -21,7 +21,7 @@ func SizeBudgetLadderStep(state map[string]any) (step string, ok bool) {
 }
 
 // RecipeStep names the encode a policy v4 goal is running, as "x265 CRF 20
-// (step 1 of 3)" or "two-pass x265 at the size budget", for status summaries.
+// (step 1 of 3)" or "x265 at the size budget", for status summaries.
 // ok is false for an action frozen before v4, which searches. A recipe submits
 // no benchmark, so its worker progress is the full encode of this step.
 func RecipeStep(state map[string]any) (step string, ok bool) {
@@ -35,7 +35,7 @@ func RecipeStep(state map[string]any) (step string, ok bool) {
 		return step, true
 	}
 	if rec := sizeBudgetOf(state); rec != nil && rec.BudgetBytes > 0 {
-		return "two-pass x265 at the size budget", true
+		return "x265 at the size budget", true
 	}
 	return "this goal's fixed settings", true
 }

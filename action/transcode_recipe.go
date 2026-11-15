@@ -17,7 +17,7 @@ import (
 // decide:
 //
 //   - a size budget runs the budget ladder (VideoToolbox, media engine allowed)
-//     or one two-pass x265 encode at the budget;
+//     or one x265 encode at the budget;
 //   - every other goal starts at the most compressed rung and, when the final
 //     check fails on quality, encodes again one rung better. The first rung
 //     that passes is kept. A rung refused for its size stops the ladder: a
