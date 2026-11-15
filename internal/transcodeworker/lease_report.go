@@ -57,9 +57,21 @@ type httpLeaseReporter struct {
 	client    *http.Client
 }
 
+// leaseBuildsPath is the builds API's path under the server's base URL.
+const leaseBuildsPath = "/api/maintenance/builds"
+
+// leaseBaseURL is the server's base URL from builds_url. The setting names the
+// server, but a URL that already ends with the builds path (as the playbook
+// once wrote it) is taken as the same server, not asked for the path twice:
+// every report went to .../builds/api/maintenance/builds and was refused.
+func leaseBaseURL(raw string) string {
+	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+	return strings.TrimSuffix(u, leaseBuildsPath)
+}
+
 func newHTTPLeaseReporter(url, tokenFile, node string) *httpLeaseReporter {
 	return &httpLeaseReporter{
-		url: strings.TrimRight(url, "/"), tokenFile: tokenFile, node: node,
+		url: leaseBaseURL(url), tokenFile: tokenFile, node: node,
 		client: &http.Client{Timeout: leaseReportTimeout},
 	}
 }
@@ -83,7 +95,7 @@ func (r *httpLeaseReporter) do(method, path string, body any) (int, []byte, erro
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), leaseReportTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, r.url+"/api/maintenance/builds"+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, r.url+leaseBuildsPath+path, rd)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -254,10 +266,13 @@ func (w *Worker) leaseReportPass() {
 			id, err := rep.Register(&l)
 			if err == nil {
 				w.leaseSetServerID(l.ID, id)
+				w.leaseNoteRegister(l.ID, "")
 			} else if errors.Is(err, errLeasesPaused) {
 				// The operator paused builds after the lease was granted: the
 				// build already runs; it is not stopped for that.
 				log.Printf("build lease %s: server reports builds paused; not recorded", l.ID)
+			} else {
+				w.leaseNoteRegister(l.ID, err.Error())
 			}
 		case l.active():
 			ended, err := rep.Heartbeat(l.ServerID, j.p.progress, l.TTLSeconds, j.p.log)
@@ -287,6 +302,7 @@ func (w *Worker) leaseReportPass() {
 			}
 		default:
 			if l.ServerID == "" {
+				log.Printf("build lease %s ended (%s) without the server having a record of it", l.ID, l.Status)
 				w.leaseMarkReported(l.ID)
 				continue
 			}
@@ -322,4 +338,22 @@ func (w *Worker) leaseSetServerID(id, serverID string) {
 
 func (w *Worker) leaseMarkReported(id string) {
 	w.leaseUpdate(id, func(l *leaseRecord) { l.Reported = true })
+}
+
+// leaseNoteRegister logs a registration that fails, once for each distinct
+// cause (the attempts repeat every few seconds), and says when it then works.
+// An empty failure means the registration succeeded.
+func (w *Worker) leaseNoteRegister(id, failure string) {
+	s := &w.leases
+	s.mu.Lock()
+	p := s.pendingFor(id)
+	was := p.regFailure
+	p.regFailure = failure
+	s.mu.Unlock()
+	switch {
+	case failure != "" && failure != was:
+		log.Printf("build lease %s: not registered with the server (%s); it is tried again", id, failure)
+	case failure == "" && was != "":
+		log.Printf("build lease %s: registered with the server", id)
+	}
 }

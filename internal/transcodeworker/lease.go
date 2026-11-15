@@ -148,6 +148,9 @@ type leasePending struct {
 	log      []string
 	dirty    bool
 	lastSent time.Time
+	// regFailure is the last reason registering with the server failed, so
+	// that a repeated failure is logged once.
+	regFailure string
 }
 
 func (s *leaseState) clock() time.Time {
