@@ -4154,7 +4154,7 @@ function batchProgressModel(job, {segments = false} = {}) {
     const observation = workerProgressObservation({...(child || activity), worker: w, status: "running"});
     const eta = workerStage && !observation.message ? encodeEta(activity.id || key, w, child?.eta_seconds ?? activity.eta_seconds) : "";
     const measurement = workerStage ? observation.message || (w.progress_is_stale ? heartbeatAlive(observation.heartbeat) ? "Worker heartbeat received; last measurement shown" : "Last measurement; stale" : eta) : "";
-    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${after ? postEncodeWorkLabel(after) : activity.work?.phase === "waiting_for_worker" ? workerSlotWaitLabel(activity.work) : workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
+    if (!prior || progress > prior.progress) byFile.set(key, {progress, eta: eta ? encodeEtas.get(activity.id || key)?.value : null, label: `${key.split("/").pop() || "Active file"}: ${after ? postEncodeWorkLabel(after) : activity.work?.phase === "waiting_for_worker" ? workerSlotWaitLabel(activity.work, activity.queue_wait_seconds) : workerStage && phase ? workerPhaseLabel(phase) : stage === "preflight" && activity.work?.phase === "hashing_source" ? `Verifying source SHA-256 (${bytes(activity.work.bytes_read || 0)} / ${bytes(activity.work.total_bytes)})` : stage === "preflight" && activity.work?.phase === "waiting_for_hash_slot" ? "Waiting to verify source" : stageLabel(stage || "preflight")}${measurement ? ` · ${measurement}` : ""}`});
   }
   const partial = Math.min(count("running"), byFile.size) ? [...byFile.values()].slice(0,count("running")).reduce((sum,a)=>sum+a.progress,0) : 0;
   const active = operationIsActive(job.status);
@@ -6182,8 +6182,9 @@ function workerProgressObservation(job) {
   if (waiting === "worker_busy" && !job.batch) {
     const position = job.work?.phase === "waiting_for_worker" ? Number(job.work.queue_position) : 0;
     const line = Number.isInteger(position) && position > 1 ? ` ${position - 1} ${position === 2 ? "job is" : "jobs are"} ahead of it in line.` : position === 1 ? " It is next in line." : "";
+    const about = waitEstimateLabel(job.savings?.queue_wait_seconds).replace(" · ", " Estimated wait: ");
     const turn = job.queue_priority ? "All slots are busy. This job goes ahead of the queue and takes the first free slot." : "The worker is running as many jobs as it allows. This job continues automatically when a slot is free.";
-    return {...result, status: job.queue_priority ? "Run next · Waiting for a slot" : "Waiting for a free worker slot", message: `${turn}${line}`};
+    return {...result, status: job.queue_priority ? "Run next · Waiting for a slot" : "Waiting for a free worker slot", message: `${turn}${line}${about ? `${about}.` : ""}`};
   }
   if (waiting === "worker_drain") return {...result, status: "Held for worker deploy", message: "Worker drain is on, so this job has not started. It continues when the drain is resumed."};
   if (["worker_busy", "parent_busy", "queued", "transcode_retry", "worker_reconciling"].includes(waiting))
@@ -7448,11 +7449,21 @@ function postEncodeWorkLabel(work) {
 // The coordinator's own slot queue (work.phase waiting_for_worker): the file
 // has not been sent to the worker yet. queue_position counts this file, so 1
 // means it gets the next free slot.
-function workerSlotWaitLabel(work) {
+// waitSeconds is the server's estimated wait (queue_wait_seconds); absent when
+// the encode history cannot support one.
+function workerSlotWaitLabel(work, waitSeconds) {
   const position = Number(work?.queue_position);
-  if (!Number.isInteger(position) || position < 1) return "Waiting for a worker slot";
-  if (position === 1) return "Waiting for a worker slot · Next in line";
-  return `Waiting for a worker slot · ${position - 1} ahead in line`;
+  const about = waitEstimateLabel(waitSeconds);
+  if (!Number.isInteger(position) || position < 1) return `Waiting for a worker slot${about}`;
+  if (position === 1) return `Waiting for a worker slot · Next in line${about}`;
+  return `Waiting for a worker slot · ${position - 1} ahead in line${about}`;
+}
+// " · about 5 h" (hours from one hour on, minutes below), "" without an estimate.
+function waitEstimateLabel(seconds) {
+  const raw = Number(seconds);
+  if (seconds == null || !Number.isFinite(raw) || raw <= 0) return "";
+  const minutes = Math.max(1, Math.round(raw / 60));
+  return minutes < 60 ? ` · about ${minutes} min` : ` · about ${Math.round(minutes / 60)} h`;
 }
 function workerPhaseLabel(phase) {
   return {
@@ -10033,7 +10044,7 @@ function batchFileActivity(item, job) {
   const worker = activity?.worker;
   const phase = worker?.transcode_phase || worker?.phase;
   // Cleared once the worker accepts the job, so it never hides worker progress.
-  if (activity?.work?.phase === "waiting_for_worker") return workerSlotWaitLabel(activity.work);
+  if (activity?.work?.phase === "waiting_for_worker") return workerSlotWaitLabel(activity.work, activity.queue_wait_seconds);
   const after = activity && postEncodeWork({...activity, status: item.status});
   if (after) {
     const observation = workerProgressObservation({...activity, status: item.status});

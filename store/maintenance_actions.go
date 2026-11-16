@@ -22,7 +22,7 @@ type maintenanceMemo struct {
 const maintenanceRefreshChunk = 400
 
 var maintenanceInputKeys = []string{"path", "queue_priority", "parent_action_id", "batch_promote_parent_id", "transcode_action_id", "library_context", "service", "series_id", "movie_id", "media_id", "paths", "episode_file_ids", "dry_run", "promote_candidates", "mode", "replace_original", "max_height", "allow_hardware", "allow_slow_preset", "size_budget_percent", "size_budget_bytes", "size_budget_source", "size_budget_sibling_multiplier", "audio_only", "media_type", "is_anime", "replace_when_done", "save_space_keep_hdr", "drop_commentary", "prefer_stereo"}
-var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "original_integrity_check", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "worker_suspended", "suspended_by", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "tracks", "track_report", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message", "quality_ladder", "mode_policy", "replace_when_done_skipped"}
+var maintenanceOutputKeys = []string{"resolved_path", "original_sha256", "original", "result", "candidate_size_bytes", "promotion", "recovery_retained", "original_integrity", "original_integrity_check", "promoted", "original_intact", "benchmark_decision", "expected_savings_percent", "transcode_phase", "progress_is_stale", "worker_suspended", "suspended_by", "progress", "speed", "last_progress_at", "counts", "batch_promotion", "benchmark_comparison_available", "job_id", "transcode_job_id", "paused", "skip_transcode", "batch_item_generations", "batch_settings_revision", "batch_retry_pending", "post_batch_promotion", "mode", "size_main10", "size_audio_only", "audio_only_estimated_bytes", "quality_evidence", "automatic_search", "conversions", "reason_code", "hardware_continuation", "size_budget", "size_budget_siblings", "size_budget_skip_message", "candidate_removed", "candidate_cleanup", "tracks", "track_report", "batch_promotion_plan", "batch_promotion_approved", "work_progress", "tracks_message", "quality_ladder", "mode_policy", "replace_when_done_skipped", "encode_duration_ms", "worker", "worker_slots_total"}
 
 // maintenanceHardwareNote begins the winner uncertainty that says why a media
 // engine result was chosen. It must equal transcode.HardwareSelectedNote;
@@ -86,7 +86,7 @@ func maintenanceQualitySummary(raw json.RawMessage) json.RawMessage {
 // maintenanceOutputKeys; submitted_source_bytes, a transcode job's file size
 // from its submission until its preflight records the original; and skipped,
 // which says a job's candidate_size_bytes is not a result to list.
-var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped", "request_origin")
+var maintenanceListKeys = append(append([]string(nil), maintenanceOutputKeys...), "submitted_source_bytes", "skipped", "request_origin", "queue_position")
 
 func maintenanceJSON(raw string, keys []string) string {
 	var source map[string]json.RawMessage
@@ -115,7 +115,7 @@ func maintenanceJSON(raw string, keys []string) string {
 		if json.Unmarshal(value, &nested) == nil && nested != nil {
 			switch key {
 			case "original":
-				value = json.RawMessage(maintenanceJSON(string(value), []string{"size_bytes", "duration_sec"}))
+				value = json.RawMessage(maintenanceJSON(string(value), []string{"size_bytes", "duration_sec", "resolution"}))
 			case "result":
 				value = json.RawMessage(maintenanceJSON(string(value), []string{"size_bytes"}))
 			case "promotion":

@@ -5254,6 +5254,11 @@ test("a file waiting in the coordinator's slot queue shows its place, not the la
   assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(1))'), "Waiting for a worker slot · Next in line");
   assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(undefined))'), "Waiting for a worker slot");
   assert.equal(h.run('workerPhaseLabel("waiting_for_worker")'), "Waiting for a worker slot");
+  // The server's estimate shows in hours from one hour on, minutes below, and not at all without one.
+  h.context.waitingJob = (position, wait) => ({activities:[{id:"child",waiting_condition:"worker_busy",queue_wait_seconds:wait,work:{phase:"waiting_for_worker",queue_position:position},worker:{transcode_phase:"completed"}}]});
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(3,18000))'), "Waiting for a worker slot · 2 ahead in line · about 5 h");
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(1,1500))'), "Waiting for a worker slot · Next in line · about 25 min");
+  assert.equal(h.run('batchFileActivity({status:"waiting_for_slot",child_action_id:"child"},waitingJob(2,null))'), "Waiting for a worker slot · 1 ahead in line");
   // Once the worker accepts the job the phase is gone and worker progress shows.
   assert.equal(h.run('batchFileActivity({status:"running",child_action_id:"child"},{activities:[{id:"child",worker:{transcode_phase:"validating_quality"}}]})'), "Measuring final quality");
   // A standalone job says how many are ahead of it.

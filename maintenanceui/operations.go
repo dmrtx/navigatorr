@@ -32,8 +32,10 @@ type operationSavings struct {
 	RealizedSavedBytes  *int64 `json:"realized_saved_bytes,omitempty"`
 	EstimateKind        string `json:"estimate_kind,omitempty"`
 	ETASeconds          *int64 `json:"eta_seconds,omitempty"`
-	MeasuredFiles       int    `json:"measured_files,omitempty"`
-	Partial             bool   `json:"partial,omitempty"`
+	// QueueWaitSeconds is the estimated wait for a worker slot (see queueWaits).
+	QueueWaitSeconds *int64 `json:"queue_wait_seconds,omitempty"`
+	MeasuredFiles    int    `json:"measured_files,omitempty"`
+	Partial          bool   `json:"partial,omitempty"`
 }
 
 type savingsReplacement struct {
@@ -668,6 +670,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	aggregateBatchSavings(records)
+	setQueueWaits(records)
 	rounds := noWinnerRounds(records)
 	recordsByID := make(map[string]operationRecord, len(records))
 	existingReplacements := queueReplacementLinks(records)
@@ -1134,8 +1137,10 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 				}
 			}
 			_, httpWorker := s.engine.ActionWorkerExecutor(r.state).(*httpclient.HTTPExecutor)
+			// Only the name: the page reads job.worker as the worker's report,
+			// and a list row now carries the assigned worker for queue waits.
 			if worker := operationString(r.state["worker"]); worker != "" {
-				job["worker"], job["worker_name"] = worker, worker
+				job["worker_name"] = worker
 			}
 			// A job frozen for its node says what froze it, whatever shape its
 			// worker takes (a name here, the worker's report on a batch's child).
@@ -1223,7 +1228,7 @@ func (s *Server) operations(w http.ResponseWriter, req *http.Request) {
 							if file == "" {
 								file = operationString(operationMap(operationValue(child, "promotion"))["original_path"])
 							}
-							activities = append(activities, map[string]any{"id": child.inst.ID, "parent_action_id": child.inputs["parent_action_id"], "action_name": child.inst.ActionName, "current_step": child.inst.CurrentStep, "stages": s.queueStages(child), "file": file, "worker": childJob["worker"], "work": childJob["work"], "waiting_condition": childJob["waiting_condition"], "eta_seconds": child.savings.ETASeconds})
+							activities = append(activities, map[string]any{"id": child.inst.ID, "parent_action_id": child.inputs["parent_action_id"], "action_name": child.inst.ActionName, "current_step": child.inst.CurrentStep, "stages": s.queueStages(child), "file": file, "worker": childJob["worker"], "work": childJob["work"], "waiting_condition": childJob["waiting_condition"], "eta_seconds": child.savings.ETASeconds, "queue_wait_seconds": child.savings.QueueWaitSeconds})
 							// Held in the worker's line: the reason says whether for a slot or for room.
 							if operationQueuedOnWorker(child) {
 								activities[len(activities)-1]["waiting_reason"] = childJob["waiting_reason"]
