@@ -254,8 +254,17 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 			}
 		}
 		// A low priority build waits only where there is a node to wait for.
+		want := b
 		b, err = e.deps.Store.CreateBuild(b, e.now(), ttl, b.Priority == store.BuildPriorityLow && isNode)
-		if err != nil || !isNode {
+		if err != nil {
+			// A target that is not a node has no lock: a create of the same
+			// id can win the insert between the check and here.
+			if got, found, ferr := e.buildByClientID(want); found {
+				b, err, created = got, ferr, false
+			}
+			return
+		}
+		if !isNode {
 			return
 		}
 		if b.Status == store.BuildWaiting {
