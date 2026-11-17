@@ -112,11 +112,18 @@ func (r *httpLeaseReporter) do(method, path string, body any) (int, []byte, erro
 }
 
 func (r *httpLeaseReporter) Register(l *leaseRecord) (string, error) {
-	code, out, err := r.do(http.MethodPost, "", map[string]any{
-		"target": r.node, "source": l.Source, "holder": l.Holder, "kind": l.Kind,
-		"title": l.Title, "preempt_mode": l.PreemptMode, "ttl_seconds": l.TTLSeconds,
-		"progress": l.Progress,
-	})
+	body := map[string]any{
+		"id": l.registrationID(), "target": r.node, "source": l.Source, "holder": l.Holder,
+		"kind": l.Kind, "title": l.Title, "preempt_mode": l.PreemptMode,
+		"ttl_seconds": l.TTLSeconds, "progress": l.Progress,
+	}
+	code, out, err := r.do(http.MethodPost, "", body)
+	if err == nil && code == http.StatusBadRequest {
+		// A server from before client ids refuses the field: register the
+		// old way (a lost answer is then a duplicate, as it was).
+		delete(body, "id")
+		code, out, err = r.do(http.MethodPost, "", body)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -297,8 +304,13 @@ func (w *Worker) leaseReportPass() {
 				w.leaseMarkReported(l.ID)
 			case ended != "":
 				// The server lost or finished it behind our back (it was
-				// unreachable past the ttl): register it again.
-				w.leaseSetServerID(l.ID, "")
+				// unreachable past the ttl): register it again, under a new id.
+				w.leaseUpdate(l.ID, func(r *leaseRecord) {
+					if r.ServerID == l.ServerID {
+						r.ServerID = ""
+						r.RegGen++
+					}
+				})
 			}
 		default:
 			if l.ServerID == "" {

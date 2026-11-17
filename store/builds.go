@@ -103,11 +103,13 @@ func buildTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 // waiting when wait is set. The caller has validated the fields; id and times
 // are set here.
 func (s *Store) CreateBuild(b Build, now time.Time, ttl time.Duration, wait bool) (Build, error) {
-	raw := make([]byte, 8)
-	if _, err := rand.Read(raw); err != nil {
-		return Build{}, err
+	if b.ID == "" {
+		raw := make([]byte, 8)
+		if _, err := rand.Read(raw); err != nil {
+			return Build{}, err
+		}
+		b.ID = "bld_" + hex.EncodeToString(raw)
 	}
-	b.ID = "bld_" + hex.EncodeToString(raw)
 	b.Status = BuildRunning
 	if b.Priority == "" {
 		b.Priority = BuildPriorityNormal
