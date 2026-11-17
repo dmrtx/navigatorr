@@ -259,6 +259,15 @@ type fakeReporter struct {
 	gone      bool // the next heartbeat finds no such build (a 404)
 	nextID    int
 	registers []string
+	// byKey is the server build of each registration id, like the server's
+	// idempotent create; keys is every id asked for, retries included.
+	byKey map[string]string
+	keys  []string
+	// loseAnswers is how many next registrations the server makes but whose
+	// answer never arrives (the client timed out).
+	loseAnswers int
+	// taken are ids another server build already has.
+	taken map[string]bool
 	// onRegister runs first in Register, outside the lock.
 	onRegister func()
 	beats      []fakeBeat
@@ -284,9 +293,25 @@ func (f *fakeReporter) Register(l *leaseRecord) (string, error) {
 	if f.paused {
 		return "", errLeasesPaused
 	}
-	f.nextID++
-	id := "bld_srv" + string(rune('a'+f.nextID))
-	f.registers = append(f.registers, l.Title+"/"+l.PreemptMode)
+	key := l.registrationID()
+	f.keys = append(f.keys, key)
+	if f.taken[key] {
+		return "", errRegistrationIDTaken
+	}
+	id, ok := f.byKey[key]
+	if !ok {
+		f.nextID++
+		id = "bld_srv" + string(rune('a'+f.nextID))
+		f.registers = append(f.registers, l.Title+"/"+l.PreemptMode)
+		if f.byKey == nil {
+			f.byKey = map[string]string{}
+		}
+		f.byKey[key] = id
+	}
+	if f.loseAnswers > 0 {
+		f.loseAnswers--
+		return "", errors.New("the server is unreachable")
+	}
 	return id, nil
 }
 

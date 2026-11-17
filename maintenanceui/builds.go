@@ -88,6 +88,7 @@ func (s *Server) buildsTokenCall(r *http.Request) bool {
 func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		var body struct {
+			ID          string `json:"id"`
 			Target      string `json:"target"`
 			Source      string `json:"source"`
 			Holder      string `json:"holder"`
@@ -99,10 +100,10 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 			Progress    string `json:"progress"`
 		}
 		if err := decode(w, r, &body); err != nil {
-			fail(w, 400, `send {"target", "source", "title", "holder"?, "kind"?, "preempt_mode"?, "priority"?, "ttl_seconds"?, "progress"?}`)
+			fail(w, 400, `send {"target", "source", "title", "id"?, "holder"?, "kind"?, "preempt_mode"?, "priority"?, "ttl_seconds"?, "progress"?}`)
 			return
 		}
-		b, err := s.engine.CreateBuild(r.Context(), action.BuildInput{Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, TTLSeconds: body.TTLSeconds})
+		b, err := s.engine.CreateBuild(r.Context(), action.BuildInput{ID: body.ID, Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, TTLSeconds: body.TTLSeconds})
 		if s.buildError(w, err) {
 			return
 		}
@@ -282,6 +283,7 @@ func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {
 func (s *Server) buildError(w http.ResponseWriter, err error) bool {
 	var invalid *action.BuildInvalidError
 	var paused *action.BuildsPausedError
+	var taken *action.BuildIDTakenError
 	switch {
 	case err == nil:
 		return false
@@ -290,6 +292,8 @@ func (s *Server) buildError(w http.ResponseWriter, err error) bool {
 	case errors.As(err, &paused):
 		// Nothing was created and no hold was taken; the code is stable for scripts.
 		writeJSON(w, 409, map[string]string{"error": paused.Error(), "code": action.BuildsPausedCode})
+	case errors.As(err, &taken):
+		writeJSON(w, 409, map[string]string{"error": taken.Error(), "code": action.BuildIDTakenCode})
 	case errors.Is(err, store.ErrBuildNotFound):
 		fail(w, 404, "build not found")
 	default:

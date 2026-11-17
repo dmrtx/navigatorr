@@ -68,8 +68,28 @@ func invalidBuild(format string, args ...any) error {
 	return &BuildInvalidError{Reason: fmt.Sprintf(format, args...)}
 }
 
+// BuildIDTakenError is a create whose client id already names a build of
+// another target or source.
+type BuildIDTakenError struct{ ID string }
+
+func (e *BuildIDTakenError) Error() string {
+	return "id " + e.ID + " already names another build"
+}
+
+// BuildIDTakenCode is the stable code of a BuildIDTakenError answer.
+const BuildIDTakenCode = "build_id_taken"
+
+// buildClientID is the shape of a client-chosen build id.
+var buildClientID = regexp.MustCompile(`^bld_[A-Za-z0-9_-]{8,59}$`)
+
 // BuildInput is a request to start a build.
 type BuildInput struct {
+	// ID is an optional client-chosen id ("bld_" and 8 to 59 letters, digits,
+	// '_' or '-'). It makes the create idempotent: asking again with the same
+	// id, target and source returns that build as it is now (even ended)
+	// and creates nothing. A client that retries a create whose answer it
+	// did not get (a timeout) needs it, or every retry is one more build.
+	ID          string
 	Target      string
 	Source      string
 	Holder      string
@@ -151,6 +171,10 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	}
 	var b store.Build
 	var err error
+	if in.ID != "" && !buildClientID.MatchString(in.ID) {
+		return b, invalidBuild(`id must be "bld_" and 8 to 59 letters, digits, '_' or '-'`)
+	}
+	b.ID = in.ID
 	if in.Target = strings.TrimSpace(in.Target); !buildTargetPattern.MatchString(in.Target) {
 		return b, invalidBuild("target is required: up to 64 characters of letters, digits, '.', '_' or '-'")
 	}
@@ -199,7 +223,20 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	if err != nil {
 		return b, err
 	}
+	// A retry of a create already made is answered before the node lock: that
+	// lock can be slow (it waits for the worker), and a retry that queued
+	// behind it would only time out again.
+	if got, found, err := e.buildByClientID(b); found || err != nil {
+		return got, err
+	}
+	created := false
 	e.withNodeLock(b.Target, func(w transcode.NamedWorker, isNode bool) {
+		// Again under the lock: two creates of one id serialise here.
+		if got, found, ferr := e.buildByClientID(b); found || ferr != nil {
+			b, err = got, ferr
+			return
+		}
+		created = true
 		if isNode {
 			// Under the node's request lock, like the toggle: a build is either
 			// refused here or registered before the pause. Nothing is created.
@@ -217,8 +254,17 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 			}
 		}
 		// A low priority build waits only where there is a node to wait for.
+		want := b
 		b, err = e.deps.Store.CreateBuild(b, e.now(), ttl, b.Priority == store.BuildPriorityLow && isNode)
-		if err != nil || !isNode {
+		if err != nil {
+			// A target that is not a node has no lock: a create of the same
+			// id can win the insert between the check and here.
+			if got, found, ferr := e.buildByClientID(want); found {
+				b, err, created = got, ferr, false
+			}
+			return
+		}
+		if !isNode {
 			return
 		}
 		if b.Status == store.BuildWaiting {
@@ -236,8 +282,31 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	if err != nil {
 		return store.Build{}, err
 	}
+	if !created {
+		return b, nil
+	}
 	e.WakeReconciler()
 	return e.markBuild(b), nil
+}
+
+// buildByClientID is the build a client id already names, marked like a
+// create's answer. found is false when the request has no id or the id is
+// new; an id that names a build of another target or source is a
+// BuildIDTakenError.
+func (e *Engine) buildByClientID(want store.Build) (store.Build, bool, error) {
+	if want.ID == "" {
+		return store.Build{}, false, nil
+	}
+	got, err := e.deps.Store.GetBuild(want.ID)
+	switch {
+	case errors.Is(err, store.ErrBuildNotFound):
+		return store.Build{}, false, nil
+	case err != nil:
+		return store.Build{}, true, err
+	case got.Target != want.Target || got.Source != want.Source:
+		return store.Build{}, true, &BuildIDTakenError{ID: want.ID}
+	}
+	return e.markBuild(got), true, nil
 }
 
 // buildHeartbeatGap is a test seam: it runs between a heartbeat's store update

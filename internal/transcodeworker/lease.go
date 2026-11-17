@@ -3,6 +3,7 @@ package transcodeworker
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -70,6 +71,10 @@ const (
 // on the node.
 var errLeasesPaused = errors.New("builds paused")
 
+// errRegistrationIDTaken is a registration whose id already names another
+// build in the server (another target or source).
+var errRegistrationIDTaken = errors.New("the registration id names another server build")
+
 // leaseInvalidError is a request the caller can fix.
 type leaseInvalidError struct{ Reason string }
 
@@ -110,6 +115,24 @@ type leaseRecord struct {
 	// answered "running". EndReason says why the worker ended it itself.
 	Confirmed bool   `json:"confirmed,omitempty"`
 	EndReason string `json:"end_reason,omitempty"`
+	// RegGen counts the server builds this lease had to register again after
+	// the server ended or forgot the previous one; it picks the id the next
+	// registration asks for (registrationID).
+	RegGen int `json:"reg_gen,omitempty"`
+}
+
+// registrationID is the id the lease asks the server to create its build
+// under. The server answers a create of a known id with that build instead of
+// a new one, so a registration whose answer was lost (the 3 s timeout ran out
+// while the server waited on this very worker) is not one more build when it
+// is retried. The first registration uses the lease id; one after the server
+// ended the build needs a fresh id, or it would get the ended build back.
+func (l *leaseRecord) registrationID() string {
+	if l.RegGen == 0 {
+		return l.ID
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%d", l.ID, l.RegGen)))
+	return "bld_r" + hex.EncodeToString(sum[:12])
 }
 
 func (l *leaseRecord) active() bool {
@@ -501,8 +524,11 @@ func (w *Worker) LeaseCreateContext(ctx context.Context, in LeaseRequest) (lease
 		if errors.Is(err, errLeasesPaused) {
 			return leaseRecord{}, err
 		}
-		if err == nil {
+		switch {
+		case err == nil:
 			l.ServerID = id
+		case errors.Is(err, errRegistrationIDTaken):
+			l.RegGen++ // the background registration asks for a new id
 		}
 	}
 	got, err := w.leaseInsert(l, true)
