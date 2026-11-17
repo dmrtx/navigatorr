@@ -266,6 +266,8 @@ type fakeReporter struct {
 	// loseAnswers is how many next registrations the server makes but whose
 	// answer never arrives (the client timed out).
 	loseAnswers int
+	// taken are ids another server build already has.
+	taken map[string]bool
 	// onRegister runs first in Register, outside the lock.
 	onRegister func()
 	beats      []fakeBeat
@@ -293,6 +295,9 @@ func (f *fakeReporter) Register(l *leaseRecord) (string, error) {
 	}
 	key := l.registrationID()
 	f.keys = append(f.keys, key)
+	if f.taken[key] {
+		return "", errRegistrationIDTaken
+	}
 	id, ok := f.byKey[key]
 	if !ok {
 		f.nextID++

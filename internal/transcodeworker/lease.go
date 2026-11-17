@@ -71,6 +71,10 @@ const (
 // on the node.
 var errLeasesPaused = errors.New("builds paused")
 
+// errRegistrationIDTaken is a registration whose id already names another
+// build in the server (another target or source).
+var errRegistrationIDTaken = errors.New("the registration id names another server build")
+
 // leaseInvalidError is a request the caller can fix.
 type leaseInvalidError struct{ Reason string }
 
@@ -520,8 +524,11 @@ func (w *Worker) LeaseCreateContext(ctx context.Context, in LeaseRequest) (lease
 		if errors.Is(err, errLeasesPaused) {
 			return leaseRecord{}, err
 		}
-		if err == nil {
+		switch {
+		case err == nil:
 			l.ServerID = id
+		case errors.Is(err, errRegistrationIDTaken):
+			l.RegGen++ // the background registration asks for a new id
 		}
 	}
 	got, err := w.leaseInsert(l, true)

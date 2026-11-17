@@ -135,6 +135,8 @@ func (r *httpLeaseReporter) Register(l *leaseRecord) (string, error) {
 	switch {
 	case code == http.StatusConflict && b.Code == "builds_paused":
 		return "", errLeasesPaused
+	case code == http.StatusConflict && b.Code == "build_id_taken":
+		return "", errRegistrationIDTaken
 	case code == http.StatusOK && b.ID != "":
 		return b.ID, nil
 	}
@@ -274,6 +276,14 @@ func (w *Worker) leaseReportPass() {
 			if err == nil {
 				w.leaseSetServerID(l.ID, id)
 				w.leaseNoteRegister(l.ID, "")
+			} else if errors.Is(err, errRegistrationIDTaken) {
+				// Another build has the id: the next attempt asks for a new one.
+				w.leaseUpdate(l.ID, func(r *leaseRecord) {
+					if r.ServerID == "" && r.RegGen == l.RegGen {
+						r.RegGen++
+					}
+				})
+				w.leaseNoteRegister(l.ID, err.Error())
 			} else if errors.Is(err, errLeasesPaused) {
 				// The operator paused builds after the lease was granted: the
 				// build already runs; it is not stopped for that.

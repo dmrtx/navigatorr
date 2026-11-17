@@ -2,6 +2,7 @@ package transcodeworker
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,5 +150,48 @@ func TestHTTPLeaseReporterSendsTheIDAndFallsBackForAnOldServer(t *testing.T) {
 			t.Fatalf("old=%v: ids sent %v, want %v", old, ids, want)
 		}
 		mu.Unlock()
+	}
+}
+
+// An id the server says names another build is never asked for again: the
+// lease moves to a fresh id and gets registered (else it retried forever).
+func TestTakenRegistrationIDMovesToAFreshOne(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	req := leaseReq("compile")
+	req.ID = "bld_clientid01"
+	rep := &fakeReporter{taken: map[string]bool{"bld_clientid01": true}}
+	w.leases.reporter = rep
+	var offset time.Duration
+	w.leases.now = func() time.Time { return time.Now().Add(offset) }
+	l, err := w.LeaseCreate(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		offset += leaseRegisterTries + time.Second
+		w.leaseReportPass()
+	}
+	got, _ := w.LeaseGet(l.ID)
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if len(rep.keys) != 2 || rep.keys[1] == "bld_clientid01" || got.ServerID == "" || got.ServerID != rep.byKey[rep.keys[1]] {
+		t.Fatalf("keys %v, lease %+v", rep.keys, got)
+	}
+}
+
+// The HTTP reporter reads the server's build_id_taken as such, not as paused.
+func TestHTTPLeaseReporterReadsATakenID(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.WriteHeader(http.StatusConflict)
+		_, _ = rw.Write([]byte(`{"error":"taken","code":"build_id_taken"}`))
+	}))
+	defer srv.Close()
+	_, err := newHTTPLeaseReporter(srv.URL, tokenFile, "m1").Register(&leaseRecord{ID: "bld_lease0001", Title: "t"})
+	if !errors.Is(err, errRegistrationIDTaken) {
+		t.Fatalf("got %v", err)
 	}
 }
