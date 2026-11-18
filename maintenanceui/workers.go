@@ -105,7 +105,10 @@ func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker)
 		node["message"] = "Worker activity unavailable. Slot occupancy is unknown."
 		return node
 	}
-	s.syncWorkerSlots(ctx, worker, activity.Slots)
+	// Pushing the saved slot split back is bounded the same way: it must not hold the answer either.
+	syncCtx, syncCancel := context.WithTimeout(ctx, activityProbeTimeout)
+	defer syncCancel()
+	s.syncWorkerSlots(syncCtx, worker, activity.Slots)
 	s.describeActivityJobs(&activity)
 	node["available"], node["activity"] = true, activity
 	return node

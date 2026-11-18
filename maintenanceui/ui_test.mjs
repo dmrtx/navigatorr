@@ -2878,6 +2878,83 @@ test("a slow worker read does not bring back an older state than the node state 
   assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
 });
 
+test("a node state read sent before a newer worker read does not bring back an older state", async () => {
+  const h=harness(), late=deferred();
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date(Date.now()-90000).toISOString()};
+  const worker=extra=>({name:"m1",available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}},...extra});
+  h.context.activity={available:true,workers:[worker()]};
+  h.context.late=late.promise;
+  h.context.fresh={available:true,workers:[worker({held_by:"builds",builds:[build]})]};
+  h.run('state.tab="jobs";refreshWorkers=async()=>{};loadJobs=async()=>{};api=async path=>path==="worker-node-state"?late:JSON.parse(JSON.stringify(fresh));renderWorkerActivity(activity)');
+  // The node state read goes out first and is slow; the activity read goes out after it and answers with the build.
+  const stale=h.run("refreshNodeState()");
+  await h.run("refreshWorkerActivity(true)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
+  // The older node state arrives now, without the build: it must not hide it.
+  late.resolve({nodes:[{name:"m1"}]});
+  await stale;
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
+});
+
+test("a forced read asked for during one in flight runs again when it ends, an ordinary one does not", async () => {
+  const h=harness(), first=deferred(), firstWorkers=deferred();
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  h.context.first=first.promise;
+  h.context.firstWorkers=firstWorkers.promise;
+  h.context.reads={activity:0,workers:0};
+  h.context.answer={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:0,jobs:[],slots:{ceiling:1,split:false,video:{total:1,used:0},podcast:{total:0,used:0}}}}]};
+  h.run('renderWorkers=()=>{};controls=()=>{};api=async path=>{if(path==="worker-activity"){reads.activity++;return reads.activity===1?first:answer}if(path==="workers"){reads.workers++;return reads.workers===1?firstWorkers:{nodes:[]}}return {builds:[]}}');
+  const activity=h.run("refreshWorkerActivity(true)");
+  h.run("refreshWorkerActivity()");
+  assert.equal(h.context.reads.activity,1);
+  h.run("refreshWorkerActivity(true)");
+  first.resolve(h.context.answer);
+  await activity;
+  for(let i=0;i<6;i++) await Promise.resolve();
+  assert.equal(h.context.reads.activity,2);
+  const workers=h.run("refreshWorkers()");
+  h.run("refreshWorkers()");
+  assert.equal(h.context.reads.workers,1);
+  h.run("refreshWorkers(true)");
+  firstWorkers.resolve({nodes:[]});
+  await workers;
+  for(let i=0;i<6;i++) await Promise.resolve();
+  assert.equal(h.context.reads.workers,2);
+});
+
+test("every node down still shows what holds it, and the first read shows the builds before any worker answers", async () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  const table=()=>h.elements.get("worker-slots").children.at(-1);
+  const down=(name,extra)=>({name,available:false,message:"Worker activity unavailable. Slot occupancy is unknown.",...extra});
+  // No worker answers and the operator paused m1: the page still says so, in both layouts.
+  h.context.activity={available:false,message:"Worker activity unavailable. Slot occupancy is unknown.",workers:[down("m1",{held_by:"operator",builds_paused:true}),down("m4")]};
+  h.run("renderWorkerActivity(activity)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown");
+  assert.equal(table().children.at(-2).textContent,"m1 · Worker activity unavailable. Slot occupancy is unknown. · transcode paused");
+  assert.equal(table().children.at(-1).textContent,"m4 · Worker activity unavailable. Slot occupancy is unknown.");
+  const phone=h.elements.get("worker-slots").children[1].children[0];
+  assert.match(phone.children[0].children.map(c=>c.textContent).join(" "),/transcode paused/);
+  // The very first activity read is still waiting on the workers: the node state stands in for it.
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date(Date.now()-90000).toISOString()};
+  h.context.calls=[];
+  h.run('state.tab="jobs";refreshWorkerActivity=async()=>{calls.push("activity")};refreshWorkers=async()=>{calls.push("workers")};loadJobs=async()=>{calls.push("jobs")};api=async()=>({nodes:[{name:"m1",held_by:"builds",builds:[{id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date().toISOString()}]},{name:"m4"}]});state.activityData=null;state.activityCheckedAt=0;state.activityRequest=true;');
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown · 1 build");
+  assert.equal(h.elements.get("worker-slots").children[0].textContent,"Reading the workers…");
+  assert.equal(table().children[0].children[1].children.length,1);
+  // Standing in is not a change to react to: no other read starts.
+  assert.deepEqual(h.context.calls,[]);
+  // Once a first read is not pending (it failed), there is nothing to stand in for.
+  h.run('state.activityRequest=false;state.activityData=null;renderWorkerActivity(null)');
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown");
+});
+
 test("the scheduler is a chip beside the slots and the settings link is an icon", () => {
   assert.match(markup,/<div class="activity-heading">.*id="activity-scheduler" class="sched-chip"/s);
   assert.match(markup,/id="worker-open-settings"[^>]*aria-label="Change in Settings"/);

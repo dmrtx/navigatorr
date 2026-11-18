@@ -282,6 +282,9 @@ function invalidateAuthentication() {
   state.workerInfo = null;
   state.activitySlotIDs = null;
   state.workerCheckedAt = 0;
+  state.nodeSnapshot = null;
+  state.activityAgain = state.workersAgain = false;
+  state.activityDataSeq = 0;
   $("worker-status").hidden = true;
   $("workers-dialog").close();
   clearTimeout(state.folderSizesTimer);
@@ -1380,8 +1383,9 @@ function renderWorkers() {
   $("worker-status").title = $("worker-status").textContent;
   $("workers-checked").textContent = info?.checked_at ? `Checked ${new Date(info.checked_at).toLocaleTimeString()}` : "";
 }
-async function refreshWorkers() {
-  if (state.workerRequest) return state.workerRequest;
+async function refreshWorkers(force) {
+  // Same as the activity read: a forced one asked for during a read in flight runs when it ends.
+  if (state.workerRequest) { if (force) state.workersAgain = true; return state.workerRequest; }
   const auth = state.authRevision;
   state.workerRequest = (async () => {
     try {
@@ -1396,6 +1400,9 @@ async function refreshWorkers() {
       state.workerRequest = null;
       renderWorkers();
       controls();
+      const again = state.workersAgain;
+      state.workersAgain = false;
+      if (again && auth === state.authRevision) void refreshWorkers(true);
     }
   })();
   return state.workerRequest;
@@ -7782,6 +7789,7 @@ function renderWorkerActivityRows(data) {
   if (!serverReachable || !data?.available || !live.length) {
     // No worker answered, but the server still knows which builds are running: say so.
     const known = serverReachable ? nodes.reduce((sum, n) => sum + runningBuilds(n).length, 0) : 0;
+    const heldNodes = serverReachable && nodes.some(n => runningBuilds(n).length || n.held_by || n.builds_paused);
     $("worker-capacity").textContent = `Worker slots · Unknown${known ? ` · ${known} build${known === 1 ? "" : "s"}` : ""}`;
     $("activity-checked").textContent = "";
     $("worker-slot-usage").hidden = true;
@@ -7789,7 +7797,7 @@ function renderWorkerActivityRows(data) {
     $("worker-slot-split").hidden = true;
     $("worker-open-settings").hidden = true;
     $("worker-slots").append(node("p",data?.message || "Worker disconnected; slot occupancy is unknown.","metadata"));
-    if (known) {
+    if (heldNodes) {
       const groups = nodes.map(n => ({n, entries: []}));
       const compact = node("div","","slots-compact");
       compact.append(...groups.map(({n, entries}) => slotNodeDetails(n, entries)));
@@ -7992,7 +8000,7 @@ function slotNodeDetails(n, entries) {
   const online = Boolean(n.available && n.activity);
   // The builds come from the server's own store, so a node that does not answer (a build can load
   // its Mac enough to slow the worker) still shows the builds that are running on it.
-  const builds = runningBuilds(n), hold = online ? nodeHoldWord(n) : "";
+  const builds = runningBuilds(n), hold = nodeHoldWord(n);
   for (const e of entries) if (hold && !e.job && !e.unknown) e.held = hold;
   // Slots count encodes only; a build is shown beside them, as the header does.
   const slotsBusy = entries.filter(e => e.job || e.unknown).length, busy = slotsBusy + builds.length;
@@ -8004,7 +8012,7 @@ function slotNodeDetails(n, entries) {
   const summary = node("summary");
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
-    node("span", !online ? [n.message || "Unavailable", builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null].filter(Boolean).join(" · ") : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
+    node("span", !online ? [n.message || "Unavailable", builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null, hold === "transcode paused" ? hold : null].filter(Boolean).join(" · ") : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
       hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
   // The builds pause is a state, so it is a paused badge, as in the workers dialog, not metadata text.
   if (n.builds_paused) summary.append(pausedBadge("Builds paused"));
@@ -8042,7 +8050,7 @@ function slotTable(groups) {
   for (const {n, entries} of groups) {
     if (n.builds_paused) buildsPaused.push(n.name || "node");
     if (!(n.available && n.activity)) {
-      down.push(`${n.name} · ${n.message || "Unavailable"}`);
+      down.push([n.name, n.message || "Unavailable", nodeHoldWord(n) === "transcode paused" ? "transcode paused" : null].filter(Boolean).join(" · "));
       for (const b of runningBuilds(n)) busy.push({n, b});
       continue;
     }
@@ -8132,29 +8140,46 @@ function applyNodeState(data, nodes) {
   }
   return changed;
 }
+// Until the first worker-activity answer arrives (it waits for the workers) the node state
+// stands in for it, so a build or a hold is on screen at once. Nothing else is claimed:
+// every node is marked as still being read.
+function placeholderActivity(nodes) {
+  return {
+    available: false, placeholder: true, message: "Reading the workers…",
+    workers: nodes.map(n => ({name: n.name, available: false, message: "Reading the workers…", builds: n.builds, held_by: n.held_by, builds_paused: n.builds_paused})),
+  };
+}
 async function refreshNodeState() {
-  if (state.nodeStateRequest || $("workspace").hidden || !serverReachable || !Array.isArray(state.activityData?.workers)) return;
+  if (state.nodeStateRequest || $("workspace").hidden || !serverReachable) return;
   const auth = state.authRevision, seq = state.stateSeq = (state.stateSeq || 0) + 1;
   state.nodeStateRequest = true;
   try {
     const data = await api("worker-node-state");
     if (auth !== state.authRevision || $("workspace").hidden || !Array.isArray(data?.nodes)) return;
-    const before = nodeStateShape(state.activityData?.workers);
+    // A worker-activity answer asked for after this read was sent can already be on screen: it is newer.
+    if (seq < (state.activityDataSeq || 0)) return;
     state.nodeSnapshot = {seq, nodes: data.nodes};
+    if (!Array.isArray(state.activityData?.workers)) {
+      if (state.activityRequest && !state.activityCheckedAt && data.nodes.length) renderWorkerActivity(placeholderActivity(data.nodes));
+      return;
+    }
+    const placeholder = Boolean(state.activityData.placeholder), before = nodeStateShape(state.activityData.workers);
     if (applyNodeState(state.activityData, data.nodes)) renderWorkerActivity(state.activityData);
     // A build or a hold changed: the slots (an encode freezes or goes back), the builds table
     // and the queue rows follow it now, not at the next poll.
-    if (before !== nodeStateShape(state.activityData?.workers)) {
+    if (!placeholder && before !== nodeStateShape(state.activityData.workers)) {
       void refreshWorkerActivity(true);
-      void refreshWorkers();
-      if (!state.jobsLoading) void safe(() => loadJobs());
+      void refreshWorkers(true);
+      void safe(() => loadJobs());
     }
   } catch {
     // The slower reads report an unreachable server; this one only stays quiet.
   } finally { state.nodeStateRequest = false; }
 }
 async function refreshWorkerActivity(force) {
-  if (state.activityRequest || (!force && $("workspace").hidden)) return;
+  // A forced read asked for while one is in flight runs when it ends: the one in flight may predate the change.
+  if (state.activityRequest) { if (force) state.activityAgain = true; return; }
+  if (!force && $("workspace").hidden) return;
   const auth = state.authRevision, seq = state.stateSeq = (state.stateSeq || 0) + 1;
   state.activityRequest = true;
   try {
@@ -8163,10 +8188,16 @@ async function refreshWorkerActivity(force) {
     state.activityCheckedAt = Date.now();
     // This answer may have waited on a slow worker: a node state read after it was asked for is newer.
     if (state.nodeSnapshot && state.nodeSnapshot.seq > seq) applyNodeState(data, state.nodeSnapshot.nodes);
+    state.activityDataSeq = seq;
     renderWorkerActivity(data);
   } catch {
     if (auth === state.authRevision) renderWorkerActivity(null);
-  } finally { state.activityRequest = false; }
+  } finally {
+    state.activityRequest = false;
+    const again = state.activityAgain;
+    state.activityAgain = false;
+    if (again && auth === state.authRevision) void refreshWorkerActivity(true);
+  }
 }
 
 // Review: the maintenance queue of entries a model or the owner keeps adding

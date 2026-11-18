@@ -119,3 +119,73 @@ func TestWorkerActivityDoesNotWaitForASlowWorkerAndKeepsItsBuilds(t *testing.T) 
 		t.Fatal("the build the server knows stays in the answer", node)
 	}
 }
+
+// One node loaded by a build answers slowly while the other is fine: the fast
+// one is reported as usual and the slow one keeps its build, in one answer
+// that does not wait for the slow worker.
+func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
+	old := activityProbeTimeout
+	activityProbeTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { activityProbeTimeout = old })
+
+	s, h := testUI(t)
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	t.Cleanup(slow.Close)
+	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/ready":
+			writeJSON(w, 200, map[string]bool{"ready": true})
+		case "/v1/activity":
+			writeJSON(w, 200, map[string]any{"worker_slots_total": 2, "worker_slots_used": 0, "jobs": []any{}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(fast.Close)
+	executor := func(url string) *httpclient.HTTPExecutor {
+		e, err := httpclient.NewHTTPExecutor(httpclient.HTTPConfig{BaseURL: url, Token: strings.Repeat("w", 16)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e
+	}
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: "m1", Executor: executor(slow.URL), Address: "192.0.2.10", Podcast: true},
+		{Name: "m4", Executor: executor(fast.URL), Address: "192.0.2.11"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := s.engine.Deps()
+	deps.Transcode, deps.Workers = nil, set
+	s.engine = action.NewEngine(deps)
+	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"}); err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	activity := getJSON(t, h, "/api/maintenance/worker-activity")
+	if took := time.Since(started); took > 3*time.Second {
+		t.Fatalf("the activity view waited %v for the slow worker", took)
+	}
+	list, _ := activity["workers"].([]any)
+	if len(list) != 2 {
+		t.Fatal(activity)
+	}
+	byName := map[string]map[string]any{}
+	for _, raw := range list {
+		node := raw.(map[string]any)
+		byName[node["name"].(string)] = node
+	}
+	if byName["m4"]["available"] != true || byName["m4"]["builds"] != nil {
+		t.Fatal("the fast node is reported as usual", byName["m4"])
+	}
+	if builds, _ := byName["m1"]["builds"].([]any); byName["m1"]["available"] != false || len(builds) != 1 || byName["m1"]["held_by"] != "builds" {
+		t.Fatal("the slow node is unavailable but keeps its build", byName["m1"])
+	}
+}
