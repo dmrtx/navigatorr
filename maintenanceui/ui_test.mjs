@@ -2866,7 +2866,9 @@ test("a slow worker read does not bring back an older state than the node state 
   h.context.activity={available:true,workers:[worker()]};
   h.context.slow=slow.promise;
   h.context.build=build;
-  h.run('state.tab="jobs";refreshWorkers=async()=>{};loadJobs=async()=>{};api=async path=>path==="worker-activity"?slow:{nodes:[{name:"m1",held_by:"builds",builds:[build]}]};renderWorkerActivity(activity)');
+  h.context.reads=0;
+  h.context.again={available:true,workers:[{name:"m1",available:true,held_by:"builds",builds:[build],activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}}}]};
+  h.run('state.tab="jobs";refreshWorkers=async()=>{};loadJobs=async()=>{};api=async path=>path==="worker-activity"?(++reads===1?slow:again):{nodes:[{name:"m1",held_by:"builds",builds:[build]}]};renderWorkerActivity(activity)');
   // The activity read is sent first and hangs on the slow worker; the node state read is sent after it and answers.
   const activity=h.run("refreshWorkerActivity(true)");
   await h.run("refreshNodeState()");
@@ -2875,6 +2877,9 @@ test("a slow worker read does not bring back an older state than the node state 
   h.context.late={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}}}]};
   slow.resolve(h.context.late);
   await activity;
+  // The re-read the change asked for runs after it, and the build stays in both.
+  for(let i=0;i<8;i++) await Promise.resolve();
+  assert.equal(h.context.reads,2);
   assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
 });
 
@@ -2949,6 +2954,12 @@ test("every node down still shows what holds it, and the first read shows the bu
   assert.equal(table().children[0].children[1].children.length,1);
   // Standing in is not a change to react to: no other read starts.
   assert.deepEqual(h.context.calls,[]);
+  // A build ending while the first read is still pending: the builds table and the queue are read again, the slots are not (that read is on its way).
+  h.context.calls.length=0;
+  h.run('api=async()=>({nodes:[{name:"m1"},{name:"m4"}]})');
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown");
+  assert.deepEqual(h.context.calls,["workers","jobs"]);
   // Once a first read is not pending (it failed), there is nothing to stand in for.
   h.run('state.activityRequest=false;state.activityData=null;renderWorkerActivity(null)');
   await h.run("refreshNodeState()");

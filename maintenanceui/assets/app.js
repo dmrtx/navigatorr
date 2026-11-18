@@ -283,6 +283,7 @@ function invalidateAuthentication() {
   state.activitySlotIDs = null;
   state.workerCheckedAt = 0;
   state.nodeSnapshot = null;
+  state.activityCheckedAt = 0;
   state.activityAgain = state.workersAgain = false;
   state.activityDataSeq = 0;
   $("worker-status").hidden = true;
@@ -8167,8 +8168,9 @@ async function refreshNodeState() {
     if (applyNodeState(state.activityData, data.nodes)) renderWorkerActivity(state.activityData);
     // A build or a hold changed: the slots (an encode freezes or goes back), the builds table
     // and the queue rows follow it now, not at the next poll.
-    if (!placeholder && before !== nodeStateShape(state.activityData.workers)) {
-      void refreshWorkerActivity(true);
+    if (before !== nodeStateShape(state.activityData.workers)) {
+      // The first activity read is already on its way, and its answer takes this state over: it needs no second one.
+      if (!placeholder) void refreshWorkerActivity(true);
       void refreshWorkers(true);
       void safe(() => loadJobs());
     }

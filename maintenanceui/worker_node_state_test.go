@@ -189,3 +189,16 @@ func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
 		t.Fatal("the slow node is unavailable but keeps its build", byName["m1"])
 	}
 }
+
+// An install without a worker set (the single local transcoder) has no nodes to
+// report; the page polls this every couple of seconds, so it must answer, not fail.
+func TestWorkerNodeStateWithoutWorkersAnswersEmpty(t *testing.T) {
+	s, h := testUI(t)
+	deps := s.engine.Deps()
+	deps.Workers = nil
+	s.engine = action.NewEngine(deps)
+	out := getJSON(t, h, "/api/maintenance/worker-node-state")
+	if nodes, ok := out["nodes"].([]any); !ok || len(nodes) != 0 {
+		t.Fatal("no workers, no nodes", out)
+	}
+}
