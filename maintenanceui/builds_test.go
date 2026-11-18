@@ -181,6 +181,7 @@ func TestBuildsTokenCallsOnlyTheBuildEndpoints(t *testing.T) {
 		{"GET", "/api/maintenance/operations", ""},
 		{"GET", "/api/maintenance/workers", ""},
 		{"GET", "/api/maintenance/worker-activity", ""},
+		{"GET", "/api/maintenance/worker-node-state", ""},
 		{"GET", "/api/maintenance/worker-pause", ""},
 		{"POST", "/api/maintenance/worker-pause", `{"node":"default","mode":"suspend"}`},
 		{"POST", "/api/maintenance/worker-drain", `{"enabled":true}`},
