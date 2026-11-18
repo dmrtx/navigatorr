@@ -97,3 +97,43 @@ transcode:
 		t.Fatalf("publish policies: %q %q %q", workers[0].PublishPolicy, workers[1].PublishPolicy, workers[2].PublishPolicy)
 	}
 }
+
+func TestTranscodeWorkerAliases(t *testing.T) {
+	load := func(second string) (*Config, error) {
+		return Load(writeHTTPConfig(t, "aliases.yaml", `
+transcode:
+  enabled: true
+  workers:
+    - name: m1pro
+      aliases: [m1]
+      base_url: "http://192.0.2.1:8097"
+      token_file: "/run/secrets/tok"
+    - name: m4mini
+`+second+`
+      base_url: "http://192.0.2.2:8097"
+      token_file: "/run/secrets/tok"
+`))
+	}
+	cfg, err := load("      aliases: [m4]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers, err := cfg.Transcode.BuildWorkerConfigs()
+	if err != nil || len(workers) != 2 || strings.Join(workers[0].Aliases, ",") != "m1" || strings.Join(workers[1].Aliases, ",") != "m4" {
+		t.Fatal(workers, err)
+	}
+	for name, second := range map[string]string{
+		"an alias used by another worker": "      aliases: [m1]",
+		"an alias that is a worker name":  "      aliases: [m1pro]",
+		"an invalid alias":                "      aliases: [\"M 4\"]",
+		"video-worker as an alias":        "      aliases: [video-worker]",
+	} {
+		cfg, err := load(second)
+		if err == nil {
+			_, err = cfg.Transcode.BuildWorkerConfigs()
+		}
+		if err == nil || !strings.Contains(err.Error(), "alias") {
+			t.Fatalf("%s must be refused by the alias checks, got %v", name, err)
+		}
+	}
+}
