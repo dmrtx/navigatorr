@@ -19,6 +19,11 @@ func TestRenameWorkerMovesEverythingKeyedByTheFormerName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.db.Exec(`INSERT INTO transcode_batch_items (batch_id, item_key, file_path, display_label, decision, profile, reasons_json, status, child_action_id, candidate_path, error, attempts, created_at, updated_at, worker)
+		VALUES ('b1', 'k1', '/p/e1.mkv', 'e1', 'transcode', 'general-hevc', '[]', 'queued', 'c1', '', '', 0, 'now', 'now', 'm1'),
+		       ('b1', 'k2', '/p/e2.mkv', 'e2', 'transcode', 'general-hevc', '[]', 'queued', 'c2', '', '', 0, 'now', 'now', 'm4')`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.SetWorkerSlotSettings("m1", 2, 1, 3, 0, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +44,16 @@ func TestRenameWorkerMovesEverythingKeyedByTheFormerName(t *testing.T) {
 	}
 	if err := s.db.QueryRow(`SELECT state_json FROM action_instances WHERE id = 'a2'`).Scan(&state); err != nil || !strings.Contains(state, `"m4"`) {
 		t.Fatal("another worker's action is left alone", state, err)
+	}
+	var onNew, onOld, other int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM transcode_batch_items WHERE worker = 'm1pro'`).Scan(&onNew); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM transcode_batch_items WHERE worker = 'm1'`).Scan(&onOld); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM transcode_batch_items WHERE worker = 'm4'`).Scan(&other); err != nil || onNew != 1 || onOld != 0 || other != 1 {
+		t.Fatal("batch items follow, another worker's stay", onNew, onOld, other, err)
 	}
 	if got, err := s.GetBuild(build.ID); err != nil || got.Target != "m1pro" {
 		t.Fatal("the build target follows", got, err)

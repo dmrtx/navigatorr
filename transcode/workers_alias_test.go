@@ -43,6 +43,7 @@ func TestWorkerAliasesAreChecked(t *testing.T) {
 		"an alias that is another worker's name": {func() NamedWorker { x := w("a", "b"); x.Podcast = true; return x }(), w("b")},
 		"an alias used twice":                    {func() NamedWorker { x := w("a", "x"); x.Podcast = true; return x }(), w("b", "x")},
 		"an invalid alias":                       {func() NamedWorker { x := w("a", "Not Valid"); x.Podcast = true; return x }()},
+		"video-worker as an alias":               {func() NamedWorker { x := w("a", DefaultWorkerName); x.Podcast = true; return x }()},
 		"an alias that is the worker's own name": {func() NamedWorker { x := w("a", "a"); x.Podcast = true; return x }()},
 	} {
 		if _, err := NewWorkerSet(list); err == nil {

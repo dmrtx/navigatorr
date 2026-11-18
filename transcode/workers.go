@@ -81,6 +81,9 @@ func NewWorkerSet(list []NamedWorker) (*WorkerSet, error) {
 			if names[alias] {
 				return nil, fmt.Errorf("transcode workers: alias %q of worker %q is also a worker name", alias, w.Name)
 			}
+			if alias == DefaultWorkerName {
+				return nil, fmt.Errorf("transcode workers: %q cannot be an alias (it already means the legacy worker)", alias)
+			}
 			if _, dup := aliases[alias]; dup {
 				return nil, fmt.Errorf("transcode workers: alias %q is used twice", alias)
 			}

@@ -126,6 +126,7 @@ transcode:
 		"an alias used by another worker": "      aliases: [m1]",
 		"an alias that is a worker name":  "      aliases: [m1pro]",
 		"an invalid alias":                "      aliases: [\"M 4\"]",
+		"video-worker as an alias":        "      aliases: [video-worker]",
 	} {
 		if cfg, err := load(second); err == nil {
 			if _, err = cfg.Transcode.BuildWorkerConfigs(); err == nil {

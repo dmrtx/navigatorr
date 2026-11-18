@@ -827,6 +827,8 @@ func (t *TranscodeConfig) EffectiveWorkers() ([]TranscodeWorkerConfig, error) {
 			switch {
 			case !transcode.ValidWorkerName(alias):
 				return nil, fmt.Errorf("transcode worker %q: invalid alias %q (lowercase letters, digits and dashes)", w.Name, alias)
+			case alias == transcode.DefaultWorkerName:
+				return nil, fmt.Errorf("transcode worker %q: %q cannot be an alias (it already means the legacy worker)", w.Name, alias)
 			case seen[alias]:
 				return nil, fmt.Errorf("transcode worker %q: alias %q is also a worker name", w.Name, alias)
 			case aliases[alias] != "":
