@@ -712,6 +712,7 @@ func (e *Engine) NodeBuilds(node string) []transcode.NodeBuild {
 	if err != nil {
 		return nil
 	}
+	node = e.resolveWorker(node)
 	var out []transcode.NodeBuild
 	for _, b := range active {
 		if w, ok := e.buildNode(b.Target); ok && w.Name == node {

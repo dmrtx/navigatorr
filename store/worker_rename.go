@@ -3,7 +3,7 @@ package store
 import "fmt"
 
 // RenameWorker rewrites what the store kept under a worker's former name (an
-// alias in the worker config) to its current name, in one transaction: the
+// alias in the worker config) to its current name, one transaction per alias: the
 // worker in the state of every action, in batch items, in builds and the slot
 // settings, transcode pause and builds pause of the node. A node that already
 // has its own row under the new name keeps it and the old one is dropped, so the

@@ -128,10 +128,12 @@ transcode:
 		"an invalid alias":                "      aliases: [\"M 4\"]",
 		"video-worker as an alias":        "      aliases: [video-worker]",
 	} {
-		if cfg, err := load(second); err == nil {
-			if _, err = cfg.Transcode.BuildWorkerConfigs(); err == nil {
-				t.Fatalf("%s must be refused", name)
-			}
+		cfg, err := load(second)
+		if err == nil {
+			_, err = cfg.Transcode.BuildWorkerConfigs()
+		}
+		if err == nil || !strings.Contains(err.Error(), "alias") {
+			t.Fatalf("%s must be refused by the alias checks, got %v", name, err)
 		}
 	}
 }
