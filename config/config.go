@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -763,6 +764,11 @@ type TranscodeWorkerConfig struct {
 	// worker's disk until the promotion is approved. Only set it on a worker that
 	// runs a version with deferred publication and enables it.
 	PublishPolicy string `yaml:"publish_policy"`
+	// Aliases are former names of this worker. A client that still says one of
+	// them (a build target, a node in a request) reaches this worker, and what
+	// the server stored under it is rewritten to Name at start. Keep an alias
+	// while anything may still say it; it is safe to leave it for good.
+	Aliases []string `yaml:"aliases"`
 }
 
 // EffectiveWorkers is the configured worker list: `workers`, or the single
@@ -808,8 +814,25 @@ func (t *TranscodeConfig) EffectiveWorkers() ([]TranscodeWorkerConfig, error) {
 			return nil, fmt.Errorf("transcode worker %q: %w", w.Name, err)
 		}
 		w.PublishPolicy = policy
+		for j, alias := range w.Aliases {
+			w.Aliases[j] = strings.TrimSpace(alias)
+		}
 		if w.Podcast {
 			podcast++
+		}
+	}
+	aliases := map[string]string{}
+	for _, w := range workers {
+		for _, alias := range w.Aliases {
+			switch {
+			case !transcode.ValidWorkerName(alias):
+				return nil, fmt.Errorf("transcode worker %q: invalid alias %q (lowercase letters, digits and dashes)", w.Name, alias)
+			case seen[alias]:
+				return nil, fmt.Errorf("transcode worker %q: alias %q is also a worker name", w.Name, alias)
+			case aliases[alias] != "":
+				return nil, fmt.Errorf("transcode workers: alias %q is used by %q and %q", alias, aliases[alias], w.Name)
+			}
+			aliases[alias] = w.Name
 		}
 	}
 	switch podcast {
@@ -831,6 +854,8 @@ type WorkerExecutorConfig struct {
 	MaxParallelJobs int
 	// PublishPolicy is "" for on_encode, or transcode.PublishPolicyOnApproval.
 	PublishPolicy string
+	// Aliases are the worker's former names.
+	Aliases []string
 }
 
 // BuildWorkerConfigs maps the effective worker list onto the
@@ -847,7 +872,7 @@ func (t *TranscodeConfig) BuildWorkerConfigs() ([]WorkerExecutorConfig, error) {
 		for j, m := range w.PathMappings {
 			mappings[j] = transcode.PathMapping{Local: m.GetLocal(), Remote: m.GetRemote()}
 		}
-		out[i] = WorkerExecutorConfig{Name: w.Name, Podcast: w.Podcast, MaxParallelJobs: w.MaxParallelJobs, PublishPolicy: w.PublishPolicy, HTTP: httpclient.HTTPConfig{
+		out[i] = WorkerExecutorConfig{Name: w.Name, Aliases: slices.Clone(w.Aliases), Podcast: w.Podcast, MaxParallelJobs: w.MaxParallelJobs, PublishPolicy: w.PublishPolicy, HTTP: httpclient.HTTPConfig{
 			BaseURL:        strings.TrimSpace(w.BaseURL),
 			Token:          strings.TrimSpace(w.Token),
 			TokenFile:      strings.TrimSpace(w.TokenFile),

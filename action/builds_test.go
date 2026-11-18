@@ -1099,3 +1099,63 @@ func TestAdmitOnNodeDefersToARunningBuildUnderTheLock(t *testing.T) {
 		t.Fatal("nothing was persisted on the node")
 	}
 }
+
+// A node renamed with its former name kept as an alias: a client that still
+// says the old name reaches the node, a retry with either name is the one
+// build, and what was stored under the old name is rewritten at start.
+func TestNodeRenameKeepsTheFormerNameWorking(t *testing.T) {
+	clock := &buildClock{t: time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)}
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{
+		{Name: "m1pro", Aliases: []string{"m1"}, Executor: &mockTranscodeExecutor{}},
+		{Name: "m4mini", Aliases: []string{"m4"}, Executor: &mockTranscodeExecutor{}, Podcast: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := setupTestStore(t)
+	// What the server stored before the rename.
+	old, err := st.CreateBuild(store.Build{Target: "m1", Source: "ci", Holder: "r", Kind: "k", Title: "before", PreemptMode: store.WorkerPauseGraceful}, clock.now(), time.Hour, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetBuildPause("m1", true); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(EngineDeps{Store: st, Config: &config.Config{}, Workers: set, DrainSettle: -1, Now: clock.now})
+	if err := e.RenameAliasedWorkers(); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.GetBuild(old.ID); err != nil || got.Target != "m1pro" {
+		t.Fatal("the stored build follows the node", got, err)
+	}
+	if !e.NodeBuildsPaused("m1") || !e.NodeBuildsPaused("m1pro") || e.NodeBuildsPaused("m4mini") {
+		t.Fatal("the builds pause follows the node, under either name")
+	}
+	if err := e.RenameAliasedWorkers(); err != nil {
+		t.Fatal("a second start finds nothing to move", err)
+	}
+	// A client with the old name: the build is recorded under the current one, and holds the node.
+	if err := st.SetBuildPause("m1pro", false); err != nil {
+		t.Fatal(err)
+	}
+	b, err := e.CreateBuild(context.Background(), BuildInput{ID: "bld_alias0001", Target: "m1", Source: "ci", Holder: "r", Kind: "k", Title: "after", PreemptMode: store.WorkerPauseGraceful})
+	if err != nil || b.Target != "m1pro" || !b.HoldsTranscodeNode {
+		t.Fatal("an old target is the node", b, err)
+	}
+	again, err := e.CreateBuild(context.Background(), BuildInput{ID: "bld_alias0001", Target: "m1pro", Source: "ci", Holder: "r", Kind: "k", Title: "after", PreemptMode: store.WorkerPauseGraceful})
+	if err != nil || again.ID != b.ID {
+		t.Fatal("the same build asked again with the other name is the one build", again, err)
+	}
+	for _, target := range []string{"m1", "m1pro"} {
+		list, err := e.ListBuilds(store.BuildFilter{Target: target})
+		if err != nil || len(list) != 2 {
+			t.Fatalf("listing by %q: %d builds, %v", target, len(list), err)
+		}
+	}
+	if !e.workerPaused("m1pro") {
+		t.Fatal("the running builds hold the renamed node")
+	}
+	if e.resolveWorker("m4") != "m4mini" || e.resolveWorker("") != "m1pro" || e.resolveWorker("video-worker") != "m1pro" {
+		t.Fatal("a stored name resolves to the current worker")
+	}
+}

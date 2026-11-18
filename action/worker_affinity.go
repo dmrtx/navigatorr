@@ -87,19 +87,23 @@ func (e *Engine) workersConfigured() bool { return e.deps.Workers.Len() > 0 }
 // legacyWorker is the worker that jobs from before workers had names belong
 // to (see above): video-worker when configured, else the first worker.
 func (e *Engine) legacyWorker() string {
-	if _, ok := e.deps.Workers.Get(transcode.DefaultWorkerName); ok || !e.workersConfigured() {
+	if w, ok := e.deps.Workers.Get(transcode.DefaultWorkerName); ok {
+		return w.Name
+	}
+	if !e.workersConfigured() {
 		return transcode.DefaultWorkerName
 	}
 	return e.deps.Workers.All()[0].Name
 }
 
 // resolveWorker maps a stored worker name to the worker it means: an empty
-// name, or video-worker once no worker has that name, is the legacy worker.
+// name, or video-worker once no worker has that name, is the legacy worker; a
+// former name of a worker (an alias) is that worker.
 func (e *Engine) resolveWorker(name string) string {
 	if name == "" || name == transcode.DefaultWorkerName {
 		return e.legacyWorker()
 	}
-	return name
+	return e.deps.Workers.Canonical(name)
 }
 
 // holdsWorkerJob reports whether an action's state holds a job on a worker,
@@ -301,6 +305,27 @@ func (e *Engine) workersReady(ctx context.Context, workers []transcode.NamedWork
 	}
 	wg.Wait()
 	return ready
+}
+
+// RenameAliasedWorkers rewrites what the store kept under a worker's former
+// name (its aliases in the config) to its current name: the worker of every
+// action and batch item, builds, and the node's slot settings and pauses. It
+// runs before the reconciler starts and is a no-op once nothing is left under
+// a former name.
+func (e *Engine) RenameAliasedWorkers() error {
+	if e.deps.Store == nil {
+		return nil
+	}
+	for _, r := range e.deps.Workers.Renames() {
+		n, err := e.deps.Store.RenameWorker(r[0], r[1])
+		if err != nil {
+			return fmt.Errorf("renaming worker %s to %s: %w", r[0], r[1], err)
+		}
+		if n > 0 {
+			log.Printf("worker rename: %d rows kept under %s now belong to %s", n, r[0], r[1])
+		}
+	}
+	return nil
 }
 
 // AssignEarlierWorkerActions stamps the legacy worker (see above) on every

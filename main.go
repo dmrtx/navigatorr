@@ -214,6 +214,10 @@ func main() {
 	if actEngine != nil {
 		// Jobs from before workers had names keep their worker; this runs
 		// before anything polls them.
+		if err := actEngine.RenameAliasedWorkers(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		if err := actEngine.AssignEarlierWorkerActions(); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
@@ -350,7 +354,7 @@ func buildTranscodeWorkers(tc config.TranscodeConfig) (*transcode.WorkerSet, err
 				address = u.Host
 			}
 			internal.Logf("transcode worker configured: %s http base=%s", wc.Name, exec.BaseURL())
-			workers = append(workers, transcode.NamedWorker{Name: wc.Name, Executor: exec, Address: address, Podcast: wc.Podcast, MaxParallelJobs: wc.MaxParallelJobs, PublishPolicy: wc.PublishPolicy})
+			workers = append(workers, transcode.NamedWorker{Name: wc.Name, Aliases: wc.Aliases, Executor: exec, Address: address, Podcast: wc.Podcast, MaxParallelJobs: wc.MaxParallelJobs, PublishPolicy: wc.PublishPolicy})
 		}
 		return transcode.NewWorkerSet(workers)
 	case "ssh":

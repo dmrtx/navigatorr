@@ -593,6 +593,19 @@ To prevent unbounded JSON responses when batching entire series or large seasons
 - **Safe cancellation semantics**: Calling `action_resume` with `decision: "cancel"` records cancellation before new work can start, cancels active child actions and their worker jobs, and records any cancellation errors in the batch result.
 - **Pause/resume semantics**: Passing `paused: true` or resuming with `decision: "pause"` transitions the batch to `waiting_decision`. Resuming with `decision: "resume"` cleanly continues remaining items.
 
+### Renaming a worker (`aliases`)
+
+A worker name is a durable identity: jobs, batch items, builds, slot settings and pauses are kept under it. To rename a worker without losing any of that, give it the new `name` and list the old one in `aliases`:
+
+```yaml
+transcode:
+  workers:
+    - name: m1pro
+      aliases: [m1]
+```
+
+An alias is a former name that still reaches the worker: a build target, the `node` of a pause or a slot request, a stored job's worker. At start (before anything polls) the server rewrites what the store kept under each alias to the current name, in one transaction: the `worker` and `upload_worker` of every action, batch items, builds (any status), and the node's slot settings, transcode pause and builds pause. When the current name already has its own slot settings or pause row, that row wins and the old one is dropped. Starting again changes nothing. A build asked for with the old target is recorded under the new name, so the same build asked for again with either name is one build, and `GET /builds?target=` takes either. Aliases are valid worker names, never another worker's name, and unique across the set; leaving one in place after every client has moved is harmless.
+
 ### Concurrency and `worker_busy` behavior
 
 - **Parallelism**: A batch keeps as many children in flight as the worker's video pool: its [parallel jobs](#parallel-jobs-on-a-node), or its video slots when the pool is split. The server reads that from `GET /v1/slots` (cached for 30 seconds; an unreachable worker keeps the last value it reported). The server's `transcode.max_parallel_jobs` is an optional cap on top: `0` follows the worker, a positive value caps each batch at that many. A worker that cannot report its pool falls back to the cap, or one at a time without one. When the result is 1, media files are transcoded serially one after another.

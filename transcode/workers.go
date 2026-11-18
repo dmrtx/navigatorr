@@ -10,7 +10,10 @@ import (
 // The server drives one or more named transcode workers. A job belongs to the
 // worker it was assigned when its action was admitted: every status read,
 // cancel and cleanup for it goes to that worker and no other, so a worker name
-// is a durable identity. Renaming a worker is removing it and adding another.
+// is a durable identity. Renaming a worker is removing it and adding another,
+// unless the old name is kept as an alias: an alias is a former name that still
+// finds the worker (a client with the old name keeps working) and that the
+// server rewrites to the new name in what it stored (see store.RenameWorker).
 
 // DefaultWorkerName names the one worker of the single base_url config form,
 // and the node the per-node slot settings used before workers had names.
@@ -26,6 +29,9 @@ func ValidWorkerName(name string) bool { return workerNameRegex.MatchString(name
 type NamedWorker struct {
 	Name     string
 	Executor Executor
+	// Aliases are former names of this worker. They resolve to it, never
+	// name another worker, and are valid worker names.
+	Aliases []string
 	// Address is the worker's host, for display only.
 	Address string
 	// Podcast marks the one worker that runs podcast work. Its ad catalog
@@ -43,6 +49,8 @@ type NamedWorker struct {
 // every tie, so scheduling is deterministic. A nil set has no workers.
 type WorkerSet struct {
 	list []NamedWorker
+	// aliases maps a former name to the position of its worker in list.
+	aliases map[string]int
 }
 
 // NewWorkerSet checks a worker list: at least one worker, valid unique names,
@@ -51,16 +59,33 @@ func NewWorkerSet(list []NamedWorker) (*WorkerSet, error) {
 	if len(list) == 0 {
 		return nil, fmt.Errorf("transcode workers: at least one worker is required")
 	}
-	seen := make(map[string]bool, len(list))
-	podcast := 0
+	names := make(map[string]bool, len(list))
 	for _, w := range list {
+		names[w.Name] = true
+	}
+	aliases := map[string]int{}
+	podcast := 0
+	used := make(map[string]bool, len(list))
+	for i, w := range list {
 		if !ValidWorkerName(w.Name) {
 			return nil, fmt.Errorf("transcode workers: invalid worker name %q (lowercase letters, digits and dashes)", w.Name)
 		}
-		if seen[w.Name] {
+		if used[w.Name] {
 			return nil, fmt.Errorf("transcode workers: worker name %q is used twice", w.Name)
 		}
-		seen[w.Name] = true
+		used[w.Name] = true
+		for _, alias := range w.Aliases {
+			if !ValidWorkerName(alias) {
+				return nil, fmt.Errorf("transcode workers: invalid alias %q for worker %q (lowercase letters, digits and dashes)", alias, w.Name)
+			}
+			if names[alias] {
+				return nil, fmt.Errorf("transcode workers: alias %q of worker %q is also a worker name", alias, w.Name)
+			}
+			if _, dup := aliases[alias]; dup {
+				return nil, fmt.Errorf("transcode workers: alias %q is used twice", alias)
+			}
+			aliases[alias] = i
+		}
 		if w.Executor == nil {
 			return nil, fmt.Errorf("transcode workers: worker %q has no executor", w.Name)
 		}
@@ -77,7 +102,7 @@ func NewWorkerSet(list []NamedWorker) (*WorkerSet, error) {
 	if podcast != 1 {
 		return nil, fmt.Errorf("transcode workers: exactly one worker must run podcast work, %d do", podcast)
 	}
-	return &WorkerSet{list: append([]NamedWorker(nil), list...)}, nil
+	return &WorkerSet{list: append([]NamedWorker(nil), list...), aliases: aliases}, nil
 }
 
 // SingleWorker is a set of one worker named DefaultWorkerName that also runs
@@ -105,7 +130,7 @@ func (s *WorkerSet) All() []NamedWorker {
 	return append([]NamedWorker(nil), s.list...)
 }
 
-// Get returns the worker with this name.
+// Get returns the worker with this name, or whose former name (alias) it is.
 func (s *WorkerSet) Get(name string) (NamedWorker, bool) {
 	if s == nil {
 		return NamedWorker{}, false
@@ -115,7 +140,34 @@ func (s *WorkerSet) Get(name string) (NamedWorker, bool) {
 			return w, true
 		}
 	}
+	if i, ok := s.aliases[name]; ok {
+		return s.list[i], true
+	}
 	return NamedWorker{}, false
+}
+
+// Canonical is the current name of the worker this name (or alias) means, and
+// the name itself when no worker has it.
+func (s *WorkerSet) Canonical(name string) string {
+	if w, ok := s.Get(name); ok {
+		return w.Name
+	}
+	return name
+}
+
+// Renames lists every alias with the name it now stands for, in config order,
+// for the store to rewrite what it kept under the former name.
+func (s *WorkerSet) Renames() [][2]string {
+	if s == nil {
+		return nil
+	}
+	var out [][2]string
+	for _, w := range s.list {
+		for _, alias := range w.Aliases {
+			out = append(out, [2]string{alias, w.Name})
+		}
+	}
+	return out
 }
 
 // Podcast returns the worker that runs podcast work.

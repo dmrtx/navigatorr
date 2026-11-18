@@ -136,6 +136,14 @@ func (e *Engine) buildNode(target string) (transcode.NamedWorker, bool) {
 	return e.deps.Workers.Get(target)
 }
 
+// canonicalTarget is the node a target names, by its current name, or the target itself when it is no node.
+func (e *Engine) canonicalTarget(target string) string {
+	if w, ok := e.buildNode(target); ok {
+		return w.Name
+	}
+	return target
+}
+
 func (e *Engine) markBuild(b store.Build) store.Build {
 	_, b.HoldsTranscodeNode = e.buildNode(b.Target)
 	return b
@@ -178,7 +186,9 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	if in.Target = strings.TrimSpace(in.Target); !buildTargetPattern.MatchString(in.Target) {
 		return b, invalidBuild("target is required: up to 64 characters of letters, digits, '.', '_' or '-'")
 	}
-	b.Target = in.Target
+	// A target that is a node's former name is that node: the build is recorded under its current name, so
+	// the same build asked again (or listed) with either name is the one build.
+	b.Target = e.canonicalTarget(in.Target)
 	if b.Source, err = checkBuildText("source", in.Source, buildFieldMax, true); err != nil {
 		return b, err
 	}
@@ -450,6 +460,7 @@ func (e *Engine) ListBuilds(f store.BuildFilter) ([]store.Build, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
+	f.Target = e.canonicalTarget(f.Target)
 	list, err := e.deps.Store.ListBuilds(f)
 	return e.markBuilds(list), err
 }
