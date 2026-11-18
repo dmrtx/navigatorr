@@ -2749,6 +2749,135 @@ test("worker slots list running builds, and a node held by a build or a pause of
   assert.match(h.elements.get("worker-capacity").textContent,/0\/0 occupied/);
 });
 
+// A build loads its Mac and the worker there answers slowly or not at all; the server still knows the
+// build, so the page must keep showing it (the activity answer carries the builds from the server's store).
+test("a node that does not answer still shows the builds running on it, in both layouts and the header", () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date(Date.now()-90000).toISOString(),progress:"step 2/5"};
+  const idle=name=>({name,available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}}});
+  const down={name:"m1",available:false,message:"Worker activity unavailable. Slot occupancy is unknown.",held_by:"builds",builds:[build]};
+  const table=()=>h.elements.get("worker-slots").children.at(-1);
+  const summaryText=d=>d.children[0].children.map(c=>c.textContent).join(" ");
+  h.context.activity={available:true,workers:[down,idle("m4")]};
+  h.run("renderWorkerActivity(activity)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/2 occupied · 1 build · 1 of 2 nodes unavailable");
+  const rows=table().children[0].children[1].children;
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].children[0].textContent,"m1 · build");
+  assert.equal(rows[0].children[1].children[0].textContent,"unit tests");
+  assert.equal(table().children.at(-1).textContent,"m1 · Worker activity unavailable. Slot occupancy is unknown.");
+  const phone=h.elements.get("worker-slots").children[0].children[0];
+  assert.match(summaryText(phone),/Worker activity unavailable\. Slot occupancy is unknown\. · 1 build/);
+  assert.match(phone.children[1].children[0].children[0].textContent,/m1 · build · unit tests/);
+  // No worker answers at all: the header and the rows still say a build is running.
+  h.context.activity={available:false,message:"Worker activity unavailable. Slot occupancy is unknown.",workers:[down,{name:"m4",available:false,message:"Worker activity unavailable. Slot occupancy is unknown."}]};
+  h.run("renderWorkerActivity(activity)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown · 1 build");
+  assert.equal(table().children[0].children[1].children.length,1);
+  assert.equal(table().children[0].children[1].children[0].children[1].children[0].textContent,"unit tests");
+  // Without a build nothing changes: Unknown and the message.
+  h.run("activity.workers[0].builds=undefined;renderWorkerActivity(activity)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown");
+  // An unreachable server is not evidence of a build: the last answer is not shown.
+  h.run("activity.workers[0].builds=[{id:'b1',status:'running',title:'x'}];serverReachable=false;renderWorkerActivity(activity)");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · Unknown");
+  h.run("serverReachable=true");
+});
+
+test("the node state read follows a build and a pause at once, apart from the slow worker read", async () => {
+  const h=harness();
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date(Date.now()-90000).toISOString()};
+  const node=name=>({name,available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}}});
+  h.context.activity={available:true,workers:[node("m1"),node("m4")]};
+  h.context.calls=[];
+  h.context.answer={nodes:[{name:"m1"},{name:"m4"}]};
+  h.run('state.tab="jobs";refreshWorkerActivity=async()=>{calls.push("activity")};refreshWorkers=async()=>{calls.push("workers")};loadJobs=async()=>{calls.push("jobs")};api=async path=>{calls.push(path);return JSON.parse(JSON.stringify(answer))};renderWorkerActivity(activity)');
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/4 occupied");
+  // Nothing changed: one small read, nothing else is read again.
+  await h.run("refreshNodeState()");
+  assert.deepEqual(h.context.calls,["worker-node-state"]);
+  // A build starts on m1: the header and the row show it on this read, and the slots, builds table and queue are read again.
+  h.context.calls.length=0;
+  h.context.answer={nodes:[{name:"m1",held_by:"builds",builds:[build]},{name:"m4"}]};
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/2 occupied · 1 build");
+  assert.deepEqual(h.context.calls,["worker-node-state","activity","workers","jobs"]);
+  // Its progress changes: the row follows, but no other read is needed.
+  h.context.calls.length=0;
+  h.context.answer={nodes:[{name:"m1",held_by:"builds",builds:[{...build,progress:"step 3/5"}]},{name:"m4"}]};
+  await h.run("refreshNodeState()");
+  assert.deepEqual(h.context.calls,["worker-node-state"]);
+  assert.equal(h.elements.get("worker-slots").children[1].children[0].children[1].children[0].children[2].children[1].textContent,"ci:runner1 · swift-test · step 3/5");
+  // It ends and the operator pauses m4: both show at once.
+  h.context.calls.length=0;
+  h.context.answer={nodes:[{name:"m1"},{name:"m4",held_by:"operator"}]};
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/2 occupied");
+  assert.equal(h.elements.get("worker-slots").children[1].children[0].textContent,"2 slots available · m1 2 · m4 transcode paused");
+  assert.deepEqual(h.context.calls,["worker-node-state","activity","workers","jobs"]);
+});
+
+test("the node state read waits for no other read, stays quiet on a failure and runs only where the activity shows", async () => {
+  let fail;
+  const h=harness(), pending={promise:new Promise((_, reject) => { fail = reject; })};
+  pending.promise.catch(() => {});
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  h.context.activity={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:1,worker_slots_used:0,jobs:[],slots:{ceiling:1,split:false,video:{total:1,used:0},podcast:{total:0,used:0}}}}]};
+  h.context.reads=0;
+  h.context.pending=pending.promise;
+  h.run('state.tab="jobs";refreshWorkerActivity=async()=>{};refreshWorkers=async()=>{};loadJobs=async()=>{};api=async()=>{reads++;return pending};renderWorkerActivity(activity)');
+  // A read still pending is not asked again.
+  const first=h.run("refreshNodeState()");
+  h.run("nodeStateTick()");
+  assert.equal(h.context.reads,1);
+  fail(new Error("offline"));
+  await first;
+  // The failure left the page as it was and the next tick may read again.
+  assert.match(h.elements.get("worker-capacity").textContent,/0\/1 occupied/);
+  h.run("nodeStateTick()");
+  assert.equal(h.context.reads,2);
+  // Other tabs and a hidden workspace do not read it.
+  const settle=async()=>{for(let i=0;i<6;i++) await Promise.resolve()};
+  await settle();
+  h.run('state.tab="library"');
+  h.run("nodeStateTick()");
+  await settle();
+  assert.equal(h.context.reads,2);
+  h.run('state.tab="jobs";$("workspace").hidden=true');
+  h.run("nodeStateTick()");
+  await settle();
+  assert.equal(h.context.reads,2);
+  h.run('$("workspace").hidden=false');
+  h.run("nodeStateTick()");
+  await settle();
+  assert.equal(h.context.reads,3);
+});
+
+test("a slow worker read does not bring back an older state than the node state already shown", async () => {
+  const h=harness(), slow=deferred();
+  h.elements.get("settings-node-pick").options=[];
+  h.run('$("workspace").hidden=false');
+  const build={id:"b1",source:"ci",holder:"runner1",kind:"swift-test",title:"unit tests",status:"running",started_at:new Date(Date.now()-90000).toISOString()};
+  const worker=extra=>({name:"m1",available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}},...extra});
+  h.context.activity={available:true,workers:[worker()]};
+  h.context.slow=slow.promise;
+  h.context.build=build;
+  h.run('state.tab="jobs";refreshWorkers=async()=>{};loadJobs=async()=>{};api=async path=>path==="worker-activity"?slow:{nodes:[{name:"m1",held_by:"builds",builds:[build]}]};renderWorkerActivity(activity)');
+  // The activity read is sent first and hangs on the slow worker; the node state read is sent after it and answers.
+  const activity=h.run("refreshWorkerActivity(true)");
+  await h.run("refreshNodeState()");
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
+  // The slow answer was written before the build started: it must not hide it.
+  h.context.late={available:true,workers:[{name:"m1",available:true,activity:{details_available:true,worker_slots_total:2,worker_slots_used:0,jobs:[],slots:{ceiling:2,split:false,video:{total:2,used:0},podcast:{total:0,used:0}}}}]};
+  slow.resolve(h.context.late);
+  await activity;
+  assert.equal(h.elements.get("worker-capacity").textContent,"Worker slots · 0/0 occupied · 1 build");
+});
+
 test("the scheduler is a chip beside the slots and the settings link is an icon", () => {
   assert.match(markup,/<div class="activity-heading">.*id="activity-scheduler" class="sched-chip"/s);
   assert.match(markup,/id="worker-open-settings"[^>]*aria-label="Change in Settings"/);

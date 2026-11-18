@@ -2,11 +2,19 @@ package maintenanceui
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/jakenesler/navigatorr/transcode"
 )
+
+// activityProbeTimeout bounds each worker's live read for the activity view. A
+// Mac that is busy with a build can take long to answer; the page must not wait
+// for it (the executor's own deadline is 15 s), because the builds and holds it
+// shows come from the server's store and are known at once.
+var activityProbeTimeout = 5 * time.Second
 
 type workerActivityReader interface {
 	Activity(ctx context.Context) (transcode.WorkerActivity, error)
@@ -45,26 +53,54 @@ func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, out)
 }
 
-func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker) map[string]any {
-	node := map[string]any{"name": worker.Name, "address": worker.Address, "podcast": worker.Podcast, "available": false}
+// nodeStoreState is what the server itself knows about a node without asking
+// its worker: the builds running or waiting on it, what keeps new files off it
+// and whether new builds are refused. It reads stored state only, so it is
+// immediate and does not depend on the node answering.
+func (s *Server) nodeStoreState(name string) map[string]any {
+	state := map[string]any{}
 	// The builds running or waiting on this node, so the activity view can say why it is busy.
-	if builds := s.engine.NodeBuilds(worker.Name); len(builds) > 0 {
-		node["builds"] = builds
+	if builds := s.engine.NodeBuilds(name); len(builds) > 0 {
+		state["builds"] = builds
 	}
 	// What keeps new files off the node, so the slot count can leave it out.
-	if held := s.engine.NodeHeldBy(worker.Name); held != "" {
-		node["held_by"] = held
+	if held := s.engine.NodeHeldBy(name); held != "" {
+		state["held_by"] = held
 	}
 	// Whether new builds on the node are refused, shown beside its slots.
-	if s.engine.NodeBuildsPaused(worker.Name) {
-		node["builds_paused"] = true
+	if s.engine.NodeBuildsPaused(name) {
+		state["builds_paused"] = true
 	}
+	return state
+}
+
+// workerNodeState answers, for every worker, only what the server knows from
+// its store (builds, hold, builds pause). The page polls it every second or two
+// so a build starting, ending or being cancelled, or a pause, shows at once,
+// while the slower worker-activity read keeps the slots.
+func (s *Server) workerNodeState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	workers := s.engine.Deps().Workers.All()
+	nodes := make([]map[string]any, len(workers))
+	for i, worker := range workers {
+		node := s.nodeStoreState(worker.Name)
+		node["name"] = worker.Name
+		nodes[i] = node
+	}
+	writeJSON(w, 200, map[string]any{"nodes": nodes, "at": time.Now().UTC()})
+}
+
+func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker) map[string]any {
+	node := map[string]any{"name": worker.Name, "address": worker.Address, "podcast": worker.Podcast, "available": false}
+	maps.Copy(node, s.nodeStoreState(worker.Name))
 	reader, ok := worker.Executor.(workerActivityReader)
 	if !ok {
 		node["message"] = "Live worker activity requires the HTTP video worker."
 		return node
 	}
-	activity, err := reader.Activity(ctx)
+	probe, cancel := context.WithTimeout(ctx, activityProbeTimeout)
+	defer cancel()
+	activity, err := reader.Activity(probe)
 	if err != nil {
 		node["message"] = "Worker activity unavailable. Slot occupancy is unknown."
 		return node
