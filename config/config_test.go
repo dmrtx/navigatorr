@@ -774,3 +774,37 @@ transcode:
 		}
 	})
 }
+
+// Nodes is registered like any other service: a url, a key and the spec the
+// server itself serves (see docs/nodes/README.md).
+func TestNodesServiceAndDatabasePath(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(`
+services:
+  nodes:
+    url: "http://127.0.0.1:8099"
+    api_key: "example-builds-token-at-least-24-chars"
+    api_version: "/nodes/v1"
+    openapi_url: "http://127.0.0.1:8099/nodes/v1/openapi.json"
+media:
+  allowed_read_roots: ["/media/test"]
+database:
+  path: "/data/navigatorr.db"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, ok := cfg.Services["nodes"]
+	if !ok || svc.APIVersion != "/nodes/v1" || svc.OpenAPIURL == "" || svc.AuthHeader != "X-Api-Key" {
+		t.Fatalf("%+v", svc)
+	}
+	if got := cfg.Database.NodesDatabasePath("/data/navigatorr.db"); got != "/data/nodes.db" {
+		t.Fatal(got)
+	}
+	if got := (DatabaseConfig{NodesPath: "/x/n.db"}).NodesDatabasePath("/data/navigatorr.db"); got != "/x/n.db" {
+		t.Fatal(got)
+	}
+}
