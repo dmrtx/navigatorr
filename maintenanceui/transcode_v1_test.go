@@ -544,6 +544,14 @@ func TestTranscodeV1TooLargeAnswersAnError(t *testing.T) {
 	if c, e := get(t, h, "/transcode/v1/actions", keyHdr()); c != 502 || e["code"] != "internal" {
 		t.Fatal(c, e)
 	}
+	// History that is not a page ({}, null, a sentence) is an error, never an
+	// empty 200.
+	for _, out := range []string{`{}`, `null`, `nothing`} {
+		fakeTool(s, "action_history", func(map[string]any) (*mcp.CallToolResult, error) { return mcp.NewToolResultText(out), nil })
+		if c, e := get(t, h, "/transcode/v1/history", keyHdr()); c != 502 || e["code"] != "internal" {
+			t.Errorf("history answering %s: %d %v", out, c, e)
+		}
+	}
 }
 
 // Numbers and booleans are validated here, not left to the tools, which fall

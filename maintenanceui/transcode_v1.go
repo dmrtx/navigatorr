@@ -120,10 +120,11 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 		return v1Args(r, nil, pInt("offset", 0, 0))
 	}, v1Err{notFound: "not_found", hint: podcastHint}))
 	// Reading a block records read coverage, a side effect that only a GET may
-	// have: HEAD would record it without delivering the body.
-	get("/actions/{id}/podcast/blocks/{block_id}", getOnly(s.v1ActionTool("podcast_block", func(r *http.Request) (map[string]any, string) {
+	// have: HEAD would record it without delivering the body. The route is
+	// NoHead in transcodeapi, whose NewHandler refuses HEAD before this runs.
+	get("/actions/{id}/podcast/blocks/{block_id}", s.v1ActionTool("podcast_block", func(r *http.Request) (map[string]any, string) {
 		return v1Args(r, map[string]any{"block_id": r.PathValue("block_id")}, pInt("offset", 0, 0), pBool("unknown_only"))
-	}, v1Err{notFound: "not_found", hint: podcastHint})))
+	}, v1Err{notFound: "not_found", hint: podcastHint}))
 	get("/actions/{id}/podcast/artifacts/{artifact}", s.v1ActionTool("podcast_artifact", func(r *http.Request) (map[string]any, string) {
 		artifact := r.PathValue("artifact")
 		if !slices.Contains([]string{"transcript", "classifications", "cuts"}, artifact) {
@@ -641,18 +642,6 @@ func v1Args(r *http.Request, fixed map[string]any, ps ...v1Param) (map[string]an
 	return out, ""
 }
 
-// getOnly refuses HEAD (405, Allow: GET) for a route whose read has an effect.
-func getOnly(fn http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
-			w.Header().Set("Allow", "GET")
-			transcodeapi.WriteError(w, 405, "method_not_allowed", "this endpoint answers GET only: reading it records read coverage, which a HEAD must not do", "")
-			return
-		}
-		fn(w, r)
-	}
-}
-
 // logEvents are the action_log entries the engine writes for a workflow
 // instance (identifiers holds the instance id). Every other entry of the log
 // (scan_library, safe_replace, api_call, ...) belongs to other services.
@@ -717,17 +706,26 @@ func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 		}
 		break
 	}
-	var page struct {
-		Records []map[string]any `json:"records"`
+	// A page is an object with a "records" key (null when the log is empty);
+	// {} or null is not a page, and neither is a sentence.
+	var raw map[string]json.RawMessage
+	var pageRecords []map[string]any
+	err := json.Unmarshal([]byte(text), &raw)
+	if err == nil {
+		if rec, ok := raw["records"]; !ok {
+			err = errors.New("no records field")
+		} else {
+			err = json.Unmarshal(rec, &pageRecords)
+		}
 	}
-	if err := json.Unmarshal([]byte(text), &page); err != nil {
+	if err != nil {
 		log.Printf("transcode v1: action_history answered something that is not a page: %v", err)
 		transcodeapi.WriteError(w, 502, "internal", "the history could not be read", "")
 		return
 	}
 	owner := map[string]string{} // instance id -> workflow name ("" when not a transcode one)
 	records := []map[string]any{}
-	for _, rec := range page.Records {
+	for _, rec := range pageRecords {
 		if len(records) >= limit {
 			break
 		}
