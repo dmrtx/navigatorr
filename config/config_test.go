@@ -783,7 +783,7 @@ func TestNodesServiceAndDatabasePath(t *testing.T) {
 services:
   nodes:
     url: "http://127.0.0.1:8099"
-    api_key: "example-builds-token-at-least-24-chars"
+    api_key: "example.builds.token.not.a.secret"
     api_version: "/nodes/v1"
     openapi_url: "http://127.0.0.1:8099/nodes/v1/openapi.json"
 media:
