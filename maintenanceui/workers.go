@@ -125,10 +125,17 @@ func (s *Server) nodeActivity(ctx context.Context, worker transcode.NamedWorker)
 // workers lists every configured worker as a node, with the summary of them
 // all at the top.
 func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
+	observation, nodes := s.workerRows(r.Context())
+	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "message": observation.Message, "observation": observation, "drain": observation.Drain, "nodes": nodes})
+}
+
+// workerRows is the summary observation and one row per configured worker
+// (the rows of the workers list; /transcode/v1 serves the same ones).
+func (s *Server) workerRows(ctx context.Context) (transcode.WorkerObservation, []map[string]any) {
 	transport := s.cfg.Transcode.Executor
-	observation := s.engine.WorkerObservation(r.Context())
+	observation := s.engine.WorkerObservation(ctx)
 	nodes := []map[string]any{}
-	pauses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(r.Context()))
+	pauses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(ctx))
 	for _, o := range observation.Workers {
 		address := ""
 		if worker, ok := s.engine.Deps().Workers.Get(o.Name); ok {
@@ -143,7 +150,7 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	if len(nodes) == 0 {
 		nodes = append(nodes, workerNode(observation, "", transport))
 	}
-	writeJSON(w, 200, map[string]any{"ready": observation.Ready, "checked_at": observation.CheckedAt, "message": observation.Message, "observation": observation, "drain": observation.Drain, "nodes": nodes})
+	return observation, nodes
 }
 
 func workerNode(o transcode.WorkerObservation, address, transport string) map[string]any {

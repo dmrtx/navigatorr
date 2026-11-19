@@ -176,3 +176,7 @@ Workflow filters use Finished for all terminal outcomes; Failed includes failed 
 - A batch's files are sized once, when the batch plans them (the stat it already makes), and the size is kept on the batch item. `operations` rows of a batch carry `selection: {source_bytes, files, sized_files}`: the sum of the sizes on record for every file the batch listed (including those it decided to skip or hold for review, so it is what was selected, not what will be encoded), how many files it lists (a file under two item keys counts once) and how many of those have a size. A client shows the figure as complete only when `sized_files` equals `files`. Files the batch could not stat (outside the read roots, unreadable) and batches planned before this was recorded are unsized and are not measured again, and a size of 0 means unknown. `batch-items` rows carry `source_bytes` per file. The selection figure is read only for the batches on the page returned. A single file's original size is still the encode's own probe (`savings.source_bytes`).
 
 The larger design for an index with change tokens, and what the NAS helper can and cannot hold, is in [files-index-design.md](files-index-design.md).
+
+## Transcode API
+
+A read-only HTTP API for transcode (workers, actions, batches, recipes, backups, podcasts, review queue) is served under `/transcode/v1`, with its OpenAPI document at `/transcode/v1/openapi.json`. Its own key is `web.transcode_token_file`; see [transcode/API_V1.md](transcode/API_V1.md).

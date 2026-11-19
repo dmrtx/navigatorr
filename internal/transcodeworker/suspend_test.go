@@ -420,12 +420,12 @@ func TestSuspendTreatsAGoneProcessAsFrozen(t *testing.T) {
 // running. That limit is documented on suspendControl.
 func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		ownGroup  bool
-		wantState string // of the grandchild while the child is frozen
+		name        string
+		ownGroup    bool
+		wantStopped bool // the grandchild, while the child is frozen
 	}{
-		{"group leader", true, "T"},
-		{"not a leader", false, "S"},
+		{"group leader", true, true},
+		{"not a leader", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := newSuspendControl()
@@ -457,8 +457,32 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 				t.Fatal("the child must be reported frozen")
 			}
 			waitFor(t, "the child to stop", func() bool { return strings.HasPrefix(procState(cmd.Process.Pid), "T") })
-			if got := procState(grandchild); !strings.HasPrefix(got, tc.wantState) {
-				t.Fatalf("grandchild state = %q, want %q", got, tc.wantState)
+			// A group leader is stopped with its group: each member gets the
+			// signal on its own schedule, so the child can show stopped
+			// before the grandchild does; wait for the grandchild too. A child
+			// that is not a leader is signalled alone: the grandchild, though
+			// in the same group, must stay alive (not gone, not a zombie) and
+			// not stopped for a while, not only at the first look.
+			if tc.wantStopped {
+				for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+					got := procState(grandchild)
+					if strings.HasPrefix(got, "T") {
+						break
+					}
+					if !time.Now().Before(end) {
+						t.Fatalf("grandchild state = %q, want stopped (T)", got)
+					}
+				}
+			} else {
+				for end := time.Now().Add(300 * time.Millisecond); ; time.Sleep(20 * time.Millisecond) {
+					got := procState(grandchild)
+					if got == "" || strings.ContainsAny(got[:1], "TZX") {
+						t.Fatalf("grandchild state = %q, want alive and not stopped", got)
+					}
+					if !time.Now().Before(end) {
+						break
+					}
+				}
 			}
 			ctl.apply(false)
 		})

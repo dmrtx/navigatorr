@@ -80,8 +80,13 @@ type WebConfig struct {
 	// BuildsTokenFile holds a second bearer token that may call only the
 	// /api/maintenance/builds endpoints, for scripts on build machines. Read
 	// once at startup; unset means no such token exists.
-	BuildsTokenFile  string                 `yaml:"builds_token_file"`
-	CloudflareAccess CloudflareAccessConfig `yaml:"cloudflare_access"`
+	BuildsTokenFile string `yaml:"builds_token_file"`
+	// TranscodeTokenFile holds the API key of /transcode/v1 (X-Api-Key or
+	// Bearer), at least 24 characters. Read once at startup; unset means the
+	// API answers only to the web UI's own sign-in. It opens nothing else and
+	// is not the builds token.
+	TranscodeTokenFile string                 `yaml:"transcode_token_file"`
+	CloudflareAccess   CloudflareAccessConfig `yaml:"cloudflare_access"`
 }
 
 type CloudflareAccessConfig struct {
