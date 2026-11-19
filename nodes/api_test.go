@@ -103,7 +103,7 @@ func TestAPICreateIsIdempotentByClientID(t *testing.T) {
 	body := `{"client_id":"bld_job00001","target":"remote-box","source":"ci","title":"compile"}`
 	c1, b1 := call(t, h, "POST", "/nodes/v1/builds", body)
 	c2, b2 := call(t, h, "POST", "/nodes/v1/builds", body)
-	if c1 != 201 && c1 != 200 || c2 != 200 && c2 != 201 || b1["id"] != "bld_job00001" || b2["id"] != "bld_job00001" {
+	if c1 != 200 || c2 != 200 || b1["id"] != "bld_job00001" || b2["id"] != "bld_job00001" {
 		t.Fatal(c1, b1, c2, b2)
 	}
 	_, list := call(t, h, "GET", "/nodes/v1/builds", "")
@@ -123,7 +123,7 @@ func TestAPIErrorsCarryCodeAndHint(t *testing.T) {
 	if code != 409 || e["code"] != NodeLeaseRequiredCode || e["hint"] == "" || e["error"] == "" {
 		t.Fatal(code, e)
 	}
-	if code, e := call(t, h, "POST", "/nodes/v1/builds", `{"target":"nodeA","via":"node_lease","source":"ci","title":"t"}`); code != 201 && code != 200 {
+	if code, e := call(t, h, "POST", "/nodes/v1/builds", `{"target":"nodeA","via":"node_lease","source":"ci","title":"t"}`); code != 200 {
 		t.Fatal(code, e)
 	}
 	if code, _ := call(t, h, "POST", "/nodes/v1/nodes/nodeB/builds-pause", `{"paused":true}`); code != 200 {

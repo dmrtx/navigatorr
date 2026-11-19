@@ -93,7 +93,7 @@ func TestLegacyAndV1StoreTheSameBuild(t *testing.T) {
 			n string
 			f func() *httptest.ResponseRecorder
 		}{{"create", create}, {"heartbeat", hb}, {"finish", fin}, {"get", get}} {
-			if w := step.f(); w.Code != 200 && w.Code != 201 {
+			if w := step.f(); w.Code != 200 {
 				t.Fatalf("legacy=%v %s: %d %s", legacy, step.n, w.Code, w.Body.String())
 			}
 		}
@@ -123,7 +123,7 @@ func TestLegacyAndV1StoreTheSameBuild(t *testing.T) {
 func TestN5CancelThroughV1ReachesTheNextHeartbeat(t *testing.T) {
 	_, h := buildsUI(t)
 	bearer := map[string]string{"Authorization": "Bearer " + testBuildsToken}
-	if w := v1(h, "POST", "/nodes/v1/builds", `{"client_id":"bld_cancel001","target":"laptop","source":"ci","title":"t"}`, apiKey()); w.Code != 201 && w.Code != 200 {
+	if w := v1(h, "POST", "/nodes/v1/builds", `{"client_id":"bld_cancel001","target":"laptop","source":"ci","title":"t"}`, apiKey()); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if w := v1(h, "POST", "/nodes/v1/builds/bld_cancel001/cancel", "", apiKey()); w.Code != 200 {

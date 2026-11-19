@@ -42,6 +42,16 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -72,6 +82,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -148,6 +168,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown node.",
             "content": {
@@ -167,8 +197,8 @@
           "builds"
         ],
         "operationId": "listBuilds",
-        "summary": "List builds (running first, then recent history)",
-        "description": "Build records: running ones first, then ended ones, newest first. Filter by node (the build's target machine), status (running, succeeded, failed, cancelled, lost) and source (the tool that registered it). Paged: pass next_cursor of one answer as cursor to get the next page. Use this to see what is running on a machine or to find the id to cancel. Read-only.",
+        "summary": "List builds (newest first)",
+        "description": "Build records, newest created first, whatever their status: running and ended ones are in one order that never changes while you page, so a build that finishes between two pages is neither repeated nor skipped. Filter by node (the build's target machine), status (running, succeeded, failed, cancelled, lost; waiting only on old rows) and source (the tool that registered it). Paged: limit is 1 to 500 (default 50); pass next_cursor of one answer as cursor to get the next page; the last page has no next_cursor. A cursor stays valid even if the build it came from was pruned meanwhile. Use this to see what is running on a machine or to find the id to cancel. Read-only.",
         "parameters": [
           {
             "name": "node",
@@ -183,11 +213,12 @@
             "name": "status",
             "in": "query",
             "required": false,
-            "description": "Only this status.",
+            "description": "Only this status (waiting appears only on rows an earlier server left; Navigatorr cancels them).",
             "schema": {
               "type": "string",
               "enum": [
                 "running",
+                "waiting",
                 "succeeded",
                 "failed",
                 "cancelled",
@@ -208,7 +239,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "description": "Page size, 1 to 500 (default 50).",
+            "description": "Page size, 1 to 500 (default 50); outside that range is 400 invalid_request.",
             "schema": {
               "type": "integer",
               "minimum": 1,
@@ -219,7 +250,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "next_cursor from the previous page.",
+            "description": "next_cursor from the previous page (opaque; anything else is 400 invalid_cursor).",
             "schema": {
               "type": "string"
             }
@@ -241,7 +272,7 @@
                     },
                     "next_cursor": {
                       "type": "string",
-                      "description": "Present when more builds follow; pass it as cursor."
+                      "description": "Present when more builds follow; pass it as cursor. Absent on the last page."
                     }
                   }
                 }
@@ -249,7 +280,17 @@
             }
           },
           "400": {
-            "description": "Bad limit or cursor.",
+            "description": "Bad limit (invalid_request) or cursor (invalid_cursor).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
             "content": {
               "application/json": {
                 "schema": {
@@ -266,7 +307,7 @@
         ],
         "operationId": "createBuild",
         "summary": "Register a build on a machine that is not a node",
-        "description": "Records a build another tool runs on a machine, so others can see it (and cancel it). It is bookkeeping: nothing is started. The target machine must NOT be a configured transcode node: for a node, its own worker registers the lease (via=\"node_lease\") and refusing is the worker's job; a node target without via answers 409 node_lease_required. 409 builds_paused means the operator paused builds on that node. Idempotent: send client_id (\"bld_\" and 8 to 59 letters, digits, _ or -) and repeat the same request after a network error; the same target and source returns the same build and creates nothing. Then heartbeat it while it runs and finish it at the end; a build without heartbeats is marked lost after its ttl.",
+        "description": "Records a build another tool runs on a machine, so others can see it (and cancel it). It is bookkeeping: nothing is started. The target machine must NOT be a configured transcode node: for a node, its own worker registers the lease (via=\"node_lease\") and refusing is the worker's job; a node target without via answers 409 node_lease_required. 409 builds_paused means the operator paused builds on that node. Idempotent: send client_id (\"bld_\" and 8 to 59 letters, digits, _ or -) and repeat the same request after a network error; the same target and source returns the same build and creates nothing. Then heartbeat it while it runs and finish it at the end; a build without heartbeats is marked lost after its ttl. Answers 200 with the build (also when the same client_id is repeated); there is no 201. Errors: 400 invalid_request, 409 node_lease_required, builds_paused or build_id_taken.",
         "requestBody": {
           "required": true,
           "content": {
@@ -322,7 +363,7 @@
                   },
                   "ttl_seconds": {
                     "type": "integer",
-                    "description": "Optional lifetime without a heartbeat: 60 to 7200, default 900."
+                    "description": "Optional lifetime without a heartbeat, in seconds. Omitted or 0 means 900 (15 minutes); a positive value is used as given (there is no minimum) up to 7200 (2 hours): a larger value is clamped to 7200, not refused. Negative is 400 invalid_request."
                   },
                   "progress": {
                     "type": "string",
@@ -342,7 +383,7 @@
         },
         "responses": {
           "200": {
-            "description": "The build (a repeat of the same client_id returns it unchanged).",
+            "description": "The build (a repeat of the same client_id with the same target and source returns it as it is now, even ended, with the same 200).",
             "content": {
               "application/json": {
                 "schema": {
@@ -353,6 +394,16 @@
           },
           "400": {
             "description": "A field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
             "content": {
               "application/json": {
                 "schema": {
@@ -404,6 +455,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown build.",
             "content": {
@@ -449,7 +510,7 @@
                   },
                   "ttl_seconds": {
                     "type": "integer",
-                    "description": "New lifetime without a heartbeat (60 to 7200)."
+                    "description": "New lifetime without a heartbeat, in seconds. Omitted or 0 keeps the build's current window; a positive value is used as given up to 7200 (larger values are clamped to 7200, not refused). Negative is 400."
                   },
                   "log": {
                     "type": "array",
@@ -484,6 +545,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown build.",
             "content": {
@@ -495,7 +566,7 @@
             }
           },
           "409": {
-            "description": "The build already ended; body.build is its final record.",
+            "description": "code build_ended: the build already ended (finished, cancelled or lost, including a heartbeat after its expiry); body.build is its final record.",
             "content": {
               "application/json": {
                 "schema": {
@@ -574,6 +645,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown build.",
             "content": {
@@ -617,6 +698,16 @@
               }
             }
           },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Unknown build.",
             "content": {
@@ -637,7 +728,7 @@
         ],
         "operationId": "getBuildLog",
         "summary": "Read a build's output lines",
-        "description": "The last lines (up to 200) the build sent with its heartbeats, each with an absolute number n. Pass after=N (the next_after of the previous answer) to get only newer lines; first_available is the number of the oldest line still held (older ones are gone). Output is kept in memory for 30 minutes after the build ends and is lost on a restart (expired is true when it was dropped). No waiting: poll again. Read-only.",
+        "description": "The last lines (up to 200) the build sent with its heartbeats, each with an absolute number n. Pass after=N (the next_after of the previous answer) to get only newer lines; first_available is the number of the oldest line still held (older ones are gone). Numbers restart at 1 whenever the build's buffer is recreated (after a server restart, after the buffer was evicted or its retention passed and the build writes again), so every answer carries a generation naming the buffer the numbers belong to. Send it back as generation together with after: when it differs from the current one, or after is beyond the last line, the answer starts from the first line held and has reset true (discard what you kept and continue from next_after). Output is kept in memory for 30 minutes after the build ends and is lost on a restart (expired is true when it was dropped). No waiting: poll again. Read-only.",
         "parameters": [
           {
             "name": "id",
@@ -656,6 +747,15 @@
             "schema": {
               "type": "integer",
               "minimum": 0
+            }
+          },
+          {
+            "name": "generation",
+            "in": "query",
+            "required": false,
+            "description": "The generation of the previous answer. If it differs from the current one the answer is a reset from the start.",
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -700,8 +800,26 @@
                     },
                     "expired": {
                       "type": "boolean"
+                    },
+                    "generation": {
+                      "type": "string",
+                      "description": "Names the buffer the line numbers belong to; empty when the build has no buffer. Pass it back as generation."
+                    },
+                    "reset": {
+                      "type": "boolean",
+                      "description": "true when your after/generation did not match this buffer: the lines start from the first one held and next_after is the new position."
                     }
                   }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -739,7 +857,7 @@
           },
           "code": {
             "type": "string",
-            "description": "Stable machine code."
+            "description": "Stable machine code: invalid_request, invalid_cursor, unauthorized, not_found, unknown_node, build_not_found, build_ended, build_id_taken, builds_paused, node_lease_required, internal."
           },
           "hint": {
             "type": "string",
@@ -782,11 +900,13 @@
             "type": "string",
             "enum": [
               "running",
+              "waiting",
               "succeeded",
               "failed",
               "cancelled",
               "lost"
-            ]
+            ],
+            "description": "waiting only appears on rows an earlier server left; it counts as active until Navigatorr cancels it."
           },
           "created_at": {
             "type": "string"
