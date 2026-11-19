@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,26 +200,43 @@ func TestEngineWithoutARegistryShowsNothing(t *testing.T) {
 func TestSetBuildRecordsWhileReading(t *testing.T) {
 	e, _ := buildEngine(t, &mockTranscodeExecutor{})
 	e.SetBuildRecords(nil)
+	const readers = 4
 	var wg sync.WaitGroup
+	var started sync.WaitGroup // every reader has read at least once
+	var reads atomic.Int64
 	stop := make(chan struct{})
-	for i := 0; i < 4; i++ {
+	started.Add(readers)
+	for i := 0; i < readers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			first := true
 			for {
+				_ = e.NodeBuildRecords("m1")
+				_ = e.NodeBuildsPaused("m1")
+				reads.Add(1)
+				if first {
+					first = false
+					started.Done()
+				}
 				select {
 				case <-stop:
 					return
 				default:
-					_ = e.NodeBuildRecords("m1")
-					_ = e.NodeBuildsPaused("m1")
 				}
 			}
 		}()
 	}
-	for i := 0; i < 100; i++ {
+	started.Wait()
+	// The writer keeps going until the readers have read again during it, so
+	// reads and writes certainly overlap.
+	seen := reads.Load()
+	for i := 0; i < 100 || reads.Load() < seen+readers*10; i++ {
 		e.SetBuildRecords(newFakeRecords())
 		e.SetBuildRecords(nil)
+		if i > 1_000_000 {
+			t.Fatal("the readers made no progress")
+		}
 	}
 	close(stop)
 	wg.Wait()
