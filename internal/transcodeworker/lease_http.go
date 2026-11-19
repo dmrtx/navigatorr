@@ -134,6 +134,12 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if len(path) >= 100 {
 		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
 	}
+	// The group first: a bad one changes nothing on disk (not even a stale
+	// socket of an earlier worker).
+	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
+	if err != nil {
+		return err
+	}
 	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
 		return err
 	}
@@ -145,17 +151,8 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
 		_ = os.Remove(path)
 	}
-	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
+	ln, err := listenLeaseSocket(path, gid)
 	if err != nil {
-		return err
-	}
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return err
-	}
-	if err := setLeaseSocketAccess(path, gid); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(path)
 		return err
 	}
 	srv := &http.Server{
@@ -177,6 +174,38 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		_ = os.Remove(path)
 	}()
 	return nil
+}
+
+// listenLeaseSocket binds the socket in a new 0700 directory next to path,
+// gives it its final mode and group there, and only then renames it into
+// place: whatever the umask, no one can connect before the mode is final. A
+// failure leaves nothing behind.
+func listenLeaseSocket(path string, gid int) (net.Listener, error) {
+	tmp, err := os.MkdirTemp(filepath.Dir(path), ".l")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+	bind := filepath.Join(tmp, "s")
+	if len(bind) >= 100 {
+		return nil, fmt.Errorf("build socket path is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", len(bind))
+	}
+	ln, err := net.Listen("unix", bind)
+	if err != nil {
+		return nil, err
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false) // the socket moves; shutdown removes path
+	}
+	if err := setLeaseSocketAccess(bind, gid); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	if err := os.Rename(bind, path); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }
 
 // leaseSocketGroupID is the group the socket opens to, or -1 for owner-only.
