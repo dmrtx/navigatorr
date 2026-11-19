@@ -141,7 +141,7 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		return fmt.Errorf("build socket directory is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", n)
 	}
 	// "<socket>.lock" is the lock file, so no socket may be one.
-	if strings.HasSuffix(path, ".lock") {
+	if n := len(path); n >= 5 && strings.EqualFold(path[n-5:], ".lock") { // APFS ignores case
 		return errors.New("build_socket must not end in .lock (that name is the socket's lock file)")
 	}
 	// The group first: a bad one changes nothing on disk (not even a stale

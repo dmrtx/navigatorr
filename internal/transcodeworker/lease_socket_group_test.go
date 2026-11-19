@@ -248,7 +248,7 @@ func TestLeaseSocketGroup(t *testing.T) {
 	}
 
 	// A socket named like a lock file is refused before anything is made.
-	lk := filepath.Join(dir, "x.lock")
+	lk := filepath.Join(dir, "x.LOCK")
 	kw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: lk})
 	if err := kw.StartBuildLeases(ctx); err == nil || !strings.Contains(err.Error(), ".lock") {
 		t.Fatalf("a socket ending in .lock: %v", err)
