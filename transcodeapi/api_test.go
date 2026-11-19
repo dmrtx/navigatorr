@@ -183,6 +183,10 @@ func TestAllowHeaderFollowsTheRoute(t *testing.T) {
 		if _, _, hdr := do(t, h, "DELETE", p); hdr.Get("Allow") != want {
 			t.Errorf("DELETE %s: Allow %q, want %q", p, hdr.Get("Allow"), want)
 		}
+		// NewHandler itself keeps HEAD away from a NoHead route's handler.
+		if code, _, hdr := do(t, h, "HEAD", p); r.NoHead != (code == 405) || (r.NoHead && hdr.Get("Allow") != "GET") {
+			t.Errorf("HEAD %s = %d (Allow %q), NoHead %v", p, code, hdr.Get("Allow"), r.NoHead)
+		}
 	}
 	if noHead != 1 {
 		t.Errorf("%d routes refuse HEAD, want 1 (the podcast block)", noHead)

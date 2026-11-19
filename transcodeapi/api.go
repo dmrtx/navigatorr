@@ -112,12 +112,24 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 		if !ok || fn == nil {
 			return nil, fmt.Errorf("transcodeapi: no handler for %s", r.Key())
 		}
-		mux.HandleFunc(r.Key(), fn)
-		paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
 		allow[r.Path] = "GET, HEAD"
 		if r.NoHead {
 			allow[r.Path] = "GET"
+			// A GET pattern also serves HEAD; refuse it here so the route's
+			// handler never runs for a HEAD.
+			get := fn
+			fn = func(w http.ResponseWriter, req *http.Request) {
+				if req.Method == http.MethodHead {
+					w.Header().Set("Allow", "GET")
+					WriteError(w, 405, "method_not_allowed", "this endpoint answers GET only",
+						"GET "+SpecPath+" lists the endpoints of this API")
+					return
+				}
+				get(w, req)
+			}
 		}
+		mux.HandleFunc(r.Key(), fn)
+		paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
 	}
 	var extra []string
 	for k := range handlers {

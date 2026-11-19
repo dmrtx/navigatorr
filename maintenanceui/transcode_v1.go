@@ -563,6 +563,7 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 		if toolTooLarge(text) {
 			writeTooLarge(w, "lower limit")
 		} else {
+			log.Printf("transcode v1: action_list answered something that is not a page: %v", err)
 			transcodeapi.WriteError(w, 502, "internal", "the action list could not be read", "")
 		}
 		return
@@ -719,13 +720,17 @@ func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 	var page struct {
 		Records []map[string]any `json:"records"`
 	}
-	if json.Unmarshal([]byte(text), &page) != nil {
+	if err := json.Unmarshal([]byte(text), &page); err != nil {
+		log.Printf("transcode v1: action_history answered something that is not a page: %v", err)
 		transcodeapi.WriteError(w, 502, "internal", "the history could not be read", "")
 		return
 	}
 	owner := map[string]string{} // instance id -> workflow name ("" when not a transcode one)
 	records := []map[string]any{}
 	for _, rec := range page.Records {
+		if len(records) >= limit {
+			break
+		}
 		ev, _ := rec["action"].(string)
 		id, _ := rec["identifiers"].(string)
 		if !slices.Contains(logEvents, ev) || id == "" {
@@ -735,6 +740,7 @@ func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 		if !seen {
 			inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
 			if err != nil {
+				log.Printf("transcode v1: reading action %q for history: %v", id, err)
 				transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
 				return
 			}
@@ -746,9 +752,7 @@ func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 		if name == "" || (workflow != "" && name != workflow) {
 			continue
 		}
-		if len(records) < limit {
-			records = append(records, rec)
-		}
+		records = append(records, rec)
 	}
 	transcodeapi.WriteJSON(w, 200, map[string]any{"count": len(records), "records": records})
 }
