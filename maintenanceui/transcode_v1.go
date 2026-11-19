@@ -20,8 +20,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-// This file serves /transcode/v1 (package transcodeapi), the read-only
-// successor of the transcode reads of /api/maintenance/* and of the MCP tools.
+// This file serves the reads of /transcode/v1 (package transcodeapi), the
+// successor of the transcode reads of /api/maintenance/* and of the MCP tools;
+// transcode_v1_write.go serves its writes.
 // It holds no business logic of its own: each endpoint calls the maintenance
 // handler or the MCP tool that already answers the question, so the two
 // surfaces cannot drift apart, and only reshapes the request (a resource path
@@ -31,12 +32,19 @@ import (
 // one the maintenance surface already restricts its actions to.
 func transcodeAction(name string) bool { return allowedActions[name] }
 
-// transcodeAuthorized is whether a /transcode/v1 call may proceed: the API key
-// (web.transcode_token_file) as X-Api-Key (what call_api sends) or as a bearer,
-// or a signed-in web UI session. This phase serves reads only, so a session
-// needs no same-origin header, but a change attempted through one still needs
-// it, as everywhere, so it answers 401 and not 405.
-func (s *Server) transcodeAuthorized(r *http.Request) bool {
+// transcodeAccess says whether a /transcode/v1 call may proceed and, when it
+// may not, the status to answer: 401 for no or wrong credentials, 403 for a
+// change that fails the console's own write checks.
+//
+// The API key (web.transcode_token_file), as X-Api-Key (what call_api sends) or
+// as a bearer, is no ambient credential (a browser never attaches it by itself),
+// so it needs nothing more, as the builds token needs nothing more on the build
+// routes. The web console's own sign-in (cookie, bearer web token or Cloudflare
+// Access) is ambient, so a change made with it passes the same two checks the
+// console applies to its /api/ writes (see the handler wrapper in server.go): the
+// X-Navigatorr-Request: 1 header, and an Origin, when sent, that names this host.
+// Reads need only the credential.
+func (s *Server) transcodeAccess(r *http.Request) (ok bool, status int) {
 	if s.hasTranscodeToken {
 		tok := r.Header.Get("X-Api-Key")
 		if auth := r.Header.Get("Authorization"); tok == "" && strings.HasPrefix(auth, "Bearer ") {
@@ -45,14 +53,26 @@ func (s *Server) transcodeAuthorized(r *http.Request) bool {
 		if tok != "" {
 			h := sha256.Sum256([]byte(tok))
 			if subtle.ConstantTimeCompare(h[:], s.transcodeTokenHash[:]) == 1 {
-				return true
+				return true, 0
 			}
 		}
 	}
 	if !s.authorized(r) {
-		return false
+		return false, 401
 	}
-	return r.Method == http.MethodGet || r.Method == http.MethodHead || r.Header.Get("X-Navigatorr-Request") == "1"
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		return true, 0
+	}
+	if r.Header.Get("X-Navigatorr-Request") != "1" {
+		return false, 401
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			return false, 403
+		}
+	}
+	return true, 0
 }
 
 // transcodeV1 builds the handler of /transcode/v1 (auth was checked by
@@ -171,35 +191,15 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 	get("/recipe-bundle", s.v1Tool("recipe_status", func(*http.Request) (map[string]any, string) { return map[string]any{}, "" }, v1Err{}))
 
 	// Podcasts.
-	podcastsOff := func(w http.ResponseWriter) bool {
-		if s.cfg.Podcasts.Enabled {
-			return false
-		}
-		transcodeapi.WriteError(w, 503, "unavailable", "podcasts are switched off on this server", "")
-		return true
-	}
 	get("/podcasts", func(w http.ResponseWriter, r *http.Request) {
-		if !podcastsOff(w) {
+		if !s.podcastsOff(w) {
 			s.v1Legacy(s.podcasts, nil, v1Err{})(w, r)
 		}
 	})
-	podcast := func(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			id := r.PathValue("id")
-			if podcastsOff(w) {
-				return
-			}
-			if p, ok := s.cfg.Podcasts.Podcasts[id]; !ok || !p.Enabled {
-				transcodeapi.WriteError(w, 404, "unknown_podcast", "no such podcast profile", "GET "+b+"/podcasts lists the enabled podcast profiles")
-				return
-			}
-			fn(w, r)
-		}
-	}
-	get("/podcasts/{id}/local-library", podcast(s.v1Legacy(s.podcastLocalLibrary, func(r *http.Request) url.Values {
+	get("/podcasts/{id}/local-library", s.v1Podcast(s.v1Legacy(s.podcastLocalLibrary, func(r *http.Request) url.Values {
 		return url.Values{"podcast_id": {r.PathValue("id")}}
 	}, v1Err{notFound: "unknown_podcast"})))
-	get("/podcasts/{id}/ad-library", podcast(s.v1Tool("podcast_ad_library", func(r *http.Request) (map[string]any, string) {
+	get("/podcasts/{id}/ad-library", s.v1Podcast(s.v1Tool("podcast_ad_library", func(r *http.Request) (map[string]any, string) {
 		return v1Args(r, map[string]any{"podcast_id": r.PathValue("id")}, pInt("offset", 0, 0))
 	}, v1Err{})))
 
@@ -207,24 +207,42 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 	get("/review-queue", s.v1Legacy(s.maintenanceQueue, func(r *http.Request) url.Values {
 		return pick(r, "state", "issue_type", "sort", "q", "offset", "limit")
 	}, v1Err{}))
+	s.transcodeWriteHandlers(h)
 	return h
+}
+
+// podcastsOff answers 503 when podcasts are switched off on this server.
+func (s *Server) podcastsOff(w http.ResponseWriter) bool {
+	if s.cfg.Podcasts.Enabled {
+		return false
+	}
+	transcodeapi.WriteError(w, 503, "unavailable", "podcasts are switched off on this server", "")
+	return true
+}
+
+// v1Podcast guards a route under /podcasts/{id}: podcasts must be on and the
+// profile must exist and be enabled.
+func (s *Server) v1Podcast(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if s.podcastsOff(w) {
+			return
+		}
+		if p, ok := s.cfg.Podcasts.Podcasts[id]; !ok || !p.Enabled {
+			transcodeapi.WriteError(w, 404, "unknown_podcast", "no such podcast profile", "GET "+transcodeapi.BasePath+"/podcasts lists the enabled podcast profiles")
+			return
+		}
+		fn(w, r)
+	}
 }
 
 // v1Batch serves a batch sub-resource with the legacy handler fn. The batch
 // is known to exist by the time fn runs, so a 404 of fn is about something
 // inside it (a file, a candidate): the generic not_found, never batch_not_found.
 func (s *Server) v1Batch(fn http.HandlerFunc, query func(r *http.Request) url.Values) http.HandlerFunc {
-	const b = transcodeapi.BasePath
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
-		if err != nil {
-			log.Printf("transcode v1: reading batch %q: %v", id, err)
-			transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
-			return
-		}
-		if inst == nil || inst.ActionName != "transcode_batch" {
-			transcodeapi.WriteError(w, 404, "batch_not_found", "batch not found", "GET "+b+"/actions?status=all lists actions; a batch has action_name transcode_batch")
+		if !s.checkBatch(w, id) {
 			return
 		}
 		s.v1Legacy(fn, func(r *http.Request) url.Values {
@@ -233,6 +251,21 @@ func (s *Server) v1Batch(fn http.HandlerFunc, query func(r *http.Request) url.Va
 			return v
 		}, v1Err{})(w, r)
 	}
+}
+
+// checkBatch answers 404 unless id is a transcode batch.
+func (s *Server) checkBatch(w http.ResponseWriter, id string) bool {
+	inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
+	if err != nil {
+		log.Printf("transcode v1: reading batch %q: %v", id, err)
+		transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
+		return false
+	}
+	if inst == nil || inst.ActionName != "transcode_batch" {
+		transcodeapi.WriteError(w, 404, "batch_not_found", "batch not found", "GET "+transcodeapi.BasePath+"/actions?status=all lists actions; a batch has action_name transcode_batch")
+		return false
+	}
+	return true
 }
 
 // pick copies the named query parameters of r that are present.

@@ -3,7 +3,7 @@
   "info": {
     "title": "Transcode",
     "version": "1.0.0",
-    "description": "Transcode is the video and podcast conversion side of Navigatorr: workers (machines that encode), durable actions (one file, a batch of files, podcast ad cleaning), encoding recipes, candidates and promotion backups. This version is READ-ONLY: it tells you what exists and what is happening; starting, holding, cancelling, pausing, draining and replacing arrive in a later version and are still done with the existing MCP tools. Start with GET /transcode/v1/workers to see the machines, GET /transcode/v1/actions?status=running to see what is encoding, and GET /transcode/v1/actions/{id} for one conversion. Paths use {id} for an action or batch id, {name} for a worker or recipe. Lists are offset-based: send offset and limit, follow next_offset until has_more is false (/history is the exception: the audit log has no offset, it answers count and records). Errors are JSON {error, code, hint}; the hint names the endpoint to use instead. Authentication: X-Api-Key (or Authorization: Bearer) with the transcode API key; this document is public."
+    "description": "Transcode is the video and podcast conversion side of Navigatorr: workers (machines that encode), durable actions (one file, a batch of files, podcast ad cleaning), encoding recipes, candidates and promotion backups. The API reads what exists and what is happening, and writes: starting, cancelling, resuming and retrying actions, recording decisions, changing a batch goal, pausing and draining workers, changing worker slots, saving, deleting and rolling back recipes, cleaning, restoring and discarding backups, classifying and reviewing podcasts, revoking ad references and closing review-queue entries. A write calls the same function as the MCP tool or maintenance route of the same name and keeps every safeguard of it: expected revisions, digests and versions, confirm flags, dry-runs and idempotency keys are passed through, never bypassed (a request that omits one is refused with 400 or 409 exactly as the tool would, or answers the read-only preview). Start with GET /transcode/v1/workers to see the machines, GET /transcode/v1/actions?status=running to see what is encoding, and GET /transcode/v1/actions/{id} for one conversion. Paths use {id} for an action, batch or review-queue id, {name} for a worker or recipe. Lists are offset-based: send offset and limit, follow next_offset until has_more is false (/history is the exception: the audit log has no offset, it answers count and records). Write bodies are JSON (Content-Type: application/json, at most 1 MiB, unknown fields rejected). Errors are JSON {error, code, hint}; the hint names the endpoint to use instead. Authentication: X-Api-Key (or Authorization: Bearer) with the transcode API key, which needs nothing else for a write; a signed-in web console session may write only with the console's own write checks (header X-Navigatorr-Request: 1 and a same-site Origin). This document is public."
   },
   "tags": [
     {
@@ -76,7 +76,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -148,7 +148,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -208,7 +208,7 @@
         ],
         "operationId": "getWorkerSlots",
         "summary": "Show a worker's slot split",
-        "description": "How the worker divides its parallel slots between video and podcast work: the stored settings (video_slots, podcast_slots, ceiling, x265_slots, core_budget, revision), what the worker runs now (worker) and whether they agree (applied). supported is false for a worker that cannot divide slots. 404 unknown_worker. Read-only (changing slots is a write).",
+        "description": "How the worker divides its parallel slots between video and podcast work: the stored settings (video_slots, podcast_slots, ceiling, x265_slots, core_budget, revision), what the worker runs now (worker) and whether they agree (applied). supported is false for a worker that cannot divide slots. 404 unknown_worker.",
         "responses": {
           "200": {
             "description": "The slot settings.",
@@ -267,7 +267,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -318,6 +318,170 @@
             }
           }
         ]
+      },
+      "put": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "putWorkerSlots",
+        "summary": "Change a worker's slot split",
+        "description": "Stores and pushes the worker's slot split (the console's handler). Read the current settings with GET first and send settings.revision as revision: a stale revision is a 409 and nothing is changed. A worker that cannot divide slots answers 409.",
+        "responses": {
+          "200": {
+            "description": "The stored and applied settings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "video_slots": {
+                    "type": "integer"
+                  },
+                  "podcast_slots": {
+                    "type": "integer"
+                  },
+                  "ceiling": {
+                    "type": "integer"
+                  },
+                  "x265_slots": {
+                    "type": "integer"
+                  },
+                  "core_budget": {
+                    "type": "integer"
+                  },
+                  "revision": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/activity": {
@@ -414,7 +578,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -517,7 +681,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -556,7 +720,7 @@
         ],
         "operationId": "getDrain",
         "summary": "Read the deploy drain",
-        "description": "Whether the workers are being drained for a deploy, and whether it is safe to deploy: ready_for_deploy is true only when drain is on, the settle window passed, every worker is reachable and none has a file encoding or unsaved (publication_pending). not_ready says why not; workers and jobs list what is left. Read-only (turning drain on or off is a write).",
+        "description": "Whether the workers are being drained for a deploy, and whether it is safe to deploy: ready_for_deploy is true only when drain is on, the settle window passed, every worker is reachable and none has a file encoding or unsaved (publication_pending). not_ready says why not; workers and jobs list what is left.",
         "responses": {
           "200": {
             "description": "The drain status.",
@@ -589,7 +753,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -619,6 +783,143 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "putDrain",
+        "summary": "Turn the deploy drain on or off",
+        "description": "enabled true stops new work and lets running work finish so a deploy is safe; false resumes. Check GET /transcode/v1/drain for ready_for_deploy before deploying.",
+        "responses": {
+          "200": {
+            "description": "The drain status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Drain"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/pauses": {
@@ -628,7 +929,7 @@
         ],
         "operationId": "listPauses",
         "summary": "List every worker's pause",
-        "description": "Each worker's operator pause: paused, mode (graceful, immediate, suspend or empty), since, running files still on it, suspended (frozen encodes), idle (true when the machine is free), held_by and message. Read-only (pausing is a write).",
+        "description": "Each worker's operator pause: paused, mode (graceful, immediate, suspend or empty), since, running files still on it, suspended (frozen encodes), idle (true when the machine is free), held_by and message.",
         "responses": {
           "200": {
             "description": "The pauses.",
@@ -670,7 +971,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -742,7 +1043,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -753,6 +1054,266 @@
           },
           "404": {
             "description": "The named thing does not exist (code unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "putPause",
+        "summary": "Pause or resume a worker",
+        "description": "Send exactly one of mode (graceful, immediate, suspend, off) and builds_paused (true or false): they are independent switches. mode off clears the pause.",
+        "responses": {
+          "200": {
+            "description": "The pause status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "graceful",
+                      "immediate",
+                      "suspend",
+                      "off"
+                    ]
+                  },
+                  "builds_paused": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "deletePause",
+        "summary": "Clear a worker's pause",
+        "description": "Same as PUT with mode off: the worker takes work again. No body.",
+        "responses": {
+          "200": {
+            "description": "The pause status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
             "content": {
               "application/json": {
                 "schema": {
@@ -856,7 +1417,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -939,6 +1500,165 @@
             }
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "runAction",
+        "summary": "Start a transcode workflow",
+        "description": "Starts one of the transcode workflows (clean_podcast_ads, transcode_media, transcode_batch, benchmark_transcode, promote_transcode_candidate; GET /transcode/v1/catalog lists them and their inputs) through action_run, with its validation. Any other action name is 400. Send an idempotency key (Idempotency-Key header or idempotency_key): the same key answers the first action instead of starting another. Answers 202 with the action.",
+        "responses": {
+          "202": {
+            "description": "The action was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Idempotency key. The same key with the same request answers the first result instead of repeating it. May be sent instead as the idempotency_key body field; if both are sent they must be equal (400 otherwise).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/actions/{id}": {
@@ -1000,7 +1720,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1114,7 +1834,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1291,7 +2011,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1414,7 +2134,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only, and HEAD is refused too (Allow: GET) because reading a block records read coverage.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1556,7 +2276,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1697,7 +2417,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1876,7 +2596,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1999,7 +2719,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2140,7 +2860,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2274,7 +2994,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2377,7 +3097,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2476,7 +3196,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2578,7 +3298,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2682,7 +3402,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2778,7 +3498,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2908,7 +3628,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -2969,6 +3689,327 @@
             }
           }
         ]
+      },
+      "put": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "saveRecipe",
+        "summary": "Save a recipe profile",
+        "description": "Creates or replaces a recipe profile (recipe_save). To replace one, send expected_generation and expected_digest from GET /transcode/v1/recipes/{name}: a stale pair is 409 and nothing changes. profile is the complete profile.",
+        "responses": {
+          "200": {
+            "description": "The saved recipe.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Recipe profile name, as listed by GET /transcode/v1/recipes.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "profile"
+                ],
+                "properties": {
+                  "profile": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "source_action_id": {
+                    "type": "string"
+                  },
+                  "expected_generation": {
+                    "type": "integer"
+                  },
+                  "expected_digest": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "deleteRecipe",
+        "summary": "Delete a recipe profile",
+        "description": "recipe_delete. expected_generation and expected_digest are both required (read them with GET /transcode/v1/recipes/{name}); a stale pair is 409. The body is sent with DELETE.",
+        "responses": {
+          "200": {
+            "description": "The recipe was deleted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Recipe profile name, as listed by GET /transcode/v1/recipes.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "expected_generation",
+                  "expected_digest"
+                ],
+                "properties": {
+                  "expected_generation": {
+                    "type": "integer"
+                  },
+                  "expected_digest": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/recipes/{name}/history": {
@@ -3033,7 +4074,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3158,7 +4199,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3246,7 +4287,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3319,7 +4360,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3379,7 +4420,7 @@
         ],
         "operationId": "listPodcastAdLibrary",
         "summary": "List a podcast's confirmed acoustic ad references",
-        "description": "Confirmed acoustic ad references of one podcast profile, 16 a page. Paging: offset-based. Send offset (0 first) and limit; the answer carries next_offset and has_more. Follow next_offset until has_more is false; a page can be short or empty and still have more. Fields: scope, algorithm, catalog_digest, references, total_references. 404 unknown_podcast. Read-only (revoking a reference is a write).",
+        "description": "Confirmed acoustic ad references of one podcast profile, 16 a page. Paging: offset-based. Send offset (0 first) and limit; the answer carries next_offset and has_more. Follow next_offset until has_more is false; a page can be short or empty and still have more. Fields: scope, algorithm, catalog_digest, references, total_references. 404 unknown_podcast.",
         "responses": {
           "200": {
             "description": "A page of references.",
@@ -3431,7 +4472,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3571,7 +4612,7 @@
             }
           },
           "405": {
-            "description": "Any method but GET (code method_not_allowed): this version is read-only.",
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3675,6 +4716,2710 @@
           }
         ]
       }
+    },
+    "/transcode/v1/actions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "cancelAction",
+        "summary": "Cancel an action",
+        "description": "Cancels a running or waiting transcode action (action_cancel). 404 for an action that is not a transcode one.",
+        "responses": {
+          "200": {
+            "description": "The action after the cancel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/actions/{id}/resume": {
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "resumeAction",
+        "summary": "Resume an action waiting for a decision",
+        "description": "Resumes an action that waits (action_resume). For a promotion, plan_digest must be the digest of the plan read with GET /transcode/v1/batches/{id}/promotion-plan: a different one is 409.",
+        "responses": {
+          "200": {
+            "description": "The action after the resume.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "decision": {
+                    "type": "string"
+                  },
+                  "inputs": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "plan_digest": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/actions/{id}/retry": {
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "retryAction",
+        "summary": "Retry a failed action",
+        "description": "Retries a failed or cancelled transcode action (action_retry).",
+        "responses": {
+          "200": {
+            "description": "The action after the retry.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/actions/{id}/podcast/classify": {
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "classifyPodcast",
+        "summary": "Submit the classification of a podcast's blocks",
+        "description": "The body is the classification (podcast_classify): the block ids and digests to copy come from GET /transcode/v1/actions/{id}/podcast/blocks.",
+        "responses": {
+          "200": {
+            "description": "The classification was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "The classification object.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/actions/{id}/podcast/review": {
+      "post": {
+        "tags": [
+          "actions"
+        ],
+        "operationId": "reviewPodcast",
+        "summary": "Approve or reclassify a podcast cleaning",
+        "description": "podcast_review: digest must be the exact digest of the review being answered, with approve or reclassify; a stale digest is 409.",
+        "responses": {
+          "200": {
+            "description": "The review result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "digest": {
+                    "type": "string"
+                  },
+                  "approve": {
+                    "type": "boolean"
+                  },
+                  "reclassify": {
+                    "type": "boolean"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/batches/{id}/goal": {
+      "get": {
+        "tags": [
+          "batches"
+        ],
+        "operationId": "getBatchGoal",
+        "summary": "Preview a batch goal change",
+        "description": "Read-only preview of changing the goal of an automatic batch (transcode_goal_change without a mode): the exact selection and its selection_version, which POST needs. scope narrows the selection.",
+        "responses": {
+          "200": {
+            "description": "The preview and its selection_version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is invalid (code invalid_request); the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Batch id, as listed by GET /transcode/v1/actions (kind transcode_batch).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "description": "Optional selection scope.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "batches"
+        ],
+        "operationId": "changeBatchGoal",
+        "summary": "Change a batch goal",
+        "description": "Applies a goal change (transcode_goal_change). Read the preview with GET first: selection_version must be the one it returned (a different one is 409: the selection moved) and an idempotency key is required, as in the tool. mode is size, quality, x265_preserve or compact; the other fields are the tool's options. Answers 202.",
+        "responses": {
+          "202": {
+            "description": "The goal change was accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Batch id, as listed by GET /transcode/v1/actions (kind transcode_batch).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Idempotency key. The same key with the same request answers the first result instead of repeating it. May be sent instead as the idempotency_key body field; if both are sent they must be equal (400 otherwise).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode",
+                  "selection_version"
+                ],
+                "properties": {
+                  "mode": {
+                    "type": "string"
+                  },
+                  "scope": {
+                    "type": "string"
+                  },
+                  "selection_version": {
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "type": "string"
+                  },
+                  "allow_hardware": {
+                    "type": "boolean"
+                  },
+                  "allow_slow_preset": {
+                    "type": "boolean"
+                  },
+                  "keep_hdr": {
+                    "type": "boolean"
+                  },
+                  "audio_only": {
+                    "type": "boolean"
+                  },
+                  "size_budget_percent": {
+                    "type": "number"
+                  },
+                  "size_budget_bytes": {
+                    "type": "number"
+                  },
+                  "size_budget_source": {
+                    "type": "string"
+                  },
+                  "size_budget_sibling_multiplier": {
+                    "type": "number"
+                  },
+                  "hardware_margin_percent": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/backups/{id}/clean": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "operationId": "cleanBackup",
+        "summary": "Clean a backup",
+        "description": "Removes the recovery copy of a verified, promoted candidate (transcode_backups clean). Refused (409) while it is not safe.",
+        "responses": {
+          "200": {
+            "description": "The backup result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/backups/{id}/restore": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "operationId": "restoreBackup",
+        "summary": "Restore a backup",
+        "description": "Puts the original back (transcode_backups restore). Refused (409) in a state that cannot be restored.",
+        "responses": {
+          "200": {
+            "description": "The backup result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/backups/{id}/discard-duplicate": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "operationId": "discardDuplicateBackup",
+        "summary": "Discard a duplicate backup",
+        "description": "Discards a backup that duplicates another (transcode_backups discard_duplicate).",
+        "responses": {
+          "200": {
+            "description": "The backup result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/backups/{id}/discard": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "operationId": "discardBackup",
+        "summary": "Discard a backup without verifying its replacement",
+        "description": "Permanently removes a recovery copy WITHOUT verifying its replacement (transcode_backups discard). The tool needs explicit intent and the server's destructive switch; the API also requires confirm true in the body: without it the answer is 400 and nothing is removed.",
+        "responses": {
+          "200": {
+            "description": "The backup was discarded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "confirm"
+                ],
+                "properties": {
+                  "confirm": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/backups/candidates/{id}/discard": {
+      "post": {
+        "tags": [
+          "backups"
+        ],
+        "operationId": "discardCandidate",
+        "summary": "Discard a leftover candidate",
+        "description": "Removes the files of a candidate that was not promoted (transcode_backups discard_candidate). confirm true is required; the tool also needs the server's destructive switch (403 when off).",
+        "responses": {
+          "200": {
+            "description": "The candidate was discarded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id, as listed by GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "confirm"
+                ],
+                "properties": {
+                  "confirm": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/recipe-bundle/reload": {
+      "post": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "reloadRecipeBundle",
+        "summary": "Reload the recipe bundle",
+        "description": "Re-reads the bundle source on this server (recipe_reload). No body.",
+        "responses": {
+          "200": {
+            "description": "The bundle status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The bundle did not validate or was not activated (code rejected); the active bundle is unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/recipe-bundle/update": {
+      "post": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "updateRecipeBundle",
+        "summary": "Fetch the recipe bundle source now",
+        "description": "Fetches the bundle source now and activates it if it validates (recipe_update). No body.",
+        "responses": {
+          "200": {
+            "description": "The bundle status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The bundle did not validate or was not activated (code rejected); the active bundle is unchanged.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": false,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/recipe-bundle/rollback": {
+      "post": {
+        "tags": [
+          "recipes"
+        ],
+        "operationId": "rollbackRecipeBundle",
+        "summary": "Roll the recipe bundle back",
+        "description": "Re-activates the previous bundle (recipe_rollback). expected_active_digest and expected_previous_digest are both required (read them with GET /transcode/v1/recipe-bundle): if either no longer matches, 409 and nothing changes.",
+        "responses": {
+          "200": {
+            "description": "The bundle status after the rollback.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "expected_active_digest",
+                  "expected_previous_digest"
+                ],
+                "properties": {
+                  "expected_active_digest": {
+                    "type": "string"
+                  },
+                  "expected_previous_digest": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/podcasts/{id}/ad-library/{entry}": {
+      "delete": {
+        "tags": [
+          "podcasts"
+        ],
+        "operationId": "revokeAdReference",
+        "summary": "Revoke a confirmed ad reference",
+        "description": "Revokes one reference of a podcast's ad library (podcast_ad_library revoke). No body.",
+        "responses": {
+          "200": {
+            "description": "The reference was revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Podcast profile id, as listed by GET /transcode/v1/podcasts.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "entry",
+            "in": "path",
+            "required": true,
+            "description": "Reference id, as listed by GET /transcode/v1/podcasts/{id}/ad-library.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/transcode/v1/review-queue/{id}/close": {
+      "post": {
+        "tags": [
+          "review-queue"
+        ],
+        "operationId": "closeReviewEntry",
+        "summary": "Close a review-queue entry",
+        "description": "Closes an entry as processed or dismissed (the console's queue handler).",
+        "responses": {
+          "200": {
+            "description": "The entry after closing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Review-queue entry id, as listed by GET /transcode/v1/review-queue.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "outcome"
+                ],
+                "properties": {
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "processed",
+                      "dismissed"
+                    ]
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/review-queue/{id}/decisions": {
+      "post": {
+        "tags": [
+          "review-queue"
+        ],
+        "operationId": "recordDecision",
+        "summary": "Record a decision for a review-queue entry",
+        "description": "Records the decision made for the entry (decision_record). Answers 201.",
+        "responses": {
+          "201": {
+            "description": "The decision was recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Review-queue entry id, as listed by GET /transcode/v1/review-queue.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "title",
+                  "decision"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "decision": {
+                    "type": "string"
+                  },
+                  "release_guid": {
+                    "type": "string"
+                  },
+                  "release_group": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "integer"
+                  },
+                  "seeders": {
+                    "type": "integer"
+                  },
+                  "score": {
+                    "type": "number"
+                  },
+                  "reasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -3692,7 +7437,7 @@
           },
           "code": {
             "type": "string",
-            "description": "Stable code for a program: invalid_request, unauthorized, not_found, method_not_allowed, conflict, unavailable, internal, or a specific one such as unknown_worker, action_not_found, batch_not_found, recipe_not_found, unknown_podcast. Also response_too_large (502): the answer would not fit, narrow the request."
+            "description": "Stable code for a program: invalid_request (400, a bad parameter or body), unauthorized (401), forbidden (403), not_found (404), method_not_allowed (405), conflict (409, the state, revision, digest or version is not what the request expects), payload_too_large (413), unsupported_media_type (415), rejected (422, a bundle that did not validate), unavailable (503), internal (500), or a specific one such as unknown_worker, action_not_found, batch_not_found, recipe_not_found, unknown_podcast. Also response_too_large (502): the answer would not fit, narrow the request."
           },
           "hint": {
             "type": "string",

@@ -1,12 +1,15 @@
-# Transcode API v1 (read-only)
+# Transcode API v1
 
-An HTTP API for everything the transcode side can tell you, served by the
-Navigatorr server itself under `/transcode/v1`. This version (phase 1a) only
-reads. Starting, holding, cancelling, pausing, draining, changing goals and
-replacing files are not here yet: keep using the MCP tools for those.
+An HTTP API for everything the transcode side can tell you and do, served by the
+Navigatorr server itself under `/transcode/v1`. Phase 1a added the reads; phase
+1b (this version) adds the writes: starting, cancelling, resuming and retrying
+actions, recording decisions, changing a batch goal, pausing and draining
+workers, changing worker slots, recipes, backups, podcast review and the review
+queue. The MCP tools stay as they are.
 
 The routes reuse the functions the maintenance console and the MCP tools
-already call, so an answer here is the same answer they give. Transcode never
+already call, so an answer here is the same answer they give, and a write keeps
+every safeguard of the function it calls (see "Writes"). Transcode never
 imports Nodes (invariant N2; `internal/importguard` checks it).
 
 ## Discoverability
@@ -38,18 +41,33 @@ call_api    service=transcode method=GET path=/actions/{id}
 - `GET /transcode/v1/openapi.json` is public.
 - Everything else needs either the transcode API key (`X-Api-Key: <key>` or
   `Authorization: Bearer <key>`) or the web console's own sign-in (same rules
-  as the console: GET needs only the credential).
+  as the console: GET needs only the credential; a write also needs the
+  console's write checks, below).
 - The key is read once at startup from `web.transcode_token_file`, compared by
   hash, and opens `/transcode/v1` and nothing else. It is not the builds token.
 - With no key configured, only the console sign-in works.
-- Any method but GET answers `405 method_not_allowed` (with `Allow: GET, HEAD`,
-  or `Allow: GET` on the podcast block route, which refuses HEAD). This holds
-  for `/openapi.json` too: reading it is public, writing to it is a 405.
+- A write made with the transcode key needs nothing else: the key is no ambient
+  credential (a browser never attaches it by itself). A write made with the
+  web sign-in (cookie, console bearer token, Cloudflare Access) goes through the
+  console's own write rules, the same ones the `/api/` routes apply
+  (`maintenanceui/server.go`, the handler wrapper; `transcodeAccess` in
+  `maintenanceui/transcode_v1.go`): the header `X-Navigatorr-Request: 1` is
+  required (`401` without it) and an `Origin`, when sent, must name this host
+  (`403 forbidden` otherwise).
+- A method a path does not serve answers `405 method_not_allowed` with an
+  `Allow` header listing what it does serve (for example `GET, HEAD, PUT,
+  DELETE` on `/pauses/{name}`, `POST` on `/actions/{id}/cancel`; `GET` alone on
+  the podcast block route, which refuses HEAD). This holds for `/openapi.json`
+  too: reading it is public, writing to it is a 405 (`Allow: GET, HEAD`).
 
 Errors are JSON `{"error", "code", "hint"}`. Codes: `invalid_request` (400),
-`unauthorized` (401), `not_found` (404, plus `unknown_worker`, `action_not_found`,
+`unauthorized` (401), `forbidden` (403, a cross-origin console write, or a
+destructive change the server keeps switched off), `not_found` (404, plus `unknown_worker`, `action_not_found`,
 `batch_not_found`, `recipe_not_found`, `unknown_podcast`), `method_not_allowed`
-(405), `conflict` (409), `unavailable` (503, the capability is switched off;
+(405), `conflict` (409, the state, revision, digest or version is not what the
+request expects: read the resource again), `payload_too_large` (413),
+`unsupported_media_type` (415), `rejected` (422, a recipe bundle that did not
+validate), `unavailable` (503, the capability is switched off;
 every podcast route, `GET /podcasts` included, answers it when podcasts are
 disabled, and 404
 `unknown_podcast` only for a profile that does not exist or is off),
@@ -90,7 +108,7 @@ audit log has no offset, so it answers `{count, records}` only (see below).
   `action_retry`, `action_cancelled`) narrows the read itself; a workflow name is
   applied after it. If even `limit` entries do not fit, it is a 502.
 
-## Routes
+## Routes (reads)
 
 Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 
@@ -116,18 +134,79 @@ Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 | `GET /podcasts`, `/podcasts/{id}/local-library`, `/podcasts/{id}/ad-library` | `/api/maintenance/podcasts`, `/api/maintenance/podcast-local-library`, `podcast_ad_library` |
 | `GET /review-queue` | `/api/maintenance/maintenance-queue` |
 
-`/actions/{id}` and the batch routes answer 404 for an action that is not a
+The writes are listed under "Writes". `/actions/{id}`, the batch routes and every
+write under `/actions/{id}` or `/backups/{id}` answer 404 for an action that is not a
 transcode one (for example a Sonarr action), so this API never becomes a back
 door into other kinds of work.
 
+## Writes
+
+Every write has a JSON request body (`Content-Type: application/json`, at most
+1 MiB). Unknown fields, a second JSON value, a wrong type or a missing required
+field are `400 invalid_request`; a body over 1 MiB is `413 payload_too_large`;
+any other content type is `415 unsupported_media_type`. A write that takes no
+body accepts an empty one. Nothing is changed by a request that is refused.
+
+Each write calls the same MCP tool or maintenance handler as the read it
+completes, and passes its safeguards on: the API checks a few more things (that
+the action is a transcode one, the body's shape) but never removes one. A
+refusal of the tool is `404` when the thing does not exist, `409 conflict` when
+its state, digest, revision or version is not what the request expects, `400`
+for a bad parameter, `403` when it needs a switch the server keeps off. Failures
+of the server (5xx) never carry their cause.
+
+| Route | Calls | Body | Safeguard |
+|---|---|---|---|
+| `POST /actions` | `action_run` (202) | `action`, `inputs`, `idempotency_key` | only the transcode workflows (`GET /catalog`); idempotency key |
+| `POST /actions/{id}/cancel` | `action_cancel` | `reason` | transcode actions only (else 404) |
+| `POST /actions/{id}/resume` | `action_resume` | `decision`, `inputs`, `plan_digest` | `plan_digest` of the promotion plan read with `GET /batches/{id}/promotion-plan`; a stale one is 409 |
+| `POST /actions/{id}/retry` | `action_retry` | none | transcode actions only |
+| `POST /actions/{id}/podcast/classify` | `podcast_classify` | the classification object | block ids and digests from `GET .../podcast/blocks` |
+| `POST /actions/{id}/podcast/review` | `podcast_review` | `digest`, `approve`, `reclassify`, `offset` | exact `digest` of the review; stale is 409 |
+| `GET /batches/{id}/goal` | `transcode_goal_change` without a mode | query `scope` | read-only preview: the selection and its `selection_version` |
+| `POST /batches/{id}/goal` | `transcode_goal_change` (202) | `mode`, `selection_version`, `idempotency_key`, options | `selection_version` from the preview (stale is 409); idempotency key |
+| `PUT /workers/{name}/slots` | `/api/maintenance/worker-slots` | `video_slots`, `podcast_slots`, `ceiling`, `x265_slots`, `core_budget`, `revision` | `revision` from `GET .../slots` (`settings.revision`); stale is 409 |
+| `PUT /drain` | `/api/maintenance/worker-drain` | `enabled` | read `GET /drain` for `ready_for_deploy` |
+| `PUT /pauses/{name}` | `/api/maintenance/worker-pause` | exactly one of `mode` (`graceful`, `immediate`, `suspend`, `off`) and `builds_paused` | the two switches are independent, never both in one request |
+| `DELETE /pauses/{name}` | same, mode `off` | none | |
+| `POST /backups/{id}/clean`, `/restore`, `/discard-duplicate` | `transcode_backups` | none | the tool's own state checks (409) |
+| `POST /backups/{id}/discard` | `transcode_backups` discard | `confirm: true` | removes a recovery copy without verifying its replacement: `confirm` is required here, and the tool needs the destructive switch (403 when off) |
+| `POST /backups/candidates/{id}/discard` | `transcode_backups` discard_candidate | `confirm: true` | the tool refuses without `confirm`; destructive switch |
+| `PUT /recipes/{name}` | `recipe_save` | `profile`, `description`, `source_action_id`, `expected_generation`, `expected_digest` | to replace a recipe, the generation and digest read with `GET /recipes/{name}`; stale is 409 |
+| `DELETE /recipes/{name}` | `recipe_delete` | `expected_generation`, `expected_digest` (both required) | stale is 409 |
+| `POST /recipe-bundle/reload`, `/update` | `recipe_reload`, `recipe_update` | none | a bundle that does not validate is 422, the active one unchanged |
+| `POST /recipe-bundle/rollback` | `recipe_rollback` | `expected_active_digest`, `expected_previous_digest` (both required) | digests from `GET /recipe-bundle`; either stale is 409 |
+| `DELETE /podcasts/{id}/ad-library/{entry}` | `podcast_ad_library` revoke | none | |
+| `POST /review-queue/{id}/close` | the console's queue handler | `outcome` (`processed` or `dismissed`), `note` | |
+| `POST /review-queue/{id}/decisions` | `decision_record` (201) | `title`, `decision`, release fields, `reasons` | |
+
+### Confirmation flows
+
+There is no confirmation code in this backend; its confirmations are a digest, a
+version or a flag the caller must have read first, and the API requires the same
+ones, so no write can be made blind:
+
+- Goal change: `GET /batches/{id}/goal` previews the exact selection and gives
+  `selection_version`; `POST` with a different version (the selection moved) is
+  `409`, and without a `mode` it is `400`.
+- Promotion: `GET /batches/{id}/promotion-plan` gives the plan and its digest;
+  `POST /actions/{id}/resume` with a stale `plan_digest` is `409`.
+- Podcast review: the `digest` of the review being answered must be sent.
+- Recipes and the bundle: the expected generation and digests are required where
+  the tool requires them, and a stale one is `409`; the change is not applied.
+- Worker slots: send the `revision` read with the settings; a stale one is `409`.
+- Discarding a backup or a candidate: `confirm: true`.
+
+### Idempotency
+
+`POST /actions` and `POST /batches/{id}/goal` take an idempotency key, as the
+tools do: send it as the `Idempotency-Key` header or the `idempotency_key` body
+field (both are fine when equal; different values are `400`). Repeating the same
+request with the same key returns the first result instead of repeating the work.
+The goal change requires a key.
+
 ## Left out of this version
 
-- All writes: `action_run`, `action_cancel`, `action_resume`, `action_retry`,
-  `decision_record`, `transcode_goal_change`, `worker_pause` (set), drain on or
-  off, worker slot changes, `recipe_save`, `recipe_update`, `recipe_delete`,
-  `recipe_rollback`, `recipe_reload`, `transcode_backups` clean, restore and
-  discard, `podcast_classify`, `podcast_review`, the ad-library `revoke`, and
-  closing a review-queue entry. They arrive in phase 1b.
 - Things Transcode does not own: Nodes builds (`/nodes/v1`), file system tools
   (`fs_*`), `safe_replace`, media inspection, library scans, torrents, the
   generic operation ledger and the `maintenance_*` claim tools, which serve

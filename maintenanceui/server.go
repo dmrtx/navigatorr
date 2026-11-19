@@ -230,7 +230,7 @@ func (s *Server) Handler() http.Handler {
 	// The successor API and its spec (see package nodes).
 	mux.Handle("GET "+nodes.SpecPath, nodes.SpecHandler())
 	mux.HandleFunc(nodes.BasePath+"/", s.nodesAPI)
-	// The read-only Transcode API and its spec (see package transcodeapi).
+	// The Transcode API and its spec (see package transcodeapi).
 	mux.Handle("GET "+transcodeapi.SpecPath, transcodeapi.SpecHandler())
 	mux.Handle(transcodeapi.BasePath+"/", s.transcodeV1())
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
@@ -274,10 +274,17 @@ func (s *Server) Handler() http.Handler {
 				"hint": "send the builds token as the X-Api-Key header (or Authorization: Bearer)"})
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath && !s.transcodeAuthorized(r) {
-			writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
-				"hint": "send the transcode API key as the X-Api-Key header (or Authorization: Bearer), or sign in to the web UI"})
-			return
+		if strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath {
+			if ok, status := s.transcodeAccess(r); !ok {
+				if status == 403 {
+					writeJSON(w, 403, map[string]string{"error": "cross-origin request denied", "code": "forbidden",
+						"hint": "a change made with the web sign-in must come from this host; scripts should use the transcode API key"})
+					return
+				}
+				writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
+					"hint": "send the transcode API key as the X-Api-Key header (or Authorization: Bearer), or sign in to the web UI (a change also needs the X-Navigatorr-Request: 1 header)"})
+				return
+			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			// The builds token is a bearer for scripts, accepted on the build
@@ -316,7 +323,7 @@ func (s *Server) Handler() http.Handler {
 			// file name or request value in one, since it is logged here as it is.
 			log.Printf("slow request: %s %s took %s (%d other requests in flight when it began) %s", r.Method, r.URL.Path, d.Round(time.Millisecond), others, w.Header().Get("Server-Timing"))
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/")) && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
 			// (Signing in or out changes nothing the listings show, and anyone can
 			// post to login, so it must not be a way to empty the caches.)
