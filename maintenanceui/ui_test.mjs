@@ -10694,8 +10694,8 @@ test("a running build's row opens its output, as text, newest at the bottom", as
   h.context.log = { lines: ["a", "b", "c"], status: "running", ended_at: null };
   await timers.at(-1)[0]();
   assert.equal(box.scrollTop, 1000);
-  // Refreshed every 5 s; scrolled up, the view stays; scrolled down again, it follows.
-  assert.equal(timers.at(-1)[1], 5000);
+  // Refreshed every 2 s; scrolled up, the view stays; scrolled down again, it follows.
+  assert.equal(timers.at(-1)[1], 2000);
   box.scrollTop = 100; box.listeners.get("scroll")();
   h.context.log = { lines: ["a", "b", "c", "d"], status: "running", ended_at: null };
   await timers.at(-1)[0]();
