@@ -33,8 +33,20 @@ type ImportResult struct {
 //     is retried at the next start even if builds or pauses were written here
 //     in the meantime. The copy is INSERT OR IGNORE, so a row already here (the
 //     registry's own, newer one) always wins and nothing is overwritten;
+//   - the flag is checked once more inside the transaction, under the write
+//     lock, so two concurrent imports (callers or processes sharing the file)
+//     import once and the second is Skipped;
 //   - a failed import changes nothing (one transaction) and is reported to the
-//     caller, who logs it and starts anyway.
+//     caller, who logs it and starts anyway;
+//   - the legacy builds take the lowest insertion numbers, in their own order
+//     (oldest first), and the registry's rows move up behind them, so history
+//     imported by a retry pages after the builds created in the meantime.
+//
+// Known and accepted: a retry after a failed first import brings back a legacy
+// builds pause for a node the operator resumed in between (the registry only
+// keeps a row while paused, so the resume left nothing to tell the import to
+// leave it). This fails safe (the node refuses builds until resumed again) and
+// the retry logs the worker name of each pause it brings back.
 //
 // The old tables in the main database are only read, never changed or dropped.
 // legacyPath is the main database file; a missing file, or one without the old
@@ -77,15 +89,47 @@ func (s *Service) ImportLegacy(ctx context.Context, legacyPath string) (ImportRe
 		return ImportResult{}, err
 	}
 	defer tx.Rollback()
-	for _, b := range builds {
+	// A statement that writes (even one that matches no row) takes the
+	// database's write lock now, so the flag is read below as the latest
+	// committed state and no other process can finish an import between that
+	// read and our commit.
+	if _, err := tx.ExecContext(ctx, `UPDATE meta SET value = value WHERE key = ?`, metaLegacyImport); err != nil {
+		return ImportResult{}, err
+	}
+	// Checked again under the lock: two imports (two callers, or two processes
+	// on one file) that both passed the early check above import only once.
+	var done string
+	switch err := tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, metaLegacyImport).Scan(&done); {
+	case err == nil:
+		return ImportResult{Skipped: "already imported (" + done + ")"}, nil
+	case !errors.Is(err, sql.ErrNoRows):
+		return ImportResult{}, err
+	}
+	// A registry that already holds rows means an earlier import failed and
+	// this is the retry.
+	var held int
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM builds) + (SELECT COUNT(*) FROM build_pauses)`).Scan(&held); err != nil {
+		return ImportResult{}, err
+	}
+	retry := held > 0
+	// The legacy history is older than anything the registry already holds, so
+	// it takes the lowest insertion numbers, in the order it was read
+	// (created_at, seq): the registry's own rows move up by the number of
+	// legacy rows. Gaps left by rows that already exist are harmless; only the
+	// order matters. seq is never below 1, and builds_seq is not unique, so
+	// the shift cannot collide midway.
+	if len(builds) > 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE builds SET seq = seq + ?`, len(builds)); err != nil {
+			return ImportResult{}, err
+		}
+	}
+	for i, b := range builds {
 		var code any
 		if b.ExitCode != nil {
 			code = *b.ExitCode
 		}
-		// seq continues after whatever the registry already holds, so the
-		// insertion order stays unique and monotonic.
-		r, err := tx.Exec(`INSERT OR IGNORE INTO builds(`+buildColumns+`, seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM builds))`,
-			b.ID, b.Target, b.Source, b.Holder, b.Kind, b.Title, b.PreemptMode, b.Priority, b.Status, b.CreatedAt, b.StartedAt, b.LastHeartbeatAt, b.ExpiresAt, b.EndedAt, b.Progress, code)
+		r, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO builds(`+buildColumns+`, seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			b.ID, b.Target, b.Source, b.Holder, b.Kind, b.Title, b.PreemptMode, b.Priority, b.Status, b.CreatedAt, b.StartedAt, b.LastHeartbeatAt, b.ExpiresAt, b.EndedAt, b.Progress, code, i+1)
 		if err != nil {
 			return ImportResult{}, err
 		}
@@ -93,22 +137,27 @@ func (s *Service) ImportLegacy(ctx context.Context, legacyPath string) (ImportRe
 			res.Builds++
 		}
 	}
+	var pauseNames []string
 	for _, p := range pauses {
-		r, err := tx.Exec(`INSERT OR IGNORE INTO build_pauses(worker, since, updated_at) VALUES(?, ?, ?)`, p.Worker, p.Since, p.UpdatedAt)
+		r, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO build_pauses(worker, since, updated_at) VALUES(?, ?, ?)`, p.Worker, p.Since, p.UpdatedAt)
 		if err != nil {
 			return ImportResult{}, err
 		}
 		if n, _ := r.RowsAffected(); n > 0 {
 			res.Pauses++
+			pauseNames = append(pauseNames, p.Worker)
 		}
 	}
-	if _, err := tx.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)`, metaLegacyImport, fmt.Sprintf("%d builds, %d pauses", res.Builds, res.Pauses)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)`, metaLegacyImport, fmt.Sprintf("%d builds, %d pauses", res.Builds, res.Pauses)); err != nil {
 		return ImportResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return ImportResult{}, err
 	}
 	log.Printf("nodes: imported %d build record(s) and %d builds pause(s) from the main database (the old tables stay as they were)", res.Builds, res.Pauses)
+	if retry && len(pauseNames) > 0 {
+		log.Printf("nodes: retry of an earlier failed import: builds pause(s) re-imported for %s; resume them if they were lifted meanwhile", strings.Join(pauseNames, ", "))
+	}
 	return res, nil
 }
 

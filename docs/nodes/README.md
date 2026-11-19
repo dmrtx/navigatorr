@@ -147,3 +147,13 @@ successful import it never runs again, so records pruned later do not come back.
 Old `waiting` rows are imported as they were and cancelled by the first
 reconcile pass. The old tables are opened read-only by that import and then left
 where they are, unused (they are not dropped).
+
+The flag is checked again inside the import's transaction, so two imports at
+once (two processes on one file) copy only once. On a retry, the old builds are
+placed before the ones `nodes.db` already holds, so the history pages after the
+newer builds. One case is accepted on purpose: if the first import failed, an
+operator resumed a node, and then the retry ran, the node's old builds pause
+comes back (the registry keeps a row only while a node is paused, so there is
+nothing to tell the import to skip it). It fails safe: the node refuses builds
+until it is resumed again, and the retry logs the name of each pause it brings
+back.

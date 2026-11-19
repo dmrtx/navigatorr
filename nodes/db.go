@@ -20,6 +20,10 @@ var schema = []string{
 	// created in the same second keep their creation order.
 	`CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, target TEXT NOT NULL, source TEXT NOT NULL, holder TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, preempt_mode TEXT NOT NULL, priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', last_heartbeat_at TEXT NOT NULL, expires_at TEXT NOT NULL, ended_at TEXT NOT NULL DEFAULT '', progress TEXT NOT NULL DEFAULT '', exit_code INTEGER, seq INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID`,
 	`CREATE INDEX IF NOT EXISTS builds_status ON builds(status, expires_at)`,
+	// seq is always >= 1 here (never the column default 0). The index is not
+	// unique: an import shifts every existing seq by an offset in one UPDATE,
+	// and a unique index would be checked row by row in the middle of it.
+	`CREATE INDEX IF NOT EXISTS builds_seq ON builds(seq)`,
 	// A node whose builds the operator paused: one row while it is paused.
 	`CREATE TABLE IF NOT EXISTS build_pauses (worker TEXT PRIMARY KEY, since TEXT NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
 	// Facts about this database (the one-time import from the main database).

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -247,5 +248,107 @@ func TestImportLegacyWaitingRowsAreCancelledByReconcile(t *testing.T) {
 	}
 	if run, _ := s.GetBuild("bld_old00001"); run.ExitCode != nil {
 		t.Fatalf("no exit code on a running row: %+v", run)
+	}
+}
+
+// Two services on one nodes.db (two processes) importing at once import once;
+// what is pruned or resumed afterwards is never brought back by the loser or by
+// a later call.
+func TestImportLegacyConcurrentImportsRunOnce(t *testing.T) {
+	legacy := legacyDB(t)
+	path := filepath.Join(t.TempDir(), "nodes.db")
+	a, _ := buildSvcAt(t, path)
+	b, _ := buildSvcAt(t, path)
+	ctx := context.Background()
+
+	results := make([]ImportResult, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i, s := range []*Service{a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i], errs[i] = s.ImportLegacy(ctx, legacy)
+		}()
+	}
+	wg.Wait()
+	imported := 0
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("import %d: %v", i, errs[i])
+		}
+		if results[i].Skipped == "" {
+			imported++
+			if results[i].Builds != 4 || results[i].Pauses != 1 {
+				t.Fatalf("the import that ran copies everything: %+v", results[i])
+			}
+		} else if results[i].Builds != 0 || results[i].Pauses != 0 {
+			t.Fatalf("a skipped import copies nothing: %+v", results[i])
+		}
+	}
+	if imported != 1 {
+		t.Fatalf("exactly one of two concurrent imports runs, got %d: %+v", imported, results)
+	}
+
+	// An operator resumes nodeB and a build is pruned; a second import (even
+	// from a service that never saw the flag) brings neither back.
+	if err := a.SetBuildsPause(ctx, "nodeB", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.reg.db.Exec(`DELETE FROM builds WHERE id='bld_done0001'`); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := buildSvcAt(t, path)
+	res, err := c.ImportLegacy(ctx, legacy)
+	if err != nil || res.Skipped == "" || res.Builds != 0 || res.Pauses != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := c.GetBuild("bld_done0001"); err == nil {
+		t.Fatal("a pruned build must not come back")
+	}
+	if p, _ := c.BuildsPauses(); len(p) != 0 {
+		t.Fatalf("a resumed node must not be paused again: %+v", p)
+	}
+}
+
+// A retry after the registry was written to: the registry's own builds are the
+// newest, the legacy ones follow oldest-last, and seq stays unique and >= 1.
+func TestImportLegacyRetryKeepsTheRegistrysBuildsNewest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "main.db")
+	writeBadLegacy(t, path)
+	s, _ := buildSvc(t)
+	ctx := context.Background()
+	if _, err := s.ImportLegacy(ctx, path); err == nil {
+		t.Fatal("the first import fails")
+	}
+	own := startBuild(t, s, "nodeA", "graceful", 0)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	writeLegacyDB(t, path)
+	if res, err := s.ImportLegacy(ctx, path); err != nil || res.Builds != 4 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	page, err := s.PageBuilds(BuildFilter{}, "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newest first: the own build, then the legacy ones by created_at, newest
+	// first (waiting 09:10, old 09:00, fail 08:10, done 08:00).
+	want := []string{own.ID, "bld_wait0001", "bld_old00001", "bld_fail0001", "bld_done0001"}
+	if len(page.Builds) != len(want) {
+		t.Fatalf("%d builds, want %d", len(page.Builds), len(want))
+	}
+	for i, b := range page.Builds {
+		if b.ID != want[i] {
+			t.Fatalf("position %d: %s, want %s", i, b.ID, want[i])
+		}
+	}
+	var n, d, lo int
+	if err := s.reg.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT seq), MIN(seq) FROM builds`).Scan(&n, &d, &lo); err != nil {
+		t.Fatal(err)
+	}
+	if n != d || lo < 1 {
+		t.Fatalf("seq must be unique and >= 1: %d rows, %d distinct, min %d", n, d, lo)
 	}
 }
