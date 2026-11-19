@@ -55,21 +55,41 @@ type BuildRecords interface {
 	BuildsPaused(node string) (bool, error)
 }
 
-// SetBuildRecords wires the registry. Call it before the engine is used.
-func (e *Engine) SetBuildRecords(r BuildRecords) { e.records = r }
+// recordsBox lets an interface value sit in an atomic pointer.
+type recordsBox struct{ r BuildRecords }
+
+// SetBuildRecords wires the registry. main calls it once, before the reconciler
+// starts; the field is atomic anyway, so a goroutine the engine started earlier
+// reads either none or the registry, never a torn value.
+func (e *Engine) SetBuildRecords(r BuildRecords) {
+	if r == nil {
+		e.records.Store(nil)
+		return
+	}
+	e.records.Store(&recordsBox{r})
+}
+
+// buildRecords is the wired registry, nil when there is none.
+func (e *Engine) buildRecords() BuildRecords {
+	if b := e.records.Load(); b != nil {
+		return b.r
+	}
+	return nil
+}
 
 // SetNodeBuildsPause pauses or resumes new builds on a node and returns the
 // node's status afterwards. It never touches the transcode pause or any build.
 // Repeating a request changes nothing.
 func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused bool) (transcode.NodePauseStatus, error) {
-	if e.records == nil {
+	records := e.buildRecords()
+	if records == nil {
 		return transcode.NodePauseStatus{}, errors.New("the builds registry is not configured")
 	}
 	w, ok := e.deps.Workers.Get(node)
 	if !ok {
 		return transcode.NodePauseStatus{}, &transcode.WorkerNotConfiguredError{Name: node}
 	}
-	if err := e.records.SetBuildsPause(ctx, w.Name, paused); err != nil {
+	if err := records.SetBuildsPause(ctx, w.Name, paused); err != nil {
 		return transcode.NodePauseStatus{}, err
 	}
 	return e.NodePauseStatuses(ctx)[w.Name], nil
@@ -78,19 +98,21 @@ func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused boo
 // NodeBuildsPaused reports whether new builds on the named node are refused. An
 // unreadable state reads as paused, as the create path fails closed too.
 func (e *Engine) NodeBuildsPaused(name string) bool {
-	if e.records == nil {
+	records := e.buildRecords()
+	if records == nil {
 		return false
 	}
-	paused, err := e.records.BuildsPaused(e.resolveWorker(name))
+	paused, err := records.BuildsPaused(e.resolveWorker(name))
 	return paused || err != nil
 }
 
 // buildsPauses is the registry's paused nodes with the unreadable flag.
 func (e *Engine) buildsPauses() (map[string]string, bool) {
-	if e.records == nil {
+	records := e.buildRecords()
+	if records == nil {
 		return nil, false
 	}
-	m, err := e.records.BuildsPauses()
+	m, err := records.BuildsPauses()
 	return m, err != nil
 }
 
@@ -98,10 +120,11 @@ func (e *Engine) buildsPauses() (map[string]string, bool) {
 // for the registry's view of it (the UI). It is a record read only: nothing in
 // the engine decides on it.
 func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
-	if e.records == nil {
+	records := e.buildRecords()
+	if records == nil {
 		return nil
 	}
-	return e.records.NodeBuildRecords(node)
+	return records.NodeBuildRecords(node)
 }
 
 // RunningLeases is how many build leases the node's worker reports running,

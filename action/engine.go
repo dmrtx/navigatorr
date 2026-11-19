@@ -42,8 +42,9 @@ type Engine struct {
 	// beforeAutoEnqueue, in tests, can fail an automatic submission.
 	beforeAutoEnqueue func(id string) error
 	// records is the builds registry's display side (package nodes, wired in
-	// main); nil reads as none. See build_records.go.
-	records BuildRecords
+	// main); nil reads as none. It is set once at startup but read from the
+	// engine's own goroutines, so it is an atomic. See build_records.go.
+	records atomic.Pointer[recordsBox]
 	// notes tracks skipped-replacement notes still being written.
 	notes sync.WaitGroup
 

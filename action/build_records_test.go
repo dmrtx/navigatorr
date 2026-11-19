@@ -94,7 +94,7 @@ func (f *fakeRecords) add(node, mode string) transcode.NodeBuild {
 	return b
 }
 
-func records(e *Engine) *fakeRecords { return e.records.(*fakeRecords) }
+func records(e *Engine) *fakeRecords { return e.buildRecords().(*fakeRecords) }
 
 func buildEngine(t *testing.T, m1 transcode.Executor) (*Engine, *buildClock) {
 	t.Helper()
@@ -191,5 +191,39 @@ func TestEngineWithoutARegistryShowsNothing(t *testing.T) {
 	}
 	if _, err := e.SetNodeBuildsPause(context.Background(), "m1", true); err == nil {
 		t.Fatal("a pause needs the registry")
+	}
+}
+
+// The registry may be wired while engine goroutines already read it: the field
+// is atomic, so both orders are safe (checked by go test -race where cgo is on).
+func TestSetBuildRecordsWhileReading(t *testing.T) {
+	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	e.SetBuildRecords(nil)
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = e.NodeBuildRecords("m1")
+					_ = e.NodeBuildsPaused("m1")
+				}
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		e.SetBuildRecords(newFakeRecords())
+		e.SetBuildRecords(nil)
+	}
+	close(stop)
+	wg.Wait()
+	e.SetBuildRecords(newFakeRecords())
+	if e.buildRecords() == nil {
+		t.Fatal("wired")
 	}
 }
