@@ -1,16 +1,22 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/tools"
 	"github.com/jakenesler/navigatorr/transcodeapi"
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 const testTranscodeKey = "synthetic-transcode-key-0123456789"
@@ -177,7 +183,6 @@ func TestTranscodeV1UnknownIdsAre404(t *testing.T) {
 		"/transcode/v1/batches/nope/items":         "batch_not_found",
 		"/transcode/v1/batches/file1/items":        "batch_not_found",
 		"/transcode/v1/batches/nope/settings":      "batch_not_found",
-		"/transcode/v1/podcasts/nope/ad-library":   "unknown_podcast",
 	} {
 		c, e := get(t, h, p, keyHdr())
 		if c != 404 || e["code"] != code || e["error"] == "" {
@@ -350,5 +355,273 @@ func TestTranscodeV1UIAuthWriteNeedsTheSameOriginHeader(t *testing.T) {
 	w = v1(h, "POST", "/transcode/v1/drain", `{}`, map[string]string{"Authorization": "Bearer " + testToken, "X-Navigatorr-Request": "1"})
 	if w.Code != 405 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// fakeTool replaces an MCP tool of the test server with fn.
+func fakeTool(s *Server, name string, fn func(args map[string]any) (*mcp.CallToolResult, error)) {
+	s.mcp.AddTool(mcp.NewTool(name), func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return fn(req.GetArguments())
+	})
+}
+
+// The history shows only what the engine logged for transcode actions: not the
+// entries of other services, nor those of non-transcode actions, whatever the
+// filters say.
+func TestTranscodeV1HistoryIsLimitedToTranscodeActions(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	tools.RegisterDiagnostics(s.mcp, s.cfg, s.registry, nil, nil, nil, nil, st, s.engine.Deps().Workers)
+	seedOperation(t, st, "job1", "transcode_media", "completed", nil, nil, nil)
+	seedOperation(t, st, "pod1", "clean_podcast_ads", "completed", nil, nil, nil)
+	seedOperation(t, st, "other1", "sonarr_thing", "completed", nil, nil, nil)
+	log := func(action, service, media, ident string) {
+		t.Helper()
+		if err := st.LogActionEnriched(action, service, media, `{}`, "ok", "", ident, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log("action_completed", "", "job1", "job1")
+	log("action_failed", "", "pod1", "pod1")
+	log("action_completed", "", "other1", "other1")
+	log("scan_library", "radarr", "Show A", "")
+	log("safe_replace", "sonarr", "Show A", "")
+	log("action_completed", "", "gone1", "gone1") // an instance that no longer exists
+
+	ids := func(q string) (int, []string, map[string]any) {
+		code, body := get(t, h, "/transcode/v1/history"+q, keyHdr())
+		var out []string
+		recs, _ := body["records"].([]any)
+		for _, r := range recs {
+			rec := r.(map[string]any)
+			out = append(out, rec["action"].(string)+":"+rec["identifiers"].(string))
+		}
+		return code, out, body
+	}
+	for q, want := range map[string][]string{
+		"":                                    {"action_failed:pod1", "action_completed:job1"},
+		"?service=radarr":                     nil,
+		"?media=Show":                         nil,
+		"?media=job1":                         {"action_completed:job1"},
+		"?action=transcode_media":             {"action_completed:job1"},
+		"?action=clean_podcast_ads":           {"action_failed:pod1"},
+		"?action=action_completed":            {"action_completed:job1"},
+		"?action=action_failed":               {"action_failed:pod1"},
+		"?action=promote_transcode_candidate": nil,
+		"?limit=1":                            {"action_failed:pod1"},
+	} {
+		code, got, body := ids(q)
+		if code != 200 || strings.Join(got, ",") != strings.Join(want, ",") || body["count"] != float64(len(want)) {
+			t.Errorf("history%s: %d %v (want %v) %v", q, code, got, want, body)
+		}
+	}
+	// Any other action (a non-transcode workflow or another service's entry) is refused.
+	for _, q := range []string{"?action=sonarr_thing", "?action=scan_library", "?action=safe_replace", "?action=api_call", "?limit=0", "?limit=101", "?limit=x"} {
+		if c, e := get(t, h, "/transcode/v1/history"+q, keyHdr()); c != 400 || e["code"] != "invalid_request" {
+			t.Errorf("history%s: %d %v", q, c, e)
+		}
+	}
+}
+
+// HEAD on the block route must not read (reading records coverage).
+func TestTranscodeV1HeadDoesNotRecordPodcastCoverage(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "pod1", "clean_podcast_ads", "waiting_decision", nil, nil, nil)
+	calls := 0
+	fakeTool(s, "podcast_block", func(map[string]any) (*mcp.CallToolResult, error) {
+		calls++
+		return mcp.NewToolResultText(`{"has_more":false}`), nil
+	})
+	w := v1(h, "HEAD", "/transcode/v1/actions/pod1/podcast/blocks/b1", "", keyHdr())
+	if w.Code != 405 || w.Header().Get("Allow") != "GET" || calls != 0 {
+		t.Fatalf("HEAD: %d allow=%q calls=%d", w.Code, w.Header().Get("Allow"), calls)
+	}
+	if c, _ := get(t, h, "/transcode/v1/actions/pod1/podcast/blocks/b1", keyHdr()); c != 200 || calls != 1 {
+		t.Fatalf("GET: %d calls=%d", c, calls)
+	}
+	// Other reads keep answering HEAD.
+	if w := v1(h, "HEAD", "/transcode/v1/workers", "", keyHdr()); w.Code != 200 {
+		t.Fatal("HEAD workers", w.Code)
+	}
+}
+
+func TestWriteToolErrorClassification(t *testing.T) {
+	for msg, want := range map[string]int{
+		`action instance "job1" not found`:                               404,
+		`key "x" not found in section inputs (available keys: [])`:       404,
+		`step index 3 not found for action job1 (total logged steps: 2)`: 404,
+		`podcast action not found`:                                       404,
+		`unknown transcode profile "nope"`:                               404,
+		`unknown block`:                                                  404,
+		`no such recipe`:                                                 404,
+		`open /x: no such file or directory`:                             400,
+		`unknown_only must be a boolean`:                                 400,
+		`unknown mode "x"`:                                               400,
+		`unknown podcast worker status`:                                  400,
+		`invalid block/offset`:                                           400,
+		`name is required`:                                               400,
+		`transcode recipe manager is not initialized`:                    400,
+	} {
+		w := httptest.NewRecorder()
+		writeToolError(w, msg, v1Err{})
+		var e map[string]string
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		wantCode := "invalid_request"
+		if want == 404 {
+			wantCode = "not_found"
+		}
+		if w.Code != want || e["code"] != wantCode {
+			t.Errorf("%q: %d %v, want %d %s", msg, w.Code, e, want, wantCode)
+		}
+	}
+	w := httptest.NewRecorder()
+	writeToolError(w, "recipe not found", v1Err{notFound: "recipe_not_found", hint: "h"})
+	if w.Code != 404 || !strings.Contains(w.Body.String(), `"recipe_not_found"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// A Go error of a tool handler is the server's fault (500, cause not sent); a
+// refusal the tool reports as a result stays the caller's (400/404).
+func TestTranscodeV1ToolGoErrorIs500(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", nil, nil, nil)
+	fakeTool(s, "action_status", func(map[string]any) (*mcp.CallToolResult, error) {
+		return nil, errors.New("database exploded at /secret/path")
+	})
+	w := v1(h, "GET", "/transcode/v1/actions/job1", "", keyHdr())
+	if w.Code != 500 || !strings.Contains(w.Body.String(), `"internal"`) || strings.Contains(w.Body.String(), "secret") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	fakeTool(s, "action_status", func(map[string]any) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultError("verbose must be shorter"), nil
+	})
+	if c, e := get(t, h, "/transcode/v1/actions/job1", keyHdr()); c != 400 || e["code"] != "invalid_request" {
+		t.Fatal(c, e)
+	}
+}
+
+// A not-found inside an existing action is not "action_not_found".
+func TestTranscodeV1NotFoundInsideAnActionIsGeneric(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", map[string]any{"path": "/media/a.mkv"}, nil, nil)
+	c, e := get(t, h, "/transcode/v1/actions/job1/detail/inputs?key=nope", keyHdr())
+	if c != 404 || e["code"] != "not_found" || e["hint"] == "" || strings.Contains(e["hint"].(string), "lists the actions") {
+		t.Fatal(c, e)
+	}
+	c, e = get(t, h, "/transcode/v1/actions/job1/detail/steps?step_index=9", keyHdr())
+	if c != 404 || e["code"] != "not_found" {
+		t.Fatal(c, e)
+	}
+	// The action itself missing keeps its code.
+	if c, e = get(t, h, "/transcode/v1/actions/nope/detail/inputs", keyHdr()); c != 404 || e["code"] != "action_not_found" {
+		t.Fatal(c, e)
+	}
+}
+
+// The "response too large" note of a tool is never a 200 page.
+func TestTranscodeV1TooLargeAnswersAnError(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", nil, nil, nil)
+	note := `{"error":"response_too_large","message":"too big","size_bytes":99999,"limit_bytes":65536}`
+	for _, tool := range []string{"action_list", "action_status", "action_history"} {
+		fakeTool(s, tool, func(map[string]any) (*mcp.CallToolResult, error) { return mcp.NewToolResultText(note), nil })
+	}
+	for p, hint := range map[string]string{
+		"/transcode/v1/actions":      "limit",
+		"/transcode/v1/actions/job1": "narrow",
+		"/transcode/v1/history":      "narrow",
+	} {
+		c, e := get(t, h, p, keyHdr())
+		if c != 502 || e["code"] != "response_too_large" || !strings.Contains(e["hint"].(string), hint) || e["items"] != nil {
+			t.Errorf("%s: %d %v", p, c, e)
+		}
+	}
+	// A plain sentence instead of a page is an error too, not a 200 message.
+	fakeTool(s, "action_list", func(map[string]any) (*mcp.CallToolResult, error) { return mcp.NewToolResultText("nothing"), nil })
+	if c, e := get(t, h, "/transcode/v1/actions", keyHdr()); c != 502 || e["code"] != "internal" {
+		t.Fatal(c, e)
+	}
+}
+
+// Numbers and booleans are validated here, not left to the tools, which fall
+// back to their defaults on a value they cannot read.
+func TestTranscodeV1NumericAndBooleanParameters(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", nil, nil, nil)
+	var last map[string]any
+	for _, tool := range []string{"action_status", "action_detail", "podcast_blocks", "podcast_block", "podcast_artifact", "recipe_list", "recipe_history", "transcode_backups", "podcast_ad_library"} {
+		fakeTool(s, tool, func(a map[string]any) (*mcp.CallToolResult, error) {
+			last = a
+			return mcp.NewToolResultText(`{"ok":true}`), nil
+		})
+	}
+	bad := []string{
+		"/transcode/v1/actions/job1?verbose=maybe",
+		"/transcode/v1/actions/job1/detail/steps?step_limit=0",
+		"/transcode/v1/actions/job1/detail/steps?step_limit=51",
+		"/transcode/v1/actions/job1/detail/steps?step_index=-1",
+		"/transcode/v1/actions/job1/detail/steps?step_offset=abc",
+		"/transcode/v1/actions/job1/detail/inputs?chunk=-1",
+		"/transcode/v1/actions/job1/podcast/blocks?offset=-1",
+		"/transcode/v1/actions/job1/podcast/blocks/b1?offset=1.5",
+		"/transcode/v1/actions/job1/podcast/blocks/b1?unknown_only=yes",
+		"/transcode/v1/actions/job1/podcast/artifacts/cuts?offset=x",
+		"/transcode/v1/recipes?limit=0",
+		"/transcode/v1/recipes?limit=101",
+		"/transcode/v1/recipes?limit=abc",
+		"/transcode/v1/recipes?offset=-1",
+		"/transcode/v1/recipes?include_selection_details=maybe",
+		"/transcode/v1/recipes/x/history?limit=51",
+		"/transcode/v1/backups?offset=-1",
+		"/transcode/v1/backups/candidates?offset=z",
+		"/transcode/v1/podcasts/none/ad-library?offset=-1",
+	}
+	s.cfg.Podcasts.Enabled = true
+	s.cfg.Podcasts.Podcasts = map[string]config.PodcastSettings{"pod": {Enabled: true}}
+	bad = append(bad, "/transcode/v1/podcasts/pod/ad-library?offset=-1")
+	for _, p := range bad {
+		last = nil
+		c, e := get(t, h, p, keyHdr())
+		if p != "/transcode/v1/podcasts/none/ad-library?offset=-1" && (c != 400 || e["code"] != "invalid_request" || e["hint"] == "" || last != nil) {
+			t.Errorf("%s: %d %v (tool called: %v)", p, c, e, last)
+		}
+	}
+	// Valid values reach the tool typed.
+	for p, want := range map[string]map[string]any{
+		"/transcode/v1/actions/job1?verbose=true":                                 {"verbose": true},
+		"/transcode/v1/actions/job1?verbose=0":                                    {"verbose": false},
+		"/transcode/v1/actions/job1/detail/steps?step_limit=50&step_offset=2":     {"step_limit": 50, "step_offset": 2},
+		"/transcode/v1/actions/job1/podcast/blocks/b1?offset=3&unknown_only=1":    {"offset": 3, "unknown_only": true, "block_id": "b1"},
+		"/transcode/v1/recipes?limit=100&offset=0&include_selection_details=true": {"limit": 100, "offset": 0, "include_selection_details": true},
+	} {
+		last = nil
+		if c, e := get(t, h, p, keyHdr()); c != 200 {
+			t.Fatalf("%s: %d %v", p, c, e)
+		}
+		for k, v := range want {
+			if last[k] != v {
+				t.Errorf("%s: %s = %#v (%T), want %#v", p, k, last[k], last[k], v)
+			}
+		}
+	}
+}
+
+// The podcast routes answer like every other switched-off feature: 503.
+func TestTranscodeV1PodcastsDisabledIs503(t *testing.T) {
+	s, h := transcodeUI(t)
+	s.cfg.Podcasts.Enabled = false
+	s.cfg.Podcasts.Podcasts = map[string]config.PodcastSettings{"pod": {Enabled: true}}
+	for _, p := range []string{"/transcode/v1/podcasts/pod/ad-library", "/transcode/v1/podcasts/pod/local-library", "/transcode/v1/podcasts/nope/ad-library"} {
+		if c, e := get(t, h, p, keyHdr()); c != 503 || e["code"] != "unavailable" {
+			t.Errorf("%s: %d %v", p, c, e)
+		}
+	}
+	// Enabled: an unknown or disabled profile is a 404.
+	s.cfg.Podcasts.Enabled = true
+	for _, p := range []string{"/transcode/v1/podcasts/nope/ad-library", "/transcode/v1/podcasts/nope/local-library"} {
+		if c, e := get(t, h, p, keyHdr()); c != 404 || e["code"] != "unknown_podcast" {
+			t.Errorf("%s: %d %v", p, c, e)
+		}
 	}
 }

@@ -47,8 +47,17 @@ call_api    service=transcode method=GET path=/actions/{id}
 Errors are JSON `{"error", "code", "hint"}`. Codes: `invalid_request` (400),
 `unauthorized` (401), `not_found` (404, plus `unknown_worker`, `action_not_found`,
 `batch_not_found`, `recipe_not_found`, `unknown_podcast`), `method_not_allowed`
-(405), `conflict` (409), `unavailable` (503, the capability is switched off),
-`internal` (5xx).
+(405), `conflict` (409), `unavailable` (503, the capability is switched off;
+the podcast routes answer it too when podcasts are disabled, and 404
+`unknown_podcast` only for a profile that does not exist or is off),
+`response_too_large` (502, the answer would not fit: narrow the request with a
+smaller `limit`, a later `offset`, a section or a key), `internal` (500, a fault
+of the server; the cause is in its log, not in the answer).
+
+A 404 of a thing inside an existing action (a `key`, a step) is the generic
+`not_found` with a hint, not `action_not_found`, which means the action itself.
+Only clear "not found" refusals of the underlying tools are 404; a refusal about
+a parameter is 400.
 
 ## Paging
 
@@ -62,7 +71,12 @@ follow `next_offset` until `has_more` is false.
 - `/batches/{id}/items` and `/review-queue` also report `total` and `offset`.
 - Limits: `/actions` 1-100 (default 20), `/batches/{id}/items` 1-100 (default
   25), `/review-queue` 1-1000, `/recipes` 1-100 (default 50), `/history` 1-100.
-- Bad values are `400 invalid_request` with a hint, never silently clamped.
+- Bad values are `400 invalid_request` with a hint, never silently clamped:
+  integers (`offset`, `limit`, `chunk`, `step_index`, `step_offset`,
+  `step_limit` 1-50, ...) must be whole numbers in range, and booleans
+  (`verbose`, `unknown_only`, `include_selection_details`) must be `true`,
+  `false`, `1` or `0`. An empty value counts as absent.
+- `/recipes/{name}/history` limit is 1-50.
 
 ## Routes
 
@@ -79,7 +93,7 @@ Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 | `GET /actions`, `/actions/{id}` | `action_list`, `action_status` |
 | `GET /actions/{id}/detail/{section}` | `action_detail` (inputs, outputs, state, steps) |
 | `GET /actions/{id}/podcast/blocks`, `.../blocks/{block_id}`, `.../artifacts/{artifact}` | `podcast_blocks`, `podcast_block`, `podcast_artifact` |
-| `GET /history` | `action_history` |
+| `GET /history` | `action_history`, cut to transcode actions (see below) |
 | `GET /catalog` | `action_catalog` (transcode workflows only) |
 | `GET /batches/{id}/items` | `/api/maintenance/batch-items` |
 | `GET /batches/{id}/settings` | `/api/maintenance/batch-settings` |
@@ -106,6 +120,13 @@ door into other kinds of work.
   (`fs_*`), `safe_replace`, media inspection, library scans, torrents, the
   generic operation ledger and the `maintenance_*` claim tools, which serve
   other areas.
+- `/history` only returns the audit entries of transcode actions (completed,
+  failed, retried, cancelled), never other services' history. `action` is a
+  transcode workflow name or one of those four events; anything else is 400.
+  The log has no offset: the newest 100 entries matching `media` and `service`
+  are read and then cut to the transcode ones, so a page can hold fewer than
+  `limit` entries.
 - Reading a podcast block records the units delivered as read coverage (a later
   classification requires it); this is the one effect of a GET and it is
-  documented on that route.
+  documented on that route. Because of it `HEAD` on that route answers
+  `405` (`Allow: GET`) and records nothing; `HEAD` elsewhere behaves as `GET`.

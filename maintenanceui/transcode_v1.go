@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -100,35 +103,35 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 
 	// Actions.
 	get("/actions", s.v1Actions)
+	detailHint := "GET " + b + "/actions/{id}/detail/{section} without key lists the keys of a section; steps pages through the step log"
+	podcastHint := "podcast reads need a clean_podcast_ads action: GET " + b + "/actions lists the actions"
 	get("/actions/{id}", s.v1ActionTool("action_status", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"verbose": r.URL.Query().Get("verbose")}, ""
-	}))
+		return v1Args(r, nil, pBool("verbose"))
+	}, v1Err{}))
 	get("/actions/{id}/detail/{section}", s.v1ActionTool("action_detail", func(r *http.Request) (map[string]any, string) {
 		section := r.PathValue("section")
 		if !slices.Contains([]string{"inputs", "outputs", "state", "steps"}, section) {
 			return nil, "section must be inputs, outputs, state or steps"
 		}
-		q := r.URL.Query()
-		return map[string]any{"section": section, "key": q.Get("key"), "chunk": q.Get("chunk"), "step_index": q.Get("step_index"), "step_offset": q.Get("step_offset"), "step_limit": q.Get("step_limit")}, ""
-	}))
+		return v1Args(r, map[string]any{"section": section, "key": r.URL.Query().Get("key")},
+			pInt("chunk", 0, 0), pInt("step_index", 0, 0), pInt("step_offset", 0, 0), pInt("step_limit", 1, 50))
+	}, v1Err{notFound: "not_found", hint: detailHint}))
 	get("/actions/{id}/podcast/blocks", s.v1ActionTool("podcast_blocks", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"offset": r.URL.Query().Get("offset")}, ""
-	}))
-	get("/actions/{id}/podcast/blocks/{block_id}", s.v1ActionTool("podcast_block", func(r *http.Request) (map[string]any, string) {
-		q := r.URL.Query()
-		return map[string]any{"block_id": r.PathValue("block_id"), "offset": q.Get("offset"), "unknown_only": q.Get("unknown_only")}, ""
-	}))
+		return v1Args(r, nil, pInt("offset", 0, 0))
+	}, v1Err{notFound: "not_found", hint: podcastHint}))
+	// Reading a block records read coverage, a side effect that only a GET may
+	// have: HEAD would record it without delivering the body.
+	get("/actions/{id}/podcast/blocks/{block_id}", getOnly(s.v1ActionTool("podcast_block", func(r *http.Request) (map[string]any, string) {
+		return v1Args(r, map[string]any{"block_id": r.PathValue("block_id")}, pInt("offset", 0, 0), pBool("unknown_only"))
+	}, v1Err{notFound: "not_found", hint: podcastHint})))
 	get("/actions/{id}/podcast/artifacts/{artifact}", s.v1ActionTool("podcast_artifact", func(r *http.Request) (map[string]any, string) {
 		artifact := r.PathValue("artifact")
 		if !slices.Contains([]string{"transcript", "classifications", "cuts"}, artifact) {
 			return nil, "artifact must be transcript, classifications or cuts"
 		}
-		return map[string]any{"artifact": artifact, "offset": r.URL.Query().Get("offset")}, ""
-	}))
-	get("/history", s.v1Tool("action_history", func(r *http.Request) (map[string]any, string) {
-		q := r.URL.Query()
-		return map[string]any{"media": q.Get("media"), "service": q.Get("service"), "action": q.Get("action"), "limit": q.Get("limit")}, ""
-	}, v1Err{}))
+		return v1Args(r, map[string]any{"artifact": artifact}, pInt("offset", 0, 0))
+	}, v1Err{notFound: "not_found", hint: podcastHint}))
+	get("/history", s.v1History)
 	get("/catalog", func(w http.ResponseWriter, r *http.Request) {
 		out := []any{}
 		for _, entry := range s.engine.Catalog() {
@@ -167,22 +170,21 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 
 	// Backups and leftover candidates.
 	get("/backups", s.v1Tool("transcode_backups", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"mode": "list", "offset": r.URL.Query().Get("offset")}, ""
+		return v1Args(r, map[string]any{"mode": "list"}, pInt("offset", 0, 0))
 	}, v1Err{}))
 	get("/backups/candidates", s.v1Tool("transcode_backups", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"mode": "candidates", "offset": r.URL.Query().Get("offset")}, ""
+		return v1Args(r, map[string]any{"mode": "candidates"}, pInt("offset", 0, 0))
 	}, v1Err{}))
 
 	// Recipes.
 	get("/recipes", s.v1Tool("recipe_list", func(r *http.Request) (map[string]any, string) {
-		q := r.URL.Query()
-		return map[string]any{"limit": q.Get("limit"), "offset": q.Get("offset"), "include_selection_details": q.Get("include_selection_details")}, ""
+		return v1Args(r, nil, pInt("limit", 1, 100), pInt("offset", 0, 0), pBool("include_selection_details"))
 	}, v1Err{}))
 	get("/recipes/{name}", s.v1Tool("recipe_get", func(r *http.Request) (map[string]any, string) {
 		return map[string]any{"name": r.PathValue("name")}, ""
 	}, v1Err{notFound: "recipe_not_found", hint: hintRecipes}))
 	get("/recipes/{name}/history", s.v1Tool("recipe_history", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"name": r.PathValue("name"), "limit": r.URL.Query().Get("limit")}, ""
+		return v1Args(r, map[string]any{"name": r.PathValue("name")}, pInt("limit", 1, 50))
 	}, v1Err{notFound: "recipe_not_found", hint: hintRecipes}))
 	get("/recipe-bundle", s.v1Tool("recipe_status", func(*http.Request) (map[string]any, string) { return map[string]any{}, "" }, v1Err{}))
 
@@ -191,7 +193,11 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 	podcast := func(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
-			if p, ok := s.cfg.Podcasts.Podcasts[id]; !s.cfg.Podcasts.Enabled || !ok || !p.Enabled {
+			if !s.cfg.Podcasts.Enabled {
+				transcodeapi.WriteError(w, 503, "unavailable", "podcasts are switched off on this server", "")
+				return
+			}
+			if p, ok := s.cfg.Podcasts.Podcasts[id]; !ok || !p.Enabled {
 				transcodeapi.WriteError(w, 404, "unknown_podcast", "no such podcast profile", "GET "+b+"/podcasts lists the enabled podcast profiles")
 				return
 			}
@@ -202,7 +208,7 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 		return url.Values{"podcast_id": {r.PathValue("id")}}
 	}, v1Err{notFound: "unknown_podcast"})))
 	get("/podcasts/{id}/ad-library", podcast(s.v1Tool("podcast_ad_library", func(r *http.Request) (map[string]any, string) {
-		return map[string]any{"podcast_id": r.PathValue("id"), "offset": r.URL.Query().Get("offset")}, ""
+		return v1Args(r, map[string]any{"podcast_id": r.PathValue("id")}, pInt("offset", 0, 0))
 	}, v1Err{})))
 
 	// The review queue of files and titles worth converting.
@@ -325,11 +331,13 @@ func (s *Server) v1Worker(w http.ResponseWriter, r *http.Request) {
 }
 
 // callTool runs an MCP tool the way the maintenance surface does and returns
-// its text. errText is set when the tool reported an error.
-func (s *Server) callTool(ctx context.Context, name string, args map[string]any) (text string, errText string, found bool) {
+// its text. errText is set when the tool refused the call (an IsError result:
+// a message for the caller); err is a Go error of the handler itself, which is
+// a fault of the server and never the caller's.
+func (s *Server) callTool(ctx context.Context, name string, args map[string]any) (text string, errText string, found bool, err error) {
 	t := s.mcp.GetTool(name)
 	if t == nil {
-		return "", "", false
+		return "", "", false, nil
 	}
 	// Empty arguments are left out so the tool applies its own defaults.
 	clean := map[string]any{}
@@ -341,7 +349,10 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 	}
 	res, err := t.Handler(ctx, mcp.CallToolRequest{Params: mcp.CallToolParams{Name: name, Arguments: clean}})
 	if err != nil {
-		return "", err.Error(), true
+		return "", "", true, err
+	}
+	if res == nil {
+		return "", "", true, errors.New("tool returned no result")
 	}
 	var sb strings.Builder
 	for _, c := range res.Content {
@@ -350,17 +361,54 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		}
 	}
 	if res.IsError {
-		return "", sb.String(), true
+		return "", sb.String(), true, nil
 	}
-	return sb.String(), "", true
+	return sb.String(), "", true, nil
+}
+
+// writeToolFault answers a Go error of a tool handler: 500, with the cause
+// logged and not sent.
+func writeToolFault(w http.ResponseWriter, tool string, err error) {
+	log.Printf("transcode v1: tool %s failed: %v", tool, err)
+	transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
+}
+
+// toolTooLarge is whether text is the "response_too_large" note the bounded
+// tools send instead of a page that would not fit.
+func toolTooLarge(text string) bool {
+	var note struct {
+		Error string `json:"error"`
+	}
+	return json.Unmarshal([]byte(text), &note) == nil && note.Error == "response_too_large"
+}
+
+func writeTooLarge(w http.ResponseWriter, hint string) {
+	transcodeapi.WriteError(w, 502, "response_too_large", "the answer does not fit in one response", hint)
+}
+
+// unknownResource matches the "unknown <resource>" messages the tools behind
+// this API emit for a thing that does not exist ("unknown transcode profile",
+// "unknown block"). A bare "unknown" is not enough: "unknown_only" and
+// "unknown mode" are about a parameter, and "unknown podcast worker status"
+// is a fault.
+var unknownResource = regexp.MustCompile(`\bunknown (transcode profile|block)\b`)
+
+// toolMissing is whether a tool's refusal says the thing asked for does not
+// exist: "... not found", "no such <thing>" (but not the OS's "no such file or
+// directory") or an "unknown <resource>" the tools use.
+func toolMissing(msg string) bool {
+	low := strings.ToLower(msg)
+	if strings.Contains(low, "not found") || unknownResource.MatchString(low) {
+		return true
+	}
+	return strings.Contains(low, "no such ") && !strings.Contains(low, "no such file or directory")
 }
 
 // writeToolError presents what an MCP tool refused. The tools report errors
-// as text, so a missing thing is told apart by its words; the endpoints that
-// can know before calling check first and never reach this.
+// as text, so a missing thing is told apart by its words (toolMissing); the
+// endpoints that can know before calling check first and never reach this.
 func writeToolError(w http.ResponseWriter, msg string, e v1Err) {
-	low := strings.ToLower(msg)
-	if strings.Contains(low, "not found") || strings.Contains(low, "unknown") || strings.Contains(low, "no such") {
+	if toolMissing(msg) {
 		code := e.notFound
 		if code == "" {
 			code = "not_found"
@@ -395,12 +443,16 @@ func (s *Server) v1Tool(tool string, args func(r *http.Request) (map[string]any,
 			transcodeapi.WriteError(w, 400, "invalid_request", bad, "GET "+transcodeapi.SpecPath+" describes the parameters")
 			return
 		}
-		text, errText, found := s.callTool(r.Context(), tool, a)
+		text, errText, found, err := s.callTool(r.Context(), tool, a)
 		switch {
 		case !found:
 			transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server (its capability is switched off)", "")
+		case err != nil:
+			writeToolFault(w, tool, err)
 		case errText != "":
 			writeToolError(w, errText, e)
+		case toolTooLarge(text):
+			writeTooLarge(w, "narrow the request: a smaller limit, a later offset, a section or a key")
 		default:
 			writeToolText(w, text)
 		}
@@ -409,7 +461,9 @@ func (s *Server) v1Tool(tool string, args func(r *http.Request) (map[string]any,
 
 // v1ActionTool is v1Tool for an endpoint under /actions/{id}: the action must
 // exist and be one of the transcode workflows.
-func (s *Server) v1ActionTool(tool string, args func(r *http.Request) (map[string]any, string)) http.HandlerFunc {
+// e presents a 404 of the tool: the action is known to exist by then, so it is
+// about something inside it (a key, a step, a block).
+func (s *Server) v1ActionTool(tool string, args func(r *http.Request) (map[string]any, string), e v1Err) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !s.checkTranscodeAction(w, id) {
@@ -421,7 +475,7 @@ func (s *Server) v1ActionTool(tool string, args func(r *http.Request) (map[strin
 				a["id"] = id
 			}
 			return a, bad
-		}, v1Err{notFound: "action_not_found", hint: hintActions})(w, r)
+		}, e)(w, r)
 	}
 }
 
@@ -461,10 +515,13 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 			*target = n
 		}
 	}
-	text, errText, found := s.callTool(r.Context(), "action_list", map[string]any{"status": status, "limit": limit, "offset": offset})
+	text, errText, found, err := s.callTool(r.Context(), "action_list", map[string]any{"status": status, "limit": limit, "offset": offset})
 	switch {
 	case !found:
 		transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server", "")
+		return
+	case err != nil:
+		writeToolFault(w, "action_list", err)
 		return
 	case errText != "":
 		writeToolError(w, errText, v1Err{})
@@ -472,8 +529,13 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows []map[string]any
 	if err := json.Unmarshal([]byte(text), &rows); err != nil {
-		// The tool sent its "response too large" note instead of the page.
-		writeToolText(w, text)
+		// Not a page: the tool sent its "response too large" note (or
+		// something unexpected). Never answer 200 without the page fields.
+		if toolTooLarge(text) {
+			writeTooLarge(w, "lower limit")
+		} else {
+			transcodeapi.WriteError(w, 502, "internal", "the action list could not be read", "")
+		}
 		return
 	}
 	items := make([]map[string]any, 0, len(rows))
@@ -483,4 +545,175 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	transcodeapi.WriteJSON(w, 200, map[string]any{"items": items, "offset": offset, "limit": limit, "next_offset": offset + len(rows), "has_more": len(rows) == limit})
+}
+
+// v1Param is one numeric or boolean query parameter of a tool-backed route.
+type v1Param struct {
+	name     string
+	boolean  bool
+	min, max int // integers; max 0 is no upper bound
+}
+
+func pInt(name string, min, max int) v1Param { return v1Param{name: name, min: min, max: max} }
+func pBool(name string) v1Param              { return v1Param{name: name, boolean: true} }
+
+func (p v1Param) problem() string {
+	switch {
+	case p.boolean:
+		return p.name + " must be true or false (or 1 or 0)"
+	case p.max > 0:
+		return fmt.Sprintf("%s must be an integer from %d to %d", p.name, p.min, p.max)
+	}
+	return fmt.Sprintf("%s must be an integer of %d or more", p.name, p.min)
+}
+
+// v1Params reads the named query parameters as typed values (int or bool) for
+// the tool. An absent or empty one is left out, so the tool applies its own
+// default; a bad one is a message for a 400 and never silently falls back to
+// the default, which is what the tools do with a string they cannot parse.
+func v1Params(r *http.Request, ps ...v1Param) (map[string]any, string) {
+	out := map[string]any{}
+	q := r.URL.Query()
+	for _, p := range ps {
+		raw := strings.TrimSpace(q.Get(p.name))
+		if raw == "" {
+			continue
+		}
+		if p.boolean {
+			switch strings.ToLower(raw) {
+			case "true", "1":
+				out[p.name] = true
+			case "false", "0":
+				out[p.name] = false
+			default:
+				return nil, p.problem()
+			}
+			continue
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < p.min || (p.max > 0 && n > p.max) {
+			return nil, p.problem()
+		}
+		out[p.name] = n
+	}
+	return out, ""
+}
+
+// v1Args is v1Params plus the fixed arguments of the route.
+func v1Args(r *http.Request, fixed map[string]any, ps ...v1Param) (map[string]any, string) {
+	out, bad := v1Params(r, ps...)
+	if bad != "" {
+		return nil, bad
+	}
+	for k, v := range fixed {
+		out[k] = v
+	}
+	return out, ""
+}
+
+// getOnly refuses HEAD (405, Allow: GET) for a route whose read has an effect.
+func getOnly(fn http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead {
+			w.Header().Set("Allow", "GET")
+			transcodeapi.WriteError(w, 405, "method_not_allowed", "this endpoint answers GET only: reading it records read coverage, which a HEAD must not do", "")
+			return
+		}
+		fn(w, r)
+	}
+}
+
+// logEvents are the action_log entries the engine writes for a workflow
+// instance (identifiers holds the instance id). Every other entry of the log
+// (scan_library, safe_replace, api_call, ...) belongs to other services.
+var logEvents = []string{"action_completed", "action_failed", "action_retry", "action_cancelled"}
+
+// v1History is the audit log of the transcode workflows. action_history reads
+// the whole log, so the answer is cut to the entries the engine wrote for a
+// transcode action instance, and no other service's history is reachable.
+// The filter `action` is a transcode workflow name (entries of its instances)
+// or a log event (action_completed, ...); anything else is a 400. The log has
+// no offset, so the newest 100 entries matching media and service are read and
+// then filtered: with a busy log the page can hold fewer than limit entries.
+func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	args, bad := v1Params(r, pInt("limit", 1, 100))
+	if bad != "" {
+		transcodeapi.WriteError(w, 400, "invalid_request", bad, "GET "+transcodeapi.SpecPath+" describes the parameters")
+		return
+	}
+	limit := 20
+	if n, ok := args["limit"].(int); ok {
+		limit = n
+	}
+	var workflow, event string
+	switch a := strings.TrimSpace(q.Get("action")); {
+	case a == "":
+	case transcodeAction(a):
+		workflow = a
+	case slices.Contains(logEvents, a):
+		event = a
+	default:
+		transcodeapi.WriteError(w, 400, "invalid_request", "action must be a transcode workflow ("+strings.Join(transcodeActionNames(), ", ")+") or a log event ("+strings.Join(logEvents, ", ")+")", "GET "+transcodeapi.BasePath+"/catalog lists the workflows")
+		return
+	}
+	text, errText, found, err := s.callTool(r.Context(), "action_history", map[string]any{"media": q.Get("media"), "service": q.Get("service"), "action": event, "limit": 100})
+	switch {
+	case !found:
+		transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server (its capability is switched off)", "")
+		return
+	case err != nil:
+		writeToolFault(w, "action_history", err)
+		return
+	case errText != "":
+		writeToolError(w, errText, v1Err{})
+		return
+	case toolTooLarge(text):
+		writeTooLarge(w, "narrow with media, service or action")
+		return
+	}
+	var page struct {
+		Records []map[string]any `json:"records"`
+	}
+	if json.Unmarshal([]byte(text), &page) != nil {
+		transcodeapi.WriteError(w, 502, "internal", "the history could not be read", "")
+		return
+	}
+	owner := map[string]string{} // instance id -> workflow name ("" when not a transcode one)
+	records := []map[string]any{}
+	for _, rec := range page.Records {
+		ev, _ := rec["action"].(string)
+		id, _ := rec["identifiers"].(string)
+		if !slices.Contains(logEvents, ev) || id == "" {
+			continue
+		}
+		name, seen := owner[id]
+		if !seen {
+			inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
+			if err != nil {
+				transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
+				return
+			}
+			if inst != nil && transcodeAction(inst.ActionName) {
+				name = inst.ActionName
+			}
+			owner[id] = name
+		}
+		if name == "" || (workflow != "" && name != workflow) {
+			continue
+		}
+		if len(records) < limit {
+			records = append(records, rec)
+		}
+	}
+	transcodeapi.WriteJSON(w, 200, map[string]any{"count": len(records), "records": records})
+}
+
+func transcodeActionNames() []string {
+	names := []string{}
+	for n := range allowedActions {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	return names
 }

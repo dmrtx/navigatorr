@@ -170,8 +170,15 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 				}
 			}
 			reach("nodes", func(p string) bool {
-				return p == "action" || p == "maintenanceui" || p == "internal/nodeswire" || p == "transcode" || strings.HasPrefix(p, "transcode/")
+				return p == "action" || p == "maintenanceui" || p == "internal/nodeswire" || p == "transcode" || p == "transcodeapi" || strings.HasPrefix(p, "transcode/")
 			})
+			// The contract package is self-contained: it imports nothing of the
+			// module, so it can never carry Nodes (or anything else) into the engine.
+			if imps, ok := graph["transcodeapi"]; !ok {
+				t.Fatal("transcodeapi is not in the import graph: the guard would check nothing")
+			} else if len(imps) > 0 {
+				t.Errorf("transcodeapi must import nothing of the module, it imports %v", imps)
+			}
 			for _, engine := range []string{"action", "transcode", "transcodeapi"} {
 				reach(engine, func(p string) bool { return p == "nodes" || p == "internal/nodeswire" })
 			}
