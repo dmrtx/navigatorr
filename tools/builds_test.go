@@ -104,7 +104,7 @@ func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.HeartbeatBuild(context.Background(), b.ID, nil, 0, "token=synthetic-secret-77"); err != nil {
+	if _, err := engine.HeartbeatBuild(context.Background(), b.ID, nil, 0, "tok=fixture-value-77"); err != nil {
 		t.Fatal(err)
 	}
 	if _, lines, _, _ := engine.BuildLog(b.ID); len(lines) != 1 {
@@ -121,7 +121,7 @@ func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
 		if text == "" {
 			t.Fatalf("%s answered nothing", name)
 		}
-		if strings.Contains(text, "synthetic-secret") {
+		if strings.Contains(text, "fixture-value") {
 			t.Fatalf("the output reached %s: %s", name, text)
 		}
 	}
