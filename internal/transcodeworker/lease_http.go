@@ -197,9 +197,11 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 
 // leaseBindPrefix names the bind directories of one socket: "." plus the
 // socket's name plus ".b", then MkdirTemp's random digits.
-// A "*" would be MkdirTemp's placeholder, so it becomes "_".
+// A "*" would be MkdirTemp's placeholder, so it is escaped, one-to-one, so
+// two sockets never share a prefix.
 func leaseBindPrefix(path string) string {
-	return "." + strings.ReplaceAll(filepath.Base(path), "*", "_") + ".b"
+	name := strings.NewReplacer("%", "%25", "*", "%2A").Replace(filepath.Base(path))
+	return "." + name + ".b"
 }
 
 // leaseBindExtra is how much longer than the socket's directory the bind path
@@ -264,7 +266,8 @@ func unlockLeaseSocket(f *os.File) {
 
 // removeLeaseBindLeftovers clears the bind directories this socket's worker
 // left when it was killed mid-start: named by leaseBindPrefix and digits only,
-// empty or holding nothing but the "s" socket. Called with this socket's lock
+// holding nothing but an "s" socket that does not answer (an empty one is
+// left: it may be another start's, between MkdirTemp and its bind). Called with this socket's lock
 // held, so no start of this socket is using one; other sockets' are never
 // matched.
 func removeLeaseBindLeftovers(path string) {
@@ -280,11 +283,8 @@ func removeLeaseBindLeftovers(path string) {
 		}
 		m := filepath.Join(dir, n.Name())
 		entries, err := os.ReadDir(m)
-		if err != nil || len(entries) > 1 {
-			continue
-		}
-		if len(entries) == 1 && (entries[0].Name() != "s" || entries[0].Type()&os.ModeSocket == 0 ||
-			leaseSocketLive(filepath.Join(m, "s"))) {
+		if err != nil || len(entries) != 1 || entries[0].Name() != "s" ||
+			entries[0].Type()&os.ModeSocket == 0 || leaseSocketLive(filepath.Join(m, "s")) {
 			continue // not a dead bind of ours
 		}
 		_ = os.RemoveAll(m)

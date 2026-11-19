@@ -169,7 +169,7 @@ func TestLeaseSocketGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer live.Close()
-	keep = append(keep, liveDir)
+	keep = append(keep, liveDir, deadEmpty) // an empty one may be a start in progress
 	for _, k := range keep[1:3] {
 		if err := os.Mkdir(k, 0o700); err != nil {
 			t.Fatal(err)
@@ -185,7 +185,7 @@ func TestLeaseSocketGroup(t *testing.T) {
 	if err := mw.StartBuildLeases(mctx); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{dead, deadEmpty} {
+	for _, d := range []string{dead} {
 		if _, err := os.Lstat(d); err == nil {
 			t.Fatalf("a dead bind directory must be cleared: %s", d)
 		}
@@ -286,7 +286,16 @@ func foreignGroup(dir string) string {
 }
 
 func TestLeaseBindPrefixHasNoPlaceholder(t *testing.T) {
-	if got := leaseBindPrefix("/x/a*b.sock"); got != ".a_b.sock.b" {
+	if got := leaseBindPrefix("/x/a*b.sock"); got != ".a%2Ab.sock.b" {
 		t.Fatalf("bind prefix: %q", got)
+	}
+	// Distinct names never share a prefix.
+	seen := map[string]string{}
+	for _, n := range []string{"a*b", "a_b", "a%2Ab", "a%b", "a%252Ab"} {
+		p := leaseBindPrefix("/x/" + n)
+		if o, ok := seen[p]; ok {
+			t.Fatalf("%q and %q share bind prefix %q", o, n, p)
+		}
+		seen[p] = n
 	}
 }
