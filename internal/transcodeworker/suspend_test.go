@@ -457,7 +457,13 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 				t.Fatal("the child must be reported frozen")
 			}
 			waitFor(t, "the child to stop", func() bool { return strings.HasPrefix(procState(cmd.Process.Pid), "T") })
-			if got := procState(grandchild); !strings.HasPrefix(got, tc.wantState) {
+			// A signal to the group reaches each member on its own schedule:
+			// the child can show stopped before the grandchild does, so wait
+			// for the grandchild too. A grandchild outside the group is never
+			// signalled and stays as it was.
+			if tc.ownGroup {
+				waitFor(t, "the grandchild to stop", func() bool { return strings.HasPrefix(procState(grandchild), "T") })
+			} else if got := procState(grandchild); !strings.HasPrefix(got, tc.wantState) {
 				t.Fatalf("grandchild state = %q, want %q", got, tc.wantState)
 			}
 			ctl.apply(false)
