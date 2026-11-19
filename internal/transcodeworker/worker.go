@@ -66,10 +66,13 @@ type WorkerConfig struct {
 	// the default socket path (<state_dir>/.builds/lease.sock). BuildsURL and
 	// BuildsTokenFile (a builds-only token) let the worker report leases to the
 	// server; without them leases work but the server does not see them.
-	BuildNode       string `json:"build_node" yaml:"build_node"`
-	BuildSocket     string `json:"build_socket" yaml:"build_socket"`
-	BuildsURL       string `json:"builds_url" yaml:"builds_url"`
-	BuildsTokenFile string `json:"builds_token_file" yaml:"builds_token_file"`
+	// BuildSocketGroup opens the socket to one group (0660, that group) so
+	// builds from another local user can take leases; it needs BuildSocket.
+	BuildNode        string `json:"build_node" yaml:"build_node"`
+	BuildSocket      string `json:"build_socket" yaml:"build_socket"`
+	BuildSocketGroup string `json:"build_socket_group" yaml:"build_socket_group"`
+	BuildsURL        string `json:"builds_url" yaml:"builds_url"`
+	BuildsTokenFile  string `json:"builds_token_file" yaml:"builds_token_file"`
 
 	// Operational storage settings (Phase 6B1). StagingPolicy is validated
 	// fail-closed on config load; ExternalRoots defaults to a copy of

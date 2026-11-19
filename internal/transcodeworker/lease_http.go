@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +22,8 @@ import (
 //
 // A Unix socket in the worker's state directory (default
 // <state_dir>/.builds/lease.sock, in a 0700 directory, the socket itself 0600:
-// only the user the worker runs as can reach it; there is no token). It
+// only the user the worker runs as can reach it; there is no token; with
+// build_socket_group, also that group: 0660). It
 // speaks HTTP and, on purpose, the shape of the server's builds API, so a
 // caller that already speaks that one (nbuild) only changes where it sends:
 //
@@ -131,25 +134,44 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if len(path) >= 100 {
 		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
 	}
-	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
-		return err
+	// The socket is bound first in a temporary directory beside it (see
+	// listenLeaseSocket), whose path is longer than the directory's by at most
+	// leaseBindExtra(path) bytes.
+	if n := len(filepath.Dir(path)) + leaseBindExtra(path); n >= 104 {
+		return fmt.Errorf("build socket directory is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", n)
 	}
-	// A socket left by a worker that died: remove it. One that answers belongs
-	// to a live worker.
-	if leaseSocketLive(path) {
-		return errLeaseSocketTaken
+	// "<socket>.lock" is the lock file, so no socket may be one.
+	if n := len(path); n >= 5 && strings.EqualFold(path[n-5:], ".lock") { // APFS ignores case
+		return errors.New("build_socket must not end in .lock (that name is the socket's lock file)")
 	}
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(path)
-	}
-	ln, err := net.Listen("unix", path)
+	// The group first: a bad one changes nothing on disk (not even a stale
+	// socket of an earlier worker).
+	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		_ = ln.Close()
+	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
 		return err
 	}
+	// One worker per socket: the lock is held for as long as the socket is
+	// served, so a second worker never touches the first one's socket.
+	lock, err := lockLeaseSocket(path)
+	if err != nil {
+		return err
+	}
+	// A socket that answers belongs to a live worker (one that predates the
+	// lock); one that does not is replaced once the new one is ready.
+	if leaseSocketLive(path) {
+		unlockLeaseSocket(lock)
+		return errLeaseSocketTaken
+	}
+	removeLeaseBindLeftovers(path)
+	ln, err := listenLeaseSocket(path, gid)
+	if err != nil {
+		unlockLeaseSocket(lock)
+		return err
+	}
+	served, _ := os.Lstat(path)
 	srv := &http.Server{
 		Handler:           w.leaseHandler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -165,10 +187,150 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdown)
-		_ = os.Remove(path)
+		if srv.Shutdown(shutdown) != nil {
+			_ = srv.Close() // no connection outlives the lock
+		}
+		// Only the socket this worker linked: never a file put there since.
+		if now, err := os.Lstat(path); err == nil && served != nil && os.SameFile(now, served) {
+			_ = os.Remove(path)
+		}
+		unlockLeaseSocket(lock)
 	}()
 	return nil
+}
+
+// leaseBindPrefix names the bind directories of one socket: "." plus the
+// socket's name plus ".b", then MkdirTemp's random digits.
+// A "*" would be MkdirTemp's placeholder, so it is escaped, one-to-one, so
+// two sockets never share a prefix.
+func leaseBindPrefix(path string) string {
+	name := strings.NewReplacer("%", "%25", "*", "%2A").Replace(filepath.Base(path))
+	return "." + name + ".b"
+}
+
+// leaseBindExtra is how much longer than the socket's directory the bind path
+// can be: "/" plus the prefix plus MkdirTemp's digits (at most 10) plus "/s".
+func leaseBindExtra(path string) int { return 1 + len(leaseBindPrefix(path)) + 10 + 2 }
+
+// listenLeaseSocket binds the socket in a new 0700 directory next to path and
+// gives it its final mode and group there, so no umask ever opens it early.
+// Only then does a stale socket at path go, and the new one is hard-linked
+// into place, which never replaces anything (a file that is not a socket stays
+// and the start fails). A failure leaves nothing behind.
+func listenLeaseSocket(path string, gid int) (net.Listener, error) {
+	tmp, err := os.MkdirTemp(filepath.Dir(path), leaseBindPrefix(path))
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(tmp)
+	bind := filepath.Join(tmp, "s")
+	ln, err := net.Listen("unix", bind)
+	if err != nil {
+		return nil, err
+	}
+	if ul, ok := ln.(*net.UnixListener); ok {
+		ul.SetUnlinkOnClose(false) // the socket moves; shutdown removes path
+	}
+	if err := setLeaseSocketAccess(bind, gid); err != nil {
+		_ = ln.Close()
+		return nil, err
+	}
+	// A socket left by a worker that died (the caller saw it does not answer).
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(path)
+	}
+	if err := os.Link(bind, path); err != nil {
+		_ = ln.Close()
+		return nil, fmt.Errorf("build socket: %w", err)
+	}
+	return ln, nil
+}
+
+// lockLeaseSocket takes path+".lock" for as long as the socket is served.
+// Held by another worker: errLeaseSocketTaken.
+func lockLeaseSocket(path string) (*os.File, error) {
+	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("build socket lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errLeaseSocketTaken
+		}
+		return nil, fmt.Errorf("build socket lock: %w", err)
+	}
+	return f, nil
+}
+
+func unlockLeaseSocket(f *os.File) {
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+// removeLeaseBindLeftovers clears the bind directories this socket's worker
+// left when it was killed mid-start: named by leaseBindPrefix and digits only,
+// holding nothing but an "s" socket that does not answer (an empty one is
+// left: it may be another start's, between MkdirTemp and its bind). Called with this socket's lock
+// held, so no start of this socket is using one; other sockets' are never
+// matched.
+func removeLeaseBindLeftovers(path string) {
+	dir, prefix := filepath.Dir(path), leaseBindPrefix(path)
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		rest, ok := strings.CutPrefix(n.Name(), prefix)
+		if !ok || rest == "" || strings.Trim(rest, "0123456789") != "" || !n.IsDir() {
+			continue
+		}
+		m := filepath.Join(dir, n.Name())
+		entries, err := os.ReadDir(m)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "s" ||
+			entries[0].Type()&os.ModeSocket == 0 || leaseSocketLive(filepath.Join(m, "s")) {
+			continue // not a dead bind of ours
+		}
+		_ = os.RemoveAll(m)
+	}
+}
+
+// leaseSocketGroupID is the group the socket opens to, or -1 for owner-only.
+// A group needs a socket path of the operator's own: the worker's default
+// directory is private, so a group could not reach a socket there anyway.
+func leaseSocketGroupID(name string, ownPath bool) (int, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return -1, nil
+	}
+	if !ownPath {
+		return -1, errors.New("build_socket_group needs build_socket (a directory that group can enter)")
+	}
+	g, err := user.LookupGroup(name)
+	if err != nil {
+		return -1, fmt.Errorf("build_socket_group: %w", err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return -1, fmt.Errorf("build_socket_group %q: bad gid %q", name, g.Gid)
+	}
+	return gid, nil
+}
+
+// setLeaseSocketAccess makes the socket owner-only (gid -1) or opens it to
+// one group: the group is set before the mode, so the socket is never open to
+// the group it had when it was made.
+func setLeaseSocketAccess(path string, gid int) error {
+	if gid < 0 {
+		return os.Chmod(path, 0o600)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	if err := os.Lchown(path, -1, gid); err != nil {
+		return fmt.Errorf("build_socket_group: %w (the worker's user must be in the group)", err)
+	}
+	return os.Chmod(path, 0o660)
 }
 
 // prepareLeaseSocketDir makes the directory the socket goes in. The worker's
