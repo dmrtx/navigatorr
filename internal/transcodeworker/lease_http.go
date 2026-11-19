@@ -149,15 +149,25 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
 		return err
 	}
-	// A socket that answers belongs to a live worker; one that does not is
-	// replaced once the new one is ready.
-	if leaseSocketLive(path) {
-		return errLeaseSocketTaken
-	}
-	ln, err := listenLeaseSocket(path, gid)
+	// One worker per socket: the lock is held for as long as the socket is
+	// served, so a second worker never touches the first one's socket.
+	lock, err := lockLeaseSocket(path)
 	if err != nil {
 		return err
 	}
+	// A socket that answers belongs to a live worker (one that predates the
+	// lock); one that does not is replaced once the new one is ready.
+	if leaseSocketLive(path) {
+		unlockLeaseSocket(lock)
+		return errLeaseSocketTaken
+	}
+	removeLeaseBindLeftovers(filepath.Dir(path))
+	ln, err := listenLeaseSocket(path, gid)
+	if err != nil {
+		unlockLeaseSocket(lock)
+		return err
+	}
+	served, _ := os.Lstat(path)
 	srv := &http.Server{
 		Handler:           w.leaseHandler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -174,7 +184,11 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
-		_ = os.Remove(path)
+		// Only the socket this worker linked: never a file put there since.
+		if now, err := os.Lstat(path); err == nil && served != nil && os.SameFile(now, served) {
+			_ = os.Remove(path)
+		}
+		unlockLeaseSocket(lock)
 	}()
 	return nil
 }
@@ -211,10 +225,57 @@ func listenLeaseSocket(path string, gid int) (net.Listener, error) {
 		_ = os.Remove(path)
 	}
 	if err := os.Link(bind, path); err != nil {
+		// A filesystem without hard links to sockets: rename, but only onto
+		// nothing (the directory is ours and the lock is held).
+		if _, lerr := os.Lstat(path); !errors.Is(err, os.ErrExist) && errors.Is(lerr, os.ErrNotExist) {
+			if rerr := os.Rename(bind, path); rerr == nil {
+				return ln, nil
+			}
+		}
 		_ = ln.Close()
 		return nil, fmt.Errorf("build socket: %w", err)
 	}
 	return ln, nil
+}
+
+// lockLeaseSocket takes path+".lock" for as long as the socket is served.
+// Held by another worker: errLeaseSocketTaken.
+func lockLeaseSocket(path string) (*os.File, error) {
+	f, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("build socket lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errLeaseSocketTaken
+		}
+		return nil, fmt.Errorf("build socket lock: %w", err)
+	}
+	return f, nil
+}
+
+func unlockLeaseSocket(f *os.File) {
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+// removeLeaseBindLeftovers clears bind directories of a worker that was
+// killed mid-start: ".l*" directories holding nothing but its "s" socket.
+// Called with the lock held, so no other start is using one.
+func removeLeaseBindLeftovers(dir string) {
+	matches, _ := filepath.Glob(filepath.Join(dir, ".l*"))
+	for _, m := range matches {
+		fi, err := os.Lstat(m)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(m)
+		if err != nil || len(entries) > 1 || (len(entries) == 1 && entries[0].Name() != "s") {
+			continue
+		}
+		_ = os.RemoveAll(m)
+	}
 }
 
 // leaseSocketGroupID is the group the socket opens to, or -1 for owner-only.

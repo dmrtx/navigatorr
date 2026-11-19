@@ -123,6 +123,69 @@ func TestLeaseSocketGroup(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	// A second worker on a served socket is refused and leaves it alone.
+	before, _ := os.Lstat(sock)
+	tw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: sock, BuildSocketGroup: g.Name})
+	if err := tw.StartBuildLeases(ctx); err == nil {
+		t.Fatal("a second worker must not take a served socket")
+	}
+	if after, err := os.Lstat(sock); err != nil || !os.SameFile(before, after) {
+		t.Fatalf("the first worker's socket must stay: %v", err)
+	}
+	if c, err := net.DialTimeout("unix", sock, time.Second); err != nil {
+		t.Fatal(err)
+	} else {
+		_ = c.Close()
+	}
+
+	// Bind directories of a killed start are cleared; other dot entries stay.
+	if err := os.MkdirAll(filepath.Join(dir, ".ldead"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".ldead", "s"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".lkeep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".lkeep", "x"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Stopping leaves a file put at the path since the start.
+	moved := filepath.Join(dir, "m.sock")
+	mctx, mcancel := context.WithCancel(ctx)
+	mw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: moved})
+	if err := mw.StartBuildLeases(mctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".ldead")); err == nil {
+		t.Fatal("a dead bind directory must be cleared")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".lkeep", "x")); err != nil {
+		t.Fatal("a directory with other files must stay")
+	}
+	_ = os.RemoveAll(filepath.Join(dir, ".lkeep"))
+	if err := os.Remove(moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(moved, []byte("other"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mcancel()
+	for i := 0; ; i++ {
+		if l, err := lockLeaseSocket(moved); err == nil {
+			unlockLeaseSocket(l)
+			break
+		}
+		if i == 50 {
+			t.Fatal("the worker must release the socket lock when it stops")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if b, err := os.ReadFile(moved); err != nil || string(b) != "other" {
+		t.Fatalf("stopping must not remove a file it did not link: %q %v", b, err)
+	}
+
 	// A file that is not a socket is never replaced.
 	reg := filepath.Join(dir, "reg")
 	if err := os.WriteFile(reg, []byte("keep"), 0o600); err != nil {
@@ -143,7 +206,7 @@ func TestLeaseSocketGroup(t *testing.T) {
 		if err := lw.StartBuildLeases(ctx); err == nil || !strings.Contains(err.Error(), "too long") {
 			t.Fatalf("a directory too long to bind in: %v", err)
 		}
-		if m, _ := filepath.Glob(filepath.Join(long, "*")); len(m) != 0 {
+		if m, _ := os.ReadDir(long); len(m) != 0 {
 			t.Fatalf("nothing may be made in it: %v", m)
 		}
 	}
