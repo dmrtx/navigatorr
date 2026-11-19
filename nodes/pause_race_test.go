@@ -27,8 +27,10 @@ func TestBuildsPauseNeverLetsABuildBeCreatedAfterItReturns(t *testing.T) {
 	// The create has passed the check and is held before its insert.
 	<-checked
 	paused := make(chan struct{})
+	pauseErr := make(chan error, 1)
 	go func() {
-		pauseBuilds(t, e, "nodeA", true)
+		// Not t.Fatal: this is not the test goroutine. The error goes back.
+		pauseErr <- e.SetBuildsPause(context.Background(), "nodeA", true)
 		close(paused)
 	}()
 	select {
@@ -42,6 +44,9 @@ func TestBuildsPauseNeverLetsABuildBeCreatedAfterItReturns(t *testing.T) {
 	}
 	select {
 	case <-paused:
+		if err := <-pauseErr; err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the pause must return once the create is done")
 	}

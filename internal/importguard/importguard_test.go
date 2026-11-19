@@ -148,6 +148,11 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 		t.Run(p[0]+"/"+p[1], func(t *testing.T) {
 			graph := moduleImports(t, p[0], p[1])
 			reach := func(root string, banned func(string) bool) {
+				// A package missing from the graph (renamed, moved, or the go
+				// list output changed) must fail the test, not pass it empty.
+				if _, ok := graph[root]; !ok {
+					t.Fatalf("root package %q is not in the import graph (%d packages): the guard would check nothing", root, len(graph))
+				}
 				via := map[string]string{root: ""}
 				queue := []string{root}
 				for len(queue) > 0 {
