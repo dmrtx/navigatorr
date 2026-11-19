@@ -353,8 +353,10 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 		return refuse(fmt.Errorf("%w: job %q has not finished encoding", ErrNotRetained, jobID))
 	}
 	// The drain hold (Held) or a running build lease holds publication; an
-	// operator suspend never did.
-	if w.Held() || w.leaseHolds() {
+	// operator suspend never did. A podcast is in its own lane: a lease does
+	// not hold it.
+	leaseHoldsJob := func() bool { return w.leaseHolds() && jobSlotKind(job) != slotKindPodcast }
+	if w.Held() || leaseHoldsJob() {
 		return refuse(ErrPublishHeld)
 	}
 	if err := verifyCheckpointCandidate(w.withJobDigestMemo(ctx), job, job.LocalCandidatePath); err != nil {
@@ -385,7 +387,7 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 			capLock.Unlock()
 		}
 	}()
-	if w.Held() || w.leaseHolds() {
+	if w.Held() || leaseHoldsJob() {
 		return refuse(ErrPublishHeld)
 	}
 

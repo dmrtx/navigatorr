@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jakenesler/navigatorr/podcast"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // The podcast lane: a build lease holds the conversion (video) lane only. A
@@ -158,5 +161,92 @@ func TestOperatorPauseStillStopsPodcasts(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Post-encode recovery is per lane too: under a running lease a podcast's
+// finished encode goes on to be saved, a conversion's waits for the build.
+func TestResumePostEncodeUnderALeaseFinishesPodcastsOnly(t *testing.T) {
+	for _, podcastJob := range []bool{true, false} {
+		w, stub, cfg := postEncodeWorker(t)
+		if podcastJob {
+			jobFile := filepath.Join(cfg.StateDir, "job1", "job.json")
+			job, err := LoadJob(jobFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job.Plan = &transcode.Plan{Podcast: &podcast.Task{}}
+			if err := SaveJobAtomic(jobFile, job); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := w.LeaseCreate(LeaseRequest{Source: "tester", Title: "compile", PreemptMode: "graceful", TTLSeconds: 60}); err != nil {
+			t.Fatal(err)
+		}
+		n, err := w.ResumePostEncode(context.Background(), "self", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if podcastJob {
+			want = 1
+		}
+		if n != want || stub.n() != want {
+			t.Fatalf("podcast=%v: started %d (spawns %d), want %d", podcastJob, n, stub.n(), want)
+		}
+	}
+}
+
+// A podcast that stays queued under a build (its own slots are full) is not
+// marked as held by the build; the queued conversion is.
+func TestQueuedPodcastUnderALeaseIsNotMarkedHeld(t *testing.T) {
+	withHostCPUs(t, 10)
+	stub := newStubSpawn()
+	w, _, _ := newLeaseWorker(t, 4, stub)
+	if _, err := w.SetSlotSplit(transcode.SlotSplit{VideoSlots: 3, PodcastSlots: 1}); err != nil {
+		t.Fatal(err)
+	}
+	seedSlotJob(t, w, stub, "run-podcast", "running", slotKindPodcast, true, 3*time.Minute)
+	if _, err := w.LeaseCreate(leaseReq("compile")); err != nil {
+		t.Fatal(err)
+	}
+	seedSlotJob(t, w, stub, "queued-podcast", "queued", slotKindPodcast, false, 2*time.Minute)
+	seedSlotJob(t, w, stub, "queued-video", "queued", slotKindVideo, false, time.Minute)
+	if started, err := w.ScheduleQueued(context.Background(), "exe", ""); err != nil || started != 0 {
+		t.Fatalf("started %d (%v); the podcast slot is full and the build holds video", started, err)
+	}
+	podcastJob, _ := LoadJob(filepath.Join(w.cfg.StateDir, "queued-podcast", "job.json"))
+	if podcastJob.RetentionBlocked != "" {
+		t.Fatalf("a queued podcast must not be marked as held by a build: %+v", podcastJob)
+	}
+	video, _ := LoadJob(filepath.Join(w.cfg.StateDir, "queued-video", "job.json"))
+	if video.RetentionBlocked == "" {
+		t.Fatalf("the queued conversion must say the build holds it: %+v", video)
+	}
+}
+
+// A low-priority lease, once running, holds conversions and never podcasts.
+func TestLowLeaseRunningHoldsConversionsOnly(t *testing.T) {
+	withHostCPUs(t, 10)
+	stub := newStubSpawn()
+	w, _, _ := newLeaseWorker(t, 4, stub)
+	if _, err := w.LeaseCreate(LeaseRequest{Source: "tester", Title: "compile", Priority: "low", TTLSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	// The worker's tick promotes the waiting low lease on an idle node.
+	w.leaseTick()
+	if !w.leaseHolds() {
+		t.Fatal("the low lease must be running")
+	}
+	if on, _ := w.freezeState(); on {
+		t.Fatal("a low lease never freezes")
+	}
+	seedSlotJob(t, w, stub, "queued-video", "queued", slotKindVideo, false, 2*time.Minute)
+	seedSlotJob(t, w, stub, "queued-podcast", "queued", slotKindPodcast, false, time.Minute)
+	if started, err := w.ScheduleQueued(context.Background(), "exe", ""); err != nil || started != 1 {
+		t.Fatalf("started %d (%v); want only the podcast", started, err)
+	}
+	if laneJobPID(t, w, "queued-podcast") == 0 || laneJobPID(t, w, "queued-video") != 0 {
+		t.Fatal("the low lease must hold the conversion and let the podcast run")
 	}
 }

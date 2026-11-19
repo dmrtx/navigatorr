@@ -126,16 +126,18 @@ A lease is not an operator pause, so the gate differs by path:
   (`queueHeld()`).
 - New podcast jobs: held by an operator hold or drain or a suspend only
   (`operatorHeld()`); a lease never holds them.
-- Post-encode recovery (`ResumePostEncode`): held by a running lease only.
-  An operator pause or a drain still lets a finished encode go on to be saved.
+- Post-encode recovery (`ResumePostEncode`): a conversion is held by a running
+  lease only; a podcast job is never held. An operator pause or a drain still
+  lets a finished encode go on to be saved.
 - Publication of a retained candidate (`PublishRetained`): held by the drain
-  hold or a running lease. An operator suspend does not hold it.
+  hold, and for a conversion also by a running lease. An operator suspend does
+  not hold it.
 
 An operator suspend does not stop post-encode copy/verify or publication
-(intended): only leases and the drain hold do.
+(intended): only leases (for conversions) and the drain hold do.
 
-Both post-encode paths check the lease once before the capacity lock and again
-under it. Leases are granted under that same lock, so a lease granted between
+Both post-encode paths check the lease under the capacity lock
+(`PublishRetained` also looks once before taking it). Leases are granted under that same lock, so a lease granted between
 the first check and the lock is seen, and no process starts after the grant.
 `PublishRetained` takes the lock without waiting: if the node is busy it
 refuses with a transient "the node is busy, ask again" instead of blocking
