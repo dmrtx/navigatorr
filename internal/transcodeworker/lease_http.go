@@ -136,8 +136,8 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	}
 	// The socket is bound first in a temporary directory beside it (see
 	// listenLeaseSocket), whose path is longer than the directory's by at most
-	// leaseBindExtra bytes.
-	if n := len(filepath.Dir(path)) + leaseBindExtra; n >= 104 {
+	// leaseBindExtra(path) bytes.
+	if n := len(filepath.Dir(path)) + leaseBindExtra(path); n >= 104 {
 		return fmt.Errorf("build socket directory is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", n)
 	}
 	// The group first: a bad one changes nothing on disk (not even a stale
@@ -161,7 +161,7 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		unlockLeaseSocket(lock)
 		return errLeaseSocketTaken
 	}
-	removeLeaseBindLeftovers(filepath.Dir(path))
+	removeLeaseBindLeftovers(path)
 	ln, err := listenLeaseSocket(path, gid)
 	if err != nil {
 		unlockLeaseSocket(lock)
@@ -183,7 +183,9 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdown)
+		if srv.Shutdown(shutdown) != nil {
+			_ = srv.Close() // no connection outlives the lock
+		}
 		// Only the socket this worker linked: never a file put there since.
 		if now, err := os.Lstat(path); err == nil && served != nil && os.SameFile(now, served) {
 			_ = os.Remove(path)
@@ -193,9 +195,13 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	return nil
 }
 
+// leaseBindPrefix names the bind directories of one socket: "." plus the
+// socket's name plus ".b", then MkdirTemp's random digits.
+func leaseBindPrefix(path string) string { return "." + filepath.Base(path) + ".b" }
+
 // leaseBindExtra is how much longer than the socket's directory the bind path
-// can be: "/.l" plus MkdirTemp's random part (at most 10 digits) plus "/s".
-const leaseBindExtra = 3 + 10 + 2
+// can be: "/" plus the prefix plus MkdirTemp's digits (at most 10) plus "/s".
+func leaseBindExtra(path string) int { return 1 + len(leaseBindPrefix(path)) + 10 + 2 }
 
 // listenLeaseSocket binds the socket in a new 0700 directory next to path and
 // gives it its final mode and group there, so no umask ever opens it early.
@@ -203,7 +209,7 @@ const leaseBindExtra = 3 + 10 + 2
 // into place, which never replaces anything (a file that is not a socket stays
 // and the start fails). A failure leaves nothing behind.
 func listenLeaseSocket(path string, gid int) (net.Listener, error) {
-	tmp, err := os.MkdirTemp(filepath.Dir(path), ".l")
+	tmp, err := os.MkdirTemp(filepath.Dir(path), leaseBindPrefix(path))
 	if err != nil {
 		return nil, err
 	}
@@ -260,18 +266,28 @@ func unlockLeaseSocket(f *os.File) {
 	_ = f.Close()
 }
 
-// removeLeaseBindLeftovers clears bind directories of a worker that was
-// killed mid-start: ".l*" directories holding nothing but its "s" socket.
-// Called with the lock held, so no other start is using one.
-func removeLeaseBindLeftovers(dir string) {
-	matches, _ := filepath.Glob(filepath.Join(dir, ".l*"))
-	for _, m := range matches {
-		fi, err := os.Lstat(m)
-		if err != nil || !fi.IsDir() {
+// removeLeaseBindLeftovers clears the bind directories this socket's worker
+// left when it was killed mid-start: named by leaseBindPrefix and digits only,
+// empty or holding nothing but the "s" socket. Called with this socket's lock
+// held, so no start of this socket is using one; other sockets' are never
+// matched.
+func removeLeaseBindLeftovers(path string) {
+	dir, prefix := filepath.Dir(path), leaseBindPrefix(path)
+	names, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, n := range names {
+		rest, ok := strings.CutPrefix(n.Name(), prefix)
+		if !ok || rest == "" || strings.Trim(rest, "0123456789") != "" || !n.IsDir() {
 			continue
 		}
+		m := filepath.Join(dir, n.Name())
 		entries, err := os.ReadDir(m)
-		if err != nil || len(entries) > 1 || (len(entries) == 1 && entries[0].Name() != "s") {
+		if err != nil || len(entries) > 1 {
+			continue
+		}
+		if len(entries) == 1 && (entries[0].Name() != "s" || entries[0].Type()&os.ModeSocket == 0) {
 			continue
 		}
 		_ = os.RemoveAll(m)

@@ -138,17 +138,33 @@ func TestLeaseSocketGroup(t *testing.T) {
 		_ = c.Close()
 	}
 
-	// Bind directories of a killed start are cleared; other dot entries stay.
-	if err := os.MkdirAll(filepath.Join(dir, ".ldead"), 0o700); err != nil {
+	// Bind directories of this socket's killed start are cleared; anything
+	// else stays (other sockets', other names, a non-socket "s").
+	deadSocket := func(d string) {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		l, err := net.Listen("unix", filepath.Join(d, "s"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		l.(*net.UnixListener).SetUnlinkOnClose(false)
+		_ = l.Close()
+	}
+	dead := filepath.Join(dir, ".m.sock.b123")
+	deadSocket(dead)
+	deadEmpty := filepath.Join(dir, ".m.sock.b456")
+	if err := os.Mkdir(deadEmpty, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, ".ldead", "s"), nil, 0o600); err != nil {
-		t.Fatal(err)
+	keep := []string{filepath.Join(dir, ".other.sock.b789"), filepath.Join(dir, ".m.sock.bX1"), filepath.Join(dir, ".logs"), filepath.Join(dir, ".m.sock.b321")}
+	deadSocket(keep[0])
+	for _, k := range keep[1:3] {
+		if err := os.Mkdir(k, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := os.MkdirAll(filepath.Join(dir, ".lkeep"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, ".lkeep", "x"), nil, 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Join(keep[3], "s"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// Stopping leaves a file put at the path since the start.
@@ -158,13 +174,17 @@ func TestLeaseSocketGroup(t *testing.T) {
 	if err := mw.StartBuildLeases(mctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, ".ldead")); err == nil {
-		t.Fatal("a dead bind directory must be cleared")
+	for _, d := range []string{dead, deadEmpty} {
+		if _, err := os.Lstat(d); err == nil {
+			t.Fatalf("a dead bind directory must be cleared: %s", d)
+		}
 	}
-	if _, err := os.Lstat(filepath.Join(dir, ".lkeep", "x")); err != nil {
-		t.Fatal("a directory with other files must stay")
+	for _, k := range keep {
+		if _, err := os.Lstat(k); err != nil {
+			t.Fatalf("%s must stay: %v", k, err)
+		}
+		_ = os.RemoveAll(k)
 	}
-	_ = os.RemoveAll(filepath.Join(dir, ".lkeep"))
 	if err := os.Remove(moved); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +232,7 @@ func TestLeaseSocketGroup(t *testing.T) {
 	}
 
 	// Binding happens in a temporary directory; none is left behind.
-	if m, _ := filepath.Glob(filepath.Join(dir, ".l*")); len(m) != 0 {
+	if m, _ := filepath.Glob(filepath.Join(dir, ".*.b[0-9]*")); len(m) != 0 {
 		t.Fatalf("temporary bind directories left: %v", m)
 	}
 
