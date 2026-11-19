@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"github.com/jakenesler/navigatorr/nodes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,7 +35,7 @@ func TestWorkerNodeStateFollowsTheStoreImmediately(t *testing.T) {
 		t.Fatal("idle nodes carry no build, hold or pause", idle)
 	}
 
-	build, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"})
+	build, err := s.nodes.CreateBuild(t.Context(), nodes.BuildInput{Target: "m1", Via: nodes.BuildViaNodeLease, Source: "ci", Title: "compile"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +49,7 @@ func TestWorkerNodeStateFollowsTheStoreImmediately(t *testing.T) {
 		t.Fatal("the build belongs to m1 only", running["m4"])
 	}
 
-	if _, changed, err := s.engine.FinishBuild(t.Context(), build.ID, "succeeded", nil); err != nil || !changed {
+	if _, changed, err := s.nodes.FinishBuild(t.Context(), build.ID, "succeeded", nil); err != nil || !changed {
 		t.Fatal(err, changed)
 	}
 	done := nodeStateByName(t, h)
@@ -99,7 +100,8 @@ func TestWorkerActivityDoesNotWaitForASlowWorkerAndKeepsItsBuilds(t *testing.T) 
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
+	attachNodes(t, s, s.engine, nil)
+	if _, err := s.nodes.CreateBuild(t.Context(), nodes.BuildInput{Target: "m1", Via: nodes.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -165,7 +167,8 @@ func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
+	attachNodes(t, s, s.engine, nil)
+	if _, err := s.nodes.CreateBuild(t.Context(), nodes.BuildInput{Target: "m1", Via: nodes.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,6 +201,7 @@ func TestWorkerNodeStateWithoutWorkersAnswersEmpty(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Workers = nil
 	s.engine = action.NewEngine(deps)
+	attachNodes(t, s, s.engine, nil)
 	out := getJSON(t, h, "/api/maintenance/worker-node-state")
 	if nodes, ok := out["nodes"].([]any); !ok || len(nodes) != 0 {
 		t.Fatal("no workers, no nodes", out)

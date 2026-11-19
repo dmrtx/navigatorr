@@ -2,6 +2,7 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/nodes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -30,6 +30,7 @@ func buildsUI(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	s.SetNodes(base.nodes)
 	return s, s.Handler()
 }
 
@@ -43,9 +44,9 @@ func withBuildsToken(h http.Handler, method, path, body string) *httptest.Respon
 	return w
 }
 
-func decodeBuild(t *testing.T, w *httptest.ResponseRecorder) store.Build {
+func decodeBuild(t *testing.T, w *httptest.ResponseRecorder) nodes.Build {
 	t.Helper()
-	var b store.Build
+	var b nodes.Build
 	if err := json.Unmarshal(w.Body.Bytes(), &b); err != nil {
 		t.Fatal(err, w.Body.String())
 	}
@@ -64,14 +65,14 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 			t.Fatalf("%q must be a 400, got %d %s", bad, w.Code, w.Body.String())
 		}
 	}
-	if list, _ := s.engine.ListBuilds(store.BuildFilter{}); len(list) != 0 {
+	if list, _ := s.nodes.ListBuilds(nodes.BuildFilter{}); len(list) != 0 {
 		t.Fatal("a refused request records nothing", list)
 	}
 
 	// A machine that is not a transcode node is tracked, not refused.
 	w := withBuildsToken(h, "POST", path, `{"target":"laptop","source":"mdm-stack","holder":"runner1","kind":"gradle","title":"unit run"}`)
 	other := decodeBuild(t, w)
-	if w.Code != 200 || other.ID == "" || other.HoldsTranscodeNode || other.Status != store.BuildRunning || !strings.Contains(w.Body.String(), `"holds_transcode_node":false`) {
+	if w.Code != 200 || other.ID == "" || other.HoldsTranscodeNode || other.Status != nodes.BuildRunning || !strings.Contains(w.Body.String(), `"holds_transcode_node":false`) {
 		t.Fatal("a non-node target", w.Code, w.Body.String())
 	}
 	if s.engine.NodePauseStatuses(t.Context())[node].Paused {
@@ -80,7 +81,7 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 
 	w = withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"mdm-stack","holder":"runner1","kind":"integration-test","title":"enrollment run","ttl_seconds":600,"progress":"starting"}`)
 	b := decodeBuild(t, w)
-	if w.Code != 200 || b.HoldsTranscodeNode || b.Status != store.BuildRunning || b.PreemptMode != "suspend" || b.Priority != "normal" || b.Progress != "starting" || b.ExpiresAt == "" || b.StartedAt != b.CreatedAt {
+	if w.Code != 200 || b.HoldsTranscodeNode || b.Status != nodes.BuildRunning || b.PreemptMode != "suspend" || b.Priority != "normal" || b.Progress != "starting" || b.ExpiresAt == "" || b.StartedAt != b.CreatedAt {
 		t.Fatal("create on a node", w.Code, w.Body.String())
 	}
 	// A running record is history: with no lease reported by the node's worker
@@ -102,7 +103,7 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 
 	w = withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"progress":"step 3","ttl_seconds":900}`)
 	hb := decodeBuild(t, w)
-	if w.Code != 200 || hb.Progress != "step 3" || hb.Status != store.BuildRunning {
+	if w.Code != 200 || hb.Progress != "step 3" || hb.Status != nodes.BuildRunning {
 		t.Fatal("heartbeat", w.Code, w.Body.String())
 	}
 	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", ``); w.Code != 200 {
@@ -116,7 +117,7 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 	}
 
 	var list struct {
-		Builds []store.Build `json:"builds"`
+		Builds []nodes.Build `json:"builds"`
 	}
 	w = withBuildsToken(h, "GET", path+"?target="+node+"&status=running&source=mdm-stack&limit=5", "")
 	if json.Unmarshal(w.Body.Bytes(), &list) != nil || w.Code != 200 || len(list.Builds) != 1 || list.Builds[0].ID != b.ID {
@@ -137,7 +138,7 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 	}
 	w = withBuildsToken(h, "POST", path+"/"+b.ID+"/finish", `{"status":"failed","exit_code":2}`)
 	done := decodeBuild(t, w)
-	if w.Code != 200 || done.Status != store.BuildFailed || done.EndedAt == "" || done.ExitCode == nil || *done.ExitCode != 2 {
+	if w.Code != 200 || done.Status != nodes.BuildFailed || done.EndedAt == "" || done.ExitCode == nil || *done.ExitCode != 2 {
 		t.Fatal("finish", w.Code, w.Body.String())
 	}
 	if s.engine.NodePauseStatuses(t.Context())[node].Paused {
@@ -145,7 +146,7 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 	}
 	// Finishing again answers 200 with the build unchanged; a heartbeat is a 409.
 	w = withBuildsToken(h, "POST", path+"/"+b.ID+"/finish", `{"status":"succeeded"}`)
-	if again := decodeBuild(t, w); w.Code != 200 || again.Status != store.BuildFailed {
+	if again := decodeBuild(t, w); w.Code != 200 || again.Status != nodes.BuildFailed {
 		t.Fatal("finish twice", w.Code, w.Body.String())
 	}
 	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", ``); w.Code != 409 || !strings.Contains(w.Body.String(), `"status":"failed"`) {
@@ -160,7 +161,7 @@ func TestBuildsLowPriorityRunsAtOnceInTheServer(t *testing.T) {
 	decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"build"}`))
 	w := withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"warm","title":"warm","priority":"low"}`)
 	low := decodeBuild(t, w)
-	if low.Status != store.BuildRunning || low.StartedAt == "" || low.Priority != "low" || low.HoldsTranscodeNode {
+	if low.Status != nodes.BuildRunning || low.StartedAt == "" || low.Priority != "low" || low.HoldsTranscodeNode {
 		t.Fatal("the server never queues a low priority build", w.Body.String())
 	}
 }
@@ -178,7 +179,6 @@ func TestBuildsTokenCallsOnlyTheBuildEndpoints(t *testing.T) {
 		{"POST", "/api/maintenance/worker-pause", `{"node":"default","mode":"suspend"}`},
 		{"POST", "/api/maintenance/worker-drain", `{"enabled":true}`},
 		{"POST", "/api/maintenance/tool", `{"name":"action_list","arguments":{}}`},
-		{"POST", "/api/maintenance/tool", `{"name":"build_list","arguments":{}}`},
 		{"GET", "/api/maintenance/preferences", ""},
 		{"GET", "/api/maintenance/logs", ""},
 		{"GET", "/api/maintenance/builds/", ""},
@@ -295,16 +295,16 @@ func TestBuildsLateHeartbeatIs409AndMarksTheBuildLost(t *testing.T) {
 	const path = "/api/maintenance/builds"
 	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"build","ttl_seconds":1}`))
 	waiting := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"warm","title":"warm","priority":"low","ttl_seconds":1}`))
-	if running.Status != store.BuildRunning || waiting.Status != store.BuildRunning {
+	if running.Status != nodes.BuildRunning || waiting.Status != nodes.BuildRunning {
 		t.Fatalf("%+v %+v", running, waiting)
 	}
 	time.Sleep(2100 * time.Millisecond) // past both windows, before any reconcile tick
-	for _, b := range []store.Build{running, waiting} {
+	for _, b := range []nodes.Build{running, waiting} {
 		w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"ttl_seconds":600}`)
 		if w.Code != 409 || !strings.Contains(w.Body.String(), `"status":"lost"`) {
 			t.Fatal("a late heartbeat is a 409 with the lost build", w.Code, w.Body.String())
 		}
-		if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+b.ID, "")); got.Status != store.BuildLost || got.ExpiresAt != b.ExpiresAt {
+		if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+b.ID, "")); got.Status != nodes.BuildLost || got.ExpiresAt != b.ExpiresAt {
 			t.Fatalf("not revived: %+v", got)
 		}
 	}

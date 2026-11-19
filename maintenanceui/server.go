@@ -27,6 +27,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/mediainspect"
+	"github.com/jakenesler/navigatorr/nodes"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -57,10 +58,12 @@ type Server struct {
 	// the build routes (see builds.go).
 	buildsTokenHash [32]byte
 	hasBuildsToken  bool
-	mu              sync.Mutex
-	sessions        map[string]time.Time
-	folderSizes     folderSizeCache
-	storage         storageState
+	// nodes is the build registry the builds routes serve (see SetNodes).
+	nodes       *nodes.Service
+	mu          sync.Mutex
+	sessions    map[string]time.Time
+	folderSizes folderSizeCache
+	storage     storageState
 	// nas replaces the configured NAS helper in tests.
 	nas             nasMeter
 	folderListings  folderListingCache
@@ -199,13 +202,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-drain", s.workerDrain)
 	mux.HandleFunc("GET /api/maintenance/worker-pause", s.workerPause)
 	mux.HandleFunc("POST /api/maintenance/worker-pause", s.workerPause)
-	mux.HandleFunc("GET "+buildsPath, s.buildsRoot)
-	mux.HandleFunc("POST "+buildsPath, s.buildsRoot)
+	mux.HandleFunc("GET "+buildsPath, s.withNodes(s.buildsRoot))
+	mux.HandleFunc("POST "+buildsPath, s.withNodes(s.buildsRoot))
 	mux.HandleFunc("GET "+buildsPath+"/nodes", s.buildsNodes)
-	mux.HandleFunc("GET "+buildsPath+"/{id}", s.buildOne)
-	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.buildHeartbeat)
-	mux.HandleFunc("GET "+buildsPath+"/{id}/log", s.buildLog)
-	mux.HandleFunc("POST "+buildsPath+"/{id}/finish", s.buildFinish)
+	mux.HandleFunc("GET "+buildsPath+"/{id}", s.withNodes(s.buildOne))
+	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.withNodes(s.buildHeartbeat))
+	mux.HandleFunc("GET "+buildsPath+"/{id}/log", s.withNodes(s.buildLog))
+	mux.HandleFunc("POST "+buildsPath+"/{id}/finish", s.withNodes(s.buildFinish))
+	// The successor API and its spec (see package nodes).
+	mux.Handle("GET "+nodes.SpecPath, nodes.SpecHandler())
+	mux.HandleFunc(nodes.BasePath+"/", s.nodesAPI)
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("GET /api/maintenance/compression", s.compression)
@@ -242,6 +248,11 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		if strings.HasPrefix(r.URL.Path, nodes.BasePath+"/") && r.URL.Path != nodes.SpecPath && !s.nodesAuthorized(r) {
+			writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
+				"hint": "send the builds token as the X-Api-Key header (or Authorization: Bearer)"})
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			// The builds token is a bearer for scripts, accepted on the build
 			// routes only; being no ambient credential it needs no same-origin

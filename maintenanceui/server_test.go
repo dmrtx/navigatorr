@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/internal/nodeswire"
+	"github.com/jakenesler/navigatorr/nodes"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
@@ -63,8 +67,24 @@ func testUI(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachNodes(t, s, e, nil)
 	return s, s.Handler()
 }
+
+// attachNodes gives the server a build registry (its own database file) wired
+// to the engine, the way main does. now is the registry's clock (nil: real).
+func attachNodes(t *testing.T, s *Server, e *action.Engine, now func() time.Time) *nodes.Service {
+	t.Helper()
+	ns, err := nodes.Open(nodes.Options{Path: filepath.Join(t.TempDir(), "nodes.db"), Topology: nodeswire.Topology(e.Deps().Workers), Transcode: nodeswire.TranscodeView(e), Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ns.Close() })
+	nodeswire.Wire(e, ns)
+	s.SetNodes(ns)
+	return ns
+}
+
 func request(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("X-Navigatorr-Request", "1")
