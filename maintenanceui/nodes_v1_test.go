@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jakenesler/navigatorr/nodes"
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 func v1(h http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
@@ -136,5 +137,69 @@ func TestN5CancelThroughV1ReachesTheNextHeartbeat(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &out)
 	if w.Code != 409 || out.Error != "build already ended" || out.Build.Status != nodes.BuildCancelled {
 		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// GET /nodes/v1/nodes shows the hold the node's worker reports, the same as the
+// legacy node view: held_by builds, the strongest mode among the running leases
+// and the earliest start, whatever order the worker lists them in. An operator
+// pause wins over the display of a lease.
+func TestNodesV1ShowsTheWorkerReportedHold(t *testing.T) {
+	s, h := buildsUI(t)
+	node := transcode.DefaultWorkerName
+	early, late := "2026-11-13T10:00:00Z", "2026-11-13T10:05:00Z"
+	// Reported newest first: the earliest start and the strongest mode must not
+	// depend on list order.
+	reportLeases(t, s,
+		transcode.WorkerLease{ID: "lease2", Status: "running", Mode: "suspend", StartedAt: late},
+		transcode.WorkerLease{ID: "lease1", Status: "running", Mode: "graceful", StartedAt: early},
+		transcode.WorkerLease{ID: "lease3", Status: "waiting", Mode: "suspend", StartedAt: "2026-11-13T09:00:00Z"},
+	)
+	type view struct {
+		Name      string `json:"name"`
+		Transcode *struct {
+			Paused bool   `json:"paused"`
+			Mode   string `json:"mode"`
+			Since  string `json:"since"`
+			HeldBy string `json:"held_by"`
+		} `json:"transcode"`
+	}
+	read := func() view {
+		t.Helper()
+		w := v1(h, "GET", "/nodes/v1/nodes/"+node, "", apiKey())
+		var v view
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &v) != nil || v.Transcode == nil {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return v
+	}
+	v := read()
+	if !v.Transcode.Paused || v.Transcode.HeldBy != "builds" || v.Transcode.Mode != "suspend" || v.Transcode.Since != early {
+		t.Fatalf("the node view shows what the worker reports: %+v", v.Transcode)
+	}
+	// The list agrees with the single view, and with the legacy route.
+	w := v1(h, "GET", "/nodes/v1/nodes", "", apiKey())
+	var list struct {
+		Nodes []view `json:"nodes"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &list) != nil || len(list.Nodes) == 0 || list.Nodes[0].Transcode == nil || list.Nodes[0].Transcode.HeldBy != "builds" || list.Nodes[0].Transcode.Since != early {
+		t.Fatal(w.Body.String())
+	}
+	w = withBuildsToken(h, "GET", "/api/maintenance/builds/nodes?node="+node, "")
+	var legacy struct {
+		Nodes []struct {
+			TranscodePaused bool   `json:"transcode_paused"`
+			TranscodeMode   string `json:"transcode_mode"`
+		} `json:"nodes"`
+	}
+	if json.Unmarshal(w.Body.Bytes(), &legacy) != nil || len(legacy.Nodes) != 1 || !legacy.Nodes[0].TranscodePaused || legacy.Nodes[0].TranscodeMode != v.Transcode.Mode {
+		t.Fatalf("the legacy view says the same: %s", w.Body.String())
+	}
+	// An operator pause wins over the lease hold.
+	if w := request(h, "POST", pausePath, `{"node":"`+node+`","mode":"graceful"}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if v := read(); v.Transcode.HeldBy != "operator" {
+		t.Fatalf("an operator pause wins: %+v", v.Transcode)
 	}
 }

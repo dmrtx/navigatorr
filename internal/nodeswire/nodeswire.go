@@ -41,7 +41,11 @@ func (t topology) Nodes() []string {
 	return out
 }
 
-// TranscodeView is nodes.TranscodeView over the engine's stored pause state.
+// TranscodeView is nodes.TranscodeView over the engine's stored pause state, read
+// the way the legacy builds view reads it (AttachNodeBuilds on the stored
+// states), so GET /nodes/v1/nodes and /api/maintenance/builds/nodes agree: a
+// node the worker reports a running lease on shows held_by "builds" with the
+// strongest lease mode and the earliest lease start, and an operator pause wins.
 func TranscodeView(e *action.Engine) nodes.TranscodeView { return view{e} }
 
 type view struct{ e *action.Engine }
@@ -51,7 +55,7 @@ func (v view) TranscodeStates(ctx context.Context) map[string]nodes.TranscodeSta
 	if v.e == nil {
 		return out
 	}
-	for name, st := range v.e.NodePauseStatesStored(ctx) {
+	for name, st := range v.e.AttachNodeBuilds(v.e.NodePauseStatesStored(ctx)) {
 		out[name] = nodes.TranscodeState{Paused: st.Paused, Mode: st.Mode, Since: st.Since, HeldBy: st.HeldBy, Message: st.Message}
 	}
 	return out
