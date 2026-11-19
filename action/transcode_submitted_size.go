@@ -58,13 +58,16 @@ func (e *Engine) readFileSize(raw string) (size int64, definitive bool) {
 	// Buffered: a stat that answers after the timeout must not leak a goroutine
 	// blocked on the send.
 	done := make(chan int64, 1)
+	// Read the stat hook here, not in the goroutine: a stat that outlives the
+	// timeout must not read the package variable after a test restored it.
+	stat := submittedStat
 	go func() {
 		path, err := e.deps.Fs.ResolveRead(raw)
 		if err != nil {
 			done <- 0
 			return
 		}
-		fi, err := submittedStat(path)
+		fi, err := stat(path)
 		if err != nil || !fi.Mode().IsRegular() {
 			done <- 0
 			return
