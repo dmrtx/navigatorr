@@ -2,7 +2,9 @@ package transcodeworker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,5 +250,58 @@ func TestLowLeaseRunningHoldsConversionsOnly(t *testing.T) {
 	}
 	if laneJobPID(t, w, "queued-podcast") == 0 || laneJobPID(t, w, "queued-video") != 0 {
 		t.Fatal("the low lease must hold the conversion and let the podcast run")
+	}
+}
+
+// Submit takes the same per-lane decision: under a build a podcast job is
+// accepted and a conversion is refused; an operator hold refuses both.
+func TestSubmitUnderALeaseAcceptsPodcastsOnly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultWorkerConfig()
+	cfg.StateDir, cfg.LocalWorkDir = filepath.Join(dir, "jobs"), filepath.Join(dir, "work")
+	cfg.AllowedRoots, cfg.ExternalRoots = []string{dir}, nil
+	cfg.StagingPolicy, cfg.AppleSpeechPath = StagingPolicy("never"), "/not-executed"
+	gateConfig(cfg)
+	w := NewWorker(cfg)
+	w.SetTranscodeSpawner(func(string, string, string) (int, string, error) { return 999999, "", nil })
+	w.SetAliveFunc(func(*JobRecord) bool { return true })
+
+	podcastReq := func(id string) SubmitRequest {
+		source := filepath.Join(dir, id+".mp3")
+		if err := os.WriteFile(source, []byte("source "+id), 0600); err != nil {
+			t.Fatal(err)
+		}
+		hash, err := hashLocalFileSHA256(context.Background(), source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := &transcode.Plan{Container: "json", Podcast: &podcast.Task{Version: 1, Operation: "transcribe", Language: "en_US"}}
+		plan.PlanDigest, _ = transcode.DigestPlan(plan)
+		return SubmitRequest{ID: id, SourcePath: source, CandidatePath: filepath.Join(dir, id+".json"), SourceSHA256: hash, Profile: "podcast-v1", Plan: plan}
+	}
+	videoReq := func(id string) SubmitRequest {
+		source := filepath.Join(dir, id+".mkv")
+		if err := os.WriteFile(source, []byte("source "+id), 0600); err != nil {
+			t.Fatal(err)
+		}
+		plan := ioOptPlan(t)
+		plan.PlanDigest, _ = transcode.DigestPlan(plan)
+		return SubmitRequest{ID: id, SourcePath: source, CandidatePath: filepath.Join(dir, id+".out.mkv"), Plan: plan}
+	}
+
+	if _, err := w.LeaseCreate(LeaseRequest{Source: "tester", Title: "compile", PreemptMode: "graceful", TTLSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Submit(context.Background(), podcastReq("pod-1"), "unused", "unused"); err != nil {
+		t.Fatalf("a build must not refuse a podcast job: %v", err)
+	}
+	if _, err := w.Submit(context.Background(), videoReq("vid-1"), "unused", "unused"); err == nil || !strings.Contains(err.Error(), "build") {
+		t.Fatalf("a build must refuse a new conversion, saying so: %v", err)
+	}
+	if err := w.SetHold(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Submit(context.Background(), podcastReq("pod-2"), "unused", "unused"); err == nil {
+		t.Fatal("an operator hold must refuse a podcast job too")
 	}
 }
