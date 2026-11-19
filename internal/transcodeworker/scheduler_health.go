@@ -126,6 +126,7 @@ func (w *Worker) SchedulerObservation(now time.Time) transcode.SchedulerObservat
 		room := *w.retentionRoom
 		result.Retention = &room
 	}
+	result.Leases = w.leaseSummary(now)
 	result.Sweeps = make(map[string]transcode.SchedulerSweepObservation, len(w.schedulerHealth.Sweeps))
 	staleAfter := 3 * w.schedulerInterval
 	if staleAfter < 15*time.Second {

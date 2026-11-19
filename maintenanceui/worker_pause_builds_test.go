@@ -41,7 +41,7 @@ func TestWorkerPauseAnswerListsTheRunningBuildsOfTheNode(t *testing.T) {
 	if got := post("graceful"); len(got.Builds) != 0 {
 		t.Fatalf("no build yet: %+v", got)
 	}
-	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","source":"ci","title":"run"}`))
+	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","via":"node_lease","source":"ci","title":"run"}`))
 	for _, mode := range []string{"graceful", "off"} {
 		got := post(mode)
 		if len(got.Builds) != 1 || got.Builds[0].ID != b.ID || got.Builds[0].Status != "running" {

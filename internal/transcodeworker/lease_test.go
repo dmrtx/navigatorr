@@ -315,6 +315,18 @@ func (f *fakeReporter) Register(l *leaseRecord) (string, error) {
 	return id, nil
 }
 
+func (f *fakeReporter) CheckPaused() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch {
+	case f.down:
+		return errors.New("the server is unreachable")
+	case f.paused:
+		return errLeasesPaused
+	}
+	return nil
+}
+
 func (f *fakeReporter) Heartbeat(id string, progress *string, ttl int, lines []string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -351,6 +363,29 @@ func (f *fakeReporter) Finish(id, status string, exit *int) error {
 
 // Pause builds is decided by the server and refused before anything is held;
 // an unreachable server never stops a build.
+func TestLowLeaseRespectsBuildsPaused(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	rep := &fakeReporter{paused: true}
+	w.leases.reporter = rep
+	req := leaseReq("warm")
+	req.Priority = "low"
+	if _, err := w.LeaseCreate(req); !errors.Is(err, errLeasesPaused) {
+		t.Fatalf("paused: %v", err)
+	}
+	if f, _ := w.readLeaseFile(); len(f.Leases) != 0 {
+		t.Fatalf("a refused low lease leaves no record: %+v", f.Leases)
+	}
+	if len(rep.registers) != 0 {
+		t.Fatalf("asking about the pause registers nothing: %v", rep.registers)
+	}
+	// An unreachable server does not stop it: it is created, and waits.
+	rep.paused, rep.down = false, true
+	l, err := w.LeaseCreate(req)
+	if err != nil || l.Status != leaseStatusWaiting {
+		t.Fatalf("server down: %+v %v", l, err)
+	}
+}
+
 func TestLeasePausedRefusesAndUnreachableDoesNot(t *testing.T) {
 	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
 	rep := &fakeReporter{paused: true}
@@ -592,5 +627,59 @@ func TestLeaseSocketIsPrivateAndServes(t *testing.T) {
 	off := NewWorker(&WorkerConfig{StateDir: t.TempDir()})
 	if off.LeaseSocketPath() != "" || off.StartBuildLeases(ctx) != nil {
 		t.Fatal("no build_node, no leases")
+	}
+}
+
+// A job queued before a normal lease is granted reports the hold on its
+// record, so the coordinator takes it back; nothing starts.
+func TestQueuedJobReportsTheLeaseHold(t *testing.T) {
+	stub := newStubSpawn()
+	w, tempDir, sourceFile := newLeaseWorker(t, 2, stub)
+	jobFile := filepath.Join(w.cfg.StateDir, "job-queued", "job.json")
+	queued := &JobRecord{ID: "job-queued", Status: "queued", Source: sourceFile, Candidate: filepath.Join(tempDir, "out.mkv"), CreatedAt: time.Now().UTC()}
+	if err := SaveJobAtomic(jobFile, queued); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.LeaseCreate(leaseReq("compile")); err != nil {
+		t.Fatal(err)
+	}
+	if started, err := w.ScheduleQueued(context.Background(), "self", ""); err != nil || started != 0 {
+		t.Fatalf("a lease let %d jobs start (%v)", started, err)
+	}
+	got, err := LoadJob(jobFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "queued" || got.PID != 0 || got.RetentionBlocked != retentionBlockedHold || got.RoomNote == "" {
+		t.Fatalf("the queued job must carry the hold refusal: %+v", got)
+	}
+}
+
+// The report lists the active leases and leaves out the ended ones.
+func TestLeaseSummaryListsActiveLeasesOnly(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	a, err := w.LeaseCreate(leaseReq("first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.leaseSummary(time.Now()); len(got) != 1 || got[0].ID != a.ID || got[0].Title != "first" || got[0].Source != "tester" || got[0].StartedAt == "" {
+		t.Fatalf("summary: %+v", got)
+	}
+	if _, err := w.LeaseFinish(a.ID, leaseStatusSucceeded, ptr(0)); err != nil {
+		t.Fatal(err)
+	}
+	if got := w.leaseSummary(time.Now()); len(got) != 0 {
+		t.Fatalf("an ended lease must not be reported: %+v", got)
+	}
+}
+
+// Post-encode recovery starts no process while the node is held.
+func TestResumePostEncodeStartsNothingWhileHeld(t *testing.T) {
+	w, _, _ := newLeaseWorker(t, 2, newStubSpawn())
+	if _, err := w.LeaseCreate(leaseReq("compile")); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := w.ResumePostEncode(context.Background(), "self", ""); err != nil || n != 0 {
+		t.Fatalf("held node resumed %d runners (%v)", n, err)
 	}
 }

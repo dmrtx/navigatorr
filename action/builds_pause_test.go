@@ -19,7 +19,7 @@ func pauseBuilds(t *testing.T, e *Engine, node string, paused bool) transcode.No
 }
 
 func createBuild(e *Engine, target, priority string) (store.Build, error) {
-	return e.CreateBuild(context.Background(), BuildInput{Target: target, Source: "ci-tool", Title: "run", Priority: priority})
+	return e.CreateBuild(context.Background(), BuildInput{Target: target, Source: "ci-tool", Title: "run", Priority: priority, Via: BuildViaNodeLease})
 }
 
 func TestBuildsPausedRefusesANewBuildOnThatNodeOnly(t *testing.T) {
@@ -71,8 +71,8 @@ func TestBuildsPauseNeverTouchesBuildsAlreadyRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiting, err := createBuild(e, "m1", store.BuildPriorityLow)
-	if err != nil || waiting.Status != store.BuildWaiting {
-		t.Fatal("a low build waits behind the running one", waiting.Status, err)
+	if err != nil || waiting.Status != store.BuildRunning {
+		t.Fatal("the server never queues a low build", waiting.Status, err)
 	}
 	status := func() map[string]string {
 		out := map[string]string{}
@@ -85,23 +85,22 @@ func TestBuildsPauseNeverTouchesBuildsAlreadyRegistered(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		st := pauseBuilds(t, e, "m1", paused)
 		got := status()
-		if got[running.ID] != store.BuildRunning || got[waiting.ID] != store.BuildWaiting {
+		if got[running.ID] != store.BuildRunning || got[waiting.ID] != store.BuildRunning {
 			t.Fatalf("paused=%v changed a registered build: %+v", paused, got)
 		}
-		if len(st.Builds) != 2 || !e.workerPaused("m1") {
-			t.Fatalf("paused=%v: the running build still holds the node: %+v", paused, st)
+		if st.Paused || e.workerPaused("m1") {
+			t.Fatalf("paused=%v: a build record holds nothing: %+v", paused, st)
 		}
 		// The registered builds keep heartbeating while builds are paused.
 		if _, err := e.HeartbeatBuild(context.Background(), running.ID, nil, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// With builds paused, the waiting build already registered still starts
-	// when the node frees up, and the running one can finish normally.
+	// With builds paused, the registered builds can still finish normally.
 	pauseBuilds(t, e, "m1", true)
 	finishBuild(t, e, running.ID, store.BuildSucceeded)
 	if got := status(); got[waiting.ID] != store.BuildRunning || got[running.ID] != store.BuildSucceeded {
-		t.Fatalf("a registered waiting build is promoted as usual: %+v", got)
+		t.Fatalf("registered builds finish as usual: %+v", got)
 	}
 }
 
@@ -130,7 +129,7 @@ func TestBuildsPauseAndTranscodePauseAreIndependent(t *testing.T) {
 	// And the builds pause does not stop transcode (no operator row).
 	pauseNode(t, e, "m1", "")
 	pauseBuilds(t, e, "m1", true)
-	if pauses, _ := e.operatorPauses(); len(pauses) != 0 {
+	if pauses, _ := e.workerPauses(); len(pauses) != 0 {
 		t.Fatalf("a builds pause writes no transcode pause: %+v", pauses)
 	}
 }

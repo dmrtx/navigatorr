@@ -78,13 +78,16 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 		t.Fatal("a build on another machine holds no node")
 	}
 
-	w = withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"mdm-stack","holder":"runner1","kind":"integration-test","title":"enrollment run","ttl_seconds":600,"progress":"starting"}`)
+	w = withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"mdm-stack","holder":"runner1","kind":"integration-test","title":"enrollment run","ttl_seconds":600,"progress":"starting"}`)
 	b := decodeBuild(t, w)
-	if w.Code != 200 || !b.HoldsTranscodeNode || b.Status != store.BuildRunning || b.PreemptMode != "suspend" || b.Priority != "normal" || b.Progress != "starting" || b.ExpiresAt == "" || b.StartedAt != b.CreatedAt {
+	if w.Code != 200 || b.HoldsTranscodeNode || b.Status != store.BuildRunning || b.PreemptMode != "suspend" || b.Priority != "normal" || b.Progress != "starting" || b.ExpiresAt == "" || b.StartedAt != b.CreatedAt {
 		t.Fatal("create on a node", w.Code, w.Body.String())
 	}
-	if st := s.engine.NodePauseStatuses(t.Context())[node]; !st.Paused || st.HeldBy != "builds" || len(st.Builds) != 1 {
-		t.Fatalf("the node is held: %+v", st)
+	if st := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(t.Context()))[node]; !st.Paused || st.HeldBy != "builds" || len(st.Builds) != 1 {
+		t.Fatalf("the page shows the node as held: %+v", st)
+	}
+	if s.engine.NodePauseStatuses(t.Context())[node].Paused {
+		t.Fatal("the server itself holds nothing")
 	}
 
 	one := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+b.ID, ""))
@@ -148,29 +151,16 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 	}
 }
 
-func TestBuildsLowPriorityWaitsOnTheNodeThenRuns(t *testing.T) {
-	s, h := buildsUI(t)
+func TestBuildsLowPriorityRunsAtOnceInTheServer(t *testing.T) {
+	_, h := buildsUI(t)
 	node := transcode.DefaultWorkerName
 	const path = "/api/maintenance/builds"
-	normal := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"build"}`))
-	w := withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"warm","title":"warm","priority":"low"}`)
+	decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"build"}`))
+	w := withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"warm","title":"warm","priority":"low"}`)
 	low := decodeBuild(t, w)
-	if low.Status != store.BuildWaiting || low.StartedAt != "" || low.Priority != "low" || !low.HoldsTranscodeNode {
-		t.Fatal("a low priority build waits behind a running one", w.Body.String())
+	if low.Status != store.BuildRunning || low.StartedAt == "" || low.Priority != "low" || low.HoldsTranscodeNode {
+		t.Fatal("the server never queues a low priority build", w.Body.String())
 	}
-	if hb := decodeBuild(t, withBuildsToken(h, "POST", path+"/"+low.ID+"/heartbeat", ``)); hb.Status != store.BuildWaiting {
-		t.Fatal("the poll shows waiting", hb)
-	}
-	withBuildsToken(h, "POST", path+"/"+normal.ID+"/finish", `{"status":"succeeded"}`)
-	if hb := decodeBuild(t, withBuildsToken(h, "POST", path+"/"+low.ID+"/heartbeat", ``)); hb.Status != store.BuildRunning || hb.StartedAt == "" {
-		t.Fatal("the poll shows running once the node is idle", hb)
-	}
-	// Elsewhere a low priority build starts at once.
-	other := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"laptop","source":"warm","title":"warm","priority":"low"}`))
-	if other.Status != store.BuildRunning || other.StartedAt != other.CreatedAt || other.HoldsTranscodeNode {
-		t.Fatal(other)
-	}
-	_ = s
 }
 
 // The builds token reaches the build routes and nothing else.
@@ -276,7 +266,7 @@ func TestBuildsTokenFileMustHoldALongToken(t *testing.T) {
 func TestWorkerEndpointsListTheNodesBuilds(t *testing.T) {
 	_, h := buildsUI(t)
 	node := transcode.DefaultWorkerName
-	withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","source":"ci","title":"run","holder":"runner1"}`)
+	withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","via":"node_lease","source":"ci","title":"run","holder":"runner1"}`)
 	var list struct {
 		Nodes []struct {
 			Pause *transcode.NodePauseStatus `json:"pause"`
@@ -300,9 +290,9 @@ func TestBuildsLateHeartbeatIs409AndMarksTheBuildLost(t *testing.T) {
 	_, h := buildsUI(t)
 	node := transcode.DefaultWorkerName
 	const path = "/api/maintenance/builds"
-	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"build","ttl_seconds":1}`))
-	waiting := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"warm","title":"warm","priority":"low","ttl_seconds":1}`))
-	if running.Status != store.BuildRunning || waiting.Status != store.BuildWaiting {
+	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"build","ttl_seconds":1}`))
+	waiting := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"warm","title":"warm","priority":"low","ttl_seconds":1}`))
+	if running.Status != store.BuildRunning || waiting.Status != store.BuildRunning {
 		t.Fatalf("%+v %+v", running, waiting)
 	}
 	time.Sleep(2100 * time.Millisecond) // past both windows, before any reconcile tick
@@ -336,7 +326,7 @@ func TestWorkerActivityNamesWhatHoldsTheNode(t *testing.T) {
 	if held, ok := heldBy(); ok {
 		t.Fatal("a free node has no hold", held)
 	}
-	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","source":"ci","title":"run","holder":"runner1"}`))
+	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","via":"node_lease","source":"ci","title":"run","holder":"runner1"}`))
 	if held, _ := heldBy(); held != "builds" {
 		t.Fatal("a running build holds the node", held)
 	}

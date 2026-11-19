@@ -79,56 +79,33 @@ func (e *Engine) pauseSettleWindow() time.Duration {
 	return pauseSettle
 }
 
-// workerPauses is the effective pause of each node by name: the operator's
-// pause if the node has one, else the hold of its running builds (see
-// builds.go). Everything that decides dispatch, requeue, the worker's hold and
-// its freeze reads this view; only the operator's own requests read
-// operatorPauses. A store that cannot be read gives an error, which callers
-// treat as paused: sending a job to a node that may be paused is the worse
-// mistake.
+// workerPauses is the pause of each node by name: the operator's pause rows.
+// Everything that decides dispatch, requeue, the worker's hold and its freeze
+// reads this view. It never reads build records: a build holds its node
+// through the node's worker, not through this view. A store that cannot be
+// read gives an error, which callers treat as paused: sending a job to a node
+// that may be paused is the worse mistake.
 func (e *Engine) workerPauses() (map[string]store.WorkerPause, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
-	operator, err := e.operatorPauses()
-	if err != nil {
-		return nil, err
-	}
-	holds, err := e.buildHolds()
-	if err != nil {
-		return nil, err
-	}
-	if len(holds) == 0 {
-		return operator, nil
-	}
-	out := make(map[string]store.WorkerPause, len(operator)+len(holds))
-	for name, hold := range holds {
-		out[name] = hold
-	}
-	for name, pause := range operator {
-		out[name] = pause
-	}
-	return out, nil
+	return e.deps.Store.ListWorkerPauses()
 }
 
-// NodeHeldBy says what keeps new jobs off a node: "operator" (a pause the
-// operator set; it wins), "builds" (a running build holds it) or "" when the
-// node takes jobs. It reads stored state only, so it is cheap enough for the
-// activity view. An unreadable pause state holds the node, as workerPaused does.
+// NodeHeldBy says what keeps new jobs off a node from the server's side:
+// "operator" (a pause the operator set) or "" when the server holds nothing. A
+// build's lease holds a node in its worker, which the server does not decide.
+// It reads stored state only, so it is cheap enough for the activity view. An
+// unreadable pause state holds the node, as workerPaused does.
 func (e *Engine) NodeHeldBy(name string) string {
 	pauses, err := e.workerPauses()
 	if err != nil {
 		return "operator"
 	}
-	name = e.resolveWorker(name)
-	if _, ok := pauses[name]; !ok {
-		return ""
-	}
-	operator, _ := e.operatorPauses()
-	if _, ok := operator[name]; ok {
+	if _, ok := pauses[e.resolveWorker(name)]; ok {
 		return "operator"
 	}
-	return "builds"
+	return ""
 }
 
 // workerPaused reports whether new jobs for the node are held. A node name is
@@ -209,9 +186,8 @@ func (e *Engine) SetNodePause(ctx context.Context, node, mode string) (transcode
 		state.cacheClearedFor = ""
 	}
 	if mode == store.WorkerPauseSuspend {
-		// The operator's own pause is what a failed suspend goes back to; a
-		// build's hold is not theirs to restore or clear.
-		pauses, err := e.operatorPauses()
+		// The operator's own pause is what a failed suspend goes back to.
+		pauses, err := e.workerPauses()
 		if err != nil {
 			return transcode.NodePauseStatus{}, err
 		}
@@ -553,10 +529,10 @@ func (e *Engine) NodePauseStatuses(ctx context.Context) map[string]transcode.Nod
 }
 
 // NodePauseStatesStored is NodePauseStatuses without the worker health probes:
-// the same effective pause, builds pause and build list, read from the store and
-// memory only, so it makes no network call. Reachable is left false and the
-// messages that depend on it are not meaningful; the mode, the paused flags and
-// Builds are the same as NodePauseStatuses reports (see
+// the same pause and builds pause, read from the store and memory only, so it
+// makes no network call. Reachable is left false and the messages that depend
+// on it are not meaningful; the mode and the paused flags are the same as
+// NodePauseStatuses reports (see
 // TestNodePauseStatesStoredEqualsObservedState). nodePauseStatuses only reads:
 // it writes nothing to the store, expiry included.
 func (e *Engine) NodePauseStatesStored(ctx context.Context) map[string]transcode.NodePauseStatus {
@@ -579,7 +555,6 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		return out
 	}
 	pauses, perr := e.workerPauses()
-	operator, _ := e.operatorPauses()
 	// An unreadable builds-pause state reads as paused, like the transcode
 	// pause: the create path fails closed too, so the page must not say otherwise.
 	buildPauses, bperr := e.deps.Store.ListBuildPauses()
@@ -593,7 +568,6 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		}
 	}
 	for name, st := range out {
-		st.Builds = e.NodeBuilds(name)
 		if since, ok := buildPauses[name]; ok {
 			st.BuildsPaused, st.BuildsPausedSince = true, since.Since
 		} else if bperr != nil {
@@ -611,10 +585,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 			continue
 		}
 		st.Paused, st.Mode, st.Since = true, pause.Mode, pause.Since
-		st.HeldBy = "builds"
-		if _, ok := operator[name]; ok {
-			st.HeldBy = "operator"
-		}
+		st.HeldBy = "operator"
 		if rerr != nil {
 			st.Message = "The open jobs could not be read, so the node cannot be reported idle."
 			out[name] = st
@@ -682,15 +653,6 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		default:
 			st.Idle = true
 			st.Message = "Transcode paused and idle: no encode runs on this node."
-		}
-		if st.HeldBy == "builds" {
-			running := 0
-			for _, b := range st.Builds {
-				if b.Status == store.BuildRunning {
-					running++
-				}
-			}
-			st.Message = fmt.Sprintf("Busy with %d running build(s). ", running) + st.Message
 		}
 		out[name] = st
 	}

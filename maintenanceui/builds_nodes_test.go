@@ -49,12 +49,8 @@ func TestBuildsNodesReportsStateAndRunningBuilds(t *testing.T) {
 		t.Fatal("running_builds is an empty array, not null")
 	}
 
-	// A running build appears; a waiting one does not.
-	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"compile"}`))
-	waiting := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"warm","title":"later","priority":"low"}`))
-	if waiting.Status != "waiting" {
-		t.Fatal("the second build waits", waiting)
-	}
+	// A running build appears.
+	running := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"compile"}`))
 	got := getNodes(t, withBuildsToken(h, "GET", path+"/nodes?node="+node, "")).Nodes[0]
 	if len(got.RunningBuilds) != 1 || got.RunningBuilds[0].ID != running.ID || got.RunningBuilds[0].Source != "ci" || got.RunningBuilds[0].Label != "compile" || got.RunningBuilds[0].StartedAt == "" {
 		t.Fatalf("only the running build is listed: %+v", got)
@@ -71,7 +67,7 @@ func TestBuildsNodesReportsStateAndRunningBuilds(t *testing.T) {
 	}
 
 	// The literal route does not shadow a real build id.
-	if w := withBuildsToken(h, "GET", path+"/"+waiting.ID, ""); w.Code != 200 || decodeBuild(t, w).ID != waiting.ID {
+	if w := withBuildsToken(h, "GET", path+"/"+running.ID, ""); w.Code != 200 || decodeBuild(t, w).ID != running.ID {
 		t.Fatal("/builds/{id} still works", w.Code, w.Body.String())
 	}
 }

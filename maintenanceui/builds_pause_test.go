@@ -35,7 +35,7 @@ func TestBuildsPausedRefusesCreateWith409AndACode(t *testing.T) {
 	node := transcode.DefaultWorkerName
 	const path = "/api/maintenance/builds"
 	create := func(target string) *httptest.ResponseRecorder {
-		return withBuildsToken(h, "POST", path, `{"target":"`+target+`","source":"ci","title":"run"}`)
+		return withBuildsToken(h, "POST", path, `{"target":"`+target+`","via":"node_lease","source":"ci","title":"run"}`)
 	}
 	running := decodeBuild(t, create(node))
 	if running.ID == "" {
@@ -60,7 +60,7 @@ func TestBuildsPausedRefusesCreateWith409AndACode(t *testing.T) {
 	if w := create("laptop"); w.Code != 200 {
 		t.Fatal("a non-node target is accepted", w.Code, w.Body.String())
 	}
-	if w := withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci"}`); w.Code != 400 {
+	if w := withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci"}`); w.Code != 400 {
 		t.Fatal("validation still comes first", w.Code)
 	}
 	// The registered build carries on: heartbeat, then finish.

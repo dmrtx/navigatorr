@@ -73,6 +73,7 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 			case err != nil:
 				return mcp.NewToolResultError("builds pause not saved: " + err.Error()), nil
 			}
+			status.Builds = engine.NodeBuildRecords(status.Node)
 			statuses = []transcode.NodePauseStatus{status}
 		case hasMode && mode != "" && node == "":
 			return mcp.NewToolResultError("mode needs a node: send node and mode"), nil
@@ -96,9 +97,10 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 			case err != nil:
 				return mcp.NewToolResultError("node pause not saved: " + err.Error()), nil
 			}
+			status.Builds = engine.NodeBuildRecords(status.Node)
 			statuses = []transcode.NodePauseStatus{status}
 		default:
-			all := engine.NodePauseStatuses(ctx)
+			all := engine.AttachNodeBuilds(engine.NodePauseStatuses(ctx))
 			for name, status := range all {
 				if node == "" || node == name {
 					statuses = append(statuses, status)

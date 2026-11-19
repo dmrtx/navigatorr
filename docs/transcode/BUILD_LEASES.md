@@ -1,5 +1,19 @@
 # Build leases: local arbitration between builds and transcodes
 
+**The node's worker is the only authority on who occupies a node.** The server
+holds no build hold: its builds are a pure record (create, heartbeat,
+finish/cancel, expiry to `lost`, history and prune, logs) plus the per-node
+"builds paused" switch. A build record, running or not, never changes a pause,
+a dispatch, a requeue, a hold or a freeze on the server. The worker reports its
+active leases (id, title, source, status, started_at) in its scheduler
+observation; the server uses that list only to word `suspended_by`.
+The invariants N1 to N3 are in the doc comment at the top of `action/builds.go`.
+
+A create that targets a configured node must come from that node's worker: its
+registration carries `"via": "node_lease"`. Without it the server answers 409
+`node_lease_required` ("run nbuild on that node"). A target that is not a
+configured node is a plain record and needs no `via`.
+
 On a Mac transcode node the worker is the single decider between a build and
 an encode. A build asks the local worker for a lease over a Unix socket; the
 worker freezes the encoders (or, for a low priority build, waits for an idle
@@ -42,8 +56,13 @@ the permission.
 1. `waiting` (low only) until the worker has no running or queued job, no hold
    or suspend and no other lease; the worker promotes the oldest one under the
    capacity lock, so no job starts between the check and the grant.
-2. `running`: the queue is held. A normal lease (`suspend`, `immediate`) also
-   freezes the encoders; a `graceful` or low one does not.
+2. `running`: the queue is held, every process start is refused by the one
+   worker gate (`queueHeld()`: new jobs, post-encode recovery, publication),
+   and queued jobs that have not started carry the hold refusal on their
+   record so the coordinator takes them back. A normal lease (`suspend`,
+   `immediate`) also freezes the encoders; a `graceful` or low one does not.
+   `immediate` is an alias of `suspend`: it is stored and answered as given,
+   and the worker never requeues or cancels anything for it.
 3. Ended: `succeeded`, `failed`, `cancelled`, or `lost` when the heartbeats
    stopped past `ttl_seconds`. A lease found past its expiry
    by a read or a finish is marked lost on the spot; a finish then cannot claim
@@ -73,8 +92,13 @@ kept alive at a third of it, at most every 20 s), and finishes it (a lost lease 
 background. A build cancelled in the server answers the forwarded heartbeat as
 cancelled. A 404 (the server forgot the build) only registers it again. The
 tick and the report pass run apart, every second. A low lease is registered as
-`normal` priority with `graceful` mode: a low build in the server would wait
-there for a node the worker already decided is free.
+`normal` priority with `graceful` mode, only once the worker promotes it: the
+server never queues a build, so a low create through the server comes back
+`running`. Up front, though, a low lease asks the server whether builds are
+paused on the node (a read, nothing registered): paused refuses it with 409
+`builds_paused` and stores nothing; an unreachable server fails open and the
+lease waits; a lease already waiting is not affected by a later pause. The
+registration always carries `"via": "node_lease"`.
 
 ## Failure modes
 
@@ -87,7 +111,7 @@ there for a node the worker already decided is free.
 - Server unreachable: leases are granted, heartbeated and expired as usual;
   reports are retried and the server's record catches up. The server's own
   expiry may mark the build lost while the worker still holds it.
-- Low lease promoted while the server is down: granted without the pause check.
+- Low lease promoted while the server is down: granted; the pause was checked (and failed open) when it was asked for.
 - A normal lease is registered with the server before it is stored (the pause
   check). If storing then fails, or the answer to the registration is lost, that
   server build exists only there and expires by its ttl. A lease that ends

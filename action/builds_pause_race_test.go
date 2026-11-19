@@ -101,7 +101,7 @@ func TestBuildsPauseRacingCreatesRegisterBeforeItOrAreRefused(t *testing.T) {
 // holding the node's request lock blocks both until it is released.
 func TestBuildsPauseAndCreateShareTheNodeRequestLock(t *testing.T) {
 	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
-	lock := &e.workerStateFor("m1").pauseMu
+	lock := &e.workerStateFor("m1").buildsPauseMu
 	lock.Lock()
 	finished := make(chan string, 2)
 	go func() {

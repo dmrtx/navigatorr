@@ -1331,6 +1331,11 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
+	// One gate for every process start: while a build lease, a pause or a
+	// drain holds the node, the job stays as it is and the next tick retries.
+	if w.queueHeld() {
+		return 0, nil
+	}
 	cleanStateDir := filepath.Clean(w.cfg.StateDir)
 	capLock, err := acquireCapacityLock(cleanStateDir)
 	if err != nil {

@@ -34,7 +34,7 @@ func TestWorkerNodeStateFollowsTheStoreImmediately(t *testing.T) {
 		t.Fatal("idle nodes carry no build, hold or pause", idle)
 	}
 
-	build, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"})
+	build, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestWorkerActivityDoesNotWaitForASlowWorkerAndKeepsItsBuilds(t *testing.T) 
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"}); err != nil {
+	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -164,7 +164,7 @@ func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"}); err != nil {
+	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -28,7 +28,7 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 		}
 	}
 	for i := range out.Workers {
-		out.Workers[i].Builds = e.NodeBuilds(out.Workers[i].Name)
+		out.Workers[i].Builds = e.NodeBuildRecords(out.Workers[i].Name)
 		_, paused := buildPauses[out.Workers[i].Name]
 		out.Workers[i].BuildsPaused = paused || unreadable
 	}
@@ -158,6 +158,8 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 		if !st.obs.ObservedAt.IsZero() {
 			out.SchedulerObservation = st.obs.SchedulerObservation
 		}
+		// What an unreachable worker last said about its leases may be over.
+		out.Leases = nil
 		out.Health = "unknown"
 		out.Stale = true
 	}
@@ -166,6 +168,7 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 	}
 	out.CheckedAt = time.Now().UTC()
 	st.obs = out
+	st.setLeases(out.Leases)
 	if out.Reachable {
 		e.syncWorkerHold(ctx, w)
 	}

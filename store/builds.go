@@ -12,8 +12,9 @@ import (
 // Build statuses. A build is running until it is finished by its owner
 // (succeeded, failed or cancelled) or its heartbeat lapses (lost).
 const (
-	// BuildWaiting is a low priority build whose node is not idle yet: it
-	// holds nothing and starts (running) once the node is idle.
+	// BuildWaiting is no longer created: the server's builds never wait. Old
+	// rows (and a worker's own leases) may still carry it; it is read as an
+	// active build and expires like a running one.
 	BuildWaiting   = "waiting"
 	BuildRunning   = "running"
 	BuildSucceeded = "succeeded"
@@ -22,8 +23,9 @@ const (
 	BuildLost      = "lost"
 )
 
-// Build priorities. A normal build starts at once and preempts the node's
-// encodes; a low build never preempts and waits for an idle node.
+// Build priorities. The server only records them: a build created here is
+// running at once, and what a priority means on a node is decided by the node's
+// worker.
 const (
 	BuildPriorityNormal = "normal"
 	BuildPriorityLow    = "low"
@@ -69,8 +71,8 @@ type Build struct {
 	EndedAt         string `json:"ended_at,omitempty"`
 	Progress        string `json:"progress,omitempty"`
 	ExitCode        *int   `json:"exit_code,omitempty"`
-	// HoldsTranscodeNode is whether the target is a configured transcode node, so the
-	// build holds it while running. It is derived by the engine, never stored.
+	// HoldsTranscodeNode is kept for compatibility and is always false: the
+	// server never holds a node for a build, the node's worker does.
 	HoldsTranscodeNode bool `json:"holds_transcode_node"`
 }
 
@@ -99,10 +101,9 @@ func scanBuild(r rowScanner) (Build, error) {
 
 func buildTime(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
-// CreateBuild records a build whose heartbeat is due within ttl: running, or
-// waiting when wait is set. The caller has validated the fields; id and times
-// are set here.
-func (s *Store) CreateBuild(b Build, now time.Time, ttl time.Duration, wait bool) (Build, error) {
+// CreateBuild records a running build whose heartbeat is due within ttl. The
+// caller has validated the fields; id and times are set here.
+func (s *Store) CreateBuild(b Build, now time.Time, ttl time.Duration) (Build, error) {
 	if b.ID == "" {
 		raw := make([]byte, 8)
 		if _, err := rand.Read(raw); err != nil {
@@ -116,9 +117,6 @@ func (s *Store) CreateBuild(b Build, now time.Time, ttl time.Duration, wait bool
 	}
 	b.CreatedAt = buildTime(now)
 	b.StartedAt = b.CreatedAt
-	if wait {
-		b.Status, b.StartedAt = BuildWaiting, ""
-	}
 	b.LastHeartbeatAt = b.CreatedAt
 	b.ExpiresAt = buildTime(now.Add(ttl))
 	b.EndedAt, b.ExitCode = "", nil
@@ -142,16 +140,6 @@ func (s *Store) getBuildLocked(id string) (Build, error) {
 		return Build{}, ErrBuildNotFound
 	}
 	return b, err
-}
-
-// RunningBuilds returns the builds that are running, oldest first.
-func (s *Store) RunningBuilds() ([]Build, error) {
-	return s.activeBuilds(`status='running'`)
-}
-
-// WaitingBuilds returns the waiting builds, oldest first.
-func (s *Store) WaitingBuilds() ([]Build, error) {
-	return s.activeBuilds(`status='waiting'`)
 }
 
 // ActiveBuilds returns the builds that are waiting or running, oldest first.
@@ -182,20 +170,6 @@ func (s *Store) queryBuildsLocked(q string, args ...any) ([]Build, error) {
 		out = append(out, b)
 	}
 	return out, rows.Err()
-}
-
-// PromoteBuild turns a waiting build into a running one. It reports whether it
-// did (false when the build is no longer waiting, or its expiry has passed: an
-// expired build is never started, the next reconcile tick marks it lost).
-func (s *Store) PromoteBuild(id string, now time.Time) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.db.Exec(`UPDATE builds SET status='running', started_at=? WHERE id=? AND status='waiting' AND expires_at > ?`, buildTime(now), id, buildTime(now))
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n > 0, err
 }
 
 // ListBuilds returns the matching builds: every active one (running, waiting)
@@ -249,7 +223,7 @@ func (s *Store) HeartbeatBuild(id string, now time.Time, ttl time.Duration, prog
 		return b, ErrBuildEnded
 	}
 	if exp, perr := time.Parse(time.RFC3339, b.ExpiresAt); perr == nil && !exp.After(now) {
-		// Same boundary as ExpireBuilds and PromoteBuild: expires_at <= now.
+		// Same boundary as ExpireBuilds: expires_at <= now.
 		b.Status, b.EndedAt = BuildLost, b.ExpiresAt
 		_, err = s.db.Exec(`UPDATE builds SET status='lost', ended_at=? WHERE id=? AND status IN ('running','waiting')`, b.EndedAt, id)
 		if err != nil {
@@ -296,7 +270,7 @@ func (s *Store) FinishBuild(id, status string, exit *int, now time.Time) (b Buil
 	return b, err == nil, err
 }
 
-// ExpireBuilds marks the running builds whose expiry has passed as lost and
+// ExpireBuilds marks the running (or old waiting) builds whose expiry has passed as lost and
 // returns them.
 func (s *Store) ExpireBuilds(now time.Time) ([]Build, error) {
 	s.mu.Lock()

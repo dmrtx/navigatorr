@@ -85,11 +85,12 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			fail(w, 500, "node pause not saved")
 		default:
+			status.Builds = s.engine.NodeBuildRecords(status.Node)
 			writeJSON(w, 200, status)
 		}
 		return
 	}
-	statuses := s.engine.NodePauseStatuses(r.Context())
+	statuses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(r.Context()))
 	if node := r.URL.Query().Get("node"); node != "" {
 		for _, status := range statuses {
 			if status.Node == node {

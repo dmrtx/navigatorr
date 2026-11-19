@@ -18,26 +18,39 @@ import (
 // Builds.
 //
 // A build is one job another tool runs on a machine: the target. The target is
-// free text. When it names a configured transcode node, the build occupies the
-// node the way an encode does: while any build on the node is running the node
-// takes no new transcode work, and the encodes already on it are handled by the
-// build's preempt mode with the machinery of a node pause (graceful, immediate,
-// suspend). When the last running build on the node ends, or its heartbeat
-// lapses and the reconcile loop marks it lost, the node resumes by itself.
-// A low priority build (cache warming) never preempts (its preempt mode is
-// always graceful, whatever was asked): it is created waiting
-// and holds nothing until its node is idle, when it becomes running (see
-// promoteWaitingBuilds). A target that is not a node is only tracked: lifecycle, heartbeat, expiry and
-// history, and nothing is held.
+// free text; when it names a configured transcode node the build is about that
+// node, but the server never holds the node for it.
 //
-// Effective node state. A build never writes, changes or clears the operator's
-// worker_pauses row. The engine's pause view (workerPauses) is the merge of two
-// sources: the operator's pause if the node has one, otherwise the strongest
-// preempt mode among the node's running builds (immediate > suspend >
-// graceful), otherwise free. Everything that decides dispatch, requeue, the
-// worker hold and the freeze reads that view, so the freeze and the thaw follow
-// the effective state: an operator resume while a build runs leaves the build's
-// hold in place, and the end of the builds never resumes an operator pause.
+// The server's builds are a pure record: create, heartbeat (forwarded progress
+// and log lines), finish or cancel, expiry (a build whose heartbeat lapses
+// becomes lost), history with its pruning, logs, and the per-node "builds
+// paused" switch (create refuses with BuildsPausedError while it is on, and the
+// node's worker relies on that answer). A build created here is running at once,
+// whatever its priority: "low" and the preempt mode are stored as given and
+// change nothing. A build the server holds a record of never makes a node wait
+// and a build never waits.
+//
+// The node's worker is the only authority on who occupies the node: it takes
+// the lease (see internal/transcodeworker and docs/transcode/BUILD_LEASES.md),
+// holds its queue, freezes its encoders, refuses room and expires the lease by
+// itself.
+//
+// Invariants.
+//
+//	N1  With a running lease on a node, no new conversion starts on that node.
+//	    The worker alone guarantees it (queueHeld and the room it reports); the
+//	    server does nothing for it.
+//	N2  The transcode engine's dispatch, placement, pause view (workerPauses),
+//	    drain and freeze logic never read build records. Outside the builds
+//	    record files (builds.go, builds_pause.go, buildlog.go) nothing in this
+//	    package calls a store build function.
+//	N3  The routes /api/maintenance/builds* and the builds-only token keep their
+//	    request and response shapes. holds_transcode_node stays in the JSON for
+//	    compatibility and is always false.
+//
+// What the server shows of a node's builds (the UI) is the registry's view, read
+// from these records; why an encode is frozen comes from the leases its worker
+// reports (see suspendedBy), not from here.
 
 const (
 	// BuildDefaultTTL is how long a build lives without a heartbeat when the
@@ -76,6 +89,22 @@ func (e *BuildIDTakenError) Error() string {
 	return "id " + e.ID + " already names another build"
 }
 
+// BuildViaNodeLease is the "via" a node's worker sends when it registers one of
+// its own leases. A create that targets a configured node without it holds
+// nothing there, so it is refused (NodeLeaseRequiredError).
+const BuildViaNodeLease = "node_lease"
+
+// NodeLeaseRequiredCode is the stable code of a NodeLeaseRequiredError answer.
+const NodeLeaseRequiredCode = "node_lease_required"
+
+// NodeLeaseRequiredError is a create for a configured node that did not come
+// from that node's worker: the server holds no node for a build.
+type NodeLeaseRequiredError struct{ Node string }
+
+func (e *NodeLeaseRequiredError) Error() string {
+	return "builds on node " + e.Node + " are leased by its worker: run nbuild on that node"
+}
+
 // BuildIDTakenCode is the stable code of a BuildIDTakenError answer.
 const BuildIDTakenCode = "build_id_taken"
 
@@ -100,6 +129,8 @@ type BuildInput struct {
 	// "low" (waits for an idle node and never preempts).
 	Priority string
 	Progress string
+	// Via is "node_lease" when the node's worker registers its own lease.
+	Via string
 	// TTLSeconds is how long the build lives without a heartbeat; 0 is the default.
 	TTLSeconds int
 }
@@ -136,35 +167,9 @@ func (e *Engine) buildNode(target string) (transcode.NamedWorker, bool) {
 	return e.deps.Workers.Get(target)
 }
 
-func (e *Engine) markBuild(b store.Build) store.Build {
-	_, b.HoldsTranscodeNode = e.buildNode(b.Target)
-	return b
-}
-
-func (e *Engine) markBuilds(list []store.Build) []store.Build {
-	for i := range list {
-		list[i] = e.markBuild(list[i])
-	}
-	return list
-}
-
-// withNodeLock runs fn with the node's request lock, shared with SetNodePause,
-// so a build change and an operator pause never interleave their writes and
-// worker syncs. A target that is not a node needs no lock.
-func (e *Engine) withNodeLock(target string, fn func(w transcode.NamedWorker, isNode bool)) {
-	w, ok := e.buildNode(target)
-	if ok {
-		lock := &e.workerStateFor(w.Name).pauseMu
-		lock.Lock()
-		defer lock.Unlock()
-	}
-	fn(w, ok)
-}
-
-// CreateBuild starts a build and, on a node, brings the node's hold and freeze
-// in line before it returns, so the caller can start its work. A worker that
-// does not confirm the freeze does not fail the call: the node is still held
-// and its status says the freeze is not confirmed.
+// CreateBuild records a build. It is running at once, whatever its priority,
+// and holds nothing: on a node the worker's lease is what holds the node. The
+// only refusal that depends on the node is the builds pause.
 func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, error) {
 	if e.deps.Store == nil {
 		return store.Build{}, errors.New("store is required for builds")
@@ -210,89 +215,57 @@ func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, e
 	default:
 		return b, invalidBuild(`priority must be "normal" or "low"`)
 	}
-	if b.Priority == store.BuildPriorityLow {
-		// A low priority build never preempts. admitOnNode serialises the
-		// dispatcher's record step with promotion under the node's request
-		// lock, so an encode and a low build do not start together; forcing
-		// graceful is defence in depth should one ever slip through, since a
-		// stronger mode would then freeze or requeue that encode. Whatever mode
-		// was asked for, a low build holds the node gracefully.
-		b.PreemptMode = store.WorkerPauseGraceful
-	}
 	ttl, err := buildTTL(in.TTLSeconds)
 	if err != nil {
 		return b, err
 	}
-	// A retry of a create already made is answered before the node lock: that
-	// lock can be slow (it waits for the worker), and a retry that queued
-	// behind it would only time out again.
+	w, isNode := e.buildNode(b.Target)
+	if isNode && in.Via != BuildViaNodeLease {
+		return b, &NodeLeaseRequiredError{Node: w.Name}
+	}
+	// A retry of a create already made is answered before any lock.
 	if got, found, err := e.buildByClientID(b); found || err != nil {
 		return got, err
 	}
-	created := false
-	e.withNodeLock(b.Target, func(w transcode.NamedWorker, isNode bool) {
-		// Again under the lock: two creates of one id serialise here.
-		if got, found, ferr := e.buildByClientID(b); found || ferr != nil {
-			b, err = got, ferr
-			return
-		}
-		created = true
-		if isNode {
-			// Under the node's request lock, like the toggle: a build is either
-			// refused here or registered before the pause. Nothing is created.
-			paused, perr := e.buildsPausedOn(w.Name)
-			if perr != nil {
-				err = perr
-				return
-			}
-			if paused {
-				err = &BuildsPausedError{Node: w.Name}
-				return
-			}
-			if e.afterBuildsPausedCheck != nil {
-				e.afterBuildsPausedCheck(w.Name)
-			}
-		}
-		// A low priority build waits only where there is a node to wait for.
-		want := b
-		b, err = e.deps.Store.CreateBuild(b, e.now(), ttl, b.Priority == store.BuildPriorityLow && isNode)
+	if isNode {
+		// The node's builds-pause lock orders the check against the toggle, so
+		// a build is either refused here or registered before the pause.
+		lock := &e.workerStateFor(w.Name).buildsPauseMu
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	// Again under the lock: two creates of one id serialise here.
+	if got, found, err := e.buildByClientID(b); found || err != nil {
+		return got, err
+	}
+	if isNode {
+		paused, err := e.buildsPausedOn(w.Name)
 		if err != nil {
-			// A target that is not a node has no lock: a create of the same
-			// id can win the insert between the check and here.
-			if got, found, ferr := e.buildByClientID(want); found {
-				b, err, created = got, ferr, false
-			}
-			return
+			return store.Build{}, err
 		}
-		if !isNode {
-			return
+		if paused {
+			return store.Build{}, &BuildsPausedError{Node: w.Name}
 		}
-		if b.Status == store.BuildWaiting {
-			// Oldest first, like the tick: the new build starts only if no older
-			// waiting build on the node goes before it.
-			e.promoteNodeLocked(w)
-			if cur, gerr := e.deps.Store.GetBuild(b.ID); gerr == nil {
-				b = cur
-			}
+		if e.afterBuildsPausedCheck != nil {
+			e.afterBuildsPausedCheck(w.Name)
 		}
-		if b.Status == store.BuildRunning {
-			e.syncWorkerHold(ctx, w)
-		}
-	})
+	}
+	want := b
+	b, err = e.deps.Store.CreateBuild(b, e.now(), ttl)
 	if err != nil {
+		// A target that is not a node has no lock: a create of the same id can
+		// win the insert between the check and here.
+		if got, found, ferr := e.buildByClientID(want); found {
+			return got, ferr
+		}
 		return store.Build{}, err
 	}
-	if !created {
-		return b, nil
-	}
-	e.WakeReconciler()
-	return e.markBuild(b), nil
+	return b, nil
 }
 
-// buildByClientID is the build a client id already names, marked like a
-// create's answer. found is false when the request has no id or the id is
-// new; an id that names a build of another target or source is a
-// BuildIDTakenError.
+// buildByClientID is the build a client id already names. found is false when
+// the request has no id or the id is new; an id that names a build of another
+// target or source is a BuildIDTakenError.
 func (e *Engine) buildByClientID(want store.Build) (store.Build, bool, error) {
 	if want.ID == "" {
 		return store.Build{}, false, nil
@@ -306,7 +279,7 @@ func (e *Engine) buildByClientID(want store.Build) (store.Build, bool, error) {
 	case got.Target != want.Target || got.Source != want.Source:
 		return store.Build{}, true, &BuildIDTakenError{ID: want.ID}
 	}
-	return e.markBuild(got), true, nil
+	return got, true, nil
 }
 
 // buildHeartbeatGap is a test seam: it runs between a heartbeat's store update
@@ -337,8 +310,8 @@ func checkHeartbeat(progress **string, ttlSeconds int, logLines []string) (time.
 // the build before anything the caller sent is read. An unknown build gives
 // store.ErrBuildNotFound; an ended one gives store.ErrBuildEnded with its
 // record. A running build whose expiry passed counts as ended too: it is marked
-// lost here (releasing its node hold) rather than left for the next tick, and
-// is answered the same way. Otherwise it returns the build, unchanged.
+// lost here rather than left for the next tick, and is answered the same way.
+// Otherwise it returns the build, unchanged.
 func (e *Engine) OpenBuild(ctx context.Context, id string) (store.Build, error) {
 	cur, err := e.GetBuild(id)
 	if err != nil {
@@ -369,7 +342,7 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		if cur, gerr := e.deps.Store.GetBuild(id); gerr != nil {
 			return store.Build{}, gerr
 		} else if cur.Status != store.BuildRunning && cur.Status != store.BuildWaiting {
-			return e.markBuild(cur), store.ErrBuildEnded
+			return cur, store.ErrBuildEnded
 		}
 		return store.Build{}, err
 	}
@@ -385,24 +358,12 @@ func (e *Engine) HeartbeatBuild(ctx context.Context, id string, progress *string
 		e.buildLogs.append(id, logLines, e.now(), e.buildEnded)
 	}
 	e.buildMu.Unlock()
-	if errors.Is(err, store.ErrBuildExpired) {
-		// The late heartbeat marked the build lost: release its node hold the
-		// way a finish does, and let a waiting build take the node.
-		e.withNodeLock(b.Target, func(w transcode.NamedWorker, isNode bool) {
-			if isNode {
-				e.syncWorkerHold(ctx, w)
-			}
-		})
-		e.promoteWaitingBuilds()
-		e.WakeReconciler()
-	}
-	return e.markBuild(b), err
+	return b, err
 }
 
 // FinishBuild ends a running build with a status (succeeded, failed or
-// cancelled) and an optional exit code, then lets the node go on if no other
-// build holds it. Finishing a build that already ended changes nothing: it
-// returns the stored record, and changed is false.
+// cancelled) and an optional exit code. Finishing a build that already ended
+// changes nothing: it returns the stored record, and changed is false.
 func (e *Engine) FinishBuild(ctx context.Context, id, status string, exit *int) (b store.Build, changed bool, err error) {
 	if e.deps.Store == nil {
 		return store.Build{}, false, errors.New("store is required for builds")
@@ -412,27 +373,13 @@ func (e *Engine) FinishBuild(ctx context.Context, id, status string, exit *int) 
 	default:
 		return store.Build{}, false, invalidBuild(`status must be "succeeded", "failed" or "cancelled"`)
 	}
-	current, err := e.deps.Store.GetBuild(id)
+	e.buildMu.Lock()
+	b, changed, err = e.deps.Store.FinishBuild(id, status, exit, e.now())
+	e.buildMu.Unlock()
 	if err != nil {
 		return store.Build{}, false, err
 	}
-	e.withNodeLock(current.Target, func(w transcode.NamedWorker, isNode bool) {
-		e.buildMu.Lock()
-		b, changed, err = e.deps.Store.FinishBuild(id, status, exit, e.now())
-		e.buildMu.Unlock()
-		if err == nil && changed && isNode {
-			e.syncWorkerHold(ctx, w)
-		}
-	})
-	if err != nil {
-		return store.Build{}, false, err
-	}
-	if changed {
-		// The node may be idle for a waiting build now.
-		e.promoteWaitingBuilds()
-		e.WakeReconciler()
-	}
-	return e.markBuild(b), changed, nil
+	return b, changed, nil
 }
 
 // GetBuild returns one build.
@@ -440,8 +387,7 @@ func (e *Engine) GetBuild(id string) (store.Build, error) {
 	if e.deps.Store == nil {
 		return store.Build{}, errors.New("store is required for builds")
 	}
-	b, err := e.deps.Store.GetBuild(id)
-	return e.markBuild(b), err
+	return e.deps.Store.GetBuild(id)
 }
 
 // ListBuilds returns builds: the active ones (running, waiting) first, then the
@@ -450,14 +396,12 @@ func (e *Engine) ListBuilds(f store.BuildFilter) ([]store.Build, error) {
 	if e.deps.Store == nil {
 		return nil, nil
 	}
-	list, err := e.deps.Store.ListBuilds(f)
-	return e.markBuilds(list), err
+	return e.deps.Store.ListBuilds(f)
 }
 
-// reconcileBuilds is the build part of the reconcile tick: running builds past
-// their expiry become lost (which drops their hold), and history older than the
-// retention is pruned. The worker holds and freezes follow in the same tick,
-// since they are synced from the effective state.
+// reconcileBuilds is the build part of the reconcile tick: running (or, from an
+// old row, waiting) builds past their expiry become lost, and history older
+// than the retention is pruned.
 func (e *Engine) reconcileBuilds(ctx context.Context) {
 	if e.deps.Store == nil {
 		return
@@ -472,11 +416,6 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 	for _, b := range lost {
 		log.Printf("build %s on %s: no heartbeat before its expiry, marked lost", b.ID, b.Target)
 	}
-	if len(lost) > 0 {
-		// The tick's hold sync lifts the hold of a node nothing else holds.
-		e.WakeReconciler()
-	}
-	e.promoteWaitingBuilds()
 	e.pruneBuildLogs()
 	retention := 30 * 24 * time.Hour
 	if e.deps.Config != nil {
@@ -489,211 +428,10 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 	}
 }
 
-// nodeIdleForBuild is whether a waiting low priority build may start on the
-// node: no operator pause, no running build, and no job on it (encoding,
-// queued on the node, frozen, or finished and waiting to be saved). Anything
-// that cannot be read counts as not idle.
-func (e *Engine) nodeIdleForBuild(node string) bool {
-	operator, err := e.operatorPauses()
-	if err != nil {
-		return false
-	}
-	if _, paused := operator[node]; paused {
-		return false
-	}
-	holds, err := e.buildHolds()
-	if err != nil {
-		return false
-	}
-	if _, held := holds[node]; held {
-		return false
-	}
-	rows, err := e.deps.Store.ListDrainActions()
-	if err != nil {
-		return false
-	}
-	for _, r := range rows {
-		if e.resolveWorker(r.Worker) != node {
-			continue
-		}
-		switch classifyDrainRow(r) {
-		case transcode.DrainJobRunning, transcode.DrainJobPublicationPending:
-			return false
-		}
-	}
-	// A worker that says it runs jobs the rows do not show is not idle either.
-	if active, _, ok := e.workerFrozen(node); ok && active > 0 {
-		return false
-	}
-	return true
-}
-
-// promoteIfIdleLocked starts a waiting build when its node is idle. The node's
-// request lock is held by the caller.
-//
-// Exclusivity with dispatch: the idle check and the promotion are both under
-// the node's pauseMu, and a conversion records its job on the node (the
-// identity checkpoint before its submit, see admitOnNode) under the same lock,
-// re-checking the node's hold there. So either the job is recorded first and
-// the idle check sees it, or the build is running first and the dispatch sees
-// the hold: a low build and an encode never run on the node together.
-func (e *Engine) promoteIfIdleLocked(w transcode.NamedWorker, b store.Build) (bool, error) {
-	if !e.nodeIdleForBuild(w.Name) {
-		return false, nil
-	}
-	if e.afterBuildIdleCheck != nil {
-		e.afterBuildIdleCheck(w.Name)
-	}
-	return e.deps.Store.PromoteBuild(b.ID, e.now())
-}
-
-// promoteNodeLocked starts the oldest waiting build on the node when the node
-// is idle (by created_at, then insertion order). A build whose expiry has
-// passed is not started and the next one is tried. The node's request lock is
-// held by the caller.
-func (e *Engine) promoteNodeLocked(w transcode.NamedWorker) (bool, error) {
-	waiting, err := e.deps.Store.WaitingBuilds()
-	if err != nil {
-		return false, err
-	}
-	for _, b := range waiting {
-		if n, ok := e.buildNode(b.Target); !ok || n.Name != w.Name {
-			continue
-		}
-		ok, err := e.promoteIfIdleLocked(w, b)
-		if err != nil || ok {
-			return ok, err
-		}
-		if !e.nodeIdleForBuild(w.Name) {
-			return false, nil
-		}
-	}
-	return false, nil
-}
-
-// admitOnNode is the dispatcher's side of the exclusivity with builds. It
-// re-checks that the conversion's node takes new work and, under the node's
-// request lock, runs record, which persists the job on the node (the state a
-// build's idle check reads). It never waits for the lock: a busy node
-// (a build promotion or an operator request in flight) defers the job for a
-// pass. Lock order: the dispatcher holds its execution and parent leases, then
-// only tries pauseMu; nothing that holds pauseMu waits for those leases on a
-// blocking path, so there is no cycle. The lock is released before the submit.
-func (e *Engine) admitOnNode(ec *ExecutionContext, phase string, record func() error) (StepResult, bool, error) {
-	name := e.resolveWorker(assignedWorker(ec.State))
-	if _, ok := e.buildNode(name); !ok {
-		return StepResult{}, false, record()
-	}
-	lock := &e.workerStateFor(name).pauseMu
-	if !lock.TryLock() {
-		return pauseBlockedResult(phase, "a request for node "+name+" is in progress"), true, nil
-	}
-	defer lock.Unlock()
-	if held, reason := e.pauseHold(name); held {
-		return pauseBlockedResult(phase, reason), true, nil
-	}
-	return StepResult{}, false, record()
-}
-
-// promoteWaitingBuilds starts the waiting builds whose node is idle, oldest
-// first, one per node at a time (a running build keeps the node from being
-// idle). A waiting build is never promoted over a running one. A node whose
-// request lock is busy is left for the next pass, so the reconcile loop never
-// waits behind an operator request.
-func (e *Engine) promoteWaitingBuilds() {
-	if e.deps.Store == nil {
-		return
-	}
-	waiting, err := e.deps.Store.WaitingBuilds()
-	if err != nil {
-		log.Printf("builds: reading waiting builds: %v", err)
-		return
-	}
-	promoted := false
-	// Nodes whose lock was busy this pass: every later waiting build on them
-	// waits too, so a newer build never starts ahead of an older one.
-	skipped := map[string]bool{}
-	for _, b := range waiting {
-		w, ok := e.buildNode(b.Target)
-		if !ok || skipped[w.Name] {
-			continue
-		}
-		// Re-read: an earlier iteration may have started or expired it.
-		if cur, gerr := e.deps.Store.GetBuild(b.ID); gerr != nil || cur.Status != store.BuildWaiting {
-			continue
-		}
-		lock := &e.workerStateFor(w.Name).pauseMu
-		if e.beforeBuildTryLock != nil {
-			e.beforeBuildTryLock(w.Name)
-		}
-		if !lock.TryLock() {
-			skipped[w.Name] = true
-			continue
-		}
-		ok, err := e.promoteIfIdleLocked(w, b)
-		lock.Unlock()
-		if err != nil {
-			log.Printf("builds: starting %s: %v", b.ID, err)
-		}
-		promoted = promoted || ok
-	}
-	if promoted {
-		// The tick's hold sync puts the hold on the node.
-		e.WakeReconciler()
-	}
-}
-
-// buildRank orders the preempt modes by how much they take from the node.
-func buildRank(mode string) int {
-	switch mode {
-	case store.WorkerPauseImmediate:
-		return 3
-	case store.WorkerPauseSuspend:
-		return 2
-	case store.WorkerPauseGraceful:
-		return 1
-	}
-	return 0
-}
-
-// buildHolds is the hold the running builds put on each configured node: the
-// strongest preempt mode among them, starting at the oldest build.
-func (e *Engine) buildHolds() (map[string]store.WorkerPause, error) {
-	if e.deps.Store == nil {
-		return nil, nil
-	}
-	running, err := e.deps.Store.RunningBuilds()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]store.WorkerPause{}
-	for _, b := range running {
-		w, ok := e.buildNode(b.Target)
-		if !ok {
-			continue
-		}
-		since := b.StartedAt
-		if since == "" {
-			since = b.CreatedAt
-		}
-		hold, seen := out[w.Name]
-		if !seen {
-			hold = store.WorkerPause{Worker: w.Name, Since: since, UpdatedAt: b.LastHeartbeatAt}
-		}
-		if buildRank(b.PreemptMode) > buildRank(hold.Mode) {
-			hold.Mode = b.PreemptMode
-		}
-		if since < hold.Since {
-			hold.Since = since
-		}
-		out[w.Name] = hold
-	}
-	return out, nil
-}
-
-// NodeBuilds is a node's running and waiting builds, oldest first, for its
-// status.
-func (e *Engine) NodeBuilds(node string) []transcode.NodeBuild {
+// NodeBuildRecords is a node's running and waiting build records, oldest first,
+// for the registry's view of it (the UI). It is a record read only: nothing in
+// the engine decides on it.
+func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
 	if e.deps.Store == nil {
 		return nil
 	}
@@ -710,10 +448,30 @@ func (e *Engine) NodeBuilds(node string) []transcode.NodeBuild {
 	return out
 }
 
-// operatorPauses is the operator's own pause rows, with no build hold.
-func (e *Engine) operatorPauses() (map[string]store.WorkerPause, error) {
-	if e.deps.Store == nil {
-		return nil, nil
+// AttachNodeBuilds adds each node's build records to its pause status, for the
+// callers that show the registry's view next to the pause.
+func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
+	for name, st := range statuses {
+		st.Builds = e.NodeBuildRecords(name)
+		// Display only, for the pages that showed "held by builds": the node's
+		// worker is what really holds the node. An operator pause wins.
+		if st.HeldBy == "" {
+			running := 0
+			for _, b := range st.Builds {
+				if b.Status != store.BuildRunning {
+					continue
+				}
+				if running == 0 {
+					st.Mode, st.Since = b.PreemptMode, b.StartedAt
+				}
+				running++
+			}
+			if running > 0 {
+				st.Paused, st.HeldBy = true, "builds"
+				st.Message = fmt.Sprintf("Busy with %d running build(s). New jobs wait on this node.", running)
+			}
+		}
+		statuses[name] = st
 	}
-	return e.deps.Store.ListWorkerPauses()
+	return statuses
 }

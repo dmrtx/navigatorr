@@ -246,7 +246,7 @@ func TestBuildOutputIsOnlyOnTheLogEndpoint(t *testing.T) {
 	_, h := buildsUI(t)
 	const path = "/api/maintenance/builds"
 	node := "m1"
-	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"unit run"}`))
+	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"unit run"}`))
 	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"log":["tok=fixture-value-77"]}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}

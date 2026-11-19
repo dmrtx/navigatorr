@@ -53,7 +53,7 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 	if got := read(map[string]any{"node": "node-a", "builds_paused": true})["node-a"]; !got.BuildsPaused || got.Paused {
 		t.Fatalf("the tool pauses builds only: %+v", got)
 	}
-	_, err = engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Source: "ci", Title: "run"})
+	_, err = engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Via: action.BuildViaNodeLease, Source: "ci", Title: "run"})
 	var refused *action.BuildsPausedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("a build on the paused node is refused: %v", err)
@@ -72,7 +72,7 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 	if got := read(map[string]any{"node": "node-a", "builds_paused": false})["node-a"]; got.BuildsPaused {
 		t.Fatalf("resume: %+v", got)
 	}
-	if _, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Source: "ci", Title: "run"}); err != nil {
+	if _, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Via: action.BuildViaNodeLease, Source: "ci", Title: "run"}); err != nil {
 		t.Fatal("resumed", err)
 	}
 

@@ -61,8 +61,8 @@ func twoNodeBuildsUI(t *testing.T) http.Handler {
 func TestBuildsNodesTwoNodesKeepTheirOwnBuilds(t *testing.T) {
 	h := twoNodeBuildsUI(t)
 	const path = "/api/maintenance/builds"
-	on1 := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"m1","source":"ci","title":"first"}`))
-	on4 := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"m4","source":"ci","title":"second"}`))
+	on1 := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"m1","via":"node_lease","source":"ci","title":"first"}`))
+	on4 := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"m4","via":"node_lease","source":"ci","title":"second"}`))
 	if on1.ID == "" || on4.ID == "" {
 		t.Fatal("both builds start")
 	}
@@ -86,7 +86,7 @@ func TestBuildsNodesTwoNodesKeepTheirOwnBuilds(t *testing.T) {
 func TestBuildsNodesExactJSONKeys(t *testing.T) {
 	_, h := buildsUI(t)
 	const path = "/api/maintenance/builds"
-	decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+transcode.DefaultWorkerName+`","source":"ci","title":"compile"}`))
+	decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+transcode.DefaultWorkerName+`","via":"node_lease","source":"ci","title":"compile"}`))
 
 	var body map[string]any
 	if err := json.Unmarshal(withBuildsToken(h, "GET", path+"/nodes", "").Body.Bytes(), &body); err != nil {
