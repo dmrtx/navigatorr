@@ -28,6 +28,7 @@ import (
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/mediainspect"
 	"github.com/jakenesler/navigatorr/nodes"
+	"github.com/jakenesler/navigatorr/transcodeapi"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -58,6 +59,10 @@ type Server struct {
 	// the build routes (see builds.go).
 	buildsTokenHash [32]byte
 	hasBuildsToken  bool
+	// transcodeTokenHash is the hash of web.transcode_token_file, the API key
+	// of /transcode/v1 (see transcode_v1.go).
+	transcodeTokenHash [32]byte
+	hasTranscodeToken  bool
 	// nodes is the build registry the builds routes serve (see SetNodes).
 	nodes       *nodes.Service
 	mu          sync.Mutex
@@ -116,8 +121,21 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 		}
 		buildsHash, hasBuilds = sha256.Sum256([]byte(bt)), true
 	}
+	var transcodeHash [32]byte
+	hasTranscode := false
+	if cfg.Web.TranscodeTokenFile != "" {
+		b, err := os.ReadFile(cfg.Web.TranscodeTokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("read web transcode token file: %w", err)
+		}
+		tt := strings.TrimSpace(string(b))
+		if len(tt) < 24 {
+			return nil, fmt.Errorf("web transcode token must contain at least 24 characters")
+		}
+		transcodeHash, hasTranscode = sha256.Sum256([]byte(tt)), true
+	}
 	if cfg.Web.AuthModeValue() == "cloudflare_access" {
-		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, accessOnly: true, buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds}, nil
+		return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, accessOnly: true, buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds, transcodeTokenHash: transcodeHash, hasTranscodeToken: hasTranscode}, nil
 	}
 	token := strings.TrimSpace(cfg.Web.Token)
 	if cfg.Web.TokenFile != "" {
@@ -133,7 +151,7 @@ func New(cfg *config.Config, registry *arrservice.Registry, engine *action.Engin
 	if len(token) < 24 {
 		return nil, fmt.Errorf("web token must contain at least 24 characters")
 	}
-	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, tokenHash: sha256.Sum256([]byte(token)), buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds, sessions: map[string]time.Time{}}, nil
+	return &Server{cfg: cfg, registry: registry, engine: engine, mcp: mcpServer, access: access, tokenHash: sha256.Sum256([]byte(token)), buildsTokenHash: buildsHash, hasBuildsToken: hasBuilds, transcodeTokenHash: transcodeHash, hasTranscodeToken: hasTranscode, sessions: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -212,6 +230,9 @@ func (s *Server) Handler() http.Handler {
 	// The successor API and its spec (see package nodes).
 	mux.Handle("GET "+nodes.SpecPath, nodes.SpecHandler())
 	mux.HandleFunc(nodes.BasePath+"/", s.nodesAPI)
+	// The read-only Transcode API and its spec (see package transcodeapi).
+	mux.Handle("GET "+transcodeapi.SpecPath, transcodeapi.SpecHandler())
+	mux.Handle(transcodeapi.BasePath+"/", s.transcodeV1())
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("POST /api/maintenance/worker-slots", s.workerSlots)
 	mux.HandleFunc("GET /api/maintenance/compression", s.compression)
@@ -251,6 +272,11 @@ func (s *Server) Handler() http.Handler {
 		if strings.HasPrefix(r.URL.Path, nodes.BasePath+"/") && r.URL.Path != nodes.SpecPath && !s.nodesAuthorized(r) {
 			writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
 				"hint": "send the builds token as the X-Api-Key header (or Authorization: Bearer)"})
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath && !s.transcodeAuthorized(r) {
+			writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
+				"hint": "send the transcode API key as the X-Api-Key header (or Authorization: Bearer), or sign in to the web UI"})
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {

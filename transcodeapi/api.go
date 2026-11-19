@@ -1,0 +1,175 @@
+// Package transcodeapi is the HTTP contract of the Transcode side of
+// Navigatorr, version 1: its base path, its routes, its OpenAPI document and
+// the shape of its errors. It holds no business logic. The handlers live in
+// the web adapter (maintenanceui), which reuses the functions the maintenance
+// routes and the MCP tools already call, and are mounted here by NewHandler so
+// that exactly the routes of Routes() exist and no others.
+//
+// Phase 1a is read-only: every route is a GET. Writes arrive in phase 1b.
+//
+// Invariant N2: Transcode never imports or consults Nodes. This package
+// imports nothing of the module (internal/importguard checks it, and that
+// maintenanceui's handlers for this API do not pull Nodes into it either).
+package transcodeapi
+
+import (
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"sort"
+)
+
+// BasePath is where the HTTP API lives.
+const BasePath = "/transcode/v1"
+
+// SpecPath is the OpenAPI document of the API. It is public (it describes the
+// API and holds no data) so a service registry can fetch it without a key.
+const SpecPath = BasePath + "/openapi.json"
+
+//go:embed openapi.json
+var specJSON []byte
+
+// Spec is the OpenAPI 3 document of /transcode/v1.
+func Spec() []byte { return specJSON }
+
+// SpecHandler serves the document at SpecPath. It is public by design.
+func SpecHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(specJSON)
+	})
+}
+
+// Route is one operation of the API.
+type Route struct {
+	Method string
+	Path   string // OpenAPI form, e.g. /transcode/v1/actions/{id}
+}
+
+// Key is the "METHOD /path" form Handlers is keyed by.
+func (r Route) Key() string { return r.Method + " " + r.Path }
+
+// Routes lists every operation of the API (the spec is checked against it).
+// Order is the order the spec presents them in.
+func Routes() []Route {
+	g := func(p string) Route { return Route{"GET", BasePath + p} }
+	return []Route{
+		g("/workers"),
+		g("/workers/{name}"),
+		g("/workers/{name}/slots"),
+		g("/activity"),
+		g("/state"),
+		g("/drain"),
+		g("/pauses"),
+		g("/pauses/{name}"),
+		g("/actions"),
+		g("/actions/{id}"),
+		g("/actions/{id}/detail/{section}"),
+		g("/actions/{id}/podcast/blocks"),
+		g("/actions/{id}/podcast/blocks/{block_id}"),
+		g("/actions/{id}/podcast/artifacts/{artifact}"),
+		g("/history"),
+		g("/catalog"),
+		g("/batches/{id}/items"),
+		g("/batches/{id}/settings"),
+		g("/batches/{id}/candidates"),
+		g("/batches/{id}/promotion-plan"),
+		g("/batches/{id}/preview"),
+		g("/backups"),
+		g("/backups/candidates"),
+		g("/recipes"),
+		g("/recipes/{name}"),
+		g("/recipes/{name}/history"),
+		g("/recipe-bundle"),
+		g("/podcasts"),
+		g("/podcasts/{id}/local-library"),
+		g("/podcasts/{id}/ad-library"),
+		g("/review-queue"),
+	}
+}
+
+// Handlers maps "METHOD /path" (Route.Key) to the function serving it.
+type Handlers map[string]http.HandlerFunc
+
+// NewHandler mounts handlers, which must be exactly the routes of Routes().
+// Anything else under BasePath answers a JSON error: 405 (with Allow) for a
+// known path used with another method (the API is read-only in this phase),
+// 404 otherwise. It does no authentication: the caller wraps it.
+func NewHandler(handlers Handlers) (http.Handler, error) {
+	want := map[string]bool{}
+	paths := http.NewServeMux()
+	mux := http.NewServeMux()
+	for _, r := range Routes() {
+		want[r.Key()] = true
+		fn, ok := handlers[r.Key()]
+		if !ok || fn == nil {
+			return nil, fmt.Errorf("transcodeapi: no handler for %s", r.Key())
+		}
+		mux.HandleFunc(r.Key(), fn)
+		paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
+	}
+	var extra []string
+	for k := range handlers {
+		if !want[k] {
+			extra = append(extra, k)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		return nil, fmt.Errorf("transcodeapi: handlers for routes that are not in Routes(): %v", extra)
+	}
+	mux.HandleFunc(BasePath+"/", func(w http.ResponseWriter, r *http.Request) {
+		if _, pattern := paths.Handler(r); pattern != "" {
+			w.Header().Set("Allow", "GET, HEAD")
+			WriteError(w, 405, "method_not_allowed", "this endpoint is read-only: only GET is served",
+				"GET "+SpecPath+" lists the endpoints of this API; writes arrive in a later version")
+			return
+		}
+		WriteError(w, 404, "not_found", "no such endpoint", "GET "+SpecPath+" lists the endpoints of this API")
+	})
+	return mux, nil
+}
+
+// WriteJSON writes v as the JSON body of status.
+func WriteJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// WriteError answers {error, code, hint}: a message for a person, a stable
+// code for a program and, when there is one, the endpoint to use instead.
+func WriteError(w http.ResponseWriter, status int, code, msg, hint string) {
+	body := map[string]string{"error": msg, "code": code}
+	if hint != "" {
+		body["hint"] = hint
+	}
+	WriteJSON(w, status, body)
+}
+
+// CodeForStatus is the error code of a status no endpoint named more
+// precisely.
+func CodeForStatus(status int) string {
+	switch status {
+	case 400:
+		return "invalid_request"
+	case 401:
+		return "unauthorized"
+	case 403:
+		return "forbidden"
+	case 404:
+		return "not_found"
+	case 405:
+		return "method_not_allowed"
+	case 409:
+		return "conflict"
+	case 503:
+		return "unavailable"
+	}
+	if status >= 500 {
+		return "internal"
+	}
+	return "error"
+}

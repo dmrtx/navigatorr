@@ -808,3 +808,34 @@ database:
 		t.Fatal(got)
 	}
 }
+
+// transcode is registered like nodes: a service pointing at this server's
+// /transcode/v1 with its spec, and its key file is a web setting.
+func TestTranscodeServiceAndTokenFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(p, []byte(`
+web:
+  transcode_token_file: "/run/secrets/transcode-token"
+services:
+  transcode:
+    url: "http://127.0.0.1:8099"
+    api_key: "example.transcode.token.not.a.secret"
+    api_version: "/transcode/v1"
+    openapi_url: "http://127.0.0.1:8099/transcode/v1/openapi.json"
+media:
+  allowed_read_roots: ["/media/test"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, ok := cfg.Services["transcode"]
+	if !ok || svc.APIVersion != "/transcode/v1" || svc.OpenAPIURL == "" || svc.AuthHeader != "X-Api-Key" {
+		t.Fatalf("%+v", svc)
+	}
+	if cfg.Web.TranscodeTokenFile != "/run/secrets/transcode-token" {
+		t.Fatal(cfg.Web.TranscodeTokenFile)
+	}
+}

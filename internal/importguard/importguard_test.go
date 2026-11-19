@@ -141,7 +141,7 @@ func chain(via map[string]string, pkg string) string {
 }
 
 // TestNodesAndTheEngineStayApart guards invariant N2: the build registry
-// (nodes) and the transcode engine (action, transcode) never import each other,
+// (nodes) and the transcode engine (action, transcode, and the transcodeapi contract) never import each other,
 // directly or transitively. Only main and internal/nodeswire join them.
 func TestNodesAndTheEngineStayApart(t *testing.T) {
 	for _, p := range platforms {
@@ -172,7 +172,7 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 			reach("nodes", func(p string) bool {
 				return p == "action" || p == "maintenanceui" || p == "internal/nodeswire" || p == "transcode" || strings.HasPrefix(p, "transcode/")
 			})
-			for _, engine := range []string{"action", "transcode"} {
+			for _, engine := range []string{"action", "transcode", "transcodeapi"} {
 				reach(engine, func(p string) bool { return p == "nodes" || p == "internal/nodeswire" })
 			}
 		})
