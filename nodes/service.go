@@ -168,7 +168,7 @@ func (s *Service) CreateBuild(ctx context.Context, in BuildInput) (Build, error)
 	if in.Target = strings.TrimSpace(in.Target); !buildTargetPattern.MatchString(in.Target) {
 		return b, invalid("target is required: up to 64 characters of letters, digits, '.', '_' or '-'")
 	}
-	b.Target = in.Target
+	b.Target = s.canonicalTarget(in.Target)
 	if b.Source, err = checkBuildText("source", in.Source, buildFieldMax, true); err != nil {
 		return b, err
 	}
@@ -372,7 +372,10 @@ func (s *Service) GetBuild(id string) (Build, error) { return s.reg.get(id) }
 
 // ListBuilds returns builds: the active ones first, then the history, each
 // newest first. The limit cuts the history, never an active build.
-func (s *Service) ListBuilds(f BuildFilter) ([]Build, error) { return s.reg.list(f) }
+func (s *Service) ListBuilds(f BuildFilter) ([]Build, error) {
+	f.Target = s.canonicalTarget(f.Target)
+	return s.reg.list(f)
+}
 
 // BuildPage is one page of PageBuilds.
 type BuildPage struct {
@@ -492,6 +495,7 @@ func (s *Service) Start(ctx context.Context, interval time.Duration) <-chan stru
 // ActiveOn is a node's running and waiting build records, oldest first. It is a
 // record read only: nothing decides on it.
 func (s *Service) ActiveOn(node string) []Build {
+	node = s.canonicalTarget(node)
 	active, err := s.reg.active()
 	if err != nil {
 		return nil
@@ -509,7 +513,9 @@ func (s *Service) ActiveOn(node string) []Build {
 func (s *Service) BuildsPauses() (map[string]BuildPause, error) { return s.reg.listPauses() }
 
 // BuildsPaused reports whether new builds on the node are refused.
-func (s *Service) BuildsPaused(node string) (bool, error) { return s.reg.paused(node) }
+func (s *Service) BuildsPaused(node string) (bool, error) {
+	return s.reg.paused(s.canonicalTarget(node))
+}
 
 // SetBuildsPause pauses or resumes new builds on a node. Repeating a request
 // changes nothing. It touches no build and no transcode pause. The node must be

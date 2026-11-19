@@ -179,10 +179,8 @@ func (s *Service) apiBuildsPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	// The node's canonical name (the topology's), for the toggle and the answer.
-	if canon, ok := s.node(name); ok {
-		name = canon
-	}
+	// SetBuildsPause and Node resolve the node's canonical name (the
+	// topology's) themselves, for the toggle and for the answer.
 	if apiFail(w, s.SetBuildsPause(r.Context(), name, *body.Paused)) {
 		return
 	}

@@ -79,9 +79,19 @@ func TestAPILogResetsAfterARestart(t *testing.T) {
 
 	s2, _ := buildSvcAt(t, path)
 	h2 := s2.Handler()
+	for _, l := range []string{"three", "four", "five"} {
+		call(t, h2, "POST", "/nodes/v1/builds/bld_job00001/heartbeat", `{"log":["`+l+`"]}`)
+	}
 	_, m = call(t, h2, "GET", "/nodes/v1/builds/bld_job00001/log?after=2&generation="+g1, "")
-	if m["reset"] != true || len(m["lines"].([]any)) != 0 || m["next_after"].(float64) != 0 {
+	lines, _ := m["lines"].([]any)
+	g2, _ := m["generation"].(string)
+	if m["reset"] != true || g2 == "" || g2 == g1 || len(lines) != 3 || m["next_after"].(float64) != 3 {
 		t.Fatal(m)
+	}
+	for i, l := range lines {
+		if n := l.(map[string]any)["n"].(float64); int(n) != i+1 {
+			t.Fatalf("after a reset the lines start at 1: %v", lines)
+		}
 	}
 }
 
@@ -153,8 +163,18 @@ func TestNodeNamesUseTheCanonicalSpelling(t *testing.T) {
 	}
 	// ?node= filters by the canonical name.
 	call(t, h, "POST", "/nodes/v1/nodes/nodeA/builds-pause", `{"paused":false}`)
-	if code, e := call(t, h, "POST", "/nodes/v1/builds", `{"target":"nodeA","via":"node_lease","source":"ci","title":"t"}`); code != 200 {
-		t.Fatal(code, e)
+	if p, err := s.BuildsPaused("NODEA"); err != nil || p {
+		t.Fatal("BuildsPaused reads the canonical node", p, err)
+	}
+	code, created := call(t, h, "POST", "/nodes/v1/builds", `{"target":"NODEA","via":"node_lease","source":"ci","title":"t"}`)
+	if code != 200 || created["target"] != "nodeA" {
+		t.Fatal("the stored target is the canonical name", code, created)
+	}
+	if got, err := s.ListBuilds(BuildFilter{Target: "NODEA"}); err != nil || len(got) != 1 || got[0].Target != "nodeA" {
+		t.Fatalf("ListBuilds canonicalizes its filter: %+v %v", got, err)
+	}
+	if got := s.ActiveOn("NODEA"); len(got) != 1 {
+		t.Fatalf("ActiveOn canonicalizes its node: %+v", got)
 	}
 	for _, spelling := range []string{"nodeA", "NODEA", "nodea"} {
 		_, page := call(t, h, "GET", "/nodes/v1/builds?node="+spelling, "")
@@ -257,14 +277,15 @@ func TestAPICreateIDTakenAndClientIDValidation(t *testing.T) {
 func TestAPITTLClampingMatchesTheSpec(t *testing.T) {
 	s, _ := buildSvc(t)
 	h := s.Handler()
+	// window is the lifetime of a build created with the given extra field.
 	window := func(ttl string) (int, time.Duration) {
-		_, b := call(t, h, "POST", "/nodes/v1/builds", `{"target":"remote-box","source":"ci","title":"t"`+ttl+`}`)
-		if b["created_at"] == nil {
-			return 0, 0
+		code, b := call(t, h, "POST", "/nodes/v1/builds", `{"target":"remote-box","source":"ci","title":"t"`+ttl+`}`)
+		if code != 200 {
+			return code, 0
 		}
 		c, _ := time.Parse(time.RFC3339, b["created_at"].(string))
 		e, _ := time.Parse(time.RFC3339, b["expires_at"].(string))
-		return 200, e.Sub(c)
+		return code, e.Sub(c)
 	}
 	for ttl, want := range map[string]time.Duration{
 		``:                       15 * time.Minute,
@@ -281,6 +302,47 @@ func TestAPITTLClampingMatchesTheSpec(t *testing.T) {
 	}
 	if code, e := call(t, h, "POST", "/nodes/v1/builds", `{"target":"remote-box","source":"ci","title":"t","ttl_seconds":-5}`); code != 400 || e["code"] != "invalid_request" {
 		t.Fatal(code, e)
+	}
+
+	// Heartbeat: omitted or 0 keeps the window the build has, a positive value
+	// sets it (clamped to 7200), negative is 400 and changes nothing.
+	_, b0 := call(t, h, "POST", "/nodes/v1/builds", `{"client_id":"bld_ttl00001","target":"remote-box","source":"ci","title":"t","ttl_seconds":120}`)
+	if b0["id"] != "bld_ttl00001" {
+		t.Fatal(b0)
+	}
+	beat := func(body string) (int, time.Duration, map[string]any) {
+		code, b := call(t, h, "POST", "/nodes/v1/builds/bld_ttl00001/heartbeat", body)
+		if code != 200 {
+			return code, 0, b
+		}
+		l, _ := time.Parse(time.RFC3339, b["last_heartbeat_at"].(string))
+		e, _ := time.Parse(time.RFC3339, b["expires_at"].(string))
+		return code, e.Sub(l), b
+	}
+	// In order: each case starts from what the one before left.
+	for _, c := range []struct {
+		body string
+		want time.Duration
+	}{
+		{``, 2 * time.Minute},
+		{`{}`, 2 * time.Minute},
+		{`{"ttl_seconds":0}`, 2 * time.Minute},
+		{`{"ttl_seconds":300}`, 5 * time.Minute},
+		{`{"ttl_seconds":0}`, 5 * time.Minute},
+		{`{"ttl_seconds":7201}`, 2 * time.Hour},
+		{`{"ttl_seconds":99999}`, 2 * time.Hour},
+		{`{"ttl_seconds":45}`, 45 * time.Second},
+	} {
+		if code, got, b := beat(c.body); code != 200 || got != c.want {
+			t.Fatalf("heartbeat %q: %d %v, want %v (%v)", c.body, code, got, c.want, b)
+		}
+	}
+	code, e := call(t, h, "POST", "/nodes/v1/builds/bld_ttl00001/heartbeat", `{"ttl_seconds":-1}`)
+	if code != 400 || e["code"] != "invalid_request" {
+		t.Fatal(code, e)
+	}
+	if _, got, _ := beat(`{}`); got != 45*time.Second {
+		t.Fatalf("a refused heartbeat changes nothing: %v", got)
 	}
 }
 
