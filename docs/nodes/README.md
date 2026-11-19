@@ -25,7 +25,9 @@ Invariants, and where each one is enforced:
 1. N1: a running lease is decided only by the worker. Enforced by the node
    worker, and proved by its tests from phase 0a in `internal/transcodeworker`
    (`lease_test.go`, `lease_gate_test.go`, `hold_test.go`: a lease freezes the
-   encoder and holds the queue, nothing new starts while it runs). The tests in
+   encoder and holds the conversion lane, no new conversion starts while it runs;
+   the podcast lane is never held or frozen by a build, see
+   `docs/transcode/BUILD_LEASES.md`, "Lanes"). The tests in
    `nodes/invariants_test.go` only show that the registry never changes a build
    because of what the transcode side says; they do not prove the hold.
 2. N2: the transcode engine (`action`, `transcode`) never imports `nodes`, and

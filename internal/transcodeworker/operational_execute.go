@@ -1331,12 +1331,10 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	// While a build lease holds the node, no process starts: the job stays as
-	// it is and the next tick retries. An operator pause or a drain does not
-	// stop post-encode work (it never did: finishing it is how a drain ends).
-	if w.leaseHolds() {
-		return 0, nil
-	}
+	// While a build lease holds the node, no conversion's runner starts: the
+	// job stays as it is and the next tick retries. Podcast jobs have their own
+	// lane and keep finishing. An operator pause or a drain does not stop
+	// post-encode work (it never did: finishing it is how a drain ends).
 	if w.beforeGateLockHook != nil {
 		w.beforeGateLockHook()
 	}
@@ -1347,9 +1345,7 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 	}
 	defer capLock.Unlock()
 	// Leases are granted under this lock, so this check cannot race a grant.
-	if w.leaseHolds() {
-		return 0, nil
-	}
+	leaseHeld := w.leaseHolds()
 
 	entries, err := w.readJobDirs()
 	if err != nil {
@@ -1416,6 +1412,9 @@ func (w *Worker) ResumePostEncode(ctx context.Context, selfExe, configPath strin
 			}
 			if !isPostEncodeResume(job) {
 				return // not a post-encode candidate: safely skipped
+			}
+			if leaseHeld && jobSlotKind(job) != slotKindPodcast {
+				return // a running build holds conversions; the next tick retries
 			}
 			if !limits.hasRoom(jobSlotOf(job), active) || !automaticFinalizationAllowed(job) || time.Now().UTC().Before(job.NextFinalizationAt) {
 				return

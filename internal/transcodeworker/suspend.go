@@ -99,9 +99,22 @@ func (w *Worker) Suspended() bool {
 	return on
 }
 
-// queueHeld is whether the scheduler must start nothing: the hold, or a
-// suspended node (which is also held).
-func (w *Worker) queueHeld() bool { return w.Held() || w.Suspended() || w.leaseHolds() }
+// operatorHeld is whether the operator stopped the node: the hold or a suspend
+// (which is also a hold). It stops every lane, podcasts included.
+func (w *Worker) operatorHeld() bool { return w.Held() || w.Suspended() }
+
+// queueHeld is whether the scheduler must start no conversion (video) job: an
+// operator hold or suspend, or a running build lease. A podcast job is held by
+// the operator alone (see operatorHeld): a build never keeps it waiting.
+func (w *Worker) queueHeld() bool { return w.operatorHeld() || w.leaseHolds() }
+
+// queueHeldFor is queueHeld for one lane.
+func (w *Worker) queueHeldFor(podcast bool) bool {
+	if podcast {
+		return w.operatorHeld()
+	}
+	return w.queueHeld()
+}
 
 // SetSuspend turns the suspend on or off. Turning it on waits for a scheduler
 // pass in progress, like SetHold, so a job started by that pass finds the

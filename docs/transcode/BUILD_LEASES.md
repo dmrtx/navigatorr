@@ -70,11 +70,12 @@ the permission.
 1. `waiting` (low only) until the worker has no running or queued job, no hold
    or suspend and no other lease; the worker promotes the oldest one under the
    capacity lock, so no job starts between the check and the grant.
-2. `running`: the queue is held, every process start is refused by the one
-   worker gate (`queueHeld()` for new jobs; post-encode recovery and publication
-   have their own gates, see "What a lease gates"),
-   and queued jobs that have not started carry the hold refusal on their
-   record so the coordinator takes them back. A normal lease (`suspend`,
+2. `running`: the conversion (video) lane is held, every conversion start is
+   refused by the one worker gate (`queueHeld()` for new conversions;
+   post-encode recovery and publication have their own gates, see "What a
+   lease gates"), and queued conversions that have not started carry the hold
+   refusal on their record so the coordinator takes them back. The podcast lane
+   is not held (see "Lanes"). A normal lease (`suspend`,
    `immediate`) also freezes the encoders; a `graceful` or low one does not.
    `immediate` is an alias of `suspend`: it is stored and answered as given,
    and the worker never requeues or cancels anything for it.
@@ -85,22 +86,58 @@ the permission.
    leases stay on record for an hour once the server has the end (or when there
    is no server), at most a day otherwise.
 
+### Lanes
+
+The worker arbitrates three classes of work, each with its own slots (no
+shared pool and no borrowing between them):
+
+| Lane | Priority | Rule |
+|------|----------|------|
+| podcast | high | Starts always. Never waits for a build or a conversion; a build never freezes, cancels or requeues it. |
+| build | medium | A lease. Freezes, requeues or lets conversions finish according to its mode (graceful, suspend, immediate). Never touches a podcast. |
+| conversion | low | Uses its slots only while no build holds the node. |
+
+Invariants (model-checked in TLA+):
+
+- C1: a ready podcast starts even while a lease runs or conversions run,
+  unless the operator paused the node. An operator hold, drain or suspend
+  still stops every lane, podcasts included. A podcast is submitted and
+  scheduled under a running lease; only conversions get the "a build is running
+  on this node" refusal.
+- C2: no lease, in any mode, freezes (SIGSTOP), cancels or requeues a podcast
+  job. A podcast runner never installs the freeze watcher, and a podcast job
+  is not counted among the encoders a new normal lease waits to see frozen. An
+  operator suspend does not freeze a podcast job either: it only keeps new
+  ones from starting.
+- C3: while a lease runs, no new conversion starts on the node. A `low` lease
+  never freezes or requeues anything, and a lease refused because builds are
+  paused never freezes.
+
+The room report still says `hold: build` while a lease runs ("no room for
+conversions"). The server reads it only to place conversions; podcast work goes
+to the podcast worker and is held on the server only by the operator's pause,
+so a running build does not delay its dispatch.
+
 ### What a lease gates
 
 A lease is not an operator pause, so the gate differs by path:
 
-- New jobs: held by an operator hold or drain, a suspend, or a lease
+- New conversions: held by an operator hold or drain, a suspend, or a lease
   (`queueHeld()`).
-- Post-encode recovery (`ResumePostEncode`): held by a running lease only.
-  An operator pause or a drain still lets a finished encode go on to be saved.
+- New podcast jobs: held by an operator hold or drain or a suspend only
+  (`operatorHeld()`); a lease never holds them.
+- Post-encode recovery (`ResumePostEncode`): a conversion is held by a running
+  lease only; a podcast job is never held. An operator pause or a drain still
+  lets a finished encode go on to be saved.
 - Publication of a retained candidate (`PublishRetained`): held by the drain
-  hold or a running lease. An operator suspend does not hold it.
+  hold, and for a conversion also by a running lease. An operator suspend does
+  not hold it.
 
 An operator suspend does not stop post-encode copy/verify or publication
-(intended): only leases and the drain hold do.
+(intended): only leases (for conversions) and the drain hold do.
 
-Both post-encode paths check the lease once before the capacity lock and again
-under it. Leases are granted under that same lock, so a lease granted between
+Both post-encode paths check the lease under the capacity lock
+(`PublishRetained` also looks once before taking it). Leases are granted under that same lock, so a lease granted between
 the first check and the lock is seen, and no process starts after the grant.
 `PublishRetained` takes the lock without waiting: if the node is busy it
 refuses with a transient "the node is busy, ask again" instead of blocking

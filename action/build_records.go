@@ -181,7 +181,7 @@ func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus)
 				st.Paused, st.HeldBy = true, "builds"
 				st.Since = since
 				st.Mode = e.runningLeaseMode(name)
-				st.Message = fmt.Sprintf("Busy with %d running build(s). New jobs wait on this node.", running)
+				st.Message = fmt.Sprintf("Busy with %d running build(s). New conversions wait on this node; podcast jobs still run.", running)
 			}
 		}
 		statuses[name] = st
