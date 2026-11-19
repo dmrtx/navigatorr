@@ -134,6 +134,12 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if len(path) >= 100 {
 		return fmt.Errorf("build socket path is too long for a Unix socket (%d bytes): set build_socket", len(path))
 	}
+	// The socket is bound first in a temporary directory beside it (see
+	// listenLeaseSocket), whose path is longer than the directory's by at most
+	// leaseBindExtra bytes.
+	if n := len(filepath.Dir(path)) + leaseBindExtra; n >= 104 {
+		return fmt.Errorf("build socket directory is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", n)
+	}
 	// The group first: a bad one changes nothing on disk (not even a stale
 	// socket of an earlier worker).
 	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
@@ -143,13 +149,10 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if err := prepareLeaseSocketDir(filepath.Dir(path), strings.TrimSpace(w.cfg.BuildSocket) == ""); err != nil {
 		return err
 	}
-	// A socket left by a worker that died: remove it. One that answers belongs
-	// to a live worker.
+	// A socket that answers belongs to a live worker; one that does not is
+	// replaced once the new one is ready.
 	if leaseSocketLive(path) {
 		return errLeaseSocketTaken
-	}
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(path)
 	}
 	ln, err := listenLeaseSocket(path, gid)
 	if err != nil {
@@ -176,10 +179,15 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	return nil
 }
 
-// listenLeaseSocket binds the socket in a new 0700 directory next to path,
-// gives it its final mode and group there, and only then renames it into
-// place: whatever the umask, no one can connect before the mode is final. A
-// failure leaves nothing behind.
+// leaseBindExtra is how much longer than the socket's directory the bind path
+// can be: "/.l" plus MkdirTemp's random part (at most 10 digits) plus "/s".
+const leaseBindExtra = 3 + 10 + 2
+
+// listenLeaseSocket binds the socket in a new 0700 directory next to path and
+// gives it its final mode and group there, so no umask ever opens it early.
+// Only then does a stale socket at path go, and the new one is hard-linked
+// into place, which never replaces anything (a file that is not a socket stays
+// and the start fails). A failure leaves nothing behind.
 func listenLeaseSocket(path string, gid int) (net.Listener, error) {
 	tmp, err := os.MkdirTemp(filepath.Dir(path), ".l")
 	if err != nil {
@@ -187,9 +195,6 @@ func listenLeaseSocket(path string, gid int) (net.Listener, error) {
 	}
 	defer os.RemoveAll(tmp)
 	bind := filepath.Join(tmp, "s")
-	if len(bind) >= 100 {
-		return nil, fmt.Errorf("build socket path is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", len(bind))
-	}
 	ln, err := net.Listen("unix", bind)
 	if err != nil {
 		return nil, err
@@ -201,9 +206,13 @@ func listenLeaseSocket(path string, gid int) (net.Listener, error) {
 		_ = ln.Close()
 		return nil, err
 	}
-	if err := os.Rename(bind, path); err != nil {
+	// A socket left by a worker that died (the caller saw it does not answer).
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(path)
+	}
+	if err := os.Link(bind, path); err != nil {
 		_ = ln.Close()
-		return nil, err
+		return nil, fmt.Errorf("build socket: %w", err)
 	}
 	return ln, nil
 }

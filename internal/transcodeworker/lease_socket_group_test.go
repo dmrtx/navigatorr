@@ -7,6 +7,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -56,31 +57,95 @@ func TestLeaseSocketGroup(t *testing.T) {
 		t.Fatal("no socket for an unknown group")
 	}
 
-	// A group the worker's user is not in: chown fails, nothing is left.
-	if os.Getuid() != 0 {
-		if other := foreignGroup(dir); other != "" {
-			fw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: filepath.Join(dir, "f.sock"), BuildSocketGroup: other})
-			if err := fw.StartBuildLeases(ctx); err == nil {
-				t.Fatalf("group %s, which this user is not in, must be refused", other)
-			}
-			if _, err := os.Lstat(filepath.Join(dir, "f.sock")); err == nil {
-				t.Fatal("no socket after a failed chown")
-			}
+	// staleSocket leaves a socket file nobody listens on, as a worker that died does.
+	staleSocket := func(p string) {
+		t.Helper()
+		l, err := net.Listen("unix", p)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	// A stale socket stays put when the group is refused.
-	stale := filepath.Join(dir, "stale.sock")
-	if l, err := net.Listen("unix", stale); err == nil {
 		l.(*net.UnixListener).SetUnlinkOnClose(false)
 		_ = l.Close()
 	}
+
+	// A group the worker's user is not in: chown fails, nothing new is left and
+	// the old socket stays.
+	if os.Getuid() == 0 {
+		t.Log("root can chown to any group: the foreign-group case is skipped")
+	} else if other := foreignGroup(dir); other == "" {
+		t.Log("no local group this user is not in: the foreign-group case is skipped")
+	} else {
+		f := filepath.Join(dir, "f.sock")
+		staleSocket(f)
+		fw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: f, BuildSocketGroup: other})
+		if err := fw.StartBuildLeases(ctx); err == nil {
+			t.Fatalf("group %s, which this user is not in, must be refused", other)
+		}
+		if fi, err := os.Lstat(f); err != nil || fi.Mode()&os.ModeSocket == 0 {
+			t.Fatal("a failed chown must keep the old socket")
+		}
+	}
+
+	// A stale socket stays put when the group is unknown.
+	stale := filepath.Join(dir, "stale.sock")
+	staleSocket(stale)
 	sw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: stale, BuildSocketGroup: "no-such-group-navigatorr"})
 	if err := sw.StartBuildLeases(ctx); err == nil {
 		t.Fatal("an unknown group must be refused")
 	}
 	if _, err := os.Lstat(stale); err != nil {
 		t.Fatal("a refused group must not remove the old socket")
+	}
+
+	// Without a group the stale socket is replaced by an owner-only one.
+	octx, ocancel := context.WithCancel(ctx)
+	ow := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: stale})
+	if err := ow.StartBuildLeases(octx); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(stale); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("owner-only socket over a stale one: %v %v", fi, err)
+	}
+	if c, err := net.DialTimeout("unix", stale, time.Second); err != nil {
+		t.Fatal(err)
+	} else {
+		_ = c.Close()
+	}
+	// Stopping removes the socket.
+	ocancel()
+	for i := 0; ; i++ {
+		if _, err := os.Lstat(stale); err != nil {
+			break
+		}
+		if i == 50 {
+			t.Fatal("the socket must go when the worker stops")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// A file that is not a socket is never replaced.
+	reg := filepath.Join(dir, "reg")
+	if err := os.WriteFile(reg, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: reg, BuildSocketGroup: g.Name})
+	if err := rw.StartBuildLeases(ctx); err == nil {
+		t.Fatal("a regular file at build_socket must refuse the socket")
+	}
+	if b, err := os.ReadFile(reg); err != nil || string(b) != "keep" {
+		t.Fatalf("the regular file must stay: %q %v", b, err)
+	}
+
+	// A directory too long to bind in is refused before anything is made.
+	long := filepath.Join(dir, strings.Repeat("d", 95-len(dir)))
+	if err := os.Mkdir(long, 0o700); err == nil {
+		lw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: filepath.Join(long, "s")})
+		if err := lw.StartBuildLeases(ctx); err == nil || !strings.Contains(err.Error(), "too long") {
+			t.Fatalf("a directory too long to bind in: %v", err)
+		}
+		if m, _ := filepath.Glob(filepath.Join(long, "*")); len(m) != 0 {
+			t.Fatalf("nothing may be made in it: %v", m)
+		}
 	}
 
 	// Binding happens in a temporary directory; none is left behind.
