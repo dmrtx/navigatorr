@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/nodes"
 )
 
 func TestBuildHeartbeatLogEdgeCases(t *testing.T) {
@@ -34,11 +36,11 @@ func TestBuildHeartbeatLogEdgeCases(t *testing.T) {
 	if lines, _, _ := readLog(); len(lines) != 0 {
 		t.Fatal(lines)
 	}
-	// The biggest legal heartbeat: 64 lines of 300 characters, every one escaped
+	// The biggest legal heartbeat: 256 lines of 300 characters, every one escaped
 	// (a 12 byte surrogate pair for the astral ones), well past 100 KB.
 	const bs = "\\"
 	var big []string
-	for i := 0; i < 64; i++ {
+	for i := 0; i < nodes.BuildLogMaxBatch; i++ {
 		line := strings.Repeat(bs+"u00e9", 300)
 		if i%2 == 0 {
 			line = strings.Repeat(bs+"ud83d"+bs+"ude00", 150) + strings.Repeat(bs+"u00e9", 150)
@@ -50,9 +52,9 @@ func TestBuildHeartbeatLogEdgeCases(t *testing.T) {
 		t.Fatal("the body is meant to be big", len(body))
 	}
 	if w := withBuildsToken(h, "POST", hb, body); w.Code != 200 {
-		t.Fatalf("a legal 64x300 heartbeat: %d %.200s", w.Code, w.Body.String())
+		t.Fatalf("a legal 256x300 heartbeat: %d %.200s", w.Code, w.Body.String())
 	}
-	if lines, _, ended := readLog(); len(lines) != 64 || ended != nil {
+	if lines, _, ended := readLog(); len(lines) != nodes.BuildLogMaxBatch || ended != nil {
 		t.Fatal(len(lines), ended)
 	}
 
@@ -63,7 +65,7 @@ func TestBuildHeartbeatLogEdgeCases(t *testing.T) {
 			t.Fatalf("%.40s on an ended build: %d %s", body, w.Code, w.Body.String())
 		}
 	}
-	if lines, status, ended := readLog(); len(lines) != 64 || ended == nil || status != "succeeded" {
+	if lines, status, ended := readLog(); len(lines) != nodes.BuildLogMaxBatch || ended == nil || status != "succeeded" {
 		t.Fatal("an ended build stored lines or hides ended_at", len(lines), ended, status)
 	}
 	// Unknown: 404 whatever the log.

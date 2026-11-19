@@ -1,12 +1,14 @@
 package nodes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // BasePath is where the HTTP API lives.
@@ -295,8 +297,13 @@ func (s *Service) apiHeartbeat(w http.ResponseWriter, r *http.Request) {
 	apiJSON(w, 200, viewBuild(b))
 }
 
+// HeartbeatBodyMax is the largest heartbeat body read: BuildLogMaxBatch lines
+// of BuildLogMaxLine characters, each escaped as a 12 byte surrogate pair
+// (256*300*12 = 921,600 bytes), plus the progress and the other fields.
+const HeartbeatBodyMax = 1 << 20
+
 func decodeOptional(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, HeartbeatBodyMax)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil && !errors.Is(err, io.EOF) {
@@ -345,7 +352,30 @@ func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	out, err := s.BuildOutput(r.PathValue("id"))
+	wait := 0
+	if v := q.Get("wait"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 || n > BuildLogMaxWait {
+			apiError(w, 400, "invalid_request", "wait must be a whole number of seconds from 0 to "+strconv.Itoa(BuildLogMaxWait), "wait=S holds the request until a new line arrives or the build ends, at most "+strconv.Itoa(BuildLogMaxWait)+" seconds; omit it to answer at once")
+			return
+		}
+		wait = n
+	}
+	id := r.PathValue("id")
+	gen := q.Get("generation")
+	var out BuildOutput
+	var err error
+	if wait > 0 {
+		var tooMany bool
+		out, err, tooMany = s.waitBuildOutput(r.Context(), id, after, gen, time.Duration(wait)*logWaitUnit)
+		if tooMany {
+			w.Header().Set("Retry-After", "1")
+			apiError(w, 429, "too_many_waiters", "too many readers are waiting for build output", "read without wait (poll) or try again shortly")
+			return
+		}
+	} else {
+		out, err = s.BuildOutput(id)
+	}
 	if apiFail(w, err) {
 		return
 	}
@@ -353,7 +383,6 @@ func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
 	// eviction, the retention). The reader's position is stale when it names
 	// another generation of the buffer or a line past the end: answer from the
 	// start and say so.
-	gen := q.Get("generation")
 	reset := after > out.Total || (gen != "" && gen != out.Generation)
 	if reset {
 		after = 0
@@ -379,4 +408,51 @@ func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
 		"lines": lines, "next_after": next, "first_available": out.First, "generation": out.Generation, "reset": reset,
 		"status": out.Build.Status, "updated_at": updated, "ended_at": ended, "expired": out.Expired,
 	})
+}
+
+// logWaitUnit is the length of one second of the long-poll's wait (a test seam).
+var logWaitUnit = time.Second
+
+// waitBuildOutput is BuildOutput that, while the reader has nothing new, holds
+// the call until a line arrives, the build ends, the buffer is dropped or
+// recreated, ctx ends or max passes. It then answers like BuildOutput. tooMany
+// is true when the cap of waiting readers is reached (nothing was read).
+func (s *Service) waitBuildOutput(ctx context.Context, id string, after int, gen string, max time.Duration) (out BuildOutput, err error, tooMany bool) {
+	startGen := ""
+	ready := func(out BuildOutput) bool {
+		return !out.Build.Active() || out.Expired ||
+			out.Total > after || after > out.Total ||
+			(gen != "" && gen != out.Generation) || // as the answer without wait: a reset
+			(startGen != "" && out.Generation != startGen)
+	}
+	// Answer at once, without a waiter slot, when there is no reason to wait
+	// (lines already past after, build ended, unknown build): the cap only
+	// limits readers that actually wait.
+	out, err = s.BuildOutput(id)
+	if err != nil || ready(out) {
+		return out, err, false
+	}
+	startGen = out.Generation
+	release, werr := s.logs.watch(id)
+	if werr != nil {
+		return BuildOutput{}, nil, true
+	}
+	defer release()
+	timer := time.NewTimer(max)
+	defer timer.Stop()
+	for {
+		// Take the channel before reading: a change after the read closes it.
+		ch := s.logs.current(id)
+		out, err = s.BuildOutput(id)
+		if err != nil || ready(out) {
+			return out, err, false
+		}
+		select {
+		case <-ch:
+		case <-timer.C:
+			return out, nil, false
+		case <-ctx.Done():
+			return out, nil, false
+		}
+	}
 }

@@ -138,7 +138,7 @@ func TestBuildHeartbeat409HasOneShape(t *testing.T) {
 	}
 }
 
-// The real worst case: 64 lines of 300 astral characters, each escaped as a
+// The real worst case: 256 lines of 300 astral characters, each escaped as a
 // surrogate pair (12 bytes), plus a progress line, is accepted under the limit.
 func TestBuildHeartbeatWorstCaseBodyIsAccepted(t *testing.T) {
 	_, h := buildsUI(t)
@@ -149,19 +149,19 @@ func TestBuildHeartbeatWorstCaseBodyIsAccepted(t *testing.T) {
 	if n := len(line); n < 3600 || n > 3700 {
 		t.Fatalf("a line is %d bytes", n)
 	}
-	lines := make([]string, 64)
+	lines := make([]string, nodes.BuildLogMaxBatch)
 	for i := range lines {
 		lines[i] = line
 	}
 	body := `{"progress":"` + strings.Repeat("p", 200) + `","ttl_seconds":600,"log":[` + strings.Join(lines, ",") + `]}`
-	if len(body) < 200<<10 || len(body) >= 256<<10 {
+	if len(body) < 800<<10 || len(body) >= nodes.HeartbeatBodyMax {
 		t.Fatalf("the body is %d bytes, meant to be near the limit", len(body))
 	}
 	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", body); w.Code != 200 {
 		t.Fatalf("%d %.200s", w.Code, w.Body.String())
 	}
 	got := decodeBuildLog(t, withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String())
-	if len(got.Lines) != 64 || strings.Count(got.Lines[0], "\U0001F600") != 300 {
+	if len(got.Lines) != nodes.BuildLogMaxBatch || strings.Count(got.Lines[0], "\U0001F600") != 300 {
 		t.Fatal("the lines were not kept whole", len(got.Lines))
 	}
 }

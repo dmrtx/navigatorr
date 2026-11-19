@@ -18,15 +18,23 @@ import (
 // runs and BuildLogRetention after it ended.
 const (
 	// BuildLogMaxBatch is how many lines one heartbeat may add.
-	BuildLogMaxBatch = 64
+	BuildLogMaxBatch = 256
 	// BuildLogMaxLine is the longest line, in characters.
 	BuildLogMaxLine = 300
-	// BuildLogKeep is how many lines a build keeps.
-	BuildLogKeep = 200
+	// BuildLogKeep is how many lines a build keeps. Worst case for memory:
+	// buildLogMaxBuilds buffers of BuildLogKeep lines of BuildLogMaxLine
+	// characters is 64*2000*300 = 38.4M characters, about 38 MB of ASCII and
+	// at most about 150 MB when every character takes 4 bytes; typical build
+	// output is far shorter than the cap, so a few MB in practice.
+	BuildLogKeep = 2000
 	// BuildLogRetention is how long a build's lines stay readable once it ended.
 	BuildLogRetention = 30 * time.Minute
 	// buildLogMaxBuilds bounds the buffers held at once.
 	buildLogMaxBuilds = 64
+	// BuildLogMaxWait is the longest a reader may ask a long-poll to wait.
+	BuildLogMaxWait = 25
+	// buildLogMaxWaiters bounds the readers blocked in a long-poll at once.
+	buildLogMaxWaiters = 64
 	// buildLogMaxDropped bounds the ids remembered as "had output, dropped".
 	buildLogMaxDropped = 256
 )
@@ -60,6 +68,80 @@ type buildLogs struct {
 	// keeps the last buildLogMaxDropped ids, oldest out (droppedOrder).
 	dropped      map[string]struct{}
 	droppedOrder []string
+	// notify holds, for the builds somebody waits on, a channel that is closed
+	// (and replaced) whenever something a waiter cares about changes: lines
+	// arrive, the buffer is dropped or recreated, the build ends. waiters is
+	// how many readers hold a channel in all.
+	notify  map[string]*logNotify
+	waiters int
+}
+
+type logNotify struct {
+	ch chan struct{}
+	n  int
+}
+
+// errTooManyLogWaiters is a long-poll refused because buildLogMaxWaiters
+// readers already wait.
+var errTooManyLogWaiters = errors.New("too many readers are waiting for build output")
+
+// watch registers a reader waiting on a build and returns release, which the
+// reader must call when done. Read the output after watch and wait on current()
+// afterwards: a change in between closes the channel, so none is missed.
+func (l *buildLogs) watch(id string) (release func(), err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.waiters >= buildLogMaxWaiters {
+		return nil, errTooManyLogWaiters
+	}
+	if l.notify == nil {
+		l.notify = map[string]*logNotify{}
+	}
+	n := l.notify[id]
+	if n == nil {
+		n = &logNotify{ch: make(chan struct{})}
+		l.notify[id] = n
+	}
+	n.n++
+	l.waiters++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.waiters--
+			if n.n--; n.n == 0 && l.notify[id] == n {
+				delete(l.notify, id)
+			}
+		})
+	}, nil
+}
+
+// current is the channel the next change of the build closes.
+func (l *buildLogs) current(id string) <-chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if n := l.notify[id]; n != nil {
+		return n.ch
+	}
+	return closedChan
+}
+
+var closedChan = func() chan struct{} { c := make(chan struct{}); close(c); return c }()
+
+// wakeLocked wakes the readers waiting on a build.
+func (l *buildLogs) wakeLocked(id string) {
+	if n := l.notify[id]; n != nil {
+		close(n.ch)
+		n.ch = make(chan struct{})
+	}
+}
+
+// wake wakes the readers waiting on a build (it ended, for one).
+func (l *buildLogs) wake(id string) {
+	l.mu.Lock()
+	l.wakeLocked(id)
+	l.mu.Unlock()
 }
 
 // markDroppedLocked records that a build's buffer was dropped.
@@ -138,6 +220,7 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 			}
 			delete(l.bufs, oldest)
 			l.markDroppedLocked(oldest)
+			l.wakeLocked(oldest)
 		}
 		l.forgetDroppedLocked(id)
 		buf = &buildLogBuffer{gen: newLogGeneration()}
@@ -150,6 +233,7 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 		buf.lines = append([]string(nil), buf.lines[over:]...)
 	}
 	buf.updatedAt = now
+	l.wakeLocked(id)
 }
 
 func (l *buildLogs) get(id string) (lines []string, updated time.Time, total int) {
@@ -173,6 +257,7 @@ func (l *buildLogs) drop(id string) {
 	l.mu.Lock()
 	delete(l.bufs, id)
 	l.forgetDroppedLocked(id)
+	l.wakeLocked(id)
 	l.mu.Unlock()
 }
 
@@ -184,6 +269,7 @@ func (l *buildLogs) expire(id string) {
 	if _, ok := l.bufs[id]; ok {
 		delete(l.bufs, id)
 		l.markDroppedLocked(id)
+		l.wakeLocked(id)
 	}
 }
 
