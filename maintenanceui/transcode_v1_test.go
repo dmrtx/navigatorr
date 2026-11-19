@@ -381,7 +381,18 @@ func TestTranscodeV1UIAuthWriteNeedsTheConsoleWriteChecks(t *testing.T) {
 		}
 		return m
 	}
+	drainOn := func() bool {
+		_, e := get(t, h, drain, bearer)
+		b, _ := json.Marshal(e)
+		return strings.Contains(string(b), `"enabled":true`) || strings.Contains(string(b), `"drain":true`)
+	}
 	// No header: 401. A foreign Origin with the header: 403. Neither writes.
+	if w := v1(h, "PUT", drain, `{"enabled":true}`, bearer); w.Code != 401 || drainOn() {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := v1(h, "PUT", drain, `{"enabled":true}`, with(map[string]string{"X-Navigatorr-Request": "1", "Origin": "https://elsewhere.example"})); w.Code != 403 || drainOn() {
+		t.Fatal(w.Code, w.Body.String())
+	}
 	if w := v1(h, "PUT", drain, `{"enabled":false}`, bearer); w.Code != 401 {
 		t.Fatal(w.Code, w.Body.String())
 	}

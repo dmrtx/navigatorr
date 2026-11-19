@@ -141,18 +141,20 @@ door into other kinds of work.
 
 ## Writes
 
-Every write has a JSON request body (`Content-Type: application/json`, at most
-1 MiB). Unknown fields, a second JSON value, a wrong type or a missing required
+Every write has a JSON request body: a JSON object (`Content-Type:
+application/json`, at most 1 MiB; `null`, arrays and scalars are 400). Unknown fields, a second JSON value, a wrong type or a missing required
 field are `400 invalid_request`; a body over 1 MiB is `413 payload_too_large`;
 any other content type is `415 unsupported_media_type`. A write that takes no
-body accepts an empty one. Nothing is changed by a request that is refused.
+body (including every `DELETE` but `/recipes/{name}`) accepts an empty one or `{}`. Nothing is changed by a request that is refused.
 
 Each write calls the same MCP tool or maintenance handler as the read it
 completes, and passes its safeguards on: the API checks a few more things (that
 the action is a transcode one, the body's shape) but never removes one. A
 refusal of the tool is `404` when the thing does not exist, `409 conflict` when
 its state, digest, revision or version is not what the request expects, `400`
-for a bad parameter, `403` when it needs a switch the server keeps off. Failures
+for a bad or missing parameter (a missing confirm flag or digest included),
+`503` when a worker or service is unreachable, `403` when it needs a switch the
+server keeps off. Failures
 of the server (5xx) never carry their cause.
 
 | Route | Calls | Body | Safeguard |
@@ -165,7 +167,7 @@ of the server (5xx) never carry their cause.
 | `POST /actions/{id}/podcast/review` | `podcast_review` | `digest`, `approve`, `reclassify`, `offset` | exact `digest` of the review; stale is 409 |
 | `GET /batches/{id}/goal` | `transcode_goal_change` without a mode | query `scope` | read-only preview: the selection and its `selection_version` |
 | `POST /batches/{id}/goal` | `transcode_goal_change` (202) | `mode`, `selection_version`, `idempotency_key`, options | `selection_version` from the preview (stale is 409); idempotency key |
-| `PUT /workers/{name}/slots` | `/api/maintenance/worker-slots` | `video_slots`, `podcast_slots`, `ceiling`, `x265_slots`, `core_budget`, `revision` | `revision` from `GET .../slots` (`settings.revision`); stale is 409 |
+| `PUT /workers/{name}/slots` | `/api/maintenance/worker-slots` | `video_slots`, `podcast_slots` and `revision` (all required), `ceiling`, `x265_slots`, `core_budget` | `revision` from `GET .../slots` (`settings.revision`); stale is 409. `0` and `0` explicitly return the worker to shared slots; a request that leaves any of the three out is 400, because the console would read the gap as "clear the split" or "no revision check" |
 | `PUT /drain` | `/api/maintenance/worker-drain` | `enabled` | read `GET /drain` for `ready_for_deploy` |
 | `PUT /pauses/{name}` | `/api/maintenance/worker-pause` | exactly one of `mode` (`graceful`, `immediate`, `suspend`, `off`) and `builds_paused` | the two switches are independent, never both in one request |
 | `DELETE /pauses/{name}` | same, mode `off` | none | |

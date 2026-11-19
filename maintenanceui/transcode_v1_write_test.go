@@ -8,7 +8,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/transcode"
+	"github.com/jakenesler/navigatorr/transcodeapi"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -288,7 +290,7 @@ func TestTranscodeV1BackupsConfirmation(t *testing.T) {
 	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "completed", nil, nil, nil)
 	rec := fakeWrite(s, "transcode_backups", func(a map[string]any) (string, bool) {
 		if a["mode"] == "discard_candidate" && a["confirm"] != true {
-			return "discard_candidate requires confirm=true", true
+			return "discard_candidate needs confirm=true; the candidate stays", true
 		}
 		return `{"done":true}`, false
 	})
@@ -303,10 +305,16 @@ func TestTranscodeV1BackupsConfirmation(t *testing.T) {
 	if w := write(h, "POST", "/transcode/v1/backups/job1/discard", `{"confirm":true}`); w.Code != 200 || rec.last()["mode"] != "discard" || rec.last()["action_id"] != "job1" {
 		t.Fatal(w.Code, rec.last())
 	}
-	// The candidate flow: the tool's own refusal reaches the caller (a 400
-	// here because the body had no confirm, and the tool was still the judge).
-	if c, _ := code(t, write(h, "POST", "/transcode/v1/backups/candidates/job1/discard", `{"confirm":false}`)); c != 400 && c != 409 {
-		t.Fatal("candidate without confirm", c)
+	// The candidate flow: the tool itself judges the missing confirm, and its
+	// refusal is a bad parameter (400), never a conflict.
+	if c, k := code(t, write(h, "POST", "/transcode/v1/backups/candidates/job1/discard", `{"confirm":false}`)); c != 400 || k != "invalid_request" || rec.last()["confirm"] != false {
+		t.Fatal("candidate without confirm", c, k, rec.last())
+	}
+	// clean, restore and discard-duplicate take no body fields.
+	for _, seg := range []string{"clean", "restore", "discard-duplicate"} {
+		if c, k := code(t, write(h, "POST", "/transcode/v1/backups/job1/"+seg, `{"confirm":true}`)); c != 400 || k != "invalid_request" {
+			t.Errorf("%s with a confirm field: %d %s", seg, c, k)
+		}
 	}
 	if w := write(h, "POST", "/transcode/v1/backups/candidates/job1/discard", `{"confirm":true}`); w.Code != 200 || rec.last()["mode"] != "discard_candidate" || rec.last()["confirm"] != true {
 		t.Fatal(w.Code, rec.last())
@@ -471,14 +479,167 @@ func TestTranscodeV1PodcastWrites(t *testing.T) {
 		t.Fatal(w.Code, cls.last())
 	}
 	lib := fakeWrite(s, "podcast_ad_library", ok(`{"revoked":true}`))
-	w := write(h, "DELETE", "/transcode/v1/podcasts/p1/ad-library/e1", ``)
-	if w.Code == 200 {
-		if lib.last()["revoke"] != "e1" || lib.last()["podcast_id"] != "p1" {
-			t.Fatal(lib.last())
+	s.cfg.Podcasts.Enabled = true
+	s.cfg.Podcasts.Podcasts = map[string]config.PodcastSettings{"p1": {Enabled: true}}
+	if c, k := code(t, write(h, "DELETE", "/transcode/v1/podcasts/nope/ad-library/e1", ``)); c != 404 || k != "unknown_podcast" {
+		t.Fatal(c, k)
+	}
+	if w := write(h, "DELETE", "/transcode/v1/podcasts/p1/ad-library/e1", ``); w.Code != 200 || lib.last()["revoke"] != "e1" || lib.last()["podcast_id"] != "p1" {
+		t.Fatal(w.Code, w.Body.String(), lib.last())
+	}
+	s.cfg.Podcasts.Enabled = false
+	if c, k := code(t, write(h, "DELETE", "/transcode/v1/podcasts/p1/ad-library/e1", ``)); c != 503 || k != "unavailable" {
+		t.Fatal(c, k)
+	}
+	// podcast_review: the offset reaches the tool as the number every tool reads.
+	rev := fakeWrite(s, "podcast_review", ok(`{}`))
+	seedOperation(t, s.engine.Deps().Store, "pod2", "clean_podcast_ads", "waiting_decision", nil, nil, nil)
+	if w := write(h, "POST", "/transcode/v1/actions/pod2/podcast/review", `{"digest":"d","offset":32}`); w.Code != 200 || rev.last()["offset"] != 32.0 {
+		t.Fatal(w.Code, rev.last())
+	}
+	if c, _ := code(t, write(h, "POST", "/transcode/v1/actions/pod2/podcast/review", `{"offset":-1}`)); c != 400 {
+		t.Fatal("negative offset", c)
+	}
+}
+
+// Every write takes a JSON object: null, an array or a scalar is a 400, even
+// for the writes that otherwise take no body.
+func TestTranscodeV1WriteBodiesMustBeObjects(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", nil, nil, nil)
+	cancel := fakeWrite(s, "action_cancel", ok(`{}`))
+	retry := fakeWrite(s, "action_retry", ok(`{}`))
+	for _, body := range []string{`null`, `[]`, `[{}]`, `"x"`, `5`, `true`} {
+		for _, rt := range [][2]string{
+			{"POST", "/transcode/v1/actions"}, {"POST", "/transcode/v1/actions/job1/cancel"}, {"POST", "/transcode/v1/actions/job1/retry"},
+			{"PUT", "/transcode/v1/drain"}, {"PUT", "/transcode/v1/pauses/" + transcode.DefaultWorkerName}, {"DELETE", "/transcode/v1/pauses/" + transcode.DefaultWorkerName},
+			{"POST", "/transcode/v1/recipe-bundle/reload"}, {"DELETE", "/transcode/v1/recipes/x"}, {"PUT", "/transcode/v1/workers/" + transcode.DefaultWorkerName + "/slots"},
+		} {
+			if c, k := code(t, write(h, rt[0], rt[1], body)); c != 400 || k != "invalid_request" {
+				t.Errorf("%s %s %s: %d %s", rt[0], rt[1], body, c, k)
+			}
 		}
-	} else if w.Code != 404 && w.Code != 503 {
-		// 404 or 503 when the podcast profile is not configured in this test
-		// server; the route was reached either way.
+	}
+	if cancel.n()+retry.n() != 0 {
+		t.Fatal("a non-object body reached a tool")
+	}
+}
+
+// The slot split needs video_slots, podcast_slots and revision: the console
+// would read a gap as "clear the split" or "no revision check".
+func TestTranscodeV1SlotsRequireTheirFields(t *testing.T) {
+	s, h := transcodeUI(t)
+	const p = "/transcode/v1/workers/" + transcode.DefaultWorkerName + "/slots"
+	st := s.engine.Deps().Store
+	for _, body := range []string{`{}`, `{"revision":0,"x265_slots":2}`, `{"video_slots":2,"podcast_slots":1}`, `{"video_slots":2,"revision":0}`, `{"video_slots":null,"podcast_slots":null,"revision":null}`} {
+		if c, k := code(t, write(h, "PUT", p, body)); c != 400 || k != "invalid_request" {
+			t.Errorf("%s: %d %s", body, c, k)
+		}
+	}
+	// A stale revision is the console's 409; nothing is stored.
+	if c, k := code(t, write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":99}`)); c != 409 || k != "conflict" {
+		t.Fatal("stale revision", c, k)
+	}
+	if row, _ := st.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil && row.Revision != 0 {
+		t.Fatal("a refused slot change was stored", row)
+	}
+	// With all three present the request reaches the console handler; this test
+	// worker cannot divide slots, so the handler refuses it (409), not the API.
+	if c, _ := code(t, write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":0}`)); c != 409 && c != 503 {
+		t.Fatal("explicit shared slots", c)
+	}
+}
+
+// Pausing a worker through the API changes what the read reports.
+func TestTranscodeV1PauseWritesChangeTheState(t *testing.T) {
+	_, h := transcodeUI(t)
+	p := "/transcode/v1/pauses/" + transcode.DefaultWorkerName
+	mode := func() string {
+		_, e := get(t, h, p, keyHdr())
+		m, _ := e["mode"].(string)
+		return m
+	}
+	if mode() != "" {
+		t.Fatal("starts paused", mode())
+	}
+	if w := write(h, "PUT", p, `{"mode":"graceful"}`); w.Code != 200 || mode() != "graceful" {
+		t.Fatal(w.Code, w.Body.String(), mode())
+	}
+	if w := write(h, "DELETE", p, ``); w.Code != 200 || mode() != "" {
+		t.Fatal(w.Code, w.Body.String(), mode())
+	}
+	if w := write(h, "PUT", p, `{"mode":"immediate"}`); w.Code != 200 || mode() != "immediate" {
+		t.Fatal(w.Code, w.Body.String(), mode())
+	}
+	if w := write(h, "PUT", p, `{"mode":"off"}`); w.Code != 200 || mode() != "" {
+		t.Fatal(w.Code, w.Body.String(), mode())
+	}
+	if w := write(h, "PUT", p, `{"builds_paused":true}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	write(h, "PUT", p, `{"builds_paused":false}`)
+}
+
+// The goal change with the REAL tool: a mode without the reviewed
+// selection_version (and idempotency key) is refused as a bad request and
+// nothing is applied.
+func TestTranscodeV1GoalChangeRealToolRefusesWithoutAVersion(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch1", "transcode_batch", "running", nil, nil, nil)
+	for _, body := range []string{`{"mode":"size"}`, `{"mode":"size","idempotency_key":"k1"}`, `{"mode":"size","selection_version":"v1"}`} {
+		w := write(h, "POST", "/transcode/v1/batches/batch1/goal", body)
+		if w.Code < 400 || w.Code >= 500 {
+			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	inst, _ := s.engine.Deps().Store.GetActionInstance("batch1")
+	if inst == nil || inst.Status != "running" {
+		t.Fatal("a refused goal change touched the batch", inst)
+	}
+}
+
+// Only an authorized write that succeeded empties the caches; an anonymous or
+// refused one, and the spec path, do not.
+func TestTranscodeV1CachesAreInvalidatedOnlyAfterASuccessfulWrite(t *testing.T) {
+	s, h := transcodeUI(t)
+	gen := func() uint64 { return s.arrLists.generation.Load() }
+	g := gen()
+	v1(h, "POST", transcodeapi.SpecPath, `{}`, nil)
+	v1(h, "POST", transcodeapi.SpecPath, `{}`, keyHdr())
+	v1(h, "PUT", "/transcode/v1/drain", `{"enabled":true}`, nil)
+	write(h, "PUT", "/transcode/v1/drain", `{"bad":1}`)
+	if gen() != g {
+		t.Fatal("a refused request emptied the caches")
+	}
+	if w := write(h, "PUT", "/transcode/v1/drain", `{"enabled":false}`); w.Code != 200 || gen() == g {
+		t.Fatal(w.Code, "a successful write left the caches")
+	}
+}
+
+// A write refusal keeps its meaning: stale state is 409, a bad or missing
+// parameter 400, a missing thing 404, an unreachable service 503.
+func TestWriteToolWriteErrorClassification(t *testing.T) {
+	for msg, want := range map[string]int{
+		`managed profile "x" changed: expected generation 2, current 3`:                 409,
+		`recipe version conflict: reviewed active or previous bundle changed`:           409,
+		`batch selection changed; reopen the settings`:                                  409,
+		`cuts approval is missing or stale`:                                             409,
+		`action already completed; cancellation was not applied`:                        409,
+		`action_resume blocked: candidate validation changed; review it again`:          409,
+		`discard_candidate needs confirm=true; the candidate stays`:                     400,
+		`both expected_active_digest and expected_previous_digest are required`:         400,
+		`approval must carry the digest of the reviewed replacement plan (plan_digest)`: 400,
+		`reviewed selection_version and idempotency_key are required`:                   400,
+		`expected_generation is required to delete managed profile "x"`:                 400,
+		`managed profile "x" does not exist; expected_generation cannot create it`:      400,
+		`action instance "a" not found`:                                                 404,
+		`node m1 unreachable`:                                                           503,
+		`discard needs allow_destructive on this server`:                                403,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code != want {
+			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		}
 	}
 }

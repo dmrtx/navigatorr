@@ -61,6 +61,10 @@ func v1Body(w http.ResponseWriter, r *http.Request, dst any, required bool) bool
 		transcodeapi.WriteError(w, 415, "unsupported_media_type", "the body must be JSON", "send Content-Type: application/json")
 		return false
 	}
+	if t := bytes.TrimSpace(raw); t[0] != '{' {
+		v1Bad(w, "invalid body: the body must be a JSON object", "")
+		return false
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
@@ -89,17 +93,22 @@ func v1Key(w http.ResponseWriter, r *http.Request, body string) (string, bool) {
 	return b, true
 }
 
-// conflictWords are what a tool's refusal says when the thing exists but its
-// state, revision, digest or version is not what the request expects.
-var conflictWords = regexp.MustCompile(`stale|mismatch|conflict|changed|already|generation|digest|expected|exact|no longer|not waiting|only an? |only failed|only finished|immutable|cannot|current status|requires current|blocked|uncertain|unreachable|not confirmed|no previous|does not exist`)
+// conflictWords are the phrases the tools and the engine use when the thing
+// exists but its state, revision, digest or version is not what the request
+// expects ("managed profile changed: expected generation", "batch selection
+// changed", "cuts approval is missing or stale", "recipe version conflict",
+// "approval requires current waiting review", "action_resume blocked: ...",
+// "action already completed", "candidate validation changed", "... already
+// exists"). Anything else the tool refuses is a bad parameter (400): a
+// missing flag or digest ("needs confirm=true", "are required", "must carry")
+// is never a conflict.
+var conflictWords = regexp.MustCompile(`stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match`)
 
 // v1WriteErr names how a write presents what its tool refused: the 404 and
-// hint as for a read, and the status of a refusal that is neither a missing
-// thing nor a conflict (400 for a bad parameter by default; routes whose only
-// possible refusal is the state of the thing say 409).
+// hint as for a read; a refusal that is neither a missing thing, an
+// unreachable service nor a conflict is a bad parameter (400).
 type v1WriteErr struct {
 	v1Err
-	fallback int
 }
 
 // writeToolWriteError presents the refusal msg of a write tool.
@@ -128,7 +137,9 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 		transcodeapi.WriteError(w, 404, code, msg, e.hint)
 	case strings.Contains(low, "allow_destructive"):
 		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
-	case conflictWords.MatchString(low) || e.fallback == 409:
+	case strings.Contains(low, "unreachable"):
+		transcodeapi.WriteError(w, 503, "unavailable", msg, "the worker or service did not answer; try again when it is back")
+	case conflictWords.MatchString(low):
 		hint := "read the current state, then retry with its current revision, digest or version"
 		if e.hint != "" {
 			hint = e.hint + "; " + hint
@@ -243,7 +254,7 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 	put := func(path string, fn http.HandlerFunc) { h["PUT "+b+path] = fn }
 	post := func(path string, fn http.HandlerFunc) { h["POST "+b+path] = fn }
 	del := func(path string, fn http.HandlerFunc) { h["DELETE "+b+path] = fn }
-	state := v1WriteErr{fallback: 409}
+	state := v1WriteErr{}
 
 	// Workers: slots, drain, pause.
 	put("/workers/{name}/slots", s.v1PutSlots)
@@ -322,7 +333,7 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 				v1Bad(w, "offset must be 0 or more", "")
 				return
 			}
-			args["offset"] = *body.Offset
+			args["offset"] = float64(*body.Offset)
 		}
 		s.v1WriteTool(w, r, "podcast_review", args, 200, v1WriteErr{v1Err: v1Err{notFound: "not_found", hint: "podcast writes need a clean_podcast_ads action: GET " + b + "/actions lists the actions"}})
 	})))
@@ -350,23 +361,25 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 	post("/batches/{id}/goal", s.v1PostGoal)
 
 	// Backups and leftover candidates.
-	backup := func(path, mode string, confirm bool) {
-		post(path, s.v1ActionWrite(withBody(confirm, func(w http.ResponseWriter, r *http.Request, body struct {
-			Confirm *bool `json:"confirm"`
-		}) {
-			if confirm && (body.Confirm == nil || !*body.Confirm) {
-				v1Bad(w, `this removes files for good: send {"confirm": true}`, "")
-				return
-			}
+	backup := func(path, mode string) {
+		post(path, s.v1ActionWrite(withBody(false, func(w http.ResponseWriter, r *http.Request, _ noBody) {
 			s.v1WriteTool(w, r, "transcode_backups", map[string]any{"mode": mode, "action_id": r.PathValue("id")}, 200, state)
 		})))
 	}
-	backup("/backups/{id}/clean", "clean", false)
-	backup("/backups/{id}/restore", "restore", false)
-	backup("/backups/{id}/discard-duplicate", "discard_duplicate", false)
+	backup("/backups/{id}/clean", "clean")
+	backup("/backups/{id}/restore", "restore")
+	backup("/backups/{id}/discard-duplicate", "discard_duplicate")
 	// discard removes a recovery copy WITHOUT verifying its replacement; the
 	// tool leaves it to the caller's intent, so the API asks for it in words.
-	backup("/backups/{id}/discard", "discard", true)
+	post("/backups/{id}/discard", s.v1ActionWrite(withBody(true, func(w http.ResponseWriter, r *http.Request, body struct {
+		Confirm *bool `json:"confirm"`
+	}) {
+		if body.Confirm == nil || !*body.Confirm {
+			v1Bad(w, `this removes files for good: send {"confirm": true}`, "")
+			return
+		}
+		s.v1WriteTool(w, r, "transcode_backups", map[string]any{"mode": "discard", "action_id": r.PathValue("id")}, 200, state)
+	})))
 	post("/backups/candidates/{id}/discard", s.v1ActionWrite(withBody(true, func(w http.ResponseWriter, r *http.Request, body struct {
 		Confirm *bool `json:"confirm"`
 	}) {
@@ -498,7 +511,7 @@ func (s *Server) v1BundleCall(tool, flag string, args func(w http.ResponseWriter
 		if !ok {
 			return
 		}
-		text, done := s.v1Call(w, r, tool, a, v1WriteErr{fallback: 409})
+		text, done := s.v1Call(w, r, tool, a, v1WriteErr{})
 		if !done {
 			return
 		}
@@ -523,7 +536,7 @@ func (s *Server) v1BundleCall(tool, flag string, args func(w http.ResponseWriter
 			msg = "the change was not applied"
 		}
 		if tool == "recipe_rollback" {
-			writeToolWriteError(w, msg, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/recipe-bundle shows the active and previous digests"}, fallback: 409})
+			writeToolWriteError(w, msg, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/recipe-bundle shows the active and previous digests"}})
 			return
 		}
 		transcodeapi.WriteError(w, 422, "rejected", msg, "the active bundle is unchanged: GET "+transcodeapi.BasePath+"/recipe-bundle shows its status")
@@ -560,7 +573,7 @@ func (s *Server) v1Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	args["idempotency_key"] = key
-	s.v1WriteTool(w, r, "action_run", args, 202, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/catalog lists the workflows and their inputs"}, fallback: 409})
+	s.v1WriteTool(w, r, "action_run", args, 202, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/catalog lists the workflows and their inputs"}})
 }
 
 // v1PostGoal changes the goal of an automatic batch. The first half of the
@@ -654,8 +667,8 @@ func (s *Server) v1PutSlots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		VideoSlots   int    `json:"video_slots"`
-		PodcastSlots int    `json:"podcast_slots"`
+		VideoSlots   *int   `json:"video_slots"`
+		PodcastSlots *int   `json:"podcast_slots"`
 		Ceiling      int    `json:"ceiling"`
 		X265Slots    *int   `json:"x265_slots"`
 		CoreBudget   *int   `json:"core_budget"`
@@ -664,10 +677,24 @@ func (s *Server) v1PutSlots(w http.ResponseWriter, r *http.Request) {
 	if !v1Body(w, r, &body, true) {
 		return
 	}
+	// The console reads a missing slot count as 0 (back to shared slots) and a
+	// missing revision as "no check": a request that forgets them must not
+	// clear a split or skip the revision test, so all three are required.
+	if body.VideoSlots == nil || body.PodcastSlots == nil || body.Revision == nil {
+		v1Bad(w, "video_slots, podcast_slots and revision are required (0 and 0 return the worker to shared slots; read revision with GET "+transcodeapi.BasePath+"/workers/{name}/slots)", "")
+		return
+	}
+	legacy := map[string]any{"video_slots": *body.VideoSlots, "podcast_slots": *body.PodcastSlots, "ceiling": body.Ceiling, "revision": *body.Revision}
+	if body.X265Slots != nil {
+		legacy["x265_slots"] = *body.X265Slots
+	}
+	if body.CoreBudget != nil {
+		legacy["core_budget"] = *body.CoreBudget
+	}
 	worker, _ := s.engine.Deps().Workers.Get(name)
 	if _, ok := worker.Executor.(workerSlotController); !ok {
 		transcodeapi.WriteError(w, 409, "conflict", "slot assignment requires the HTTP video worker", "GET "+transcodeapi.BasePath+"/workers/"+url.PathEscape(name)+"/slots says whether this worker supports it")
 		return
 	}
-	s.v1LegacyWrite(w, r, s.workerSlots, url.Values{"node": {name}}, body, v1Err{notFound: "unknown_worker", hint: hintWorkers})
+	s.v1LegacyWrite(w, r, s.workerSlots, url.Values{"node": {name}}, legacy, v1Err{notFound: "unknown_worker", hint: hintWorkers})
 }

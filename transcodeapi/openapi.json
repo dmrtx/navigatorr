@@ -325,7 +325,7 @@
         ],
         "operationId": "putWorkerSlots",
         "summary": "Change a worker's slot split",
-        "description": "Stores and pushes the worker's slot split (the console's handler). Read the current settings with GET first and send settings.revision as revision: a stale revision is a 409 and nothing is changed. A worker that cannot divide slots answers 409.",
+        "description": "Stores and pushes the worker's slot split (the console's handler). video_slots, podcast_slots and revision are required: read settings.revision with GET first (a stale revision is a 409 and nothing is changed); 0 and 0 return the worker to shared slots; ceiling is optional (0 keeps the stored one). A worker that cannot divide slots answers 409.",
         "responses": {
           "200": {
             "description": "The stored and applied settings.",
@@ -418,6 +418,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -477,7 +487,12 @@
                   "revision": {
                     "type": "integer"
                   }
-                }
+                },
+                "required": [
+                  "video_slots",
+                  "podcast_slots",
+                  "revision"
+                ]
               }
             }
           }
@@ -882,6 +897,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -915,7 +940,10 @@
                   "enabled": {
                     "type": "boolean"
                   }
-                }
+                },
+                "required": [
+                  "enabled"
+                ]
               }
             }
           }
@@ -1194,6 +1222,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -1272,6 +1310,16 @@
               }
             }
           },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
             "content": {
@@ -1322,6 +1370,36 @@
               }
             }
           },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -1353,7 +1431,20 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Empty, or an empty JSON object.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/actions": {
@@ -1592,6 +1683,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3789,6 +3890,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -3946,6 +4057,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -4817,6 +4938,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -4960,6 +5091,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5126,6 +5267,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -5265,6 +5416,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5419,6 +5580,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -5521,6 +5692,16 @@
           },
           "400": {
             "description": "A parameter is invalid (code invalid_request); the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5672,6 +5853,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5880,6 +6071,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -6019,6 +6220,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6174,6 +6385,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -6313,6 +6534,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6467,6 +6698,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -6639,6 +6880,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -6785,6 +7036,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -6921,6 +7182,16 @@
               }
             }
           },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -6988,6 +7259,16 @@
               }
             }
           },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
             "content": {
@@ -7038,6 +7319,36 @@
               }
             }
           },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "503": {
             "description": "The capability is switched off on this server (code unavailable).",
             "content": {
@@ -7078,7 +7389,20 @@
               "type": "string"
             }
           }
-        ]
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Empty, or an empty JSON object.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {}
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/review-queue/{id}/close": {
@@ -7173,6 +7497,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -7334,6 +7668,16 @@
           },
           "415": {
             "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
             "content": {
               "application/json": {
                 "schema": {

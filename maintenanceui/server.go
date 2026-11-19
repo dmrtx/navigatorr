@@ -312,10 +312,21 @@ func (s *Server) Handler() http.Handler {
 		served := time.Now()
 		// Requests already being served when this one began (not counting itself).
 		others := s.inFlight.Add(1) - 1
+		// A transcode write invalidates the caches only when it succeeded.
+		transcodeWrite := strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath && r.Method != http.MethodGet && r.Method != http.MethodHead
+		sw := &statusWriter{ResponseWriter: w, status: 200}
 		func() {
 			defer s.inFlight.Add(-1)
-			mux.ServeHTTP(w, r)
+			if transcodeWrite {
+				mux.ServeHTTP(sw, r)
+			} else {
+				mux.ServeHTTP(w, r)
+			}
 		}()
+		if transcodeWrite && sw.status/100 == 2 {
+			s.fileStatusCache.invalidate()
+			s.arrLists.forget()
+		}
 		if d := time.Since(served); d > slowRequest && strings.HasPrefix(r.URL.Path, "/api/") {
 			// Only the path: a query can carry file names. The timing says which
 			// step waited, and the count whether other requests were in the way.
@@ -323,7 +334,7 @@ func (s *Server) Handler() http.Handler {
 			// file name or request value in one, since it is logged here as it is.
 			log.Printf("slow request: %s %s took %s (%d other requests in flight when it began) %s", r.Method, r.URL.Path, d.Round(time.Millisecond), others, w.Header().Get("Server-Timing"))
 		}
-		if (strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/")) && r.Method != http.MethodGet && r.Method != http.MethodHead &&
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && r.Method != http.MethodHead &&
 			r.URL.Path != "/api/maintenance/login" && r.URL.Path != "/api/maintenance/logout" {
 			// (Signing in or out changes nothing the listings show, and anyone can
 			// post to login, so it must not be a way to empty the caches.)
@@ -597,3 +608,16 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, res)
 }
+
+// statusWriter remembers the status a handler answered with.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
