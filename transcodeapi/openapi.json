@@ -3,7 +3,7 @@
   "info": {
     "title": "Transcode",
     "version": "1.0.0",
-    "description": "Transcode is the video and podcast conversion side of Navigatorr: workers (machines that encode), durable actions (one file, a batch of files, podcast ad cleaning), encoding recipes, candidates and promotion backups. This version is READ-ONLY: it tells you what exists and what is happening; starting, holding, cancelling, pausing, draining and replacing arrive in a later version and are still done with the existing MCP tools. Start with GET /transcode/v1/workers to see the machines, GET /transcode/v1/actions?status=running to see what is encoding, and GET /transcode/v1/actions/{id} for one conversion. Paths use {id} for an action or batch id, {name} for a worker or recipe. Lists are offset-based: send offset and limit, follow next_offset until has_more is false. Errors are JSON {error, code, hint}; the hint names the endpoint to use instead. Authentication: X-Api-Key (or Authorization: Bearer) with the transcode API key; this document is public."
+    "description": "Transcode is the video and podcast conversion side of Navigatorr: workers (machines that encode), durable actions (one file, a batch of files, podcast ad cleaning), encoding recipes, candidates and promotion backups. This version is READ-ONLY: it tells you what exists and what is happening; starting, holding, cancelling, pausing, draining and replacing arrive in a later version and are still done with the existing MCP tools. Start with GET /transcode/v1/workers to see the machines, GET /transcode/v1/actions?status=running to see what is encoding, and GET /transcode/v1/actions/{id} for one conversion. Paths use {id} for an action or batch id, {name} for a worker or recipe. Lists are offset-based: send offset and limit, follow next_offset until has_more is false (/history is the exception: the audit log has no offset, it answers count and records). Errors are JSON {error, code, hint}; the hint names the endpoint to use instead. Authentication: X-Api-Key (or Authorization: Bearer) with the transcode API key; this document is public."
   },
   "tags": [
     {
@@ -1651,7 +1651,7 @@
         ],
         "operationId": "listHistory",
         "summary": "Search the action audit log",
-        "description": "The audit log of the transcode workflows (what each action did: completed, failed, retried, cancelled), newest first, searchable by media title or path (media) and service. Only entries of transcode actions are returned; other services' history is not reachable here. The log has no offset: the newest 100 matching entries are read and then cut to the transcode ones, so with a busy log a page can hold fewer than limit entries. Read-only.",
+        "description": "The audit log of the transcode workflows (what each action did: completed, failed, retried, cancelled), newest first, searchable by media title or path (media) and service. Only entries of transcode actions are returned; other services' history is not reachable here. The log has no offset, has_more or next_offset: the newest 100 matching entries (fewer when they would not fit in one response; it retries with fewer, down to limit) are read and then cut to the transcode ones, so with a busy log a page can hold fewer than limit entries. An action that is a log event (action_completed, action_failed, action_retry, action_cancelled) narrows the read itself; a workflow name is applied after it. Read-only.",
         "responses": {
           "200": {
             "description": "The records.",
@@ -3256,7 +3256,7 @@
             }
           },
           "503": {
-            "description": "The capability is switched off on this server (code unavailable).",
+            "description": "The capability is switched off on this server, or podcasts are disabled (code unavailable).",
             "content": {
               "application/json": {
                 "schema": {

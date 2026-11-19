@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -620,6 +622,167 @@ func TestTranscodeV1PodcastsDisabledIs503(t *testing.T) {
 	// Enabled: an unknown or disabled profile is a 404.
 	s.cfg.Podcasts.Enabled = true
 	for _, p := range []string{"/transcode/v1/podcasts/nope/ad-library", "/transcode/v1/podcasts/nope/local-library"} {
+		if c, e := get(t, h, p, keyHdr()); c != 404 || e["code"] != "unknown_podcast" {
+			t.Errorf("%s: %d %v", p, c, e)
+		}
+	}
+}
+
+// When the tool says the newest 100 entries do not fit, fewer are read (the
+// underlying limit is halved down to the client's) so a subset is reachable;
+// only when even the client's limit does not fit is it a 502, whose hint names
+// filters that really narrow the read.
+func TestTranscodeV1HistoryRetriesSmallerWhenTooLarge(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "completed", nil, nil, nil)
+	var seen []int
+	maxFit := 10
+	fakeTool(s, "action_history", func(a map[string]any) (*mcp.CallToolResult, error) {
+		n, _ := a["limit"].(int)
+		seen = append(seen, n)
+		if n > maxFit {
+			return mcp.NewToolResultText(`{"error":"response_too_large","size_bytes":99999,"limit_bytes":65536}`), nil
+		}
+		return mcp.NewToolResultText(`{"count":2,"records":[{"action":"action_completed","identifiers":"job1"},{"action":"action_completed","identifiers":"job1"}]}`), nil
+	})
+	c, body := get(t, h, "/transcode/v1/history?limit=1", keyHdr())
+	if c != 200 || body["count"] != float64(1) || fmt.Sprint(seen) != "[100 50 25 12 6]" {
+		t.Fatal(c, body, seen)
+	}
+	// Nothing fits, not even the client's limit: 502 with an accurate hint.
+	maxFit, seen = 0, nil
+	c, e := get(t, h, "/transcode/v1/history?limit=3", keyHdr())
+	hint, _ := e["hint"].(string)
+	if c != 502 || e["code"] != "response_too_large" || fmt.Sprint(seen) != "[100 50 25 12 6 3]" || !strings.Contains(hint, "action_completed") || !strings.Contains(hint, "after the read") {
+		t.Fatal(c, e, seen)
+	}
+	// An event name reaches the tool; a workflow name is applied afterwards.
+	maxFit = 100
+	var gotAction any
+	fakeTool(s, "action_history", func(a map[string]any) (*mcp.CallToolResult, error) {
+		gotAction = a["action"]
+		return mcp.NewToolResultText(`{"count":0,"records":null}`), nil
+	})
+	if c, _ := get(t, h, "/transcode/v1/history?action=action_failed", keyHdr()); c != 200 || gotAction != "action_failed" {
+		t.Fatal(c, gotAction)
+	}
+}
+
+// With nothing logged the real tool answers an empty page: 200 with [].
+func TestTranscodeV1HistoryEmptyIsAnEmptyList(t *testing.T) {
+	s, h := transcodeUI(t)
+	tools.RegisterDiagnostics(s.mcp, s.cfg, s.registry, nil, nil, nil, nil, s.engine.Deps().Store, s.engine.Deps().Workers)
+	w := v1(h, "GET", "/transcode/v1/history?media=no-such-title", "", keyHdr())
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"records":[]`) || !strings.Contains(w.Body.String(), `"count":0`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// The detail of a legacy handler's 500 goes to the log, not to the caller.
+func TestTranscodeV1LegacyServerErrorDoesNotLeak(t *testing.T) {
+	s, _ := transcodeUI(t)
+	var logged strings.Builder
+	log.SetOutput(&logged)
+	defer log.SetOutput(os.Stderr)
+	for status, wantCode := range map[int]string{500: "internal", 503: "unavailable"} {
+		logged.Reset()
+		fn := s.v1Legacy(func(w http.ResponseWriter, _ *http.Request) { fail(w, status, "read /secret/path: disk on fire") }, nil, v1Err{})
+		w := httptest.NewRecorder()
+		fn(w, httptest.NewRequest("GET", "/x", nil))
+		var e map[string]string
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		if w.Code != status || e["code"] != wantCode || strings.Contains(w.Body.String(), "secret") || !strings.Contains(logged.String(), "disk on fire") {
+			t.Errorf("%d: %d %s (log %q)", status, w.Code, w.Body.String(), logged.String())
+		}
+	}
+	// A 4xx of the handler is the caller's and keeps its message.
+	fn := s.v1Legacy(func(w http.ResponseWriter, _ *http.Request) { fail(w, 400, "invalid limit") }, nil, v1Err{})
+	w := httptest.NewRecorder()
+	fn(w, httptest.NewRequest("GET", "/x", nil))
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "invalid limit") || !strings.Contains(w.Body.String(), `"hint"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// The podcast block route refuses HEAD, so its 405 says Allow: GET; the others
+// say GET, HEAD. A write to the spec is a 405 too (public or not, it only
+// answers GET and HEAD).
+func TestTranscodeV1AllowHeaderAndSpecWrites(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "pod1", "clean_podcast_ads", "waiting_decision", nil, nil, nil)
+	for p, want := range map[string]string{
+		"/transcode/v1/actions/pod1/podcast/blocks/b1": "GET",
+		"/transcode/v1/actions/pod1/podcast/blocks":    "GET, HEAD",
+		"/transcode/v1/workers":                        "GET, HEAD",
+	} {
+		if w := v1(h, "POST", p, "{}", keyHdr()); w.Code != 405 || w.Header().Get("Allow") != want {
+			t.Errorf("POST %s: %d Allow %q, want %q", p, w.Code, w.Header().Get("Allow"), want)
+		}
+	}
+	for _, hd := range []map[string]string{nil, keyHdr()} {
+		w := v1(h, "POST", transcodeapi.SpecPath, "{}", hd)
+		var e map[string]string
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		if w.Code != 405 || e["code"] != "method_not_allowed" || w.Header().Get("Allow") != "GET, HEAD" || strings.Contains(w.Body.String(), `"paths"`) {
+			t.Errorf("POST spec: %d %s", w.Code, w.Body.String())
+		}
+	}
+	if w := v1(h, "GET", transcodeapi.SpecPath, "", nil); w.Code != 200 {
+		t.Fatal("the spec stays public", w.Code)
+	}
+}
+
+// Paging of the two legacy-backed lists is validated, never defaulted.
+func TestTranscodeV1LegacyPagingIsValidated(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch", "transcode_batch", "completed", nil, nil, nil)
+	for _, p := range []string{
+		"/transcode/v1/batches/batch/items?limit=abc", "/transcode/v1/batches/batch/items?offset=-1", "/transcode/v1/batches/batch/items?limit=0",
+		"/transcode/v1/review-queue?limit=abc", "/transcode/v1/review-queue?offset=-1", "/transcode/v1/review-queue?limit=0", "/transcode/v1/review-queue?limit=1001",
+	} {
+		c, e := get(t, h, p, keyHdr())
+		if c != 400 || e["code"] != "invalid_request" || e["hint"] == "" {
+			t.Errorf("%s: %d %v", p, c, e)
+		}
+	}
+}
+
+// A 404 of a batch sub-resource (the batch exists) is the generic not_found.
+func TestTranscodeV1BatchSubResourceNotFoundIsGeneric(t *testing.T) {
+	s, _ := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch", "transcode_batch", "completed", nil, nil, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /b/{id}", s.v1Batch(func(w http.ResponseWriter, _ *http.Request) { fail(w, 404, "file not found") }, func(*http.Request) url.Values { return url.Values{} }))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/b/batch", nil))
+	var e map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &e)
+	if w.Code != 404 || e["code"] != "not_found" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/b/nope", nil))
+	_ = json.Unmarshal(w.Body.Bytes(), &e)
+	if w.Code != 404 || e["code"] != "batch_not_found" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// GET /podcasts answers 503 when podcasts are off, like the profile routes; a
+// profile that is configured but disabled is a 404 unknown_podcast.
+func TestTranscodeV1PodcastListFollowsTheSwitch(t *testing.T) {
+	s, h := transcodeUI(t)
+	s.cfg.Podcasts.Enabled = false
+	if c, e := get(t, h, "/transcode/v1/podcasts", keyHdr()); c != 503 || e["code"] != "unavailable" {
+		t.Fatal(c, e)
+	}
+	s.cfg.Podcasts.Enabled = true
+	s.cfg.Podcasts.Podcasts = map[string]config.PodcastSettings{"on": {Enabled: true}, "off": {Enabled: false}}
+	c, e := get(t, h, "/transcode/v1/podcasts", keyHdr())
+	if c != 200 || e["enabled"] != true || fmt.Sprint(e["podcasts"]) != "[on]" {
+		t.Fatal(c, e)
+	}
+	for _, p := range []string{"/transcode/v1/podcasts/off/local-library", "/transcode/v1/podcasts/off/ad-library"} {
 		if c, e := get(t, h, p, keyHdr()); c != 404 || e["code"] != "unknown_podcast" {
 			t.Errorf("%s: %d %v", p, c, e)
 		}

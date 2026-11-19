@@ -42,17 +42,22 @@ call_api    service=transcode method=GET path=/actions/{id}
 - The key is read once at startup from `web.transcode_token_file`, compared by
   hash, and opens `/transcode/v1` and nothing else. It is not the builds token.
 - With no key configured, only the console sign-in works.
-- Any method but GET answers `405 method_not_allowed` (with `Allow: GET, HEAD`).
+- Any method but GET answers `405 method_not_allowed` (with `Allow: GET, HEAD`,
+  or `Allow: GET` on the podcast block route, which refuses HEAD). This holds
+  for `/openapi.json` too: reading it is public, writing to it is a 405.
 
 Errors are JSON `{"error", "code", "hint"}`. Codes: `invalid_request` (400),
 `unauthorized` (401), `not_found` (404, plus `unknown_worker`, `action_not_found`,
 `batch_not_found`, `recipe_not_found`, `unknown_podcast`), `method_not_allowed`
 (405), `conflict` (409), `unavailable` (503, the capability is switched off;
-the podcast routes answer it too when podcasts are disabled, and 404
+every podcast route, `GET /podcasts` included, answers it when podcasts are
+disabled, and 404
 `unknown_podcast` only for a profile that does not exist or is off),
 `response_too_large` (502, the answer would not fit: narrow the request with a
 smaller `limit`, a later `offset`, a section or a key), `internal` (500, a fault
-of the server; the cause is in its log, not in the answer).
+of the server; the cause is in its log, not in the answer). Every 5xx a
+maintenance handler behind this API answers is presented the same way: the
+original message is logged and the caller gets a generic one.
 
 A 404 of a thing inside an existing action (a `key`, a step) is the generic
 `not_found` with a hint, not `action_not_found`, which means the action itself.
@@ -63,7 +68,8 @@ a parameter is 400.
 
 Every list is offset based: send `offset` (from 0) and, where it exists,
 `limit`. The answer carries `has_more` and, except batch items, `next_offset`;
-follow `next_offset` until `has_more` is false.
+follow `next_offset` until `has_more` is false. The exception is `/history`: the
+audit log has no offset, so it answers `{count, records}` only (see below).
 
 - Pages can be **short or empty and still have more**: `/actions` pages the
   engine and then keeps only transcode workflows, `/backups/candidates` pages
@@ -77,6 +83,12 @@ follow `next_offset` until `has_more` is false.
   (`verbose`, `unknown_only`, `include_selection_details`) must be `true`,
   `false`, `1` or `0`. An empty value counts as absent.
 - `/recipes/{name}/history` limit is 1-50.
+- `/history` reads the newest 100 matching log entries (fewer when they would
+  not fit in one response: it then retries with fewer, down to `limit`), keeps
+  the transcode ones and cuts them to `limit`; it has no `offset`, `has_more` or
+  `next_offset`. `action` set to a log event (`action_completed`, `action_failed`,
+  `action_retry`, `action_cancelled`) narrows the read itself; a workflow name is
+  applied after it. If even `limit` entries do not fit, it is a 502.
 
 ## Routes
 

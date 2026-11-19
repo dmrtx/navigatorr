@@ -143,30 +143,11 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 	})
 
 	// Batches (a batch is an action of kind transcode_batch).
-	batch := func(fn http.HandlerFunc, query func(r *http.Request) url.Values) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			id := r.PathValue("id")
-			inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
-			if err != nil {
-				transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
-				return
-			}
-			if inst == nil || inst.ActionName != "transcode_batch" {
-				transcodeapi.WriteError(w, 404, "batch_not_found", "batch not found", "GET "+b+"/actions?status=all lists actions; a batch has action_name transcode_batch")
-				return
-			}
-			s.v1Legacy(fn, func(r *http.Request) url.Values {
-				v := query(r)
-				v.Set("id", id)
-				return v
-			}, v1Err{notFound: "batch_not_found", hint: "GET " + b + "/actions lists actions; a batch has action_name transcode_batch"})(w, r)
-		}
-	}
-	get("/batches/{id}/items", batch(s.batchItems, func(r *http.Request) url.Values { return pick(r, "offset", "limit", "child") }))
-	get("/batches/{id}/settings", batch(s.batchSettings, func(r *http.Request) url.Values { return pick(r, "scope", "candidate_id", "item_key") }))
-	get("/batches/{id}/candidates", batch(s.batchCandidates, func(r *http.Request) url.Values { return url.Values{} }))
-	get("/batches/{id}/promotion-plan", batch(s.batchCandidates, func(r *http.Request) url.Values { return url.Values{"plan": {"1"}} }))
-	get("/batches/{id}/preview", batch(s.batchPreview, func(r *http.Request) url.Values { return url.Values{} }))
+	get("/batches/{id}/items", s.v1Batch(s.batchItems, func(r *http.Request) url.Values { return pick(r, "offset", "limit", "child") }))
+	get("/batches/{id}/settings", s.v1Batch(s.batchSettings, func(r *http.Request) url.Values { return pick(r, "scope", "candidate_id", "item_key") }))
+	get("/batches/{id}/candidates", s.v1Batch(s.batchCandidates, func(r *http.Request) url.Values { return url.Values{} }))
+	get("/batches/{id}/promotion-plan", s.v1Batch(s.batchCandidates, func(r *http.Request) url.Values { return url.Values{"plan": {"1"}} }))
+	get("/batches/{id}/preview", s.v1Batch(s.batchPreview, func(r *http.Request) url.Values { return url.Values{} }))
 
 	// Backups and leftover candidates.
 	get("/backups", s.v1Tool("transcode_backups", func(r *http.Request) (map[string]any, string) {
@@ -189,12 +170,22 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 	get("/recipe-bundle", s.v1Tool("recipe_status", func(*http.Request) (map[string]any, string) { return map[string]any{}, "" }, v1Err{}))
 
 	// Podcasts.
-	get("/podcasts", s.v1Legacy(s.podcasts, nil, v1Err{}))
+	podcastsOff := func(w http.ResponseWriter) bool {
+		if s.cfg.Podcasts.Enabled {
+			return false
+		}
+		transcodeapi.WriteError(w, 503, "unavailable", "podcasts are switched off on this server", "")
+		return true
+	}
+	get("/podcasts", func(w http.ResponseWriter, r *http.Request) {
+		if !podcastsOff(w) {
+			s.v1Legacy(s.podcasts, nil, v1Err{})(w, r)
+		}
+	})
 	podcast := func(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			id := r.PathValue("id")
-			if !s.cfg.Podcasts.Enabled {
-				transcodeapi.WriteError(w, 503, "unavailable", "podcasts are switched off on this server", "")
+			if podcastsOff(w) {
 				return
 			}
 			if p, ok := s.cfg.Podcasts.Podcasts[id]; !ok || !p.Enabled {
@@ -216,6 +207,31 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 		return pick(r, "state", "issue_type", "sort", "q", "offset", "limit")
 	}, v1Err{}))
 	return h
+}
+
+// v1Batch serves a batch sub-resource with the legacy handler fn. The batch
+// is known to exist by the time fn runs, so a 404 of fn is about something
+// inside it (a file, a candidate): the generic not_found, never batch_not_found.
+func (s *Server) v1Batch(fn http.HandlerFunc, query func(r *http.Request) url.Values) http.HandlerFunc {
+	const b = transcodeapi.BasePath
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
+		if err != nil {
+			log.Printf("transcode v1: reading batch %q: %v", id, err)
+			transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
+			return
+		}
+		if inst == nil || inst.ActionName != "transcode_batch" {
+			transcodeapi.WriteError(w, 404, "batch_not_found", "batch not found", "GET "+b+"/actions?status=all lists actions; a batch has action_name transcode_batch")
+			return
+		}
+		s.v1Legacy(fn, func(r *http.Request) url.Values {
+			v := query(r)
+			v.Set("id", id)
+			return v
+		}, v1Err{})(w, r)
+	}
 }
 
 // pick copies the named query parameters of r that are present.
@@ -284,6 +300,15 @@ func (w *shapedWriter) finish() {
 	if w.status == 404 && w.e.notFound != "" {
 		code = w.e.notFound
 	}
+	if w.status >= 500 {
+		// A fault of the server: the cause goes to the log and never to the
+		// caller, as for a tool's Go error (writeToolFault).
+		log.Printf("transcode v1: legacy handler answered %d: %s", w.status, body.Error)
+		body.Error = "the request could not be completed"
+		if w.status == 503 {
+			body.Error = "this endpoint is not available on this server"
+		}
+	}
 	h := w.ResponseWriter.Header()
 	h.Del("Content-Length")
 	h.Del("Etag")
@@ -291,6 +316,9 @@ func (w *shapedWriter) finish() {
 	hint := ""
 	if w.status == 400 || w.status == 404 {
 		hint = w.e.hint
+	}
+	if w.status == 400 && hint == "" {
+		hint = "GET " + transcodeapi.SpecPath + " describes the parameters"
 	}
 	transcodeapi.WriteError(w.ResponseWriter, w.status, code, body.Error, hint)
 }
@@ -483,6 +511,7 @@ func (s *Server) v1ActionTool(tool string, args func(r *http.Request) (map[strin
 func (s *Server) checkTranscodeAction(w http.ResponseWriter, id string) bool {
 	inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
 	if err != nil {
+		log.Printf("transcode v1: reading action %q: %v", id, err)
 		transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
 		return false
 	}
@@ -633,8 +662,9 @@ var logEvents = []string{"action_completed", "action_failed", "action_retry", "a
 // transcode action instance, and no other service's history is reachable.
 // The filter `action` is a transcode workflow name (entries of its instances)
 // or a log event (action_completed, ...); anything else is a 400. The log has
-// no offset, so the newest 100 entries matching media and service are read and
-// then filtered: with a busy log the page can hold fewer than limit entries.
+// no offset, so the newest 100 entries matching media, service and event are
+// read (fewer when the tool answers that they do not fit) and then filtered:
+// with a busy log the page can hold fewer than limit entries.
 func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	args, bad := v1Params(r, pInt("limit", 1, 100))
@@ -657,20 +687,34 @@ func (s *Server) v1History(w http.ResponseWriter, r *http.Request) {
 		transcodeapi.WriteError(w, 400, "invalid_request", "action must be a transcode workflow ("+strings.Join(transcodeActionNames(), ", ")+") or a log event ("+strings.Join(logEvents, ", ")+")", "GET "+transcodeapi.BasePath+"/catalog lists the workflows")
 		return
 	}
-	text, errText, found, err := s.callTool(r.Context(), "action_history", map[string]any{"media": q.Get("media"), "service": q.Get("service"), "action": event, "limit": 100})
-	switch {
-	case !found:
-		transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server (its capability is switched off)", "")
-		return
-	case err != nil:
-		writeToolFault(w, "action_history", err)
-		return
-	case errText != "":
-		writeToolError(w, errText, v1Err{})
-		return
-	case toolTooLarge(text):
-		writeTooLarge(w, "narrow with media, service or action")
-		return
+	// The tool answers a note instead of a page that would not fit its size
+	// limit. Read fewer rows then: halve the underlying limit down to the one
+	// asked for before giving up, so a useful subset is always reachable.
+	var text string
+	for rows := 100; ; {
+		var errText string
+		var found bool
+		var err error
+		text, errText, found, err = s.callTool(r.Context(), "action_history", map[string]any{"media": q.Get("media"), "service": q.Get("service"), "action": event, "limit": rows})
+		switch {
+		case !found:
+			transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server (its capability is switched off)", "")
+			return
+		case err != nil:
+			writeToolFault(w, "action_history", err)
+			return
+		case errText != "":
+			writeToolError(w, errText, v1Err{})
+			return
+		case toolTooLarge(text):
+			if rows <= limit {
+				writeTooLarge(w, "narrow with media, service or action (action_completed, action_failed, action_retry or action_cancelled; a workflow name is applied after the read and does not narrow it)")
+				return
+			}
+			rows = max(limit, rows/2)
+			continue
+		}
+		break
 	}
 	var page struct {
 		Records []map[string]any `json:"records"`

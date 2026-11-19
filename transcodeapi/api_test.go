@@ -164,6 +164,37 @@ func TestRoutesAnswerAndTheRestIsJSONErrors(t *testing.T) {
 	}
 }
 
+// The Allow header of a 405 names the methods the route really serves: GET
+// only for a route that refuses HEAD, GET and HEAD for every other, and the
+// spec path refuses writes with a 405 too, not a 404.
+func TestAllowHeaderFollowsTheRoute(t *testing.T) {
+	h, err := NewHandler(stubHandlers())
+	if err != nil {
+		t.Fatal(err)
+	}
+	noHead := 0
+	for _, r := range Routes() {
+		p := strings.NewReplacer("{name}", "m1", "{id}", "job1", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript").Replace(r.Path)
+		want := "GET, HEAD"
+		if r.NoHead {
+			want = "GET"
+			noHead++
+		}
+		if _, _, hdr := do(t, h, "DELETE", p); hdr.Get("Allow") != want {
+			t.Errorf("DELETE %s: Allow %q, want %q", p, hdr.Get("Allow"), want)
+		}
+	}
+	if noHead != 1 {
+		t.Errorf("%d routes refuse HEAD, want 1 (the podcast block)", noHead)
+	}
+	for _, m := range []string{"POST", "PUT", "DELETE"} {
+		code, body, hdr := do(t, h, m, SpecPath)
+		if code != 405 || body["code"] != "method_not_allowed" || hdr.Get("Allow") != "GET, HEAD" {
+			t.Errorf("%s %s = %d %v %q", m, SpecPath, code, body, hdr.Get("Allow"))
+		}
+	}
+}
+
 func TestCodeForStatus(t *testing.T) {
 	for st, want := range map[int]string{400: "invalid_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 405: "method_not_allowed", 409: "conflict", 503: "unavailable", 500: "internal", 502: "internal"} {
 		if got := CodeForStatus(st); got != want {

@@ -46,6 +46,10 @@ func SpecHandler() http.Handler {
 type Route struct {
 	Method string
 	Path   string // OpenAPI form, e.g. /transcode/v1/actions/{id}
+	// NoHead marks a route that answers GET only, because reading it has an
+	// effect a HEAD must not have. The 405 of any other method says
+	// Allow: GET for it, not GET, HEAD.
+	NoHead bool
 }
 
 // Key is the "METHOD /path" form Handlers is keyed by.
@@ -54,7 +58,7 @@ func (r Route) Key() string { return r.Method + " " + r.Path }
 // Routes lists every operation of the API (the spec is checked against it).
 // Order is the order the spec presents them in.
 func Routes() []Route {
-	g := func(p string) Route { return Route{"GET", BasePath + p} }
+	g := func(p string) Route { return Route{Method: "GET", Path: BasePath + p} }
 	return []Route{
 		g("/workers"),
 		g("/workers/{name}"),
@@ -68,7 +72,7 @@ func Routes() []Route {
 		g("/actions/{id}"),
 		g("/actions/{id}/detail/{section}"),
 		g("/actions/{id}/podcast/blocks"),
-		g("/actions/{id}/podcast/blocks/{block_id}"),
+		{Method: "GET", Path: BasePath + "/actions/{id}/podcast/blocks/{block_id}", NoHead: true},
 		g("/actions/{id}/podcast/artifacts/{artifact}"),
 		g("/history"),
 		g("/catalog"),
@@ -100,6 +104,7 @@ type Handlers map[string]http.HandlerFunc
 func NewHandler(handlers Handlers) (http.Handler, error) {
 	want := map[string]bool{}
 	paths := http.NewServeMux()
+	allow := map[string]string{} // path pattern -> Allow header of its 405
 	mux := http.NewServeMux()
 	for _, r := range Routes() {
 		want[r.Key()] = true
@@ -109,6 +114,10 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 		}
 		mux.HandleFunc(r.Key(), fn)
 		paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
+		allow[r.Path] = "GET, HEAD"
+		if r.NoHead {
+			allow[r.Path] = "GET"
+		}
 	}
 	var extra []string
 	for k := range handlers {
@@ -121,8 +130,16 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 		return nil, fmt.Errorf("transcodeapi: handlers for routes that are not in Routes(): %v", extra)
 	}
 	mux.HandleFunc(BasePath+"/", func(w http.ResponseWriter, r *http.Request) {
-		if _, pattern := paths.Handler(r); pattern != "" {
+		if r.URL.Path == SpecPath && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			// The spec is served by the caller's own GET route; any other
+			// method lands here.
 			w.Header().Set("Allow", "GET, HEAD")
+			WriteError(w, 405, "method_not_allowed", "this endpoint is read-only: only GET is served",
+				"GET "+SpecPath+" lists the endpoints of this API; writes arrive in a later version")
+			return
+		}
+		if _, pattern := paths.Handler(r); pattern != "" {
+			w.Header().Set("Allow", allow[pattern])
 			WriteError(w, 405, "method_not_allowed", "this endpoint is read-only: only GET is served",
 				"GET "+SpecPath+" lists the endpoints of this API; writes arrive in a later version")
 			return
