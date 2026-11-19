@@ -4,14 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/jakenesler/navigatorr/transcodeapi"
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 )
 
 // recorder replaces a tool with a fake that stores the arguments of each call
@@ -525,28 +531,88 @@ func TestTranscodeV1WriteBodiesMustBeObjects(t *testing.T) {
 	}
 }
 
-// The slot split needs video_slots, podcast_slots and revision: the console
-// would read a gap as "clear the split" or "no revision check".
+// transcodeSlotUI is the transcode API over a worker that can divide its
+// slots (the fake the console's own slot tests use), so a slot write reaches
+// the console handler.
+func transcodeSlotUI(t *testing.T, worker transcode.Executor) (*Server, http.Handler) {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	path := filepath.Join(t.TempDir(), "transcode-token")
+	if err := os.WriteFile(path, []byte(testTranscodeKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Web: config.WebConfig{Enabled: true, Token: testToken, TranscodeTokenFile: path}}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Config: cfg, Transcode: worker})
+	s, err := New(cfg, arrservice.NewRegistry(cfg), engine, server.NewMCPServer("test", "1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, s.Handler()
+}
+
+// The slot write needs all three fields; with a worker that can divide its
+// slots the request then reaches the console handler and its own rules (the
+// stale-revision 409, the stored settings, 0/0 back to shared).
 func TestTranscodeV1SlotsRequireTheirFields(t *testing.T) {
-	s, h := transcodeUI(t)
+	worker := &fakeSlotWorker{ceiling: 3, cpus: 10}
+	s, h := transcodeSlotUI(t, worker)
 	const p = "/transcode/v1/workers/" + transcode.DefaultWorkerName + "/slots"
 	st := s.engine.Deps().Store
+	stored := func() *store.WorkerSlotSettings {
+		row, err := st.GetWorkerSlotSettings(transcode.DefaultWorkerName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row
+	}
 	for _, body := range []string{`{}`, `{"revision":0,"x265_slots":2}`, `{"video_slots":2,"podcast_slots":1}`, `{"video_slots":2,"revision":0}`, `{"video_slots":null,"podcast_slots":null,"revision":null}`} {
 		if c, k := code(t, write(h, "PUT", p, body)); c != 400 || k != "invalid_request" {
 			t.Errorf("%s: %d %s", body, c, k)
 		}
 	}
-	// A stale revision is the console's 409; nothing is stored.
-	if c, k := code(t, write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":99}`)); c != 409 || k != "conflict" {
-		t.Fatal("stale revision", c, k)
+	if worker.puts != 0 || stored() != nil {
+		t.Fatal("a refused request reached the worker or the store", worker.puts, stored())
 	}
-	if row, _ := st.GetWorkerSlotSettings(transcode.DefaultWorkerName); row != nil && row.Revision != 0 {
-		t.Fatal("a refused slot change was stored", row)
+	// A stale revision is the console handler's own 409, with its message.
+	w := write(h, "PUT", p, `{"video_slots":2,"podcast_slots":1,"revision":99}`)
+	if c, k := code(t, w); c != 409 || k != "conflict" || !strings.Contains(w.Body.String(), "The worker slot settings changed; refresh and retry.") {
+		t.Fatal("stale revision", w.Code, w.Body.String())
 	}
-	// With all three present the request reaches the console handler; this test
-	// worker cannot divide slots, so the handler refuses it (409), not the API.
-	if c, _ := code(t, write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":0}`)); c != 409 && c != 503 {
-		t.Fatal("explicit shared slots", c)
+	if worker.puts != 0 || stored() != nil {
+		t.Fatal("a stale slot change was stored or pushed", worker.puts, stored())
+	}
+	// A valid body is stored and pushed.
+	if w := write(h, "PUT", p, `{"video_slots":2,"podcast_slots":1,"revision":0}`); w.Code != 200 {
+		t.Fatal("valid slots", w.Code, w.Body.String())
+	}
+	row := stored()
+	if row == nil || row.VideoSlots != 2 || row.PodcastSlots != 1 || row.Revision != 1 || worker.puts != 1 {
+		t.Fatal("slots not stored", row, worker.puts)
+	}
+	// 0 and 0 return the worker to shared slots; the old revision now fails.
+	if c, _ := code(t, write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":0}`)); c != 409 {
+		t.Fatal("old revision after a change", c)
+	}
+	if w := write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":1}`); w.Code != 200 {
+		t.Fatal("shared slots", w.Code, w.Body.String())
+	}
+	if row := stored(); row == nil || !row.Shared() || row.Revision != 2 {
+		t.Fatal("not shared again", row)
+	}
+}
+
+// A worker that cannot divide its slots is refused by the API before the
+// console handler, with its own message.
+func TestTranscodeV1SlotsRefuseAWorkerThatCannotDivideThem(t *testing.T) {
+	_, h := transcodeSlotUI(t, struct{ transcode.Executor }{})
+	const p = "/transcode/v1/workers/" + transcode.DefaultWorkerName + "/slots"
+	w := write(h, "PUT", p, `{"video_slots":0,"podcast_slots":0,"revision":0}`)
+	if c, k := code(t, w); c != 409 || k != "conflict" || !strings.Contains(w.Body.String(), "slot assignment requires the HTTP video worker") {
+		t.Fatal(w.Code, w.Body.String())
 	}
 }
 
@@ -585,11 +651,12 @@ func TestTranscodeV1PauseWritesChangeTheState(t *testing.T) {
 // nothing is applied.
 func TestTranscodeV1GoalChangeRealToolRefusesWithoutAVersion(t *testing.T) {
 	s, h := transcodeUI(t)
-	seedOperation(t, s.engine.Deps().Store, "batch1", "transcode_batch", "running", nil, nil, nil)
+	seedOperation(t, s.engine.Deps().Store, "batch1", "transcode_batch", "running", map[string]any{"mode": "size"}, nil, nil)
 	for _, body := range []string{`{"mode":"size"}`, `{"mode":"size","idempotency_key":"k1"}`, `{"mode":"size","selection_version":"v1"}`} {
 		w := write(h, "POST", "/transcode/v1/batches/batch1/goal", body)
-		if w.Code < 400 || w.Code >= 500 {
-			t.Errorf("%s: %d %s", body, w.Code, w.Body.String())
+		c, k := code(t, w)
+		if c != 400 || k != "invalid_request" || !strings.Contains(w.Body.String(), "selection_version") || !strings.Contains(w.Body.String(), "idempotency_key") {
+			t.Errorf("%s: %d %s %s", body, c, k, w.Body.String())
 		}
 	}
 	inst, _ := s.engine.Deps().Store.GetActionInstance("batch1")
@@ -618,28 +685,83 @@ func TestTranscodeV1CachesAreInvalidatedOnlyAfterASuccessfulWrite(t *testing.T) 
 
 // A write refusal keeps its meaning: stale state is 409, a bad or missing
 // parameter 400, a missing thing 404, an unreachable service 503.
+// TestWriteToolWriteErrorClassification pins the status of the real refusal
+// texts the write tools and the engine produce (file:line of each source in
+// the comment). A refusal due to the CURRENT STATE of the thing is 409; a
+// missing or bad parameter is 400; a worker that cannot take the job is 503.
 func TestWriteToolWriteErrorClassification(t *testing.T) {
-	for msg, want := range map[string]int{
-		`managed profile "x" changed: expected generation 2, current 3`:                 409,
-		`recipe version conflict: reviewed active or previous bundle changed`:           409,
-		`batch selection changed; reopen the settings`:                                  409,
-		`cuts approval is missing or stale`:                                             409,
-		`action already completed; cancellation was not applied`:                        409,
-		`action_resume blocked: candidate validation changed; review it again`:          409,
-		`discard_candidate needs confirm=true; the candidate stays`:                     400,
-		`both expected_active_digest and expected_previous_digest are required`:         400,
-		`approval must carry the digest of the reviewed replacement plan (plan_digest)`: 400,
-		`reviewed selection_version and idempotency_key are required`:                   400,
-		`expected_generation is required to delete managed profile "x"`:                 400,
-		`managed profile "x" does not exist; expected_generation cannot create it`:      400,
-		`action instance "a" not found`:                                                 404,
-		`node m1 unreachable`:                                                           503,
-		`discard needs allow_destructive on this server`:                                403,
+	for _, c := range []struct {
+		msg  string
+		want int
+		src  string
+	}{
+		// 409: revision, digest and version guards.
+		{`managed profile "x" changed: expected generation 2, current 3`, 409, "transcode/recipe/managed.go:287"},
+		{`managed profile "x" already exists; expected_generation is required to update it`, 409, "transcode/recipe/managed.go:284"},
+		{`managed profile "x" does not exist; expected_generation/expected_digest cannot create it`, 409, "transcode/recipe/managed.go:296"},
+		{`recipe version conflict: reviewed active or previous bundle changed; review current versions before restoring`, 409, "transcode/recipe/manager.go:124"},
+		{`recipe version 1 already exists with a different digest (immutable version collision)`, 409, "transcode/recipe/manager.go:189"},
+		{`no previous valid cached recipe bundle available`, 409, "transcode/recipe/manager.go:161"},
+		{`batch selection changed; reopen the settings`, 409, "action/batch_revision.go:220"},
+		{`cuts approval is missing or stale`, 409, "action/podcast.go:261"},
+		{`approval requires current waiting review and exact cuts digest`, 409, "action/podcast_tools.go:212"},
+		{`reclassification requires current waiting podcast review`, 409, "action/podcast_tools.go:310"},
+		{`reclassification requires the exact current cuts digest`, 409, "action/podcast_tools.go:319"},
+		{`podcast classification/review requires a waiting podcast action`, 409, "action/podcast_tools.go:34"},
+		{`classification is frozen; start a new action to change policy/transcript`, 409, "action/podcast_tools.go:135"},
+		{`read every podcast_block page before classifying (b1 unit 3 unread)`, 409, "action/podcast_tools.go:159"},
+		{`cuts are not planned yet`, 409, "action/podcast_tools.go:201"},
+		{`read every cut review page before approving`, 409, "action/podcast_tools.go:216"},
+		// 409: the action or the recovery copy is in the wrong state.
+		{`action already completed; cancellation was not applied`, 409, "action/engine.go:816"},
+		{`action_resume blocked: candidate validation changed; review it again`, 409, "tools/action_tools.go:496"},
+		{`action_retry blocked: only failed actions can be retried (current status: running)`, 409, "tools/action_tools.go:437, action/engine.go:500"},
+		{`only failed actions can be retried (current status: running)`, 409, "action/engine.go:500"},
+		{`this attempt's candidate was removed after it was kept; start a new transcode instead`, 409, "action/engine.go:519"},
+		{`this replacement belongs to batch b1, which has failed; retry the batch instead`, 409, "action/engine.go:611"},
+		{`transcode inputs are immutable after action creation; resume accepts only a decision`, 409, "action/engine.go:671"},
+		{`idempotency key "k" already belongs to active transcode action a1 with different immutable inputs`, 409, "action/engine.go:277"},
+		{`submission key already belongs to different immutable inputs`, 409, "action/enqueue.go:113"},
+		{`only an automatic processing batch can change goals`, 409, "tools/transcode_goal_tools.go:46"},
+		{`only a finished promotion's recovery copy can be removed`, 409, "action/backup_discard.go:25"},
+		{`recovery copy changed before removal; stopped`, 409, "action/backup_discard.go:82"},
+		{`recovery artifact is not a regular file`, 409, "action/backup_discard.go:56"},
+		{`only a failed or cancelled promotion's original can be moved back`, 409, "action/backup_restore.go:59"},
+		{`the original was never moved aside; nothing to move back`, 409, "action/backup_restore.go:19"},
+		{`the library path is not empty; the original stays at its recovery path`, 409, "action/backup_restore.go:32"},
+		{`only failed promotions can discard a duplicate recovery copy`, 409, "action/backup_duplicate.go:15"},
+		{`library command outcome is unresolved; recovery retained`, 409, "action/backup_duplicate.go:29"},
+		{`this attempt's candidate can still be promoted or the action is not finished; nothing was removed`, 409, "action/candidate_cleanup.go:270"},
+		{`candidate file kept: permission denied`, 409, "action/candidate_cleanup.go:273"},
+		{`only a finished transcode attempt's own candidate can be dropped`, 409, "action/candidate_cleanup.go:310"},
+		// 400: a missing or bad parameter.
+		{`discard_candidate needs confirm=true; the candidate stays`, 400, "tools/transcode_backup_tools.go:40"},
+		{`action_id from transcode_backups list is required for clean`, 400, "tools/transcode_backup_tools.go:56"},
+		{`mode must be list, candidates, discard_candidate, clean, discard_duplicate, discard or restore`, 400, "tools/transcode_backup_tools.go:74"},
+		{`both expected_active_digest and expected_previous_digest are required for reviewed restoration`, 400, "transcode/recipe/manager.go:116"},
+		{`approval must carry the digest of the reviewed replacement plan (plan_digest)`, 400, "action/promote_plan_digest.go:73"},
+		{`reviewed selection_version and idempotency_key are required`, 400, "tools/transcode_goal_tools.go"},
+		{`expected_generation is required to delete managed profile "x"`, 400, "transcode/recipe/managed.go:363"},
+		{`expected_digest is required to delete managed profile "x"`, 400, "transcode/recipe/managed.go:366"},
+		{`maintenance_item_id and title are required`, 400, "store/store.go:986"},
+		{`decision must be selected, rejected or alternate, got "x"`, 400, "store/store.go:991"},
+		{`id is required`, 400, "tools/action_tools.go:432"},
+		{`invalid action_run inputs: bad input`, 400, "tools/action_tools.go:374"},
+		{`invalid block offset`, 400, "action/podcast_tools.go:49"},
+		{`invalid cut offset`, 400, "action/podcast_tools.go:204"},
+		// 404, 403 and 503.
+		{`action instance "a" not found`, 404, "tools/action_tools.go:592"},
+		{`managed profile "x" not found`, 404, "transcode/recipe/managed.go:362"},
+		{`discard needs allow_destructive on this server`, 403, "action/backup_duplicate.go:44"},
+		{`allow_destructive must be enabled for backup removal`, 403, "action/backup_discard.go:13"},
+		{`node m1 unreachable`, 503, "maintenanceui"},
+		{`video worker is offline or not ready; no job was submitted`, 503, "action/worker_admission.go:170"},
+		{`this job's worker "w" is not configured on this server; nothing was sent`, 503, "action/worker_admission.go:113"},
 	} {
 		w := httptest.NewRecorder()
-		writeToolWriteError(w, msg, v1WriteErr{})
-		if w.Code != want {
-			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		writeToolWriteError(w, c.msg, v1WriteErr{})
+		if w.Code != c.want {
+			t.Errorf("%q (%s): %d, want %d", c.msg, c.src, w.Code, c.want)
 		}
 	}
 }

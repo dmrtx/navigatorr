@@ -94,15 +94,32 @@ func v1Key(w http.ResponseWriter, r *http.Request, body string) (string, bool) {
 }
 
 // conflictWords are the phrases the tools and the engine use when the thing
-// exists but its state, revision, digest or version is not what the request
-// expects ("managed profile changed: expected generation", "batch selection
-// changed", "cuts approval is missing or stale", "recipe version conflict",
-// "approval requires current waiting review", "action_resume blocked: ...",
-// "action already completed", "candidate validation changed", "... already
-// exists"). Anything else the tool refuses is a bad parameter (400): a
-// missing flag or digest ("needs confirm=true", "are required", "must carry")
+// exists but its CURRENT STATE, revision, digest or version is not what the
+// request expects. Two families:
+//   - revision and digest guards: "managed profile changed: expected
+//     generation", "batch selection changed", "cuts approval is missing or
+//     stale", "recipe version conflict", "approval requires current waiting
+//     review", "action_resume blocked: ...", "action already completed",
+//     "... already exists", "does not match";
+//   - state refusals: "only failed actions can be retried (current
+//     status: ...)", "only a finished promotion's recovery copy can be
+//     removed", "classification is frozen", "cuts are not planned yet",
+//     "no previous valid cached recipe bundle", "inputs are immutable after
+//     action creation", "candidate file kept", "recovery retained", "not a
+//     regular file", "was removed after", "belongs to batch ...".
+//
+// Anything else the tool refuses is a bad parameter (400): a missing flag or
+// digest ("needs confirm=true", "are required", "must carry", "invalid ...")
 // is never a conflict.
-var conflictWords = regexp.MustCompile(`stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match`)
+var conflictWords = regexp.MustCompile(`stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match|` +
+	`only (a |an )?(failed|finished|automatic|original)|current status|is frozen|not planned yet|read every|no previous valid|immutable|` +
+	`was removed after|belongs to batch|can still be promoted|candidate file kept|not a regular file|does not hold a regular file|` +
+	`never moved aside|is not empty|retained|not confirmed|uncertain|unresolved|cannot create it|not finished|not ready yet|` +
+	`requires (a|an|the|current) (waiting|unapproved|exact current)|requires an unapproved`)
+
+// unavailableWords are refusals because the worker or service cannot take
+// the request now (503), not because of the request or the resource.
+var unavailableWords = regexp.MustCompile(`unreachable|offline or not ready|not configured on this server|template unavailable`)
 
 // v1WriteErr names how a write presents what its tool refused: the 404 and
 // hint as for a read; a refusal that is neither a missing thing, an
@@ -137,7 +154,7 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 		transcodeapi.WriteError(w, 404, code, msg, e.hint)
 	case strings.Contains(low, "allow_destructive"):
 		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
-	case strings.Contains(low, "unreachable"):
+	case unavailableWords.MatchString(low):
 		transcodeapi.WriteError(w, 503, "unavailable", msg, "the worker or service did not answer; try again when it is back")
 	case conflictWords.MatchString(low):
 		hint := "read the current state, then retry with its current revision, digest or version"

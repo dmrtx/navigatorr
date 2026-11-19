@@ -53,7 +53,10 @@ call_api    service=transcode method=GET path=/actions/{id}
   (`maintenanceui/server.go`, the handler wrapper; `transcodeAccess` in
   `maintenanceui/transcode_v1.go`): the header `X-Navigatorr-Request: 1` is
   required (`401` without it) and an `Origin`, when sent, must name this host
-  (`403 forbidden` otherwise).
+  (`403 forbidden` otherwise). A console write that sends no `Origin` at all
+  is accepted: this is the rule of `/api/` too, where the
+  `X-Navigatorr-Request` header is the CSRF defence (a cross-site form or
+  fetch cannot add it) and `Origin` is checked whenever the browser sends it.
 - A method a path does not serve answers `405 method_not_allowed` with an
   `Allow` header listing what it does serve (for example `GET, HEAD, PUT,
   DELETE` on `/pauses/{name}`, `POST` on `/actions/{id}/cancel`; `GET` alone on
@@ -151,9 +154,15 @@ Each write calls the same MCP tool or maintenance handler as the read it
 completes, and passes its safeguards on: the API checks a few more things (that
 the action is a transcode one, the body's shape) but never removes one. A
 refusal of the tool is `404` when the thing does not exist, `409 conflict` when
-its state, digest, revision or version is not what the request expects, `400`
-for a bad or missing parameter (a missing confirm flag or digest included),
-`503` when a worker or service is unreachable, `403` when it needs a switch the
+the CURRENT STATE of the thing refuses it (a digest, revision or version that
+is stale; "only failed actions can be retried (current status: ...)"; an
+immutable or already existing recipe version; a rollback with no previous
+bundle; a classification that is frozen or cuts not planned yet; a backup or
+candidate in the wrong state; an action that already finished; a submission
+key that belongs to different inputs), `400` for a bad or missing parameter (a
+missing confirm flag, digest, version or key included), `503` when a worker or
+service cannot take the request now (unreachable, offline or not ready, not
+configured on this server), `403` when it needs a switch the
 server keeps off. Failures
 of the server (5xx) never carry their cause.
 
@@ -167,7 +176,7 @@ of the server (5xx) never carry their cause.
 | `POST /actions/{id}/podcast/review` | `podcast_review` | `digest`, `approve`, `reclassify`, `offset` | exact `digest` of the review; stale is 409 |
 | `GET /batches/{id}/goal` | `transcode_goal_change` without a mode | query `scope` | read-only preview: the selection and its `selection_version` |
 | `POST /batches/{id}/goal` | `transcode_goal_change` (202) | `mode`, `selection_version`, `idempotency_key`, options | `selection_version` from the preview (stale is 409); idempotency key |
-| `PUT /workers/{name}/slots` | `/api/maintenance/worker-slots` | `video_slots`, `podcast_slots` and `revision` (all required), `ceiling`, `x265_slots`, `core_budget` | `revision` from `GET .../slots` (`settings.revision`); stale is 409. `0` and `0` explicitly return the worker to shared slots; a request that leaves any of the three out is 400, because the console would read the gap as "clear the split" or "no revision check" |
+| `PUT /workers/{name}/slots` | `/api/maintenance/worker-slots` | `video_slots`, `podcast_slots` and `revision` (all required), `ceiling`, `x265_slots`, `core_budget` | `revision` from `GET .../slots` (`settings.revision`); stale is 409. `0` and `0` explicitly return the worker to shared slots; `ceiling` `0` (or left out) keeps the stored parallel-jobs ceiling, it never clears it; a request that leaves any of the three out is 400, because the console would read the gap as "clear the split" or "no revision check" |
 | `PUT /drain` | `/api/maintenance/worker-drain` | `enabled` | read `GET /drain` for `ready_for_deploy` |
 | `PUT /pauses/{name}` | `/api/maintenance/worker-pause` | exactly one of `mode` (`graceful`, `immediate`, `suspend`, `off`) and `builds_paused` | the two switches are independent, never both in one request |
 | `DELETE /pauses/{name}` | same, mode `off` | none | |
