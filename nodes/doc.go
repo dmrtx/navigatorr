@@ -8,7 +8,10 @@
 // with pruning, and an in-memory output tail. The registry lives in its own
 // SQLite database (nodes.db by default), never in the main one.
 //
-// Invariants. They are tested in invariants_test.go.
+// Invariants. N2 is tested here (invariants_test.go) and in internal/importguard;
+// N1 and N3 are enforced by the node worker and proved by its tests in
+// internal/transcodeworker (phase 0a); the tests here only show the registry
+// never decides on, or needs, the transcode side.
 //
 //	N1  A running lease is decided only by the node's worker. Nodes never holds,
 //	    admits, freezes or queues anything: a record, running or not, changes no

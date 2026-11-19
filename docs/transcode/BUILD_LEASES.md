@@ -7,7 +7,7 @@ finish/cancel, expiry to `lost`, history and prune, logs) plus the per-node
 a dispatch, a requeue, a hold or a freeze on the server. The worker reports its
 active leases (id, title, source, status, started_at) in its scheduler
 observation; the server uses that list only to word `suspended_by`.
-The invariants N1 to N3 are in the doc comment at the top of `action/builds.go`.
+The invariants N1 to N3 are in the doc comment at the top of `action/build_records.go` and of package `nodes` (`nodes/doc.go`); the worker enforces N1 and N3 (tests in `internal/transcodeworker`).
 
 A create that targets a configured node must come from that node's worker: its
 registration carries `"via": "node_lease"`. Without it the server answers 409
