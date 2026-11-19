@@ -17,6 +17,9 @@ func twoWorkerUI(t *testing.T) (*Server, http.Handler, *fakeSlotWorker) {
 	t.Helper()
 	s, h := testUI(t)
 	online := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveHealth(w, r) {
+			return
+		}
 		switch r.URL.Path {
 		case "/v1/ready":
 			writeJSON(w, 200, map[string]bool{"ready": true})

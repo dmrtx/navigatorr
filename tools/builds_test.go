@@ -31,7 +31,7 @@ func TestBuildMCPToolsListReadAndCancel(t *testing.T) {
 	registerBuilds(s, engine)
 	registerWorkerHealth(s, engine)
 
-	onNode, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "m1", Source: "mdm-stack", Holder: "runner1", Kind: "gradle", Title: "unit run", PreemptMode: store.WorkerPauseGraceful})
+	onNode, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "mdm-stack", Holder: "runner1", Kind: "gradle", Title: "unit run", PreemptMode: store.WorkerPauseGraceful})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestBuildMCPToolsListReadAndCancel(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "build_list", map[string]any{}))), &list); err != nil || len(list.Builds) != 2 {
 		t.Fatal(err, list)
 	}
-	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "build_list", map[string]any{"target": "m1", "status": "running", "source": "mdm-stack", "limit": float64(5)}))), &list); err != nil || len(list.Builds) != 1 || list.Builds[0].ID != onNode.ID || !list.Builds[0].HoldsTranscodeNode {
+	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "build_list", map[string]any{"target": "m1", "status": "running", "source": "mdm-stack", "limit": float64(5)}))), &list); err != nil || len(list.Builds) != 1 || list.Builds[0].ID != onNode.ID || list.Builds[0].HoldsTranscodeNode {
 		t.Fatal(err, list)
 	}
 	if res := callTool(t, s, "build_list", map[string]any{"limit": float64(0)}); !res.IsError {
@@ -66,17 +66,17 @@ func TestBuildMCPToolsListReadAndCancel(t *testing.T) {
 		t.Fatalf("worker_health must list the node's builds only: %s", text)
 	}
 
-	// Cancelling frees the node on this side and is repeatable.
-	if !engine.NodePauseStatuses(context.Background())["m1"].Paused {
-		t.Fatal("the build holds m1")
+	// Cancelling ends the record and is repeatable; the server holds nothing.
+	if engine.NodePauseStatuses(context.Background())["m1"].Paused {
+		t.Fatal("a build record holds nothing on the server")
 	}
 	for i := 0; i < 2; i++ {
 		if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "build_cancel", map[string]any{"id": onNode.ID}))), &got); err != nil || got.Status != store.BuildCancelled || got.EndedAt == "" {
 			t.Fatal(err, got)
 		}
 	}
-	if engine.NodePauseStatuses(context.Background())["m1"].Paused {
-		t.Fatal("cancelling frees the node")
+	if len(engine.NodeBuildRecords("m1")) != 0 {
+		t.Fatal("cancelling ends the record")
 	}
 	if res := callTool(t, s, "build_cancel", map[string]any{"id": "bld_missing"}); !res.IsError {
 		t.Fatal("an unknown build is an error")
@@ -100,11 +100,11 @@ func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
 	registerBuilds(s, engine)
 	registerWorkerHealth(s, engine)
 	registerWorkerPause(s, engine)
-	b, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "m1", Source: "ci", Title: "unit run", PreemptMode: store.WorkerPauseGraceful})
+	b, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "unit run", PreemptMode: store.WorkerPauseGraceful})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.HeartbeatBuild(context.Background(), b.ID, nil, 0, "token=synthetic-secret-77"); err != nil {
+	if _, err := engine.HeartbeatBuild(context.Background(), b.ID, nil, 0, "tok=fixture-value-77"); err != nil {
 		t.Fatal(err)
 	}
 	if _, lines, _, _ := engine.BuildLog(b.ID); len(lines) != 1 {
@@ -121,7 +121,7 @@ func TestBuildOutputNeverReachesTheMCPTools(t *testing.T) {
 		if text == "" {
 			t.Fatalf("%s answered nothing", name)
 		}
-		if strings.Contains(text, "synthetic-secret") {
+		if strings.Contains(text, "fixture-value") {
 			t.Fatalf("the output reached %s: %s", name, text)
 		}
 	}

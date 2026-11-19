@@ -85,11 +85,13 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			fail(w, 500, "node pause not saved")
 		default:
-			writeJSON(w, 200, status)
+			// The same shape as the GET: records and the lease-derived hold.
+			attached := s.engine.AttachNodeBuilds(map[string]transcode.NodePauseStatus{status.Node: status})
+			writeJSON(w, 200, attached[status.Node])
 		}
 		return
 	}
-	statuses := s.engine.NodePauseStatuses(r.Context())
+	statuses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(r.Context()))
 	if node := r.URL.Query().Get("node"); node != "" {
 		for _, status := range statuses {
 			if status.Node == node {

@@ -57,14 +57,38 @@ type workerState struct {
 
 	// pauseMu serialises SetNodePause for the node, so a suspend that is
 	// written, synced, confirmed and possibly undone is never interleaved with
-	// another request for the same node. It also serialises the promotion of a
-	// waiting build with the dispatcher's recording of a job on the node
-	// (admitOnNode).
+	// another request for the same node.
 	pauseMu sync.Mutex
+
+	// buildsPauseMu serialises the builds-pause toggle with a build create on
+	// the node, so a build is either refused or registered before the pause. It
+	// is separate from pauseMu: a create must not wait for a request that talks
+	// to the worker.
+	buildsPauseMu sync.Mutex
+
+	// leases is what the node's worker reported of its active leases in its
+	// latest observation (nil when none, or the worker could not be reached).
+	leasesMu sync.Mutex
+	leases   []transcode.WorkerLease
 
 	// cacheClearedFor is the pause (its start and revision) whose cache the
 	// node has been told to clear, so a pause clears it once. Under pauseMu.
 	cacheClearedFor string
+}
+
+func (st *workerState) setLeases(l []transcode.WorkerLease) {
+	st.leasesMu.Lock()
+	st.leases = l
+	st.leasesMu.Unlock()
+}
+
+// workerLeases is what the node's worker reported of its active leases in its
+// latest observation. It reads memory only.
+func (e *Engine) workerLeases(node string) []transcode.WorkerLease {
+	st := e.workerStateFor(e.resolveWorker(node))
+	st.leasesMu.Lock()
+	defer st.leasesMu.Unlock()
+	return append([]transcode.WorkerLease(nil), st.leases...)
 }
 
 func (e *Engine) workerStateFor(name string) *workerState {

@@ -34,15 +34,16 @@ func TestWorkerNodeStateFollowsTheStoreImmediately(t *testing.T) {
 		t.Fatal("idle nodes carry no build, hold or pause", idle)
 	}
 
-	build, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"})
+	build, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	running := nodeStateByName(t, h)
 	builds, _ := running["m1"]["builds"].([]any)
-	if len(builds) != 1 || builds[0].(map[string]any)["id"] != build.ID || running["m1"]["held_by"] != "builds" {
-		t.Fatal("a running build holds m1 on the next read", running["m1"])
+	if len(builds) != 1 || builds[0].(map[string]any)["id"] != build.ID || running["m1"]["held_by"] != nil {
+		t.Fatal("a running record is listed on the next read but holds nothing until the worker reports a lease", running["m1"])
 	}
+
 	if running["m4"]["builds"] != nil || running["m4"]["held_by"] != nil {
 		t.Fatal("the build belongs to m1 only", running["m4"])
 	}
@@ -51,7 +52,7 @@ func TestWorkerNodeStateFollowsTheStoreImmediately(t *testing.T) {
 		t.Fatal(err, changed)
 	}
 	done := nodeStateByName(t, h)
-	if done["m1"]["builds"] != nil || done["m1"]["held_by"] != nil {
+	if done["m1"]["builds"] != nil {
 		t.Fatal("a finished build is gone on the next read", done["m1"])
 	}
 
@@ -98,7 +99,7 @@ func TestWorkerActivityDoesNotWaitForASlowWorkerAndKeepsItsBuilds(t *testing.T) 
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"}); err != nil {
+	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,8 +113,8 @@ func TestWorkerActivityDoesNotWaitForASlowWorkerAndKeepsItsBuilds(t *testing.T) 
 		t.Fatal(activity)
 	}
 	node := workers[0].(map[string]any)
-	if node["available"] != false || node["held_by"] != "builds" {
-		t.Fatal("the node is unavailable but still held by its build", node)
+	if node["available"] != false || node["held_by"] != nil {
+		t.Fatal("the node is unavailable: it reports no lease, so nothing shows it as held", node)
 	}
 	if builds, _ := node["builds"].([]any); len(builds) != 1 {
 		t.Fatal("the build the server knows stays in the answer", node)
@@ -164,7 +165,7 @@ func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
-	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Source: "ci", Title: "compile"}); err != nil {
+	if _, err := s.engine.CreateBuild(t.Context(), action.BuildInput{Target: "m1", Via: action.BuildViaNodeLease, Source: "ci", Title: "compile"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +186,7 @@ func TestWorkerActivityWithOneSlowAndOneFastWorker(t *testing.T) {
 	if byName["m4"]["available"] != true || byName["m4"]["builds"] != nil {
 		t.Fatal("the fast node is reported as usual", byName["m4"])
 	}
-	if builds, _ := byName["m1"]["builds"].([]any); byName["m1"]["available"] != false || len(builds) != 1 || byName["m1"]["held_by"] != "builds" {
+	if builds, _ := byName["m1"]["builds"].([]any); byName["m1"]["available"] != false || len(builds) != 1 || byName["m1"]["held_by"] != nil {
 		t.Fatal("the slow node is unavailable but keeps its build", byName["m1"])
 	}
 }
@@ -200,5 +201,15 @@ func TestWorkerNodeStateWithoutWorkersAnswersEmpty(t *testing.T) {
 	out := getJSON(t, h, "/api/maintenance/worker-node-state")
 	if nodes, ok := out["nodes"].([]any); !ok || len(nodes) != 0 {
 		t.Fatal("no workers, no nodes", out)
+	}
+}
+
+// The node state names "builds" as the hold only for a lease its worker reports.
+func TestWorkerNodeStateHeldByBuildsComesFromTheReportedLease(t *testing.T) {
+	s, h, _ := twoWorkerUI(t)
+	reportLeases(t, s, runningLease("lease1"))
+	got := nodeStateByName(t, h)
+	if got["m1"]["held_by"] != "builds" || got["m4"]["held_by"] != nil {
+		t.Fatal("a reported lease holds its node only", got)
 	}
 }

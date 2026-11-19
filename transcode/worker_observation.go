@@ -30,6 +30,23 @@ type SchedulerObservation struct {
 	// Retention is the room the worker has left to retain candidates. Nil from
 	// a worker that does not report it or has no retention limit.
 	Retention *RetentionRoom `json:"retention,omitempty"`
+	// Leases are the build leases the worker holds now (running or waiting),
+	// oldest first: the worker is the only authority on who occupies the node,
+	// and this is how the server tells why a node is busy. Ended leases are
+	// not listed. Empty from a worker that holds none or does not report them.
+	Leases []WorkerLease `json:"leases,omitempty"`
+}
+
+// WorkerLease is one active build lease of a worker, without anything secret.
+type WorkerLease struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Source string `json:"source"`
+	Status string `json:"status"` // "running" or "waiting"
+	// Mode is the lease's preempt mode ("suspend", "immediate" (an alias of
+	// suspend) or "graceful"). Empty from a worker that does not report it.
+	Mode      string `json:"mode,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
 }
 
 // RetentionRoom is what a worker can take now, measured the way it admits a

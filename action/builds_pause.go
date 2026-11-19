@@ -12,7 +12,7 @@ import (
 // A node's builds pause is a second switch beside its transcode pause, and the
 // two are independent: any combination is valid. While builds are paused on a
 // node, CreateBuild refuses a new build whose target is that node, with
-// BuildsPausedError; nothing is created and no hold is taken. Builds that are
+// BuildsPausedError; nothing is created. Builds that are
 // already registered (running or waiting) are not touched, and neither
 // pausing nor resuming changes them. Other nodes and targets that are not
 // nodes are unaffected. The pause is one durable row per node (see
@@ -38,9 +38,10 @@ func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused boo
 	if !ok {
 		return transcode.NodePauseStatus{}, &transcode.WorkerNotConfiguredError{Name: node}
 	}
-	// The node's request lock (the one withNodeLock takes) orders this against a create that checks the
-	// flag, so a build is either refused or registered before the pause.
-	lock := &e.workerStateFor(w.Name).pauseMu
+	// The node's builds-pause lock (the one CreateBuild takes) orders this
+	// against a create that checks the flag, so a build is either refused or
+	// registered before the pause.
+	lock := &e.workerStateFor(w.Name).buildsPauseMu
 	lock.Lock()
 	err := e.deps.Store.SetBuildPause(w.Name, paused)
 	lock.Unlock()
@@ -51,7 +52,7 @@ func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused boo
 }
 
 // buildsPausedOn reports whether new builds on the node are refused. The node's
-// request lock is held by the caller of the create path.
+// builds-pause lock is held by the caller of the create path.
 func (e *Engine) buildsPausedOn(node string) (bool, error) {
 	return e.deps.Store.BuildsPaused(node)
 }

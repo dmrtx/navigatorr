@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jakenesler/navigatorr/transcode"
 )
 
 // Build leases: local arbitration between builds and transcodes.
@@ -96,8 +98,9 @@ type leaseRecord struct {
 	PreemptMode string `json:"preempt_mode"`
 	Status      string `json:"status"`
 	// Freeze is whether the lease freezes the encoders while it runs: a
-	// normal lease does (suspend, or immediate, which the server handles
-	// further), a graceful or low one only holds the queue.
+	// normal lease does (suspend; immediate is accepted as an alias of suspend
+	// and stored as given: the worker never requeues anything), a graceful or
+	// low one only holds the queue.
 	Freeze          bool       `json:"freeze"`
 	Progress        string     `json:"progress,omitempty"`
 	TTLSeconds      int        `json:"ttl_seconds"`
@@ -119,6 +122,10 @@ type leaseRecord struct {
 	// the server ended or forgot the previous one; it picks the id the next
 	// registration asks for (registrationID).
 	RegGen int `json:"reg_gen,omitempty"`
+	// Unrecorded is set when the server refused the registration because
+	// builds were paused after the lease was granted: the build runs, the
+	// server has no record, and the registration is not tried again.
+	Unrecorded bool `json:"unrecorded,omitempty"`
 }
 
 // registrationID is the id the lease asks the server to create its build
@@ -265,6 +272,33 @@ func (w *Worker) leaseHolds() bool {
 		}
 	}
 	return false
+}
+
+// leaseSummary lists the leases that are active now, for the report the server
+// reads: running ones that have not expired and waiting ones, oldest first. It
+// leaves out ended leases and everything but what names a lease. An unreadable
+// record lists none (the lease code heals it and the queue hold already
+// fails closed).
+func (w *Worker) leaseSummary(now time.Time) []transcode.WorkerLease {
+	if !w.leasesEnabled() {
+		return nil
+	}
+	f, err := w.readLeaseFile()
+	if err != nil {
+		return nil
+	}
+	var out []transcode.WorkerLease
+	for _, l := range f.Leases {
+		if l.Status != leaseStatusWaiting && !l.holds(now) {
+			continue
+		}
+		entry := transcode.WorkerLease{ID: l.ID, Title: l.Title, Source: l.Source, Status: l.Status, Mode: l.PreemptMode}
+		if l.StartedAt != nil {
+			entry.StartedAt = l.StartedAt.UTC().Format(time.RFC3339)
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // freezeState is the freeze runners apply: the server's suspend record, or,
@@ -515,6 +549,15 @@ func (w *Worker) LeaseCreateContext(ctx context.Context, in LeaseRequest) (lease
 		}
 	}
 	if l.Priority == "low" {
+		// A low lease is registered with the server only when it is promoted
+		// (as running), so asking now would register it twice: only whether
+		// builds are paused is asked. Unreachable fails open, as for a normal
+		// lease. A low lease already waiting when builds get paused stays.
+		if rep := s.reporter; rep != nil {
+			if err := rep.CheckPaused(); errors.Is(err, errLeasesPaused) {
+				return leaseRecord{}, err
+			}
+		}
 		return w.leaseInsert(l, false)
 	}
 	// The server decides only whether builds are paused: a network call, with

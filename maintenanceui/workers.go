@@ -60,12 +60,20 @@ func (s *Server) workerActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) nodeStoreState(name string) map[string]any {
 	state := map[string]any{}
 	// The builds running or waiting on this node, so the activity view can say why it is busy.
-	if builds := s.engine.NodeBuilds(name); len(builds) > 0 {
+	// This is the registry's view (the build records); the node's worker is
+	// what actually holds the node for them.
+	builds := s.engine.NodeBuildRecords(name)
+	if len(builds) > 0 {
 		state["builds"] = builds
 	}
-	// What keeps new files off the node, so the slot count can leave it out.
+	// What keeps new files off the node, so the slot count can leave it out:
+	// the operator's pause, else a running build on it.
 	if held := s.engine.NodeHeldBy(name); held != "" {
 		state["held_by"] = held
+	} else if running, _ := s.engine.RunningLeases(name); running > 0 {
+		// Only a lease the worker reports holds the node; a running record
+		// alone is history.
+		state["held_by"] = "builds"
 	}
 	// Whether new builds on the node are refused, shown beside its slots.
 	if s.engine.NodeBuildsPaused(name) {
@@ -120,7 +128,7 @@ func (s *Server) workers(w http.ResponseWriter, r *http.Request) {
 	transport := s.cfg.Transcode.Executor
 	observation := s.engine.WorkerObservation(r.Context())
 	nodes := []map[string]any{}
-	pauses := s.engine.NodePauseStatuses(r.Context())
+	pauses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(r.Context()))
 	for _, o := range observation.Workers {
 		address := ""
 		if worker, ok := s.engine.Deps().Workers.Get(o.Name); ok {

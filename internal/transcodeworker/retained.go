@@ -60,7 +60,7 @@ var (
 	// ErrNotRetained reports a publish for a job that is not a retained
 	// candidate (unknown policy, still encoding, cancelled, failed or expired).
 	ErrNotRetained = errors.New("job is not a retained candidate")
-	// ErrPublishHeld reports a publish refused while the drain freeze is on.
+	// ErrPublishHeld reports a publish refused while the drain hold or a build lease is on, or while the node is busy (the capacity lock is taken; ask again).
 	ErrPublishHeld = errors.New("publication is held while the worker drains")
 	// ErrRetainedCandidateChanged reports a retained file that no longer matches
 	// the checkpoint it was accepted with.
@@ -352,7 +352,9 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 	default:
 		return refuse(fmt.Errorf("%w: job %q has not finished encoding", ErrNotRetained, jobID))
 	}
-	if w.Held() {
+	// The drain hold (Held) or a running build lease holds publication; an
+	// operator suspend never did.
+	if w.Held() || w.leaseHolds() {
 		return refuse(ErrPublishHeld)
 	}
 	if err := verifyCheckpointCandidate(w.withJobDigestMemo(ctx), job, job.LocalCandidatePath); err != nil {
@@ -361,6 +363,30 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 			return refuse(fmt.Errorf("verifying the retained candidate of job %q: %w", jobID, err))
 		}
 		return refuse(fmt.Errorf("%w: %v", ErrRetainedCandidateChanged, err))
+	}
+
+	if w.beforeGateLockHook != nil {
+		w.beforeGateLockHook()
+	}
+	// Leases are granted under the capacity lock: look again under it, right
+	// before the publication is requested. The usual order is capacity lock
+	// first, then job lock, and this caller already holds the job lock, so it
+	// never waits: a busy lock is a transient refusal the caller may retry.
+	capLock, busy, err := tryAcquireCapacityLock(filepath.Clean(w.cfg.StateDir))
+	if err != nil {
+		return refuse(err)
+	}
+	if busy {
+		return refuse(fmt.Errorf("%w: the node is busy, ask again", ErrPublishHeld))
+	}
+	capHeld := true
+	defer func() {
+		if capHeld {
+			capLock.Unlock()
+		}
+	}()
+	if w.Held() || w.leaseHolds() {
+		return refuse(ErrPublishHeld)
 	}
 
 	now := time.Now().UTC()
@@ -380,6 +406,8 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 		// The state is durable; the sweep retries the move.
 		return refuse(err)
 	}
+	capLock.Unlock()
+	capHeld = false
 	lock.Unlock()
 	locked = false
 	return w.Status(ctx, jobID)

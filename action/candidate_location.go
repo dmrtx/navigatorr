@@ -403,7 +403,7 @@ func uploadingWait(p *promotionState, reason string) StepResult {
 func (e *Engine) uploadFailure(err error, p *promotionState) StepResult {
 	switch {
 	case errors.Is(err, transcode.ErrPublishHeld):
-		return promoteWaitResult("The worker is draining and holds publication; the replacement continues when it accepts work again")
+		return promoteWaitResult("The worker holds publication for now (draining, a build, or busy); the replacement continues automatically")
 	case errors.Is(err, transcode.ErrDeferredPublicationUnsupported):
 		return promoteFailedResult(fmt.Errorf("the worker was not updated for deferred publication, so it cannot upload this candidate; update the worker and promote again"))
 	case errors.Is(err, transcode.ErrNotRetained), workerJobUnknown(err):

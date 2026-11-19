@@ -328,6 +328,9 @@ type Worker struct {
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
 	afterSpawnHook  func(jobDir string, pid int)
+	// beforeGateLockHook runs between a cheap lease check and the capacity
+	// lock, for tests that grant a lease in that window.
+	beforeGateLockHook func()
 	// spawnTranscode spawns the detached runner for a queued job. Nil selects
 	// the production exec.Command path. Tests inject a stub that records the
 	// spawn without forking so queue/idempotency behavior is deterministic
@@ -1492,6 +1495,14 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		}
 		// Pause all: queued jobs stay queued; only running ones finish.
 		if w.queueHeld() {
+			// A build lease says why the queue waits: record it on the
+			// queued jobs so the coordinator takes them back. Drain and
+			// operator holds stay silent (those jobs wait in place).
+			if w.leaseHolds() {
+				if err := w.recordHoldRefusalOnQueued(); err != nil {
+					errs = append(errs, err)
+				}
+			}
 			return started, errors.Join(errs...)
 		}
 		limits := w.slotLimits()
@@ -1601,6 +1612,49 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 			return started, errors.Join(errs...)
 		}
 	}
+}
+
+// recordHoldRefusalOnQueued writes the hold refusal on every queued job that
+// has not started, as admitAtStartLocked does when a slot comes up. Callers
+// hold the capacity lock.
+func (w *Worker) recordHoldRefusalOnQueued() error {
+	reason, msg := w.holdRefusal()
+	if reason == "" {
+		return nil
+	}
+	queued, scanErr := w.listQueuedJobsObserved()
+	errs := []error{scanErr}
+	for _, q := range queued {
+		if q.PID != 0 {
+			continue
+		}
+		jobDir := filepath.Join(w.cfg.StateDir, q.ID)
+		lock, err := acquireJobLock(jobDir)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		func() {
+			defer lock.Unlock()
+			jobFile := filepath.Join(jobDir, "job.json")
+			latest, err := LoadJob(jobFile)
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			if latest == nil || latest.Status != "queued" || latest.PID != 0 {
+				return
+			}
+			if latest.RetentionBlocked == reason && latest.RoomNote == msg {
+				return
+			}
+			latest.RetentionBlocked, latest.RoomNote = reason, msg
+			if err := SaveJobAtomic(jobFile, latest); err != nil {
+				errs = append(errs, err)
+			}
+		}()
+	}
+	return errors.Join(errs...)
 }
 
 // ScheduleQueued is the public scheduler entry: discover persisted queued

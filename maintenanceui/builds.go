@@ -98,12 +98,13 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 			Priority    string `json:"priority"`
 			TTLSeconds  int    `json:"ttl_seconds"`
 			Progress    string `json:"progress"`
+			Via         string `json:"via"`
 		}
 		if err := decode(w, r, &body); err != nil {
 			fail(w, 400, `send {"target", "source", "title", "id"?, "holder"?, "kind"?, "preempt_mode"?, "priority"?, "ttl_seconds"?, "progress"?}`)
 			return
 		}
-		b, err := s.engine.CreateBuild(r.Context(), action.BuildInput{ID: body.ID, Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, TTLSeconds: body.TTLSeconds})
+		b, err := s.engine.CreateBuild(r.Context(), action.BuildInput{ID: body.ID, Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, Via: body.Via, TTLSeconds: body.TTLSeconds})
 		if s.buildError(w, err) {
 			return
 		}
@@ -148,7 +149,7 @@ func (s *Server) buildsNodes(w http.ResponseWriter, r *http.Request) {
 		RunningBuilds   []runningBuild `json:"running_builds"`
 	}
 	want := r.URL.Query().Get("node")
-	statuses := s.engine.NodePauseStatesStored(r.Context())
+	statuses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatesStored(r.Context()))
 	nodes := make([]nodeState, 0, len(statuses))
 	for name, st := range statuses {
 		if want != "" && name != want {
@@ -284,14 +285,17 @@ func (s *Server) buildError(w http.ResponseWriter, err error) bool {
 	var invalid *action.BuildInvalidError
 	var paused *action.BuildsPausedError
 	var taken *action.BuildIDTakenError
+	var needLease *action.NodeLeaseRequiredError
 	switch {
 	case err == nil:
 		return false
 	case errors.As(err, &invalid):
 		fail(w, 400, invalid.Reason)
 	case errors.As(err, &paused):
-		// Nothing was created and no hold was taken; the code is stable for scripts.
+		// Nothing was created; the code is stable for scripts.
 		writeJSON(w, 409, map[string]string{"error": paused.Error(), "code": action.BuildsPausedCode})
+	case errors.As(err, &needLease):
+		writeJSON(w, 409, map[string]string{"error": needLease.Error(), "code": action.NodeLeaseRequiredCode})
 	case errors.As(err, &taken):
 		writeJSON(w, 409, map[string]string{"error": taken.Error(), "code": action.BuildIDTakenCode})
 	case errors.Is(err, store.ErrBuildNotFound):

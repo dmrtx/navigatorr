@@ -246,11 +246,11 @@ func TestBuildOutputIsOnlyOnTheLogEndpoint(t *testing.T) {
 	_, h := buildsUI(t)
 	const path = "/api/maintenance/builds"
 	node := "m1"
-	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","source":"ci","title":"unit run"}`))
-	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"log":["token=synthetic-secret-77"]}`); w.Code != 200 {
+	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"`+node+`","via":"node_lease","source":"ci","title":"unit run"}`))
+	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"log":["tok=fixture-value-77"]}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if !strings.Contains(withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String(), "synthetic-secret-77") {
+	if !strings.Contains(withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String(), "fixture-value-77") {
 		t.Fatal("the log endpoint is meant to serve it")
 	}
 	reads := map[string]string{
@@ -269,7 +269,7 @@ func TestBuildOutputIsOnlyOnTheLogEndpoint(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("%s: %d %s", name, w.Code, w.Body.String())
 		}
-		if strings.Contains(w.Body.String(), "synthetic-secret") {
+		if strings.Contains(w.Body.String(), "fixture-value") {
 			t.Fatalf("the output reached %s: %s", name, w.Body.String())
 		}
 	}

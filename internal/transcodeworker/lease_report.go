@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -43,6 +44,10 @@ const (
 type leaseReporter interface {
 	// Register creates the build; errLeasesPaused when builds are paused.
 	Register(l *leaseRecord) (serverID string, err error)
+	// CheckPaused asks only whether builds are paused on the node, creating
+	// nothing: errLeasesPaused when they are, another error when the server
+	// cannot say (which does not stop a build).
+	CheckPaused() error
 	// Heartbeat forwards progress and output. ended is the status the server
 	// ended the build with, empty while it runs.
 	Heartbeat(serverID string, progress *string, ttlSeconds int, lines []string) (ended string, err error)
@@ -115,7 +120,7 @@ func (r *httpLeaseReporter) Register(l *leaseRecord) (string, error) {
 	body := map[string]any{
 		"id": l.registrationID(), "target": r.node, "source": l.Source, "holder": l.Holder,
 		"kind": l.Kind, "title": l.Title, "preempt_mode": l.PreemptMode,
-		"ttl_seconds": l.TTLSeconds, "progress": l.Progress,
+		"ttl_seconds": l.TTLSeconds, "progress": l.Progress, "via": "node_lease",
 	}
 	code, out, err := r.do(http.MethodPost, "", body)
 	if err == nil && code == http.StatusBadRequest {
@@ -141,6 +146,31 @@ func (r *httpLeaseReporter) Register(l *leaseRecord) (string, error) {
 		return b.ID, nil
 	}
 	return "", fmt.Errorf("the server answered HTTP %d", code)
+}
+
+func (r *httpLeaseReporter) CheckPaused() error {
+	code, out, err := r.do(http.MethodGet, "/nodes?node="+url.QueryEscape(r.node), nil)
+	if err != nil {
+		return err
+	}
+	if code != http.StatusOK {
+		return fmt.Errorf("the server answered HTTP %d", code)
+	}
+	var b struct {
+		Nodes []struct {
+			Node         string `json:"node"`
+			BuildsPaused bool   `json:"builds_paused"`
+		} `json:"nodes"`
+	}
+	if err := json.Unmarshal(out, &b); err != nil {
+		return errors.New("the server's answer was not understood")
+	}
+	for _, n := range b.Nodes {
+		if n.Node == r.node && n.BuildsPaused {
+			return errLeasesPaused
+		}
+	}
+	return nil
 }
 
 func (r *httpLeaseReporter) Heartbeat(serverID string, progress *string, ttlSeconds int, lines []string) (string, error) {
@@ -251,6 +281,9 @@ func (w *Worker) leaseReportPass() {
 		case l.active() && l.Status == leaseStatusRunning:
 			p := s.pendingFor(l.ID)
 			if l.ServerID == "" {
+				if l.Unrecorded {
+					continue
+				}
 				if now.Sub(p.lastSent) < leaseRegisterTries {
 					continue
 				}
@@ -288,6 +321,11 @@ func (w *Worker) leaseReportPass() {
 				// The operator paused builds after the lease was granted: the
 				// build already runs; it is not stopped for that.
 				log.Printf("build lease %s: server reports builds paused; not recorded", l.ID)
+				w.leaseUpdate(l.ID, func(r *leaseRecord) {
+					if r.ServerID == "" {
+						r.Unrecorded = true
+					}
+				})
 			} else {
 				w.leaseNoteRegister(l.ID, err.Error())
 			}

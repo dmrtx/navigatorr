@@ -87,11 +87,4 @@ func TestNodePauseMessages(t *testing.T) {
 			}
 		})
 	}
-	t.Run("held by a build alone", func(t *testing.T) {
-		e := pauseEngine(t, &mockTranscodeExecutor{}, &mockTranscodeExecutor{})
-		startBuild(t, e, "m1", "graceful", 0)
-		if got := message(e); got != busy+idle {
-			t.Fatal(got)
-		}
-	})
 }

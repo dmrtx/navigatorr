@@ -44,15 +44,17 @@ type NodePauseStatus struct {
 	// Idle is true when the node is paused and nothing runs on it, so the
 	// machine can be used for something else.
 	Idle bool `json:"idle"`
-	// HeldBy says what holds the node: "operator" (a pause the operator set;
-	// it wins) or "builds" (running builds only), empty when it is free.
+	// HeldBy says what holds the node: "operator" (a pause the operator set),
+	// empty when the server holds nothing. A build lease holds a node in its
+	// worker, which this does not report.
 	HeldBy string `json:"held_by,omitempty"`
 	// BuildsPaused is the second, independent switch: while true the server
 	// refuses to register a new build on this node. It says nothing about the
 	// transcode pause above and never affects builds already registered.
 	BuildsPaused      bool   `json:"builds_paused,omitempty"`
 	BuildsPausedSince string `json:"builds_paused_since,omitempty"`
-	// Builds are the builds running or waiting on the node, oldest first.
+	// Builds are the build records running or waiting on the node, oldest
+	// first: the registry's view, filled by the UI layer.
 	Builds []NodeBuild `json:"builds,omitempty"`
 	// Message says in a sentence what is left to wait for.
 	Message   string    `json:"message"`
@@ -68,7 +70,7 @@ type NodeBuild struct {
 	Title       string `json:"title"`
 	PreemptMode string `json:"preempt_mode"`
 	Priority    string `json:"priority"`
-	// Status is "running" or "waiting" (a low priority build for an idle node).
+	// Status is "running", or "waiting" on an old record.
 	Status          string `json:"status"`
 	StartedAt       string `json:"started_at,omitempty"`
 	Progress        string `json:"progress,omitempty"`
