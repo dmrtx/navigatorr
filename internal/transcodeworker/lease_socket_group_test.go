@@ -159,6 +159,17 @@ func TestLeaseSocketGroup(t *testing.T) {
 	}
 	keep := []string{filepath.Join(dir, ".other.sock.b789"), filepath.Join(dir, ".m.sock.bX1"), filepath.Join(dir, ".logs"), filepath.Join(dir, ".m.sock.b321")}
 	deadSocket(keep[0])
+	// A live socket in a directory named like ours is someone else's: kept.
+	liveDir := filepath.Join(dir, ".m.sock.b654")
+	if err := os.Mkdir(liveDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	live, err := net.Listen("unix", filepath.Join(liveDir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	keep = append(keep, liveDir)
 	for _, k := range keep[1:3] {
 		if err := os.Mkdir(k, 0o700); err != nil {
 			t.Fatal(err)
@@ -272,4 +283,10 @@ func foreignGroup(dir string) string {
 		}
 	}
 	return ""
+}
+
+func TestLeaseBindPrefixHasNoPlaceholder(t *testing.T) {
+	if got := leaseBindPrefix("/x/a*b.sock"); got != ".a_b.sock.b" {
+		t.Fatalf("bind prefix: %q", got)
+	}
 }
