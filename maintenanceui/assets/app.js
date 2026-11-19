@@ -996,7 +996,7 @@ function renderBuilds(host, builds, now = Date.now()) {
 // The output tail of a running build, in a dialog opened from its slot row. The
 // lines come from GET builds/{id}/log, are shown as text only, newest at the
 // bottom, and follow the bottom unless the person scrolled up.
-const BUILD_LOG_REFRESH_MS = 5000;
+const BUILD_LOG_REFRESH_MS = 2000;
 const buildLogView = { id: null, build: null, opener: null, seq: 0, timer: 0, pinned: true, text: null, status: null, endedAt: null, loaded: false, gone: false, stale: false };
 const BUILD_STATUS_LABEL = { running: "Running", waiting: "Waiting", succeeded: "Succeeded", failed: "Failed", cancelled: "Cancelled", lost: "Lost" };
 const BUILD_ENDED = ["succeeded", "failed", "cancelled", "lost"];

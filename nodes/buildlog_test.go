@@ -61,9 +61,10 @@ func TestBuildLogKeepsTheLastLinesInOrder(t *testing.T) {
 	if _, lines, at, _ := e.BuildLog(b.ID); lines == nil || len(lines) != 0 || !at.IsZero() {
 		t.Fatalf("no output yet must be an empty slice: %v %v", lines, at)
 	}
-	for i := 0; i < 5; i++ { // 5 x 60 = 300 lines
+	const sent = 9 * BuildLogMaxBatch // 2304 lines, past the 2000 kept
+	for i := 0; i < 9; i++ {
 		clock.advance(time.Second)
-		if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, numbered(i*60, 60)...); err != nil {
+		if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, numbered(i*BuildLogMaxBatch, BuildLogMaxBatch)...); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -71,7 +72,7 @@ func TestBuildLogKeepsTheLastLinesInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lines) != BuildLogKeep || lines[0] != "line 100" || lines[len(lines)-1] != "line 299" {
+	if len(lines) != BuildLogKeep || lines[0] != fmt.Sprintf("line %d", sent-BuildLogKeep) || lines[len(lines)-1] != fmt.Sprintf("line %d", sent-1) {
 		t.Fatalf("want the last %d lines in order, got %d: %q .. %q", BuildLogKeep, len(lines), lines[0], lines[len(lines)-1])
 	}
 	if !at.Equal(clock.now()) {

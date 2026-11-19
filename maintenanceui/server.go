@@ -330,7 +330,12 @@ func failAdmission(w http.ResponseWriter, code int, err error) {
 	fail(w, code, err.Error())
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 256<<10)
+	return decodeLimit(w, r, v, 256<<10)
+}
+
+// decodeLimit is decode with its own body limit.
+func decodeLimit(w http.ResponseWriter, r *http.Request, v any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {

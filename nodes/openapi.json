@@ -485,7 +485,7 @@
         ],
         "operationId": "heartbeatBuild",
         "summary": "Keep a running build alive (and report progress or log lines)",
-        "description": "Called by the tool that runs the build, every few minutes, to say it is still alive and optionally to set a progress line, a new ttl and to append output lines (up to 64 lines of 300 characters per call; read them with GET /nodes/v1/builds/{id}/log). 409 build_ended (with the build in the answer) means the build is over, for example cancelled by an operator: stop the work. The body may be empty.",
+        "description": "Called by the tool that runs the build, every few minutes, to say it is still alive and optionally to set a progress line, a new ttl and to append output lines (up to 256 lines of 300 characters per call, as often as every 2 seconds while the command prints; read them with GET /nodes/v1/builds/{id}/log). 409 build_ended (with the build in the answer) means the build is over, for example cancelled by an operator: stop the work. The body may be empty.",
         "parameters": [
           {
             "name": "id",
@@ -728,7 +728,7 @@
         ],
         "operationId": "getBuildLog",
         "summary": "Read a build's output lines",
-        "description": "The last lines (up to 200) the build sent with its heartbeats, each with an absolute number n. Pass after=N (the next_after of the previous answer) to get only newer lines; first_available is the number of the oldest line still held (older ones are gone). Numbers restart at 1 whenever the build's buffer is recreated (after a server restart, after the buffer was evicted or its retention passed and the build writes again), so every answer carries a generation naming the buffer the numbers belong to. Send it back as generation together with after: when it differs from the current one, or after is beyond the last line, the answer starts from the first line held and has reset true (discard what you kept and continue from next_after). Output is kept in memory for 30 minutes after the build ends and is lost on a restart (expired is true when it was dropped). No waiting: poll again. Read-only.",
+        "description": "The last lines (up to 2000) the build sent with its heartbeats, each with an absolute number n. Pass after=N (the next_after of the previous answer) to get only newer lines; first_available is the number of the oldest line still held (older ones are gone). Numbers restart at 1 whenever the build's buffer is recreated (after a server restart, after the buffer was evicted or its retention passed and the build writes again), so every answer carries a generation naming the buffer the numbers belong to. Send it back as generation together with after: when it differs from the current one, or after is beyond the last line, the answer starts from the first line held and has reset true (discard what you kept and continue from next_after). Output is kept in memory for 30 minutes after the build ends and is lost on a restart (expired is true when it was dropped). Without wait the answer is immediate (poll again). With wait=S (1 to 25 seconds) and no line after N yet, the call is held until a new line arrives, the build ends, the buffer is dropped or recreated, or S seconds pass, and then answers exactly as it would without wait: an empty lines array on a timeout, so send the same after again. At most 64 readers wait at once (429 too_many_waiters, retry without wait). Read-only.",
         "parameters": [
           {
             "name": "id",
@@ -756,6 +756,17 @@
             "description": "The generation of the previous answer. If it differs from the current one the answer is a reset from the start.",
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "description": "Long-poll: seconds to hold the call while there is no line after N and the build runs (0 to 25, default 0 answers at once).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 25
             }
           }
         ],
@@ -825,7 +836,7 @@
             }
           },
           "400": {
-            "description": "after is not a whole number of 0 or more (code invalid_request).",
+            "description": "after is not a whole number of 0 or more, or wait is not a whole number from 0 to 25 (code invalid_request).",
             "content": {
               "application/json": {
                 "schema": {
@@ -836,6 +847,16 @@
           },
           "404": {
             "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many readers are already waiting (code too_many_waiters); Retry-After: 1. Read without wait.",
             "content": {
               "application/json": {
                 "schema": {

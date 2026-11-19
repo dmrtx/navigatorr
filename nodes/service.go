@@ -338,6 +338,9 @@ func (s *Service) HeartbeatBuild(ctx context.Context, id string, progress *strin
 		s.logs.append(id, logLines, s.now(), s.buildEnded)
 	}
 	s.buildMu.Unlock()
+	if errors.Is(err, ErrBuildExpired) {
+		s.logs.wake(id)
+	}
 	return b, err
 }
 
@@ -355,6 +358,9 @@ func (s *Service) FinishBuild(ctx context.Context, id, status string, exit *int)
 	s.buildMu.Unlock()
 	if err != nil {
 		return Build{}, false, err
+	}
+	if changed {
+		s.logs.wake(id)
 	}
 	return b, changed, nil
 }
@@ -441,6 +447,7 @@ func (s *Service) Reconcile(ctx context.Context) {
 		log.Printf("builds: expiring: %v", err)
 	}
 	for _, b := range lost {
+		s.logs.wake(b.ID)
 		log.Printf("build %s on %s: no heartbeat before its expiry, marked lost", b.ID, b.Target)
 	}
 	// An earlier server could leave a build waiting; nothing promotes it now.
@@ -451,6 +458,7 @@ func (s *Service) Reconcile(ctx context.Context) {
 		log.Printf("builds: cancelling legacy waiting builds: %v", err)
 	}
 	for _, b := range cancelled {
+		s.logs.wake(b.ID)
 		log.Printf("build %s on %s: %s", b.ID, b.Target, LegacyWaitingReason)
 	}
 	s.pruneBuildLogs()

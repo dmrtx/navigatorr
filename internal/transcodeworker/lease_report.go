@@ -269,6 +269,7 @@ func (w *Worker) leaseReportPass() {
 		hbs bool
 	}
 	var work []job
+	var holdLog time.Duration // the shortest wait of output held back
 	s.mu.Lock()
 	now := s.clock()
 	f, err := w.loadLeasesLocked()
@@ -291,8 +292,19 @@ func (w *Worker) leaseReportPass() {
 				work = append(work, job{l: *l})
 				continue
 			}
+			// Output goes out at once but at most every leaseLogEvery: what
+			// arrives in between waits (with the progress that came with it).
+			if len(p.log) > 0 && now.Sub(p.lastLog) < leaseLogEvery {
+				if wait := leaseLogEvery - now.Sub(p.lastLog); holdLog == 0 || wait < holdLog {
+					holdLog = wait
+				}
+				continue
+			}
 			if p.dirty || now.Sub(p.lastSent) >= leaseKeepaliveEvery(l) {
 				work = append(work, job{l: *l, p: *p, hbs: true})
+				if len(p.log) > 0 {
+					p.lastLog = now
+				}
 				p.dirty, p.progress, p.log, p.lastSent = false, nil, nil, now
 			}
 		case !l.active() && !l.Reported:
@@ -300,6 +312,10 @@ func (w *Worker) leaseReportPass() {
 		}
 	}
 	s.mu.Unlock()
+	if holdLog > 0 {
+		// Come back when the held output may go; a kick in between is harmless.
+		time.AfterFunc(holdLog, w.leaseKickReporter)
+	}
 
 	for _, j := range work {
 		l := j.l

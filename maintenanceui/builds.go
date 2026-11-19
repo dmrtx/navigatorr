@@ -196,7 +196,7 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds json.RawMessage `json:"ttl_seconds"`
 		Log        json.RawMessage `json:"log"`
 	}
-	if err := decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+	if err := decodeLimit(w, r, &body, nodes.HeartbeatBodyMax); err != nil && !errors.Is(err, io.EOF) {
 		fail(w, 400, `send {"progress"?, "ttl_seconds"?, "log"?: [lines]} or nothing`)
 		return
 	}

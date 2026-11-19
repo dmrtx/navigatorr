@@ -66,7 +66,11 @@ const (
 	leaseFieldMax = 64
 	leaseTitleMax = 200
 	leaseProgMax  = 200
-	leaseLogMax   = 256 // lines kept for the next server report
+	leaseLogMax   = 2000 // lines kept for the next server report
+	// leaseLogBatch is how many lines one heartbeat may carry (the server's
+	// batch). leaseLogEvery is the least time between two forwards of output.
+	leaseLogBatch = 256
+	leaseLogEvery = 2 * time.Second
 )
 
 // errLeasesPaused is a new lease refused because the operator paused builds
@@ -178,6 +182,9 @@ type leasePending struct {
 	log      []string
 	dirty    bool
 	lastSent time.Time
+	// lastLog is when output lines were last forwarded; lines wait until
+	// leaseLogEvery has passed since.
+	lastLog time.Time
 	// regFailure is the last reason registering with the server failed, so
 	// that a repeated failure is logged once.
 	regFailure string
@@ -891,8 +898,8 @@ func (w *Worker) LeaseHeartbeat(id string, progress *string, ttlSeconds int, lin
 			return leaseRecord{}, &leaseInvalidError{"log lines must be text of at most 2000 characters"}
 		}
 	}
-	if len(lines) > 64 {
-		return leaseRecord{}, &leaseInvalidError{"log must have at most 64 lines"}
+	if len(lines) > leaseLogBatch {
+		return leaseRecord{}, &leaseInvalidError{fmt.Sprintf("log must have at most %d lines", leaseLogBatch)}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

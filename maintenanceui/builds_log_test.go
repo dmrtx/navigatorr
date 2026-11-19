@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jakenesler/navigatorr/nodes"
 )
 
 type buildLogBody struct {
@@ -85,7 +87,7 @@ func TestBuildHeartbeatRejectsBadLog(t *testing.T) {
 	_, h := buildsUI(t)
 	const path = "/api/maintenance/builds"
 	b := decodeBuild(t, withBuildsToken(h, "POST", path, `{"target":"laptop","source":"ci","title":"unit run"}`))
-	many := `"` + strings.Repeat(`x","`, 64) + `x"`
+	many := `"` + strings.Repeat(`x","`, nodes.BuildLogMaxBatch) + `x"`
 	cases := map[string]string{
 		"too many lines": `{"log":[` + many + `]}`,
 		"too long":       `{"log":["` + strings.Repeat("x", 301) + `"]}`,
@@ -108,8 +110,8 @@ func TestBuildHeartbeatRejectsBadLog(t *testing.T) {
 	if len(got.Lines) != 0 {
 		t.Fatal("a rejected heartbeat kept lines", got)
 	}
-	// Exactly 64 lines of 300 characters pass.
-	ok := `{"log":["` + strings.Repeat(strings.Repeat("y", 300)+`","`, 63) + strings.Repeat("y", 300) + `"]}`
+	// Exactly 256 lines of 300 characters pass.
+	ok := `{"log":["` + strings.Repeat(strings.Repeat("y", 300)+`","`, nodes.BuildLogMaxBatch-1) + strings.Repeat("y", 300) + `"]}`
 	if w := withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", ok); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
