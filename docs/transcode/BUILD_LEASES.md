@@ -39,6 +39,7 @@ stop. The build still runs its own command in the caller's shell.
 | --- | --- |
 | `build_node` | this machine's name in the server's node list. Without it the worker offers no leases. |
 | `build_socket` | socket path. Default `<state_dir>/.builds/lease.sock` (the worker creates that directory 0700; socket 0600). A path of your own must be in an existing directory that belongs to the worker's user and that others cannot write to; the worker never changes it and refuses to start the socket otherwise. A Unix socket path must stay under about 100 bytes. |
+| `build_socket_group` | a group whose members may also use the socket: the socket becomes 0660 with that group. Needs `build_socket` in a directory that group can enter (for example owned by the worker's user, group set to it, 0750). The worker's user must be in the group. An unknown group, or a group without `build_socket`, starts no socket (the worker runs without leases and logs why). Reaching the socket is the permission, so the group's members can hold builds on this node. |
 | `builds_url`, `builds_token_file` | server base URL (`http://host:port`) and a builds-only token file, so the worker can report leases to the server. A URL that already ends with `/api/maintenance/builds` is read as the same server. Optional: without them leases work and the server does not see them. A registration the server refuses or cannot be reached for is logged once for each cause (`build lease … not registered with the server (…)`), and the lease still runs. |
 
 ## Socket protocol

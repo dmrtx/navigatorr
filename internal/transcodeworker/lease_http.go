@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +22,8 @@ import (
 //
 // A Unix socket in the worker's state directory (default
 // <state_dir>/.builds/lease.sock, in a 0700 directory, the socket itself 0600:
-// only the user the worker runs as can reach it; there is no token). It
+// only the user the worker runs as can reach it; there is no token; with
+// build_socket_group, also that group: 0660). It
 // speaks HTTP and, on purpose, the shape of the server's builds API, so a
 // caller that already speaks that one (nbuild) only changes where it sends:
 //
@@ -142,12 +145,17 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
 		_ = os.Remove(path)
 	}
+	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
+	if err != nil {
+		return err
+	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	if err := setLeaseSocketAccess(path, gid); err != nil {
 		_ = ln.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	srv := &http.Server{
@@ -169,6 +177,44 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 		_ = os.Remove(path)
 	}()
 	return nil
+}
+
+// leaseSocketGroupID is the group the socket opens to, or -1 for owner-only.
+// A group needs a socket path of the operator's own: the worker's default
+// directory is private, so a group could not reach a socket there anyway.
+func leaseSocketGroupID(name string, ownPath bool) (int, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return -1, nil
+	}
+	if !ownPath {
+		return -1, errors.New("build_socket_group needs build_socket (a directory that group can enter)")
+	}
+	g, err := user.LookupGroup(name)
+	if err != nil {
+		return -1, fmt.Errorf("build_socket_group: %w", err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return -1, fmt.Errorf("build_socket_group %q: bad gid %q", name, g.Gid)
+	}
+	return gid, nil
+}
+
+// setLeaseSocketAccess makes the socket owner-only (gid -1) or opens it to
+// one group: the group is set before the mode, so the socket is never open to
+// the group it had when it was made.
+func setLeaseSocketAccess(path string, gid int) error {
+	if gid < 0 {
+		return os.Chmod(path, 0o600)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	if err := os.Lchown(path, -1, gid); err != nil {
+		return fmt.Errorf("build_socket_group: %w (the worker's user must be in the group)", err)
+	}
+	return os.Chmod(path, 0o660)
 }
 
 // prepareLeaseSocketDir makes the directory the socket goes in. The worker's
