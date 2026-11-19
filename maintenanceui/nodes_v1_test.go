@@ -29,7 +29,7 @@ func TestNodesV1Auth(t *testing.T) {
 		t.Fatal("the spec is public", w.Code)
 	}
 	// No credential, wrong credential: 401 JSON with a hint.
-	for _, hd := range []map[string]string{nil, {"X-Api-Key": "wrong-token-wrong-token-wrong"}, {"Authorization": "Bearer wrong-token-wrong-token-wrong"}} {
+	for _, hd := range []map[string]string{nil, {"X-Api-Key": "not.the.builds.key"}, {"Authorization": "Bearer not.the.builds.key"}} {
 		w := v1(h, "GET", "/nodes/v1/builds", "", hd)
 		var e map[string]string
 		_ = json.Unmarshal(w.Body.Bytes(), &e)

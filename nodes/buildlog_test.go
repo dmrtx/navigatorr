@@ -172,7 +172,7 @@ func TestBuildLogBuffersAreBounded(t *testing.T) {
 // database files (rows, write-ahead log), not the build records the lists and
 // the node views serve.
 func TestBuildLogIsNotPersisted(t *testing.T) {
-	const secret = "token=synthetic-secret-8f3a"
+	const secret = "token=synthetic.value.8f3a"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.db")
 	e, clock := buildSvcAt(t, path)
@@ -195,7 +195,7 @@ func TestBuildLogIsNotPersisted(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(raw), "synthetic-secret") {
+		if strings.Contains(string(raw), "synthetic.value") {
 			t.Fatalf("the output reached the %s payload: %s", name, raw)
 		}
 	}
@@ -210,7 +210,7 @@ func TestBuildLogIsNotPersisted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if bytes.Contains(raw, []byte("synthetic-secret")) {
+			if bytes.Contains(raw, []byte("synthetic.value")) {
 				t.Fatalf("the output reached %s %s", filepath.Base(f), when)
 			}
 		}

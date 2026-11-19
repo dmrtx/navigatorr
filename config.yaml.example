@@ -84,7 +84,7 @@ concurrency:
 # list_services / search_api / call_api. The key is web.builds_token_file's token:
 #   nodes:
 #     url: "http://localhost:8080"            # this server's web address
-#     api_key: "contents-of-the-builds-token-file"
+#     api_key: "<builds token>"
 #     api_version: "/nodes/v1"
 #     openapi_url: "http://localhost:8080/nodes/v1/openapi.json"
 services:
