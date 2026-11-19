@@ -557,7 +557,7 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	pauses, perr := e.workerPauses()
 	// An unreadable builds-pause state reads as paused, like the transcode
 	// pause: the create path fails closed too, so the page must not say otherwise.
-	buildPauses, bperr := e.deps.Store.ListBuildPauses()
+	buildPauses, bperr := e.buildsPauses()
 	rows, rerr := e.deps.Store.ListDrainActions()
 	encoding := map[string]int{}
 	if rerr == nil {
@@ -569,8 +569,8 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	}
 	for name, st := range out {
 		if since, ok := buildPauses[name]; ok {
-			st.BuildsPaused, st.BuildsPausedSince = true, since.Since
-		} else if bperr != nil {
+			st.BuildsPaused, st.BuildsPausedSince = true, since
+		} else if bperr {
 			st.BuildsPaused = true
 		}
 		if perr != nil {

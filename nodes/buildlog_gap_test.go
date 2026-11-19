@@ -1,4 +1,4 @@
-package action
+package nodes
 
 import (
 	"context"
@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/jakenesler/navigatorr/store"
 )
 
 // A heartbeat caught between its store update and its append must hold the
@@ -18,7 +16,7 @@ import (
 // gap, the line lands afterwards and the two snapshots differ every time; with
 // it the wait times out, the line lands and the finish goes on.
 func TestBuildFinishWaitsForAHeartbeatInTheGap(t *testing.T) {
-	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	e, _ := buildSvc(t)
 	b := startBuild(t, e, "laptop", "", 0)
 
 	inGap := make(chan struct{})
@@ -50,7 +48,7 @@ func TestBuildFinishWaitsForAHeartbeatInTheGap(t *testing.T) {
 	finished := make(chan error, 1)
 	go func() {
 		// build_cancel and POST /finish both end a build through FinishBuild.
-		_, _, err := e.FinishBuild(context.Background(), b.ID, store.BuildCancelled, nil)
+		_, _, err := e.FinishBuild(context.Background(), b.ID, BuildCancelled, nil)
 		_, atEnd, _, _ = e.BuildLog(b.ID)
 		close(finishReturned)
 		finished <- err

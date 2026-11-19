@@ -1,64 +1,65 @@
-package store
+package nodes
 
 import (
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestBuildStoreLifecycle(t *testing.T) {
-	s := openTest(t)
+func TestRegistryLifecycle(t *testing.T) {
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
-	b, err := s.CreateBuild(Build{Target: "m1", Source: "ci", Title: "run", PreemptMode: WorkerPauseSuspend}, now, 10*time.Minute)
+	b, err := s.create(Build{Target: "nodeA", Source: "ci", Title: "run", PreemptMode: PreemptSuspend}, now, 10*time.Minute)
 	if err != nil || b.Status != BuildRunning || b.Priority != BuildPriorityNormal || b.StartedAt != b.CreatedAt || b.ExpiresAt != "2026-11-13T10:10:00Z" {
 		t.Fatalf("%+v %v", b, err)
 	}
 	// An old row that waits (the server no longer creates them) is still an
 	// active build: read, heartbeated, finished and expired like a running one.
-	w := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "warm", PreemptMode: WorkerPauseSuspend, Priority: BuildPriorityLow}, now.Add(time.Second), time.Minute)
+	w := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "warm", PreemptMode: PreemptSuspend, Priority: BuildPriorityLow}, now.Add(time.Second), time.Minute)
 	oldWaiting(t, s, w.ID)
-	if got, _ := s.GetBuild(w.ID); got.Status != BuildWaiting {
+	if got, _ := s.get(w.ID); got.Status != BuildWaiting {
 		t.Fatalf("%+v", got)
 	}
-	if active, _ := s.ActiveBuilds(); len(active) != 2 {
+	if active, _ := s.active(); len(active) != 2 {
 		t.Fatalf("%+v", active)
 	}
-	if _, err := s.GetBuild("nope"); !errors.Is(err, ErrBuildNotFound) {
+	if _, err := s.get("nope"); !errors.Is(err, ErrBuildNotFound) {
 		t.Fatal(err)
 	}
 
 	// The shorter ttl expires first; the other keeps running.
-	lost, err := s.ExpireBuilds(now.Add(2 * time.Minute))
+	lost, err := s.expire(now.Add(2 * time.Minute))
 	if err != nil || len(lost) != 1 || lost[0].ID != w.ID {
 		t.Fatalf("%+v %v", lost, err)
 	}
-	if got, _ := s.GetBuild(w.ID); got.Status != BuildLost || got.EndedAt == "" {
+	if got, _ := s.get(w.ID); got.Status != BuildLost || got.EndedAt == "" {
 		t.Fatalf("%+v", got)
 	}
-	if _, err := s.HeartbeatBuild(w.ID, now, time.Minute, nil); !errors.Is(err, ErrBuildEnded) {
+	if _, err := s.heartbeat(w.ID, now, time.Minute, nil); !errors.Is(err, ErrBuildEnded) {
 		t.Fatal(err)
 	}
 	code := 7
-	done, changed, err := s.FinishBuild(b.ID, BuildFailed, &code, now.Add(3*time.Minute))
+	done, changed, err := s.finish(b.ID, BuildFailed, &code, now.Add(3*time.Minute))
 	if err != nil || !changed || done.ExitCode == nil || *done.ExitCode != 7 {
 		t.Fatalf("%+v %v %v", done, changed, err)
 	}
 
 	// Only ended builds older than the cutoff are pruned.
-	if n, err := s.PruneBuilds(now.Add(150 * time.Second)); err != nil || n != 1 {
+	if n, err := s.prune(now.Add(150 * time.Second)); err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
-	if n, err := s.PruneBuilds(now.Add(time.Hour)); err != nil || n != 1 {
+	if n, err := s.prune(now.Add(time.Hour)); err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
-	if list, _ := s.ListBuilds(BuildFilter{}); len(list) != 0 {
+	if list, _ := s.list(BuildFilter{}); len(list) != 0 {
 		t.Fatalf("%+v", list)
 	}
 }
 
-func mustBuild(t *testing.T, s *Store, b Build, now time.Time, ttl time.Duration) Build {
+func mustBuild(t *testing.T, s *registry, b Build, now time.Time, ttl time.Duration) Build {
 	t.Helper()
-	got, err := s.CreateBuild(b, now, ttl)
+	got, err := s.create(b, now, ttl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func mustBuild(t *testing.T, s *Store, b Build, now time.Time, ttl time.Duration
 }
 
 // oldWaiting turns a build into the waiting row an earlier server wrote.
-func oldWaiting(t *testing.T, s *Store, id string) {
+func oldWaiting(t *testing.T, s *registry, id string) {
 	t.Helper()
 	if _, err := s.db.Exec(`UPDATE builds SET status='waiting', started_at='' WHERE id=?`, id); err != nil {
 		t.Fatal(err)
@@ -74,20 +75,20 @@ func oldWaiting(t *testing.T, s *Store, id string) {
 }
 
 func TestListBuildsKeepsActiveBuildsPastTheLimit(t *testing.T) {
-	s := openTest(t)
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
-	running := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "old", PreemptMode: WorkerPauseSuspend}, now, time.Hour)
-	waiting := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "old wait", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour)
+	running := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "old", PreemptMode: PreemptSuspend}, now, time.Hour)
+	waiting := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "old wait", PreemptMode: PreemptGraceful, Priority: BuildPriorityLow}, now, time.Hour)
 	oldWaiting(t, s, waiting.ID)
 	for i := 1; i <= 120; i++ {
-		b := mustBuild(t, s, Build{Target: "h", Source: "ci", Title: "done", PreemptMode: WorkerPauseSuspend}, now.Add(time.Duration(i)*time.Minute), time.Hour)
-		if _, _, err := s.FinishBuild(b.ID, BuildSucceeded, nil, now.Add(time.Duration(i)*time.Minute)); err != nil {
+		b := mustBuild(t, s, Build{Target: "h", Source: "ci", Title: "done", PreemptMode: PreemptSuspend}, now.Add(time.Duration(i)*time.Minute), time.Hour)
+		if _, _, err := s.finish(b.ID, BuildSucceeded, nil, now.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// The limit applies to the history: both active builds always come first.
 	for _, limit := range []int{0, 100, 5, 1} {
-		list, err := s.ListBuilds(BuildFilter{Limit: limit})
+		list, err := s.list(BuildFilter{Limit: limit})
 		want := limit
 		if want == 0 {
 			want = 100
@@ -105,48 +106,48 @@ func TestListBuildsKeepsActiveBuildsPastTheLimit(t *testing.T) {
 	}
 	// More active builds than the limit: none is dropped.
 	for i := 0; i < 3; i++ {
-		mustBuild(t, s, Build{Target: "x", Source: "ci", Title: "more", PreemptMode: WorkerPauseSuspend}, now.Add(time.Duration(200+i)*time.Minute), 24*time.Hour)
+		mustBuild(t, s, Build{Target: "x", Source: "ci", Title: "more", PreemptMode: PreemptSuspend}, now.Add(time.Duration(200+i)*time.Minute), 24*time.Hour)
 	}
-	list, err := s.ListBuilds(BuildFilter{Limit: 2})
+	list, err := s.list(BuildFilter{Limit: 2})
 	if err != nil || len(list) != 5+2 {
 		t.Fatalf("5 active builds past a limit of 2 plus 2 ended: %d %v", len(list), err)
 	}
-	if l, _ := s.ListBuilds(BuildFilter{Limit: -1}); len(l) != 5+120 {
+	if l, _ := s.list(BuildFilter{Limit: -1}); len(l) != 5+120 {
 		t.Fatalf("no limit: %d", len(l))
 	}
 }
 
 func TestLateHeartbeatMarksTheBuildLostInTheStore(t *testing.T) {
-	s := openTest(t)
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	for _, wait := range []bool{false, true} {
-		b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "x", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Minute)
+		b := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "x", PreemptMode: PreemptGraceful, Priority: BuildPriorityLow}, now, time.Minute)
 		if wait {
 			oldWaiting(t, s, b.ID)
 		}
-		got, err := s.HeartbeatBuild(b.ID, now.Add(2*time.Minute), time.Hour, nil)
+		got, err := s.heartbeat(b.ID, now.Add(2*time.Minute), time.Hour, nil)
 		if !errors.Is(err, ErrBuildExpired) || !errors.Is(err, ErrBuildEnded) || got.Status != BuildLost || got.EndedAt != b.ExpiresAt {
 			t.Fatalf("wait=%v: %+v %v", wait, got, err)
 		}
-		stored, _ := s.GetBuild(b.ID)
+		stored, _ := s.get(b.ID)
 		if stored.Status != BuildLost || stored.ExpiresAt != b.ExpiresAt || stored.EndedAt != b.ExpiresAt {
 			t.Fatalf("wait=%v: not extended: %+v", wait, stored)
 		}
-		if _, err := s.HeartbeatBuild(b.ID, now.Add(2*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) || errors.Is(err, ErrBuildExpired) {
+		if _, err := s.heartbeat(b.ID, now.Add(2*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) || errors.Is(err, ErrBuildExpired) {
 			t.Fatalf("a second heartbeat is the plain ended error: %v", err)
 		}
 	}
 }
 
 func TestBuildsCreatedInTheSameSecondKeepCreationOrder(t *testing.T) {
-	s := openTest(t)
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	var ids []string
 	for i := 0; i < 12; i++ {
-		b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "t", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour)
+		b := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "t", PreemptMode: PreemptGraceful, Priority: BuildPriorityLow}, now, time.Hour)
 		ids = append(ids, b.ID)
 	}
-	list, err := s.ActiveBuilds()
+	list, err := s.active()
 	if err != nil || len(list) != len(ids) {
 		t.Fatalf("%v %v", len(list), err)
 	}
@@ -156,21 +157,21 @@ func TestBuildsCreatedInTheSameSecondKeepCreationOrder(t *testing.T) {
 		}
 	}
 	// ListBuilds is the reverse inside the active group.
-	newest, _ := s.ListBuilds(BuildFilter{})
+	newest, _ := s.list(BuildFilter{})
 	if newest[0].ID != ids[len(ids)-1] {
 		t.Fatal("newest first")
 	}
 }
 
 func TestHeartbeatWithoutTTLKeepsTheOwnWindowWithoutInflatingIt(t *testing.T) {
-	s := openTest(t)
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
-	b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "t", PreemptMode: WorkerPauseSuspend}, now, 30*time.Second)
-	hb, err := s.HeartbeatBuild(b.ID, now.Add(10*time.Second), 0, nil)
+	b := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "t", PreemptMode: PreemptSuspend}, now, 30*time.Second)
+	hb, err := s.heartbeat(b.ID, now.Add(10*time.Second), 0, nil)
 	if err != nil || hb.ExpiresAt != buildTime(now.Add(40*time.Second)) {
 		t.Fatalf("a 30 s build keeps 30 s: %+v %v", hb, err)
 	}
-	hb, _ = s.HeartbeatBuild(b.ID, now.Add(20*time.Second), 0, nil)
+	hb, _ = s.heartbeat(b.ID, now.Add(20*time.Second), 0, nil)
 	if hb.ExpiresAt != buildTime(now.Add(50*time.Second)) {
 		t.Fatalf("and it does not drift: %+v", hb)
 	}
@@ -179,30 +180,40 @@ func TestHeartbeatWithoutTTLKeepsTheOwnWindowWithoutInflatingIt(t *testing.T) {
 // A row an earlier server left waiting is still readable and listed as active
 // until the reconcile cancels it with the reason; running builds are untouched.
 func TestLegacyWaitingBuildsAreCancelledWithAReason(t *testing.T) {
-	s := openTest(t)
+	s := openReg(t)
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
-	running := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "run", PreemptMode: WorkerPauseSuspend}, now, time.Hour)
-	waiting := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "old", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour)
+	running := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "run", PreemptMode: PreemptSuspend}, now, time.Hour)
+	waiting := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "old", PreemptMode: PreemptGraceful, Priority: BuildPriorityLow}, now, time.Hour)
 	oldWaiting(t, s, waiting.ID)
-	if active, _ := s.ActiveBuilds(); len(active) != 2 {
+	if active, _ := s.active(); len(active) != 2 {
 		t.Fatalf("the waiting row is still active: %+v", active)
 	}
-	got, err := s.CancelWaitingBuilds(now.Add(time.Minute))
+	got, err := s.cancelWaiting(now.Add(time.Minute))
 	if err != nil || len(got) != 1 || got[0].ID != waiting.ID {
 		t.Fatalf("%+v %v", got, err)
 	}
-	stored, _ := s.GetBuild(waiting.ID)
+	stored, _ := s.get(waiting.ID)
 	if stored.Status != BuildCancelled || stored.EndedAt == "" || stored.Progress != LegacyWaitingReason {
 		t.Fatalf("%+v", stored)
 	}
-	if r, _ := s.GetBuild(running.ID); r.Status != BuildRunning {
+	if r, _ := s.get(running.ID); r.Status != BuildRunning {
 		t.Fatalf("a running build is untouched: %+v", r)
 	}
-	if again, _ := s.CancelWaitingBuilds(now.Add(2 * time.Minute)); len(again) != 0 {
+	if again, _ := s.cancelWaiting(now.Add(2 * time.Minute)); len(again) != 0 {
 		t.Fatalf("nothing left to cancel: %+v", again)
 	}
 	// A heartbeat now finds the build ended.
-	if _, err := s.HeartbeatBuild(waiting.ID, now.Add(3*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) {
+	if _, err := s.heartbeat(waiting.ID, now.Add(3*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) {
 		t.Fatalf("%v", err)
 	}
+}
+
+func openReg(t *testing.T) *registry {
+	t.Helper()
+	r, err := openRegistry(filepath.Join(t.TempDir(), "nodes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.close() })
+	return r
 }

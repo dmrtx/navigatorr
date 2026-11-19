@@ -8,7 +8,8 @@ import (
 )
 
 // A database at version 25 with rows keeps them when it moves to 26, and gains
-// the (empty) builds pause table.
+// the (empty) builds pause table. (The builds registry itself moved to package
+// nodes; the old tables stay here untouched.)
 func TestMigrationV25ToV26KeepsRowsAndAddsBuildPauses(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "v25.db")
 	db, err := sql.Open("sqlite", dbPath)
@@ -53,16 +54,12 @@ func TestMigrationV25ToV26KeepsRowsAndAddsBuildPauses(t *testing.T) {
 	if pauses, err := s.ListWorkerPauses(); err != nil || pauses["node-a"].Mode != WorkerPauseGraceful || pauses["node-a"].Revision != 3 {
 		t.Fatalf("the transcode pause is kept: %+v %v", pauses, err)
 	}
-	if b, err := s.GetBuild("bld_old"); err != nil || b.Title != "old run" || b.Status != BuildRunning {
-		t.Fatalf("the build is kept: %+v %v", b, err)
+	var title, status string
+	if err := s.db.QueryRow(`SELECT title, status FROM builds WHERE id='bld_old'`).Scan(&title, &status); err != nil || title != "old run" || status != "running" {
+		t.Fatalf("the build row is kept: %q %q %v", title, status, err)
 	}
-	if pauses, err := s.ListBuildPauses(); err != nil || len(pauses) != 0 {
-		t.Fatalf("nothing is builds-paused after the migration: %+v %v", pauses, err)
-	}
-	if err := s.SetBuildPause("node-a", true); err != nil {
-		t.Fatal(err)
-	}
-	if paused, _ := s.BuildsPaused("node-a"); !paused {
-		t.Fatal("the new table works")
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM build_pauses`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("nothing is builds-paused after the migration: %d %v", n, err)
 	}
 }

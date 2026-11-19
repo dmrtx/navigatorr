@@ -41,11 +41,9 @@ type Engine struct {
 	afterBatchPlanLock func()
 	// beforeAutoEnqueue, in tests, can fail an automatic submission.
 	beforeAutoEnqueue func(id string) error
-	// buildLogs holds the output tails of builds, in memory only.
-	buildLogs buildLogs
-	// buildMu makes a heartbeat's update and log append one step against the
-	// transitions that end a build.
-	buildMu sync.Mutex
+	// records is the builds registry's display side (package nodes, wired in
+	// main); nil reads as none. See build_records.go.
+	records BuildRecords
 	// notes tracks skipped-replacement notes still being written.
 	notes sync.WaitGroup
 
@@ -67,9 +65,6 @@ type Engine struct {
 	// pauseSweeping is set while a background sweep of paused nodes runs.
 	pauseSweeping atomic.Bool
 
-	// afterBuildsPausedCheck is a test seam: it runs in CreateBuild between the
-	// builds-pause check and the insert, with the node's request lock held.
-	afterBuildsPausedCheck func(node string)
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the
 	// durable queue order lives in each waiter's state (worker_slot_wait_since).
