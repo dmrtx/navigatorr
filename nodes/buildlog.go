@@ -1,7 +1,10 @@
 package nodes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +37,18 @@ type buildLogBuffer struct {
 	// the last kept line. The first kept line is number total-len(lines)+1.
 	total     int
 	updatedAt time.Time
+	// gen names this buffer: random, new each time a buffer is created for a
+	// build (first output, after an eviction or retention drop, after a
+	// restart). Line numbers only mean something within one generation.
+	gen string
+}
+
+func newLogGeneration() string {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(raw)
 }
 
 // buildLogs is the in-memory store of build output tails.
@@ -125,7 +140,7 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 			l.markDroppedLocked(oldest)
 		}
 		l.forgetDroppedLocked(id)
-		buf = &buildLogBuffer{}
+		buf = &buildLogBuffer{gen: newLogGeneration()}
 		l.bufs[id] = buf
 	}
 	buf.lines = append(buf.lines, lines...)
@@ -138,13 +153,19 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 }
 
 func (l *buildLogs) get(id string) (lines []string, updated time.Time, total int) {
+	lines, updated, total, _ = l.getGen(id)
+	return lines, updated, total
+}
+
+// getGen is get with the generation of the buffer ("" when there is none).
+func (l *buildLogs) getGen(id string) (lines []string, updated time.Time, total int, gen string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	buf := l.bufs[id]
 	if buf == nil {
-		return nil, time.Time{}, 0
+		return nil, time.Time{}, 0, ""
 	}
-	return append([]string(nil), buf.lines...), buf.updatedAt, buf.total
+	return append([]string(nil), buf.lines...), buf.updatedAt, buf.total, buf.gen
 }
 
 // drop forgets a build altogether (its record is gone).
@@ -221,6 +242,10 @@ type BuildOutput struct {
 	// (Total-len(Lines)+1; 0 when there are no lines).
 	Total int
 	First int
+	// Generation names the buffer the numbers belong to ("" when the build has
+	// no buffer). It changes whenever the buffer is recreated, which restarts
+	// the numbering at 1: a restart, an eviction or the retention dropping it.
+	Generation string
 	// Expired is true only when a buffer this build had was dropped: its
 	// retention passed or the cap on buffers pushed it out. A build that never
 	// sent output, or whose output a restart forgot, is not expired.
@@ -249,7 +274,7 @@ func (s *Service) BuildOutput(id string) (BuildOutput, error) {
 	if buildLogExpired(b, s.now()) {
 		s.logs.expire(id)
 	}
-	lines, updated, total := s.logs.get(id)
+	lines, updated, total, gen := s.logs.getGen(id)
 	if lines == nil {
 		lines = []string{}
 	}
@@ -257,7 +282,7 @@ func (s *Service) BuildOutput(id string) (BuildOutput, error) {
 	if len(lines) > 0 {
 		first = total - len(lines) + 1
 	}
-	return BuildOutput{Build: b, Lines: lines, Updated: updated, Total: total, First: first, Expired: len(lines) == 0 && s.logs.wasDropped(id)}, nil
+	return BuildOutput{Build: b, Lines: lines, Updated: updated, Total: total, First: first, Generation: gen, Expired: len(lines) == 0 && s.logs.wasDropped(id)}, nil
 }
 
 // pruneBuildLogs drops the buffers of builds that are gone or whose output

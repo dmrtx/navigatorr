@@ -110,6 +110,7 @@ func apiFail(w http.ResponseWriter, err error) bool {
 	var taken *BuildIDTakenError
 	var needLease *NodeLeaseRequiredError
 	var unknown *UnknownNodeError
+	var badCursor *InvalidCursorError
 	switch {
 	case err == nil:
 		return false
@@ -123,6 +124,8 @@ func apiFail(w http.ResponseWriter, err error) bool {
 			`target "`+needLease.Node+`" is a transcode node: its own worker registers the lease and the record follows (send via="node_lease" only from that worker). To record a build on another machine use a target that is not a configured node; GET `+BasePath+"/nodes lists the nodes")
 	case errors.As(err, &taken):
 		apiError(w, 409, BuildIDTakenCode, taken.Error(), "client_id must be unique per build; reuse it only to retry the same create (same target and source)")
+	case errors.As(err, &badCursor):
+		apiError(w, 400, "invalid_cursor", "the cursor is not one this listing gave", "restart without cursor; a cursor is the next_cursor of the previous page")
 	case errors.As(err, &unknown):
 		apiError(w, 404, "unknown_node", unknown.Error(), "GET "+BasePath+"/nodes lists the configured nodes")
 	case errors.Is(err, ErrBuildNotFound):
@@ -176,6 +179,10 @@ func (s *Service) apiBuildsPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// The node's canonical name (the topology's), for the toggle and the answer.
+	if canon, ok := s.node(name); ok {
+		name = canon
+	}
 	if apiFail(w, s.SetBuildsPause(r.Context(), name, *body.Paused)) {
 		return
 	}
@@ -203,40 +210,20 @@ func (s *Service) apiBuilds(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	// The registry gives active builds first, then history, newest first; a
-	// cursor is the id of the last build of the previous page.
-	all, err := s.ListBuilds(BuildFilter{Target: q.Get("node"), Status: q.Get("status"), Source: q.Get("source"), Limit: -1})
+	// One stable order for every page (newest created first, whatever the
+	// status), so a build that changes status between pages is neither repeated
+	// nor skipped. A cursor is the next_cursor of the previous page.
+	page, err := s.PageBuilds(BuildFilter{Target: q.Get("node"), Status: q.Get("status"), Source: q.Get("source")}, q.Get("cursor"), limit)
 	if apiFail(w, err) {
 		return
 	}
-	start := 0
-	if c := q.Get("cursor"); c != "" {
-		start = -1
-		for i, b := range all {
-			if b.ID == c {
-				start = i + 1
-				break
-			}
-		}
-		if start < 0 {
-			apiError(w, 400, "invalid_cursor", "the cursor names no build in this listing", "restart without cursor; a cursor is the next_cursor of the previous page")
-			return
-		}
-	}
-	end := start + limit
-	next := ""
-	if end < len(all) {
-		next = all[end-1].ID
-	} else {
-		end = len(all)
-	}
-	out := make([]BuildV1, 0, end-start)
-	for _, b := range all[start:end] {
+	out := make([]BuildV1, 0, len(page.Builds))
+	for _, b := range page.Builds {
 		out = append(out, viewBuild(b))
 	}
 	body := map[string]any{"builds": out}
-	if next != "" {
-		body["next_cursor"] = next
+	if page.Next != "" {
+		body["next_cursor"] = page.Next
 	}
 	apiJSON(w, 200, body)
 }
@@ -350,8 +337,9 @@ type LogLine struct {
 }
 
 func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 	after := 0
-	if v := r.URL.Query().Get("after"); v != "" {
+	if v := q.Get("after"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
 			apiError(w, 400, "invalid_request", "after must be a whole number, 0 or more", "after is the n of the last line you have seen (next_after of the previous answer)")
@@ -362,6 +350,15 @@ func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
 	out, err := s.BuildOutput(r.PathValue("id"))
 	if apiFail(w, err) {
 		return
+	}
+	// Numbers restart at 1 whenever the buffer is recreated (a restart, an
+	// eviction, the retention). The reader's position is stale when it names
+	// another generation of the buffer or a line past the end: answer from the
+	// start and say so.
+	gen := q.Get("generation")
+	reset := after > out.Total || (gen != "" && gen != out.Generation)
+	if reset {
+		after = 0
 	}
 	lines := make([]LogLine, 0, len(out.Lines))
 	for i, text := range out.Lines {
@@ -381,7 +378,7 @@ func (s *Service) apiLog(w http.ResponseWriter, r *http.Request) {
 		ended = out.Build.EndedAt
 	}
 	apiJSON(w, 200, map[string]any{
-		"lines": lines, "next_after": next, "first_available": out.First,
+		"lines": lines, "next_after": next, "first_available": out.First, "generation": out.Generation, "reset": reset,
 		"status": out.Build.Status, "updated_at": updated, "ended_at": ended, "expired": out.Expired,
 	})
 }

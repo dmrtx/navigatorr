@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -373,6 +374,57 @@ func (s *Service) GetBuild(id string) (Build, error) { return s.reg.get(id) }
 // newest first. The limit cuts the history, never an active build.
 func (s *Service) ListBuilds(f BuildFilter) ([]Build, error) { return s.reg.list(f) }
 
+// BuildPage is one page of PageBuilds.
+type BuildPage struct {
+	Builds []Build
+	// Next is the cursor of the next page; empty on the last page.
+	Next string
+}
+
+// PageBuilds is the listing /nodes/v1 pages through: every matching build,
+// newest first by creation order (the registry's insertion number), active and
+// ended alike. Unlike ListBuilds it never reorders by status, so a build that
+// finishes between two pages neither repeats nor disappears, and a cursor
+// never goes stale: it is the insertion number of the last build of the
+// previous page, valid whether or not that build still exists. limit must be
+// 1 or more; cursor is "" for the first page, otherwise a Next of an earlier
+// page (InvalidCursorError for anything else).
+func (s *Service) PageBuilds(f BuildFilter, cursor string, limit int) (BuildPage, error) {
+	if limit < 1 {
+		return BuildPage{}, invalid("limit must be 1 or more")
+	}
+	var before int64
+	if cursor != "" {
+		n, err := strconv.ParseInt(cursor, 10, 64)
+		if err != nil || n < 1 || strconv.FormatInt(n, 10) != cursor {
+			return BuildPage{}, &InvalidCursorError{Cursor: cursor}
+		}
+		before = n
+	}
+	f.Target = s.canonicalTarget(f.Target)
+	got, more, err := s.reg.page(f, before, limit)
+	if err != nil {
+		return BuildPage{}, err
+	}
+	p := BuildPage{Builds: got}
+	if more {
+		p.Next = strconv.FormatInt(got[len(got)-1].seq, 10)
+	}
+	return p, nil
+}
+
+// canonicalTarget is the configured node's own name when the target names one
+// (what the topology resolves it to), else the target as given.
+func (s *Service) canonicalTarget(target string) string {
+	if target == "" {
+		return ""
+	}
+	if name, ok := s.node(target); ok {
+		return name
+	}
+	return target
+}
+
 // Reconcile is one pass of the housekeeping: running builds past their expiry
 // become lost, waiting ones left by an earlier server are cancelled, output
 // buffers of ended builds are released and history older than the retention is
@@ -519,9 +571,13 @@ func (s *Service) Nodes(ctx context.Context) ([]NodeView, error) {
 
 // Node is one node's view; UnknownNodeError when it is not configured.
 func (s *Service) Node(ctx context.Context, name string) (NodeView, error) {
-	if _, ok := s.node(name); !ok {
+	// The topology's own name for the node is what every table and view is
+	// keyed by, whatever spelling the caller used.
+	canon, ok := s.node(name)
+	if !ok {
 		return NodeView{}, &UnknownNodeError{Node: name}
 	}
+	name = canon
 	pauses, perr := s.reg.listPauses()
 	var states map[string]TranscodeState
 	if s.tv != nil {

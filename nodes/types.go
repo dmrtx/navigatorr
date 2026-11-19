@@ -106,6 +106,10 @@ type Build struct {
 	// HoldsTranscodeNode is kept for compatibility and is always false: the
 	// registry never holds a node for a build, the node's worker does.
 	HoldsTranscodeNode bool `json:"holds_transcode_node"`
+
+	// seq is the registry's insertion number (monotonic, unique): set only by
+	// the paged listing, which cursors on it.
+	seq int64
 }
 
 // Active is whether the build is still running (or, on an old row, waiting).
@@ -174,6 +178,11 @@ func (e *NodeLeaseRequiredError) Error() string {
 type BuildsPausedError struct{ Node string }
 
 func (e *BuildsPausedError) Error() string { return "builds paused on " + e.Node }
+
+// InvalidCursorError is a list cursor that is not one a previous page gave.
+type InvalidCursorError struct{ Cursor string }
+
+func (e *InvalidCursorError) Error() string { return "invalid cursor " + e.Cursor }
 
 // UnknownNodeError is a request for a node that is not configured.
 type UnknownNodeError struct{ Node string }

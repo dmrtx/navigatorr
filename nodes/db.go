@@ -182,6 +182,55 @@ func (r *registry) list(f BuildFilter) ([]Build, error) {
 	return append(out, history...), nil
 }
 
+// page returns one page of the matching builds in a single stable order: newest
+// insertion first (seq, then id as a tie-break, so the order is total). A build
+// changing status never moves it, and rows pruned between pages cannot shift
+// the ones after the cursor. before is the seq of the last build of the previous
+// page (0 for the first page). It returns up to limit builds and whether more
+// follow. Only the rows of the page are read.
+func (r *registry) page(f BuildFilter, before int64, limit int) (out []Build, more bool, err error) {
+	where := ` WHERE 1=1`
+	var args []any
+	for _, c := range []struct{ col, v string }{{"target", f.Target}, {"status", f.Status}, {"source", f.Source}} {
+		if c.v != "" {
+			where += ` AND ` + c.col + `=?`
+			args = append(args, c.v)
+		}
+	}
+	if before > 0 {
+		where += ` AND seq < ?`
+		args = append(args, before)
+	}
+	args = append(args, limit+1)
+	r.mu.Lock()
+	rows, err := r.db.Query(`SELECT `+buildColumns+`, seq FROM builds`+where+` ORDER BY seq DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		r.mu.Unlock()
+		return nil, false, err
+	}
+	defer r.mu.Unlock()
+	defer rows.Close()
+	for rows.Next() {
+		var b Build
+		var exit sql.NullInt64
+		if err := rows.Scan(&b.ID, &b.Target, &b.Source, &b.Holder, &b.Kind, &b.Title, &b.PreemptMode, &b.Priority, &b.Status, &b.CreatedAt, &b.StartedAt, &b.LastHeartbeatAt, &b.ExpiresAt, &b.EndedAt, &b.Progress, &exit, &b.seq); err != nil {
+			return nil, false, err
+		}
+		if exit.Valid {
+			v := int(exit.Int64)
+			b.ExitCode = &v
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		out, more = out[:limit], true
+	}
+	return out, more, nil
+}
+
 // heartbeat extends a running build's expiry to now+ttl (a ttl of 0 keeps the
 // window it had) and optionally replaces its progress line. A build that ended
 // gives ErrBuildEnded (with the stored record). A heartbeat that arrives after
