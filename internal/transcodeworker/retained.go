@@ -60,7 +60,7 @@ var (
 	// ErrNotRetained reports a publish for a job that is not a retained
 	// candidate (unknown policy, still encoding, cancelled, failed or expired).
 	ErrNotRetained = errors.New("job is not a retained candidate")
-	// ErrPublishHeld reports a publish refused while the drain freeze is on.
+	// ErrPublishHeld reports a publish refused while the drain hold or a build lease is on, or while the node is busy (the capacity lock is taken; ask again).
 	ErrPublishHeld = errors.New("publication is held while the worker drains")
 	// ErrRetainedCandidateChanged reports a retained file that no longer matches
 	// the checkpoint it was accepted with.
@@ -352,8 +352,8 @@ func (w *Worker) PublishRetained(ctx context.Context, jobID string) (JobStatusRe
 	default:
 		return refuse(fmt.Errorf("%w: job %q has not finished encoding", ErrNotRetained, jobID))
 	}
-	// A drain freeze or a build lease holds publication; an operator pause or
-	// suspend never did.
+	// The drain hold (Held) or a running build lease holds publication; an
+	// operator suspend never did.
 	if w.Held() || w.leaseHolds() {
 		return refuse(ErrPublishHeld)
 	}

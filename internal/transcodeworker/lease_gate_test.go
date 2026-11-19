@@ -45,8 +45,9 @@ func TestResumePostEncodeRechecksTheLeaseUnderTheCapacityLock(t *testing.T) {
 	}
 }
 
-// Only a lease stops post-encode work: an operator pause, a suspend or a drain
-// never did, and finishing that work is how a drain ends.
+// Only a lease stops post-encode work: a drain hold (SetHold, what a drain
+// sets) or an operator suspend never did, and finishing that work is how a
+// drain ends.
 func TestResumePostEncodeGateIsTheLeaseOnly(t *testing.T) {
 	w, stub, _ := postEncodeWorker(t)
 	if err := w.SetHold(true); err != nil {
@@ -249,5 +250,46 @@ func TestHoldRefusalClearsWhenTheLeaseEnds(t *testing.T) {
 	got, _ := LoadJob(jobFile)
 	if got.RetentionBlocked != "" || got.RoomNote != "" || got.PID == 0 {
 		t.Fatalf("the refusal is gone and the job runs: %+v", got)
+	}
+}
+
+// The drain hold (SetHold) holds publication, and does not stop post-encode.
+func TestDrainHoldRefusesPublishRetainedButNotResumePostEncode(t *testing.T) {
+	f := newRetainedFixture(t, gateConfig)
+	f.retain("job1")
+	if err := f.w.SetHold(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.w.PublishRetained(context.Background(), "job1"); !errors.Is(err, ErrPublishHeld) {
+		t.Fatalf("err = %v, want ErrPublishHeld", err)
+	}
+	f.assertRetained("job1")
+
+	w, stub, _ := postEncodeWorker(t)
+	if err := w.SetHold(true); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := w.ResumePostEncode(context.Background(), "self", ""); err != nil || n != 1 || stub.n() != 1 {
+		t.Fatalf("a drain hold must not stop post-encode: started %d (%v)", n, err)
+	}
+}
+
+// Another holder of the capacity lock makes the request ask again: nothing is
+// published and the candidate stays retained.
+func TestPublishRetainedRefusesWhileTheCapacityLockIsBusy(t *testing.T) {
+	f := newRetainedFixture(t, gateConfig)
+	f.retain("job1")
+	lock, err := acquireCapacityLock(filepath.Clean(f.w.cfg.StateDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.w.PublishRetained(context.Background(), "job1"); !errors.Is(err, ErrPublishHeld) {
+		lock.Unlock()
+		t.Fatalf("err = %v, want ErrPublishHeld", err)
+	}
+	f.assertRetained("job1")
+	lock.Unlock()
+	if _, err := f.w.PublishRetained(context.Background(), "job1"); err != nil {
+		t.Fatalf("once the lock is free: %v", err)
 	}
 }

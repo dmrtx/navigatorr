@@ -665,7 +665,7 @@ func TestLeaseSummaryListsActiveLeasesOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := w.leaseSummary(time.Now()); len(got) != 1 || got[0].ID != a.ID || got[0].Title != "first" || got[0].Source != "tester" || got[0].StartedAt == "" {
+	if got := w.leaseSummary(time.Now()); len(got) != 1 || got[0].ID != a.ID || got[0].Title != "first" || got[0].Source != "tester" || got[0].StartedAt == "" || got[0].Mode == "" {
 		t.Fatalf("summary: %+v", got)
 	}
 	if _, err := w.LeaseFinish(a.ID, leaseStatusSucceeded, ptr(0)); err != nil {

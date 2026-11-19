@@ -292,7 +292,7 @@ func (w *Worker) leaseSummary(now time.Time) []transcode.WorkerLease {
 		if l.Status != leaseStatusWaiting && !l.holds(now) {
 			continue
 		}
-		entry := transcode.WorkerLease{ID: l.ID, Title: l.Title, Source: l.Source, Status: l.Status}
+		entry := transcode.WorkerLease{ID: l.ID, Title: l.Title, Source: l.Source, Status: l.Status, Mode: l.PreemptMode}
 		if l.StartedAt != nil {
 			entry.StartedAt = l.StartedAt.UTC().Format(time.RFC3339)
 		}

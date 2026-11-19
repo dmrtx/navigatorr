@@ -469,21 +469,44 @@ func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
 }
 
 // RunningLeases is how many build leases the node's worker reports running,
-// and when the oldest began. It reads the last worker observation (memory
-// only, up to a few seconds old), never the build records: the worker is the
-// only authority on what holds the node, the records are history.
+// and when the earliest began (compared as times, not by list order). It reads
+// the last worker observation (memory only, up to a few seconds old), never
+// the build records: the worker is the only authority on what holds the node,
+// the records are history.
 func (e *Engine) RunningLeases(node string) (int, string) {
 	n, since := 0, ""
+	var earliest time.Time
 	for _, l := range e.workerLeases(node) {
 		if l.Status != "running" {
 			continue
 		}
-		if n == 0 {
-			since = l.StartedAt
-		}
 		n++
+		if l.StartedAt == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, l.StartedAt)
+		if err != nil {
+			continue
+		}
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest, since = t, l.StartedAt
+		}
 	}
 	return n, since
+}
+
+// runningLeaseMode is the strongest mode among the node's running leases:
+// suspend (and its alias immediate) over graceful. Empty when no running
+// lease reports a mode (an old worker).
+func (e *Engine) runningLeaseMode(node string) string {
+	rank := map[string]int{store.WorkerPauseGraceful: 1, store.WorkerPauseImmediate: 2, store.WorkerPauseSuspend: 3}
+	mode := ""
+	for _, l := range e.workerLeases(node) {
+		if l.Status == "running" && rank[l.Mode] > rank[mode] {
+			mode = l.Mode
+		}
+	}
+	return mode
 }
 
 // AttachNodeBuilds adds each node's build records to its pause status, for the
@@ -498,12 +521,7 @@ func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus)
 			if running, since := e.RunningLeases(name); running > 0 {
 				st.Paused, st.HeldBy = true, "builds"
 				st.Since = since
-				for _, b := range st.Builds {
-					if b.Status == store.BuildRunning {
-						st.Mode = b.PreemptMode
-						break
-					}
-				}
+				st.Mode = e.runningLeaseMode(name)
 				st.Message = fmt.Sprintf("Busy with %d running build(s). New jobs wait on this node.", running)
 			}
 		}

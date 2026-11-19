@@ -70,7 +70,8 @@ the permission.
    or suspend and no other lease; the worker promotes the oldest one under the
    capacity lock, so no job starts between the check and the grant.
 2. `running`: the queue is held, every process start is refused by the one
-   worker gate (`queueHeld()`: new jobs, post-encode recovery, publication),
+   worker gate (`queueHeld()` for new jobs; post-encode recovery and publication
+   have their own gates, see "What a lease gates"),
    and queued jobs that have not started carry the hold refusal on their
    record so the coordinator takes them back. A normal lease (`suspend`,
    `immediate`) also freezes the encoders; a `graceful` or low one does not.
@@ -91,8 +92,11 @@ A lease is not an operator pause, so the gate differs by path:
   (`queueHeld()`).
 - Post-encode recovery (`ResumePostEncode`): held by a running lease only.
   An operator pause or a drain still lets a finished encode go on to be saved.
-- Publication of a retained candidate (`PublishRetained`): held by the
-  operator's hold or a running lease, not by a suspend.
+- Publication of a retained candidate (`PublishRetained`): held by the drain
+  hold or a running lease. An operator suspend does not hold it.
+
+An operator suspend does not stop post-encode copy/verify or publication
+(intended): only leases and the drain hold do.
 
 Both post-encode paths check the lease once before the capacity lock and again
 under it. Leases are granted under that same lock, so a lease granted between
