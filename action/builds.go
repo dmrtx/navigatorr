@@ -170,6 +170,15 @@ func (e *Engine) buildNode(target string) (transcode.NamedWorker, bool) {
 // CreateBuild records a build. It is running at once, whatever its priority,
 // and holds nothing: on a node the worker's lease is what holds the node. The
 // only refusal that depends on the node is the builds pause.
+//
+// Pause versus create: the builds-pause lock below orders this check against
+// the toggle, so a record is either refused or registered before the pause.
+// The operator's transcode pause (SetNodePause) is deliberately not part of
+// it: a record holds nothing, so one registered while that pause is being set
+// changes no admission anywhere. The worker already granted its lease locally
+// (a lease is only ever refused by the builds pause, checked by the worker
+// before it grants); the record is bookkeeping that follows the lease and may
+// lag it or, after a refusal, be absent (the lease is then unrecorded).
 func (e *Engine) CreateBuild(ctx context.Context, in BuildInput) (store.Build, error) {
 	if e.deps.Store == nil {
 		return store.Build{}, errors.New("store is required for builds")
@@ -400,7 +409,8 @@ func (e *Engine) ListBuilds(f store.BuildFilter) ([]store.Build, error) {
 }
 
 // reconcileBuilds is the build part of the reconcile tick: running (or, from an
-// old row, waiting) builds past their expiry become lost, and history older
+// old row, waiting) builds past their expiry become lost, waiting ones left by
+// an earlier server are cancelled, and history older
 // than the retention is pruned.
 func (e *Engine) reconcileBuilds(ctx context.Context) {
 	if e.deps.Store == nil {
@@ -415,6 +425,16 @@ func (e *Engine) reconcileBuilds(ctx context.Context) {
 	}
 	for _, b := range lost {
 		log.Printf("build %s on %s: no heartbeat before its expiry, marked lost", b.ID, b.Target)
+	}
+	// An earlier server could leave a build waiting; nothing promotes it now.
+	e.buildMu.Lock()
+	cancelled, err := e.deps.Store.CancelWaitingBuilds(now)
+	e.buildMu.Unlock()
+	if err != nil {
+		log.Printf("builds: cancelling legacy waiting builds: %v", err)
+	}
+	for _, b := range cancelled {
+		log.Printf("build %s on %s: %s", b.ID, b.Target, store.LegacyWaitingReason)
 	}
 	e.pruneBuildLogs()
 	retention := 30 * 24 * time.Hour
@@ -448,26 +468,42 @@ func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
 	return out
 }
 
+// RunningLeases is how many build leases the node's worker reports running,
+// and when the oldest began. It reads the last worker observation (memory
+// only, up to a few seconds old), never the build records: the worker is the
+// only authority on what holds the node, the records are history.
+func (e *Engine) RunningLeases(node string) (int, string) {
+	n, since := 0, ""
+	for _, l := range e.workerLeases(node) {
+		if l.Status != "running" {
+			continue
+		}
+		if n == 0 {
+			since = l.StartedAt
+		}
+		n++
+	}
+	return n, since
+}
+
 // AttachNodeBuilds adds each node's build records to its pause status, for the
-// callers that show the registry's view next to the pause.
+// callers that show the registry's view next to the pause. The records are a
+// list only. "Held by builds" comes solely from the leases the node's worker
+// reports running; a running record with no reported lease holds nothing.
 func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
 	for name, st := range statuses {
 		st.Builds = e.NodeBuildRecords(name)
-		// Display only, for the pages that showed "held by builds": the node's
-		// worker is what really holds the node. An operator pause wins.
+		// An operator pause wins over the display of a lease.
 		if st.HeldBy == "" {
-			running := 0
-			for _, b := range st.Builds {
-				if b.Status != store.BuildRunning {
-					continue
-				}
-				if running == 0 {
-					st.Mode, st.Since = b.PreemptMode, b.StartedAt
-				}
-				running++
-			}
-			if running > 0 {
+			if running, since := e.RunningLeases(name); running > 0 {
 				st.Paused, st.HeldBy = true, "builds"
+				st.Since = since
+				for _, b := range st.Builds {
+					if b.Status == store.BuildRunning {
+						st.Mode = b.PreemptMode
+						break
+					}
+				}
 				st.Message = fmt.Sprintf("Busy with %d running build(s). New jobs wait on this node.", running)
 			}
 		}

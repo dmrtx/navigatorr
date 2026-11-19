@@ -14,6 +14,19 @@ registration carries `"via": "node_lease"`. Without it the server answers 409
 `node_lease_required` ("run nbuild on that node"). A target that is not a
 configured node is a plain record and needs no `via`.
 
+`via` is a marker, not authentication. The builds token is what authenticates a
+client; `via` only says "this record is the worker's lease", so a client that
+still asks the server to hold a node (an old `nbuild`, a script) is told where
+to run. Anyone holding the builds token can send it, and that only creates a
+record: the server holds nothing for it.
+
+On the server, "held by builds" and `suspended_by` come only from the leases the
+worker reports running in its observation (at most a few seconds old; an
+unreachable worker reports none). A build record, running or not, is history and
+a list entry: a running record with no reported lease does not show the node as
+held. The POST and the GET of `/api/maintenance/worker-pause` answer in the same
+shape, records and hold included.
+
 On a Mac transcode node the worker is the single decider between a build and
 an encode. A build asks the local worker for a lease over a Unix socket; the
 worker freezes the encoders (or, for a low priority build, waits for an idle
@@ -70,6 +83,29 @@ the permission.
    leases stay on record for an hour once the server has the end (or when there
    is no server), at most a day otherwise.
 
+### What a lease gates
+
+A lease is not an operator pause, so the gate differs by path:
+
+- New jobs: held by an operator hold or drain, a suspend, or a lease
+  (`queueHeld()`).
+- Post-encode recovery (`ResumePostEncode`): held by a running lease only.
+  An operator pause or a drain still lets a finished encode go on to be saved.
+- Publication of a retained candidate (`PublishRetained`): held by the
+  operator's hold or a running lease, not by a suspend.
+
+Both post-encode paths check the lease once before the capacity lock and again
+under it. Leases are granted under that same lock, so a lease granted between
+the first check and the lock is seen, and no process starts after the grant.
+`PublishRetained` takes the lock without waiting: if the node is busy it
+refuses with a transient "the node is busy, ask again" instead of blocking
+under the job lock.
+
+A server that still has `waiting` rows from before this change (the server
+used to queue low builds) cancels them on its next reconcile pass, with the
+progress text "server-side waiting builds were removed; retry" and a log line `build ID on TARGET: ...`. Nothing promotes a
+waiting row any more.
+
 The state is `build-leases.json` in the state directory, written atomically.
 Runners read it like the suspend record, with the expiry evaluated at read time:
 an expired lease never freezes anything, even before the worker marked it lost.
@@ -100,6 +136,21 @@ paused on the node (a read, nothing registered): paused refuses it with 409
 lease waits; a lease already waiting is not affected by a later pause. The
 registration always carries `"via": "node_lease"`.
 
+## Deploy order and version skew
+
+Deploy the workers and the server together. The server decodes request bodies
+with `DisallowUnknownFields`, on the old and on the new version:
+
+- A new worker to an old server: the registration carries `via`, which the old
+  server does not know, so it answers 400. The report pass logs that cause once
+  and keeps trying.
+- An old worker to a new server: the registration has no `via`, so the new
+  server answers 409 `node_lease_required`.
+
+In both cases the lease is still granted locally, because only the builds pause
+ever stops a lease; the server's record merely lags until both sides are
+deployed. Nothing is lost on the node.
+
 ## Failure modes
 
 - Worker restart mid-lease: the freeze and the queue hold are in the record, so
@@ -112,6 +163,13 @@ registration always carries `"via": "node_lease"`.
   reports are retried and the server's record catches up. The server's own
   expiry may mark the build lost while the worker still holds it.
 - Low lease promoted while the server is down: granted; the pause was checked (and failed open) when it was asked for.
+- Low lease promoted, then the registration is refused as paused (the operator
+  paused builds after the lease asked): the lease keeps running, it is marked
+  unrecorded and is not registered again, so the worker does not retry a refusal
+  forever. It is not shown in the server's records. A pause never stops a lease
+  that already runs.
+- `RetentionBlocked` and `RoomNote`, which a held queue writes on queued jobs,
+  are cleared when the lease ends.
 - A normal lease is registered with the server before it is stored (the pause
   check). If storing then fails, or the answer to the registration is lost, that
   server build exists only there and expires by its ttl. A lease that ends

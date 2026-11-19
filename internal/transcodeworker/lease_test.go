@@ -259,6 +259,8 @@ type fakeReporter struct {
 	gone      bool // the next heartbeat finds no such build (a 404)
 	nextID    int
 	registers []string
+	// registerCalls counts every Register call, refused ones included.
+	registerCalls int
 	// byKey is the server build of each registration id, like the server's
 	// idempotent create; keys is every id asked for, retries included.
 	byKey map[string]string
@@ -287,6 +289,7 @@ func (f *fakeReporter) Register(l *leaseRecord) (string, error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.registerCalls++
 	if f.down {
 		return "", errors.New("the server is unreachable")
 	}

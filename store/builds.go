@@ -301,6 +301,41 @@ func (s *Store) ExpireBuilds(now time.Time) ([]Build, error) {
 	return lost, nil
 }
 
+// LegacyWaitingReason is the progress an old waiting build ends with.
+const LegacyWaitingReason = "server-side waiting builds were removed; retry"
+
+// CancelWaitingBuilds ends every build an earlier server left waiting (it
+// never promotes them any more) as cancelled, with the reason as its progress,
+// and returns them. A client that polls such a build then sees it ended.
+func (s *Store) CancelWaitingBuilds(now time.Time) ([]Build, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT ` + buildColumns + ` FROM builds WHERE status='waiting'`)
+	if err != nil {
+		return nil, err
+	}
+	var out []Build
+	for rows.Next() {
+		b, err := scanBuild(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Status, out[i].EndedAt, out[i].Progress = BuildCancelled, buildTime(now), LegacyWaitingReason
+		if _, err := s.db.Exec(`UPDATE builds SET status='cancelled', ended_at=?, progress=? WHERE id=? AND status='waiting'`, out[i].EndedAt, out[i].Progress, out[i].ID); err != nil {
+			return out[:i], err
+		}
+	}
+	return out, nil
+}
+
 // PruneBuilds deletes the builds that ended before the cutoff and returns how
 // many. A running or waiting build is never deleted.
 func (s *Store) PruneBuilds(before time.Time) (int64, error) {

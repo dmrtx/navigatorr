@@ -328,6 +328,9 @@ type Worker struct {
 	x265CheckRun    func(ctx context.Context, dir string, args []string) ([]byte, error)
 	ffprobePath     string
 	afterSpawnHook  func(jobDir string, pid int)
+	// beforeGateLockHook runs between a cheap lease check and the capacity
+	// lock, for tests that grant a lease in that window.
+	beforeGateLockHook func()
 	// spawnTranscode spawns the detached runner for a queued job. Nil selects
 	// the production exec.Command path. Tests inject a stub that records the
 	// spawn without forking so queue/idempotency behavior is deterministic

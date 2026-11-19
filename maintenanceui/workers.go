@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -71,13 +70,10 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 	// the operator's pause, else a running build on it.
 	if held := s.engine.NodeHeldBy(name); held != "" {
 		state["held_by"] = held
-	} else {
-		for _, b := range builds {
-			if b.Status == store.BuildRunning {
-				state["held_by"] = "builds"
-				break
-			}
-		}
+	} else if running, _ := s.engine.RunningLeases(name); running > 0 {
+		// Only a lease the worker reports holds the node; a running record
+		// alone is history.
+		state["held_by"] = "builds"
 	}
 	// Whether new builds on the node are refused, shown beside its slots.
 	if s.engine.NodeBuildsPaused(name) {

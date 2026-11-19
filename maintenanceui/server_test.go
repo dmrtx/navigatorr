@@ -30,6 +30,9 @@ func testUI(t *testing.T) (*Server, http.Handler) {
 	}
 	t.Cleanup(func() { st.Close() })
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveHealth(w, r) {
+			return
+		}
 		if r.URL.Path == "/v1/ready" {
 			writeJSON(w, 200, map[string]bool{"ready": true})
 			return

@@ -281,6 +281,9 @@ func (w *Worker) leaseReportPass() {
 		case l.active() && l.Status == leaseStatusRunning:
 			p := s.pendingFor(l.ID)
 			if l.ServerID == "" {
+				if l.Unrecorded {
+					continue
+				}
 				if now.Sub(p.lastSent) < leaseRegisterTries {
 					continue
 				}
@@ -318,6 +321,11 @@ func (w *Worker) leaseReportPass() {
 				// The operator paused builds after the lease was granted: the
 				// build already runs; it is not stopped for that.
 				log.Printf("build lease %s: server reports builds paused; not recorded", l.ID)
+				w.leaseUpdate(l.ID, func(r *leaseRecord) {
+					if r.ServerID == "" {
+						r.Unrecorded = true
+					}
+				})
 			} else {
 				w.leaseNoteRegister(l.ID, err.Error())
 			}

@@ -121,6 +121,9 @@ func TestLateHeartbeatMarksTheBuildLostInTheStore(t *testing.T) {
 	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	for _, wait := range []bool{false, true} {
 		b := mustBuild(t, s, Build{Target: "m1", Source: "ci", Title: "x", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Minute)
+		if wait {
+			oldWaiting(t, s, b.ID)
+		}
 		got, err := s.HeartbeatBuild(b.ID, now.Add(2*time.Minute), time.Hour, nil)
 		if !errors.Is(err, ErrBuildExpired) || !errors.Is(err, ErrBuildEnded) || got.Status != BuildLost || got.EndedAt != b.ExpiresAt {
 			t.Fatalf("wait=%v: %+v %v", wait, got, err)
@@ -170,5 +173,36 @@ func TestHeartbeatWithoutTTLKeepsTheOwnWindowWithoutInflatingIt(t *testing.T) {
 	hb, _ = s.HeartbeatBuild(b.ID, now.Add(20*time.Second), 0, nil)
 	if hb.ExpiresAt != buildTime(now.Add(50*time.Second)) {
 		t.Fatalf("and it does not drift: %+v", hb)
+	}
+}
+
+// A row an earlier server left waiting is still readable and listed as active
+// until the reconcile cancels it with the reason; running builds are untouched.
+func TestLegacyWaitingBuildsAreCancelledWithAReason(t *testing.T) {
+	s := openTest(t)
+	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	running := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "run", PreemptMode: WorkerPauseSuspend}, now, time.Hour)
+	waiting := mustBuild(t, s, Build{Target: "nodeA", Source: "ci", Title: "old", PreemptMode: WorkerPauseGraceful, Priority: BuildPriorityLow}, now, time.Hour)
+	oldWaiting(t, s, waiting.ID)
+	if active, _ := s.ActiveBuilds(); len(active) != 2 {
+		t.Fatalf("the waiting row is still active: %+v", active)
+	}
+	got, err := s.CancelWaitingBuilds(now.Add(time.Minute))
+	if err != nil || len(got) != 1 || got[0].ID != waiting.ID {
+		t.Fatalf("%+v %v", got, err)
+	}
+	stored, _ := s.GetBuild(waiting.ID)
+	if stored.Status != BuildCancelled || stored.EndedAt == "" || stored.Progress != LegacyWaitingReason {
+		t.Fatalf("%+v", stored)
+	}
+	if r, _ := s.GetBuild(running.ID); r.Status != BuildRunning {
+		t.Fatalf("a running build is untouched: %+v", r)
+	}
+	if again, _ := s.CancelWaitingBuilds(now.Add(2 * time.Minute)); len(again) != 0 {
+		t.Fatalf("nothing left to cancel: %+v", again)
+	}
+	// A heartbeat now finds the build ended.
+	if _, err := s.HeartbeatBuild(waiting.ID, now.Add(3*time.Minute), time.Hour, nil); !errors.Is(err, ErrBuildEnded) {
+		t.Fatalf("%v", err)
 	}
 }

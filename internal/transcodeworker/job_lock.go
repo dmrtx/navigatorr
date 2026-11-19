@@ -89,6 +89,28 @@ func acquireCapacityLock(stateDir string) (*jobFileLock, error) {
 	return &jobFileLock{file: f}, nil
 }
 
+// tryAcquireCapacityLock is acquireCapacityLock without waiting: busy is true
+// when another holder has it. It is for callers that already hold a job lock
+// (the usual order is capacity first, then job), which must never block on it.
+func tryAcquireCapacityLock(stateDir string) (lock *jobFileLock, busy bool, err error) {
+	if err := os.MkdirAll(stateDir, 0755); err != nil {
+		return nil, false, fmt.Errorf("creating state dir for capacity lock: %w", err)
+	}
+	lockFile := filepath.Join(stateDir, ".capacity.lock")
+	f, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, false, fmt.Errorf("opening capacity lock file %s: %w", lockFile, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, true, nil
+		}
+		return nil, false, fmt.Errorf("locking %s: %w", lockFile, err)
+	}
+	return &jobFileLock{file: f}, false, nil
+}
+
 func (l *jobFileLock) Unlock() {
 	if l != nil && l.file != nil {
 		_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)

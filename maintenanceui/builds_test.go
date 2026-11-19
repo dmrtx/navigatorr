@@ -83,8 +83,10 @@ func TestBuildsEndpointsLifecycle(t *testing.T) {
 	if w.Code != 200 || b.HoldsTranscodeNode || b.Status != store.BuildRunning || b.PreemptMode != "suspend" || b.Priority != "normal" || b.Progress != "starting" || b.ExpiresAt == "" || b.StartedAt != b.CreatedAt {
 		t.Fatal("create on a node", w.Code, w.Body.String())
 	}
-	if st := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(t.Context()))[node]; !st.Paused || st.HeldBy != "builds" || len(st.Builds) != 1 {
-		t.Fatalf("the page shows the node as held: %+v", st)
+	// A running record is history: with no lease reported by the node's worker
+	// the page shows the build in the list but does not show the node as held.
+	if st := s.engine.AttachNodeBuilds(s.engine.NodePauseStatuses(t.Context()))[node]; st.Paused || st.HeldBy != "" || len(st.Builds) != 1 {
+		t.Fatalf("a record without a reported lease holds nothing: %+v", st)
 	}
 	if s.engine.NodePauseStatuses(t.Context())[node].Paused {
 		t.Fatal("the server itself holds nothing")
@@ -264,7 +266,8 @@ func TestBuildsTokenFileMustHoldALongToken(t *testing.T) {
 
 // The workers list and the worker health read carry the node's builds.
 func TestWorkerEndpointsListTheNodesBuilds(t *testing.T) {
-	_, h := buildsUI(t)
+	s, h := buildsUI(t)
+	reportLeases(t, s, runningLease("lease1"))
 	node := transcode.DefaultWorkerName
 	withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","via":"node_lease","source":"ci","title":"run","holder":"runner1"}`)
 	var list struct {
@@ -327,8 +330,8 @@ func TestWorkerActivityNamesWhatHoldsTheNode(t *testing.T) {
 		t.Fatal("a free node has no hold", held)
 	}
 	b := decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", `{"target":"`+node+`","via":"node_lease","source":"ci","title":"run","holder":"runner1"}`))
-	if held, _ := heldBy(); held != "builds" {
-		t.Fatal("a running build holds the node", held)
+	if held, ok := heldBy(); ok {
+		t.Fatal("a running record with no reported lease holds nothing", held)
 	}
 	if w := request(h, "POST", "/api/maintenance/worker-pause", `{"node":"`+node+`","mode":"graceful"}`, true); w.Code != 200 {
 		t.Fatal("pause", w.Code, w.Body.String())
@@ -345,5 +348,32 @@ func TestWorkerActivityNamesWhatHoldsTheNode(t *testing.T) {
 	}
 	if held, ok := heldBy(); ok {
 		t.Fatal("a resumed node with no build is free", held)
+	}
+}
+
+// "Held by builds" is what the node's worker reports: a running lease holds the
+// node in the activity view, the operator's pause wins over it.
+func TestWorkerActivityHeldByFollowsTheReportedLease(t *testing.T) {
+	s, h := buildsUI(t)
+	node := transcode.DefaultWorkerName
+	reportLeases(t, s, runningLease("lease1"))
+	heldBy := func() any {
+		w := request(h, "GET", "/api/maintenance/worker-activity", "", true)
+		var out struct {
+			Workers []map[string]any `json:"workers"`
+		}
+		if json.Unmarshal(w.Body.Bytes(), &out) != nil || len(out.Workers) == 0 {
+			t.Fatal("worker activity", w.Body.String())
+		}
+		return out.Workers[0]["held_by"]
+	}
+	if held := heldBy(); held != "builds" {
+		t.Fatal("a lease the worker reports running holds the node, with no record at all", held)
+	}
+	if w := request(h, "POST", "/api/maintenance/worker-pause", `{"node":"`+node+`","mode":"graceful"}`, true); w.Code != 200 {
+		t.Fatal("pause", w.Code, w.Body.String())
+	}
+	if held := heldBy(); held != "operator" {
+		t.Fatal("the operator's pause wins over the lease", held)
 	}
 }

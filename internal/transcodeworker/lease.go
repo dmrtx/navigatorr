@@ -122,6 +122,10 @@ type leaseRecord struct {
 	// the server ended or forgot the previous one; it picks the id the next
 	// registration asks for (registrationID).
 	RegGen int `json:"reg_gen,omitempty"`
+	// Unrecorded is set when the server refused the registration because
+	// builds were paused after the lease was granted: the build runs, the
+	// server has no record, and the registration is not tried again.
+	Unrecorded bool `json:"unrecorded,omitempty"`
 }
 
 // registrationID is the id the lease asks the server to create its build

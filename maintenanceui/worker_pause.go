@@ -85,8 +85,9 @@ func (s *Server) workerPause(w http.ResponseWriter, r *http.Request) {
 		case err != nil:
 			fail(w, 500, "node pause not saved")
 		default:
-			status.Builds = s.engine.NodeBuildRecords(status.Node)
-			writeJSON(w, 200, status)
+			// The same shape as the GET: records and the lease-derived hold.
+			attached := s.engine.AttachNodeBuilds(map[string]transcode.NodePauseStatus{status.Node: status})
+			writeJSON(w, 200, attached[status.Node])
 		}
 		return
 	}
