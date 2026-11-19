@@ -115,6 +115,22 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 	return nil
 }
 
+// candidateKeptError is the refusal for a candidate that stays after a failed
+// removal. A fault of the file system (a path, link or system error: permission
+// denied, no space, an I/O error) is "could not remove candidate file", which
+// the transcode API presents as a server failure with its cause hidden; every
+// other reason (a guard, a worker that did not stop or release it, a
+// promotion that started) is a state refusal, "candidate file kept".
+func candidateKeptError(err error) error {
+	var pathErr *fs.PathError
+	var linkErr *os.LinkError
+	var errno syscall.Errno
+	if errors.As(err, &pathErr) || errors.As(err, &linkErr) || errors.As(err, &errno) {
+		return fmt.Errorf("could not remove candidate file: %v", err)
+	}
+	return fmt.Errorf("candidate file kept: %v", err)
+}
+
 // removeOwnCandidateFile removes one owned file, through the same root and
 // symlink checks promotion uses, and returns what it removed and, when the
 // file was emptied first, how that went (see removeDisposable). A missing file
@@ -279,7 +295,7 @@ func (e *Engine) DiscardLeftoverCandidate(ctx context.Context, id string) (*Acti
 	}
 	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredDiscarded, removal, err)
 	if err != nil {
-		return nil, fmt.Errorf("candidate file kept: %v", err)
+		return nil, candidateKeptError(err)
 	}
 	return e.Status(ctx, id)
 }
@@ -343,7 +359,7 @@ func (e *Engine) keepOriginal(ctx context.Context, id string, archived bool) (*A
 	// file was truncated first; nothing is marked removed then.
 	e.recordCandidateCleanup(ctx, inst, ec, candidateRetiredKept, removal, err)
 	if err != nil {
-		return nil, fmt.Errorf("candidate file kept: %v", err)
+		return nil, candidateKeptError(err)
 	}
 	return e.Status(ctx, id)
 }
@@ -643,7 +659,7 @@ func (e *Engine) discardRequeueLeftovers(ctx context.Context, ec *ExecutionConte
 			return fmt.Errorf("candidate file kept: %v", err)
 		}
 		if _, err := e.removeCandidateFiles(ctx, candidate, partial, false); err != nil {
-			return fmt.Errorf("candidate file kept: %v", err)
+			return candidateKeptError(err)
 		}
 	}
 	return nil

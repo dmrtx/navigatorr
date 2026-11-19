@@ -111,15 +111,28 @@ func v1Key(w http.ResponseWriter, r *http.Request, body string) (string, bool) {
 // Anything else the tool refuses is a bad parameter (400): a missing flag or
 // digest ("needs confirm=true", "are required", "must carry", "invalid ...")
 // is never a conflict.
-var conflictWords = regexp.MustCompile(`stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match|` +
+var conflictWords = regexp.MustCompile(`\b(?:stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match|` +
 	`only (a |an )?(failed|finished|automatic|original)|current status|is frozen|not planned yet|read every|no previous valid|immutable|` +
 	`was removed after|belongs to batch|can still be promoted|candidate file kept|not a regular file|does not hold a regular file|` +
 	`never moved aside|is not empty|retained|not confirmed|uncertain|unresolved|cannot create it|not finished|not ready yet|` +
-	`requires (a|an|the|current) (waiting|unapproved|exact current)|requires an unapproved`)
+	`requires (a|an|the|current) (waiting|unapproved|exact current))`)
 
 // unavailableWords are refusals because the worker or service cannot take
 // the request now (503), not because of the request or the resource.
-var unavailableWords = regexp.MustCompile(`unreachable|offline or not ready|not configured on this server|template unavailable`)
+var unavailableWords = regexp.MustCompile(`\b(?:unreachable|offline or not ready|not configured on this server|template unavailable)`)
+
+// internalWords are refusals that are a fault of the server, not of the
+// request or the resource: a file or database that could not be written
+// ("could not remove candidate file: ..." wraps the I/O error of
+// action/candidate_cleanup.go; the rest are the words of the operating system
+// and of SQLite). They answer 500 and the cause stays in the log.
+var internalWords = regexp.MustCompile(`\b(?:could not remove candidate file|permission denied|input/output error|i/o error|disk i/o|no space left|read-only file system|disk is full|database is locked|database disk image|sql logic error|sqlite)`)
+
+// quotedValues are the segments of a refusal that echo what the caller sent
+// ("got \"x\"", 'x', `x`): never classified, or a client value such as
+// "already" or "unreachable" would pick the status. A single quote counts only
+// when it opens a word ("attempt's" is not one).
+var quotedValues = regexp.MustCompile("\"[^\"]*\"|`[^`]*`|(?:^|[\\s(\\[:=,])'[^']*'")
 
 // v1WriteErr names how a write presents what its tool refused: the 404 and
 // hint as for a read; a refusal that is neither a missing thing, an
@@ -144,9 +157,9 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 		transcodeapi.WriteError(w, 400, "invalid_request", invalid.Error, hint)
 		return
 	}
-	low := strings.ToLower(msg)
+	low := strings.ToLower(quotedValues.ReplaceAllString(msg, " "))
 	switch {
-	case toolMissing(msg):
+	case toolMissing(low):
 		code := e.notFound
 		if code == "" {
 			code = "not_found"
@@ -154,6 +167,9 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 		transcodeapi.WriteError(w, 404, code, msg, e.hint)
 	case strings.Contains(low, "allow_destructive"):
 		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
+	case internalWords.MatchString(low):
+		log.Printf("transcode v1: a write tool failed inside the server: %s", msg)
+		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the state is unchanged or can be read again")
 	case unavailableWords.MatchString(low):
 		transcodeapi.WriteError(w, 503, "unavailable", msg, "the worker or service did not answer; try again when it is back")
 	case conflictWords.MatchString(low):
@@ -163,7 +179,13 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 		}
 		transcodeapi.WriteError(w, 409, "conflict", msg, hint)
 	default:
-		writeToolError(w, msg, e.v1Err)
+		// Not a missing thing (checked above on the text without the echoed
+		// values): a bad or missing parameter.
+		hint := "GET " + transcodeapi.SpecPath + " describes the parameters"
+		if e.hint != "" {
+			hint = e.hint + "; " + hint
+		}
+		transcodeapi.WriteError(w, 400, "invalid_request", msg, hint)
 	}
 }
 
@@ -492,6 +514,10 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 			v1Bad(w, "id must be the number of a review-queue entry", queue.hint)
 			return
 		}
+		if body.Decision != "selected" && body.Decision != "rejected" && body.Decision != "alternate" {
+			v1Bad(w, "decision must be selected, rejected or alternate", "")
+			return
+		}
 		args := map[string]any{"maintenance_item_id": strconv.FormatInt(id, 10), "title": body.Title, "decision": body.Decision,
 			"release_guid": body.ReleaseGUID, "release_group": body.ReleaseGroup}
 		if body.Size != nil {
@@ -528,7 +554,7 @@ func (s *Server) v1BundleCall(tool, flag string, args func(w http.ResponseWriter
 		if !ok {
 			return
 		}
-		text, done := s.v1Call(w, r, tool, a, v1WriteErr{})
+		text, done := s.v1Call(w, r, tool, a, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/recipe-bundle shows the active and previous digests and the status"}})
 		if !done {
 			return
 		}
@@ -556,7 +582,35 @@ func (s *Server) v1BundleCall(tool, flag string, args func(w http.ResponseWriter
 			writeToolWriteError(w, msg, v1WriteErr{v1Err: v1Err{hint: "GET " + transcodeapi.BasePath + "/recipe-bundle shows the active and previous digests"}})
 			return
 		}
-		transcodeapi.WriteError(w, 422, "rejected", msg, "the active bundle is unchanged: GET "+transcodeapi.BasePath+"/recipe-bundle shows its status")
+		bundleRefusal(w, msg)
+	}
+}
+
+// bundleSourceWords are the failures of reaching the recipe source (recipe/
+// provider.go: reading the file, fetching the manifest or the bundle).
+var bundleSourceWords = regexp.MustCompile(`\b(?:reading recipe file|fetching recipe|http \d{3}|connection refused|no such host|timeout|timed out|response exceeds)`)
+
+// bundleCollisionWords are the refusals of the cache for a version that is
+// already there (recipe/manager.go cacheSnapshot).
+var bundleCollisionWords = regexp.MustCompile(`immutable version collision|already exists|is corrupt`)
+
+// bundleRefusal presents why recipe_reload or recipe_update did not activate
+// a bundle: a fault of the server is 500 (cause hidden), an unreachable source
+// 503, a version that exists with other content 409, and only what the bundle
+// itself got wrong (schema, semantics, integrity) is the 422 rejection.
+func bundleRefusal(w http.ResponseWriter, msg string) {
+	low := strings.ToLower(quotedValues.ReplaceAllString(msg, " "))
+	hint := "the active bundle is unchanged: GET " + transcodeapi.BasePath + "/recipe-bundle shows its status"
+	switch {
+	case internalWords.MatchString(low):
+		log.Printf("transcode v1: a recipe bundle change failed inside the server: %s", msg)
+		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the active bundle is unchanged")
+	case bundleSourceWords.MatchString(low):
+		transcodeapi.WriteError(w, 503, "unavailable", msg, "the recipe source did not answer; try again when it is back. "+hint)
+	case bundleCollisionWords.MatchString(low):
+		transcodeapi.WriteError(w, 409, "conflict", msg, hint)
+	default:
+		transcodeapi.WriteError(w, 422, "rejected", msg, hint)
 	}
 }
 

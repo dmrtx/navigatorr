@@ -462,12 +462,12 @@ func TestTranscodeV1ReviewQueueWrites(t *testing.T) {
 	if c, _ := code(t, write(h, "POST", "/transcode/v1/review-queue/999999/close", `{"outcome":"dismissed"}`)); c != 404 {
 		t.Error("unknown entry", c)
 	}
-	w := write(h, "POST", "/transcode/v1/review-queue/7/decisions", `{"title":"Example Show","decision":"approved","release_group":"GroupA","size":1234,"reasons":["fits"]}`)
+	w := write(h, "POST", "/transcode/v1/review-queue/7/decisions", `{"title":"Example Show","decision":"selected","release_group":"GroupA","size":1234,"reasons":["fits"]}`)
 	if w.Code != 201 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	a := rec.last()
-	if a["maintenance_item_id"] != "7" || a["decision"] != "approved" || a["release_group"] != "GroupA" || a["size"] != 1234.0 || len(a["reasons"].([]any)) != 1 {
+	if a["maintenance_item_id"] != "7" || a["decision"] != "selected" || a["release_group"] != "GroupA" || a["size"] != 1234.0 || len(a["reasons"].([]any)) != 1 {
 		t.Fatal(a)
 	}
 }
@@ -732,7 +732,12 @@ func TestWriteToolWriteErrorClassification(t *testing.T) {
 		{`only failed promotions can discard a duplicate recovery copy`, 409, "action/backup_duplicate.go:15"},
 		{`library command outcome is unresolved; recovery retained`, 409, "action/backup_duplicate.go:29"},
 		{`this attempt's candidate can still be promoted or the action is not finished; nothing was removed`, 409, "action/candidate_cleanup.go:270"},
-		{`candidate file kept: permission denied`, 409, "action/candidate_cleanup.go:273"},
+		{`candidate file kept: the worker did not confirm that the job stopped`, 409, "action/candidate_cleanup.go:273 (worker-stop refusal)"},
+		// 500: a fault of the server (I/O, database); the cause stays hidden.
+		{`could not remove candidate file: remove /x/y: permission denied`, 500, "action/candidate_cleanup.go:295 (candidateKeptError)"},
+		{`candidate file kept: x is not a regular file`, 409, "action/candidate_cleanup.go:295, :136 (a guard, not an I/O fault)"},
+		{`write state: database is locked`, 500, "store (SQLite)"},
+		{`write /x: no space left on device`, 500, "operating system"},
 		{`only a finished transcode attempt's own candidate can be dropped`, 409, "action/candidate_cleanup.go:310"},
 		// 400: a missing or bad parameter.
 		{`discard_candidate needs confirm=true; the candidate stays`, 400, "tools/transcode_backup_tools.go:40"},
@@ -762,6 +767,75 @@ func TestWriteToolWriteErrorClassification(t *testing.T) {
 		writeToolWriteError(w, c.msg, v1WriteErr{})
 		if w.Code != c.want {
 			t.Errorf("%q (%s): %d, want %d", c.msg, c.src, w.Code, c.want)
+		}
+	}
+}
+
+// A value the caller sent and a tool echoes back must not pick the status, and
+// a word inside a longer one ("unchanged", "unblocked") is not the word.
+func TestWriteToolWriteErrorIgnoresEchoedValuesAndInnerWords(t *testing.T) {
+	for msg, want := range map[string]int{
+		`decision must be selected, rejected or alternate, got "uncertain"`:         400,
+		`decision must be selected, rejected or alternate, got "already"`:           400,
+		`decision must be selected, rejected or alternate, got "blocked"`:           400,
+		`decision must be selected, rejected or alternate, got "allow_destructive"`: 400,
+		`decision must be selected, rejected or alternate, got "unreachable"`:       400,
+		`decision must be selected, rejected or alternate, got 'stale'`:             400,
+		"decision must be selected, rejected or alternate, got `conflict`":          400,
+		`decision must be selected, rejected or alternate, got "not found"`:         400,
+		`the profile is unchanged and the worker unblocked`:                         400,
+		`this attempt's candidate was removed after it was kept; that's it`:         409,
+		`managed profile "a b" changed: expected generation 2, current 3`:           409,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code != want {
+			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		}
+	}
+}
+
+// The decision is checked before the tool is called.
+func TestTranscodeV1DecisionIsValidatedBeforeTheTool(t *testing.T) {
+	_, h := transcodeUI(t)
+	for _, d := range []string{"uncertain", "already", "blocked", "allow_destructive", "unreachable", ""} {
+		w := write(h, "POST", "/transcode/v1/review-queue/1/decisions", `{"title":"Example Show","decision":"`+d+`"}`)
+		if c, k := code(t, w); c != 400 || k != "invalid_request" {
+			t.Errorf("decision %q: %d %s %s", d, c, k, w.Body.String())
+		}
+	}
+}
+
+// What recipe_reload and recipe_update could not activate is presented by its
+// cause: a fault of the server is a hidden 500, an unreachable source 503, a
+// version that exists with other content 409, and only what the bundle itself
+// got wrong is the 422 rejection.
+func TestBundleRefusalClassification(t *testing.T) {
+	for _, c := range []struct {
+		msg  string
+		want int
+		code string
+	}{
+		{`recipe version 1 already exists with a different digest (immutable version collision)`, 409, "conflict"},
+		{`cached recipe version 1 is corrupt: parsing recipe bundle: x`, 409, "conflict"},
+		{`open /cache/1/bundle.yaml: permission denied`, 500, "internal"},
+		{`mkdir /cache/1: no space left on device`, 500, "internal"},
+		{`reading recipe file: open /x: no such file or directory`, 503, "unavailable"},
+		{`fetching recipe manifest: HTTP 502`, 503, "unavailable"},
+		{`fetching recipe bundle: Get "https://example.invalid/b": timeout`, 503, "unavailable"},
+		{`recipe bundle sha256 mismatch: expected a got b`, 422, "rejected"},
+		{`unsupported recipe schema_version 9 (supported: 1-2)`, 422, "rejected"},
+		{`parsing recipe bundle: bad yaml`, 422, "rejected"},
+	} {
+		w := httptest.NewRecorder()
+		bundleRefusal(w, c.msg)
+		var e struct{ Code, Error string }
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		if w.Code != c.want || e.Code != c.code {
+			t.Errorf("%q: %d %s, want %d %s", c.msg, w.Code, e.Code, c.want, c.code)
+		}
+		if c.want == 500 && (strings.Contains(w.Body.String(), "/cache") || strings.Contains(w.Body.String(), "permission")) {
+			t.Errorf("%q: a 500 carries its cause: %s", c.msg, w.Body.String())
 		}
 	}
 }

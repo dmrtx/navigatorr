@@ -162,8 +162,13 @@ candidate in the wrong state; an action that already finished; a submission
 key that belongs to different inputs), `400` for a bad or missing parameter (a
 missing confirm flag, digest, version or key included), `503` when a worker or
 service cannot take the request now (unreachable, offline or not ready, not
-configured on this server), `403` when it needs a switch the
-server keeps off. Failures
+configured on this server), `500 internal` when the server itself failed
+(a file or database error such as "could not remove candidate file: ..." or
+"permission denied"; the cause is only in the log), `403` when it needs a switch the
+server keeps off. The status comes from the words of the refusal with the
+values the caller sent (anything quoted) left out, so a body value never
+picks it; enumerated fields such as the decision of a review-queue entry
+(`selected`, `rejected`, `alternate`) are checked before the tool is called. Failures
 of the server (5xx) never carry their cause.
 
 | Route | Calls | Body | Safeguard |
@@ -185,7 +190,7 @@ of the server (5xx) never carry their cause.
 | `POST /backups/candidates/{id}/discard` | `transcode_backups` discard_candidate | `confirm: true` | the tool refuses without `confirm`; destructive switch |
 | `PUT /recipes/{name}` | `recipe_save` | `profile`, `description`, `source_action_id`, `expected_generation`, `expected_digest` | to replace a recipe, the generation and digest read with `GET /recipes/{name}`; stale is 409 |
 | `DELETE /recipes/{name}` | `recipe_delete` | `expected_generation`, `expected_digest` (both required) | stale is 409 |
-| `POST /recipe-bundle/reload`, `/update` | `recipe_reload`, `recipe_update` | none | a bundle that does not validate is 422, the active one unchanged |
+| `POST /recipe-bundle/reload`, `/update` | `recipe_reload`, `recipe_update` | none | a bundle that does not validate (schema, semantics, integrity) is 422; a version that already exists with other content is 409; an unreachable recipe source is 503; a fault of the server (I/O) is a 500 without its cause; the active bundle is unchanged in every case |
 | `POST /recipe-bundle/rollback` | `recipe_rollback` | `expected_active_digest`, `expected_previous_digest` (both required) | digests from `GET /recipe-bundle`; either stale is 409 |
 | `DELETE /podcasts/{id}/ad-library/{entry}` | `podcast_ad_library` revoke | none | |
 | `POST /review-queue/{id}/close` | the console's queue handler | `outcome` (`processed` or `dismissed`), `note` | |
