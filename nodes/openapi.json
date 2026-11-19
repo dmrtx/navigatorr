@@ -1,0 +1,886 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Nodes",
+    "version": "1.0.0",
+    "description": "Nodes is the registry of builds (jobs another tool runs on a machine, for example a compile on a build node) and of per-node build controls. A node is a machine Navigatorr knows (a transcode worker). For a node, the worker itself decides whether a build may run (its lease); this API only keeps the record, shows it, and lets an operator pause new builds on a node or cancel a build. Use GET /nodes/v1/nodes to pick a machine, POST /nodes/v1/builds to record a build on a machine that is not a node, GET /nodes/v1/builds to see what is running, POST /nodes/v1/builds/{id}/cancel to stop one. Errors are JSON {error, code, hint}; the hint names the endpoint to use instead."
+  },
+  "tags": [
+    {
+      "name": "nodes",
+      "description": "Machines and their builds pause."
+    },
+    {
+      "name": "builds",
+      "description": "Build records."
+    }
+  ],
+  "paths": {
+    "/nodes/v1/nodes": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "operationId": "listNodes",
+        "summary": "List nodes with their build and transcode state",
+        "description": "Every machine Navigatorr knows as a node, sorted by name. For each: whether new builds are paused (builds_paused and since), the builds running on it, and, read from the transcode side, whether transcoding is paused or held. Call this first to choose a machine, or to see why a build was refused (builds_paused). Read-only.",
+        "responses": {
+          "200": {
+            "description": "The nodes.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Node"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/nodes/{name}": {
+      "get": {
+        "tags": [
+          "nodes"
+        ],
+        "operationId": "getNode",
+        "summary": "Show one node",
+        "description": "One node: builds pause (builds_paused, builds_paused_since), running builds and transcode state. 404 unknown_node if the name is not a configured node (list them with GET /nodes/v1/nodes). Read-only.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Node name, as listed by GET /nodes/v1/nodes.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/nodes/{name}/builds-pause": {
+      "post": {
+        "tags": [
+          "nodes"
+        ],
+        "operationId": "setBuildsPause",
+        "summary": "Pause or resume new builds on a node",
+        "description": "Sets whether the node accepts new builds. {\"paused\": true} makes the node's worker refuse new build leases (builds already running are not touched, and transcoding is not paused: use the transcode pause for that). {\"paused\": false} resumes. Idempotent: repeating a request changes nothing and keeps the pause start time. Returns the node as GET /nodes/v1/nodes/{name} would. Changes operator state: use only when asked.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Node name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "paused"
+                ],
+                "properties": {
+                  "paused": {
+                    "type": "boolean",
+                    "description": "true to refuse new builds on the node, false to accept them again."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The node after the change.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Node"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "paused missing or body invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown node.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "listBuilds",
+        "summary": "List builds (running first, then recent history)",
+        "description": "Build records: running ones first, then ended ones, newest first. Filter by node (the build's target machine), status (running, succeeded, failed, cancelled, lost) and source (the tool that registered it). Paged: pass next_cursor of one answer as cursor to get the next page. Use this to see what is running on a machine or to find the id to cancel. Read-only.",
+        "parameters": [
+          {
+            "name": "node",
+            "in": "query",
+            "required": false,
+            "description": "Only builds whose target is this machine name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "description": "Only this status.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "running",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "lost"
+              ]
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "description": "Only builds registered by this tool.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 500 (default 50).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "next_cursor from the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of builds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "builds": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Build"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "description": "Present when more builds follow; pass it as cursor."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad limit or cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "createBuild",
+        "summary": "Register a build on a machine that is not a node",
+        "description": "Records a build another tool runs on a machine, so others can see it (and cancel it). It is bookkeeping: nothing is started. The target machine must NOT be a configured transcode node: for a node, its own worker registers the lease (via=\"node_lease\") and refusing is the worker's job; a node target without via answers 409 node_lease_required. 409 builds_paused means the operator paused builds on that node. Idempotent: send client_id (\"bld_\" and 8 to 59 letters, digits, _ or -) and repeat the same request after a network error; the same target and source returns the same build and creates nothing. Then heartbeat it while it runs and finish it at the end; a build without heartbeats is marked lost after its ttl.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "target",
+                  "source",
+                  "title"
+                ],
+                "properties": {
+                  "target": {
+                    "type": "string",
+                    "description": "Machine name (letters, digits, . _ -; up to 64)."
+                  },
+                  "source": {
+                    "type": "string",
+                    "description": "The tool registering the build, e.g. a script name."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "One line saying what is being built."
+                  },
+                  "client_id": {
+                    "type": "string",
+                    "description": "Optional idempotency key and build id: bld_ plus 8 to 59 letters, digits, _ or -."
+                  },
+                  "holder": {
+                    "type": "string",
+                    "description": "Optional who runs it (process or user label)."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "Optional kind of job."
+                  },
+                  "preempt_mode": {
+                    "type": "string",
+                    "enum": [
+                      "suspend",
+                      "graceful",
+                      "immediate"
+                    ],
+                    "description": "Optional what transcoding does on this machine while the build runs (default suspend)."
+                  },
+                  "priority": {
+                    "type": "string",
+                    "enum": [
+                      "normal",
+                      "low"
+                    ],
+                    "description": "Optional (default normal)."
+                  },
+                  "ttl_seconds": {
+                    "type": "integer",
+                    "description": "Optional lifetime without a heartbeat: 60 to 7200, default 900."
+                  },
+                  "progress": {
+                    "type": "string",
+                    "description": "Optional first progress line."
+                  },
+                  "via": {
+                    "type": "string",
+                    "enum": [
+                      "node_lease"
+                    ],
+                    "description": "Only the worker of a node sends this."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The build (a repeat of the same client_id returns it unchanged).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A field is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "node_lease_required, builds_paused or build_id_taken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds/{id}": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "getBuild",
+        "summary": "Show one build",
+        "description": "One build record with its status, progress line, heartbeat and expiry times and exit code when it ended. 404 build_not_found for an unknown id (list builds with GET /nodes/v1/builds). Read-only.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Build id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds/{id}/heartbeat": {
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "heartbeatBuild",
+        "summary": "Keep a running build alive (and report progress or log lines)",
+        "description": "Called by the tool that runs the build, every few minutes, to say it is still alive and optionally to set a progress line, a new ttl and to append output lines (up to 64 lines of 300 characters per call; read them with GET /nodes/v1/builds/{id}/log). 409 build_ended (with the build in the answer) means the build is over, for example cancelled by an operator: stop the work. The body may be empty.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Build id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "progress": {
+                    "type": "string",
+                    "description": "New progress line."
+                  },
+                  "ttl_seconds": {
+                    "type": "integer",
+                    "description": "New lifetime without a heartbeat (60 to 7200)."
+                  },
+                  "log": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Output lines to append."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The build, expiry extended.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A value is invalid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The build already ended; body.build is its final record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds/{id}/finish": {
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "finishBuild",
+        "summary": "End a build with its result",
+        "description": "Called by the tool that ran the build when it is over. status is succeeded, failed or cancelled; exit_code optional. Finishing a build that already ended answers 200 with it unchanged. To stop someone else's build use POST /nodes/v1/builds/{id}/cancel instead.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Build id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "status"
+                ],
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "failed",
+                      "cancelled"
+                    ]
+                  },
+                  "exit_code": {
+                    "type": "integer",
+                    "description": "Process exit code, if any."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The ended build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds/{id}/cancel": {
+      "post": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "cancelBuild",
+        "summary": "Cancel a running build",
+        "description": "Marks the build cancelled. The tool that runs it learns on its next heartbeat (409 build_ended, status cancelled) and must stop. Cancelling does not kill any process by itself. Cancelling a build that already ended answers 200 with it unchanged. Operator action: use only when asked.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Build id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The build, now cancelled (or as it was if already over).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Build"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nodes/v1/builds/{id}/log": {
+      "get": {
+        "tags": [
+          "builds"
+        ],
+        "operationId": "getBuildLog",
+        "summary": "Read a build's output lines",
+        "description": "The last lines (up to 200) the build sent with its heartbeats, each with an absolute number n. Pass after=N (the next_after of the previous answer) to get only newer lines; first_available is the number of the oldest line still held (older ones are gone). Output is kept in memory for 30 minutes after the build ends and is lost on a restart (expired is true when it was dropped). No waiting: poll again. Read-only.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Build id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Only lines numbered above this (default 0).",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lines.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "n": {
+                            "type": "integer"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "next_after": {
+                      "type": "integer"
+                    },
+                    "first_available": {
+                      "type": "integer"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "updated_at": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "ended_at": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "expired": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown build.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Api-Key",
+        "description": "The builds token (web.builds_token_file). Authorization: Bearer <token> is also accepted."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong."
+          },
+          "code": {
+            "type": "string",
+            "description": "Stable machine code."
+          },
+          "hint": {
+            "type": "string",
+            "description": "What to call instead or how to fix it."
+          },
+          "build": {
+            "$ref": "#/components/schemas/Build"
+          }
+        }
+      },
+      "Build": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string",
+            "description": "Machine the build runs on."
+          },
+          "source": {
+            "type": "string"
+          },
+          "holder": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "preempt_mode": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled",
+              "lost"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "last_heartbeat_at": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "description": "The build is marked lost if no heartbeat arrives by then."
+          },
+          "ended_at": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          }
+        }
+      },
+      "Node": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "builds_paused": {
+            "type": "boolean"
+          },
+          "builds_paused_since": {
+            "type": "string"
+          },
+          "running_builds": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "holder": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "started_at": {
+                  "type": "string"
+                },
+                "progress": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "transcode": {
+            "type": "object",
+            "description": "Transcode state of the node (read only here).",
+            "properties": {
+              "paused": {
+                "type": "boolean"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "since": {
+                "type": "string"
+              },
+              "held_by": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKey": []
+    }
+  ]
+}
