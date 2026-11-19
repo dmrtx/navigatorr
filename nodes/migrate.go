@@ -15,8 +15,8 @@ const metaLegacyImport = "legacy_import"
 
 // ImportResult says what ImportLegacy did.
 type ImportResult struct {
-	// Skipped is why nothing was read: "already imported", "registry not empty"
-	// or "no legacy database"; empty when the legacy database was read.
+	// Skipped is why nothing was read: "already imported" or "no legacy
+	// database"; empty when the legacy database was read.
 	Skipped string
 	Builds  int
 	Pauses  int
@@ -26,11 +26,15 @@ type ImportResult struct {
 // from the main database (where they lived before the registry had its own) to
 // this registry. It runs at startup and is idempotent:
 //
-//   - it does nothing once it has run (a flag in this database), so records
-//     pruned later are never brought back;
-//   - it does nothing when this database already holds builds or pauses;
-//   - it copies with INSERT OR IGNORE, so a run interrupted halfway is safe to
-//     repeat.
+//   - it is decided only by a flag in this database, which is written inside
+//     the transaction of a successful import and nowhere else. Once the flag is
+//     there it does nothing, so records pruned later are never brought back;
+//   - it does not look at what this database holds: a first import that failed
+//     is retried at the next start even if builds or pauses were written here
+//     in the meantime. The copy is INSERT OR IGNORE, so a row already here (the
+//     registry's own, newer one) always wins and nothing is overwritten;
+//   - a failed import changes nothing (one transaction) and is reported to the
+//     caller, who logs it and starts anyway.
 //
 // The old tables in the main database are only read, never changed or dropped.
 // legacyPath is the main database file; a missing file, or one without the old
@@ -50,18 +54,6 @@ func (s *Service) ImportLegacy(ctx context.Context, legacyPath string) (ImportRe
 		}
 		return ImportResult{}, err
 	}
-	var have int
-	s.reg.mu.Lock()
-	err := s.reg.db.QueryRow(`SELECT (SELECT COUNT(*) FROM builds) + (SELECT COUNT(*) FROM build_pauses)`).Scan(&have)
-	s.reg.mu.Unlock()
-	if err != nil {
-		return ImportResult{}, err
-	}
-	if have > 0 {
-		s.markImported("registry not empty")
-		return ImportResult{Skipped: "registry not empty"}, nil
-	}
-
 	old, err := sql.Open("sqlite", "file:"+(&url.URL{Path: legacyPath}).EscapedPath()+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("opening the main database to import builds: %w", err)
@@ -85,13 +77,15 @@ func (s *Service) ImportLegacy(ctx context.Context, legacyPath string) (ImportRe
 		return ImportResult{}, err
 	}
 	defer tx.Rollback()
-	for i, b := range builds {
+	for _, b := range builds {
 		var code any
 		if b.ExitCode != nil {
 			code = *b.ExitCode
 		}
-		r, err := tx.Exec(`INSERT OR IGNORE INTO builds(`+buildColumns+`, seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			b.ID, b.Target, b.Source, b.Holder, b.Kind, b.Title, b.PreemptMode, b.Priority, b.Status, b.CreatedAt, b.StartedAt, b.LastHeartbeatAt, b.ExpiresAt, b.EndedAt, b.Progress, code, i+1)
+		// seq continues after whatever the registry already holds, so the
+		// insertion order stays unique and monotonic.
+		r, err := tx.Exec(`INSERT OR IGNORE INTO builds(`+buildColumns+`, seq) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM builds))`,
+			b.ID, b.Target, b.Source, b.Holder, b.Kind, b.Title, b.PreemptMode, b.Priority, b.Status, b.CreatedAt, b.StartedAt, b.LastHeartbeatAt, b.ExpiresAt, b.EndedAt, b.Progress, code)
 		if err != nil {
 			return ImportResult{}, err
 		}
@@ -116,12 +110,6 @@ func (s *Service) ImportLegacy(ctx context.Context, legacyPath string) (ImportRe
 	}
 	log.Printf("nodes: imported %d build record(s) and %d builds pause(s) from the main database (the old tables stay as they were)", res.Builds, res.Pauses)
 	return res, nil
-}
-
-func (s *Service) markImported(note string) {
-	s.reg.mu.Lock()
-	defer s.reg.mu.Unlock()
-	_, _ = s.reg.db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)`, metaLegacyImport, note)
 }
 
 func noTable(err error) bool { return err != nil && strings.Contains(err.Error(), "no such table") }

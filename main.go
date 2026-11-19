@@ -229,8 +229,10 @@ func main() {
 	defer nodeSvc.Close()
 	internal.Logf("nodes database at %s", nodesPath)
 	if _, err := nodeSvc.ImportLegacy(context.Background(), dbPath); err != nil {
-		// Not fatal: the registry starts empty; the next start retries.
-		internal.Logf("nodes: importing builds from the main database failed: %v", err)
+		// Not fatal: the import is one transaction, so nothing was imported, and
+		// its flag is only written when it succeeds: the next start tries again,
+		// whatever the registry holds by then (rows already there are kept).
+		internal.Logf("nodes: ERROR importing builds and pauses from the main database failed (the registry starts without them; the import is retried at the next start): %v", err)
 	}
 	nodeswire.Wire(actEngine, nodeSvc)
 	nodesCtx, stopNodes := context.WithCancel(context.Background())
