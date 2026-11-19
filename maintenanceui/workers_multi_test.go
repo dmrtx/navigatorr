@@ -53,6 +53,7 @@ func twoWorkerUI(t *testing.T) (*Server, http.Handler, *fakeSlotWorker) {
 	deps := s.engine.Deps()
 	deps.Transcode, deps.Workers = nil, set
 	s.engine = action.NewEngine(deps)
+	attachNodes(t, s, s.engine, nil)
 	return s, h, m4
 }
 

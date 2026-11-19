@@ -2,10 +2,10 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/nodes"
 	"reflect"
 	"testing"
 
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -24,7 +24,7 @@ func TestNodeTargetWithoutViaIs409NodeLeaseRequired(t *testing.T) {
 	if w.Code != 409 || refusal["code"] != "node_lease_required" {
 		t.Fatal("a node target without via is a 409 node_lease_required", w.Code, w.Body.String())
 	}
-	if list, _ := s.engine.ListBuilds(store.BuildFilter{}); len(list) != 0 {
+	if list, _ := s.nodes.ListBuilds(nodes.BuildFilter{}); len(list) != 0 {
 		t.Fatal("a refused create records nothing", list)
 	}
 	// The marker is the only difference. (The API answers 200 for a create.)
@@ -46,7 +46,7 @@ func TestUnknownPriorityIsA400(t *testing.T) {
 			t.Fatal("an unknown priority is a 400", target, w.Code, w.Body.String())
 		}
 	}
-	if list, _ := s.engine.ListBuilds(store.BuildFilter{}); len(list) != 0 {
+	if list, _ := s.nodes.ListBuilds(nodes.BuildFilter{}); len(list) != 0 {
 		t.Fatal("a refused create records nothing", list)
 	}
 }

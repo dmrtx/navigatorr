@@ -155,7 +155,20 @@ type ConcurrencyConfig struct {
 }
 type DatabaseConfig struct {
 	Path string `yaml:"path"`
+	// NodesPath is the SQLite file of the Nodes build registry (package
+	// nodes). Empty means nodes.db next to the main database.
+	NodesPath string `yaml:"nodes_path"`
 }
+
+// NodesDatabasePath is where the Nodes registry lives, given the resolved path
+// of the main database.
+func (d DatabaseConfig) NodesDatabasePath(mainPath string) string {
+	if d.NodesPath != "" {
+		return d.NodesPath
+	}
+	return filepath.Join(filepath.Dir(mainPath), "nodes.db")
+}
+
 type MediaConfig struct {
 	AllowedReadRoots  []string `yaml:"allowed_read_roots"`
 	AllowedWriteRoots []string `yaml:"allowed_write_roots"`

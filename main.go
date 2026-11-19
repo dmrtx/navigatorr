@@ -16,7 +16,9 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/internal"
+	"github.com/jakenesler/navigatorr/internal/nodeswire"
 	"github.com/jakenesler/navigatorr/maintenanceui"
+	"github.com/jakenesler/navigatorr/nodes"
 	"github.com/jakenesler/navigatorr/openapi"
 	"github.com/jakenesler/navigatorr/qbit"
 	"github.com/jakenesler/navigatorr/queue"
@@ -211,6 +213,34 @@ func main() {
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
 	actEngine := tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeWorkers)
+	// The build registry (Nodes) has its own database. It is registered before
+	// the reconciler's deferred stop so it closes after it (LIFO).
+	nodesPath := cfg.Database.NodesDatabasePath(dbPath)
+	nodeSvc, err := nodes.Open(nodes.Options{
+		Path:      nodesPath,
+		Topology:  nodeswire.Topology(transcodeWorkers),
+		Transcode: nodeswire.TranscodeView(actEngine),
+		Retention: cfg.Builds.RetentionDuration,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: nodes database %s: %v\n", nodesPath, err)
+		os.Exit(1)
+	}
+	defer nodeSvc.Close()
+	internal.Logf("nodes database at %s", nodesPath)
+	if _, err := nodeSvc.ImportLegacy(context.Background(), dbPath); err != nil {
+		// Not fatal: the import is one transaction, so nothing was imported, and
+		// its flag is only written when it succeeds: the next start tries again,
+		// whatever the registry holds by then (rows already there are kept).
+		internal.Logf("nodes: ERROR importing builds and pauses from the main database failed (the registry starts without them; the import is retried at the next start): %v", err)
+	}
+	nodeswire.Wire(actEngine, nodeSvc)
+	nodesCtx, stopNodes := context.WithCancel(context.Background())
+	nodesDone := nodeSvc.Start(nodesCtx, 0)
+	defer func() {
+		stopNodes()
+		<-nodesDone
+	}()
 	if actEngine != nil {
 		// Jobs from before workers had names keep their worker; this runs
 		// before anything polls them.
@@ -235,6 +265,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: maintenance UI: %v\n", err)
 			os.Exit(1)
 		}
+		webUI.SetNodes(nodeSvc)
 		// How full the NAS and its folders are, sampled for the Stats tab. It
 		// stops before the store closes, like the retention pass.
 		storageCtx, stopStorage := context.WithCancel(context.Background())

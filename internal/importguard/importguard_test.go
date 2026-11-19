@@ -139,3 +139,42 @@ func chain(via map[string]string, pkg string) string {
 	}
 	return strings.Join(parts, " -> ")
 }
+
+// TestNodesAndTheEngineStayApart guards invariant N2: the build registry
+// (nodes) and the transcode engine (action, transcode) never import each other,
+// directly or transitively. Only main and internal/nodeswire join them.
+func TestNodesAndTheEngineStayApart(t *testing.T) {
+	for _, p := range platforms {
+		t.Run(p[0]+"/"+p[1], func(t *testing.T) {
+			graph := moduleImports(t, p[0], p[1])
+			reach := func(root string, banned func(string) bool) {
+				// A package missing from the graph (renamed, moved, or the go
+				// list output changed) must fail the test, not pass it empty.
+				if _, ok := graph[root]; !ok {
+					t.Fatalf("root package %q is not in the import graph (%d packages): the guard would check nothing", root, len(graph))
+				}
+				via := map[string]string{root: ""}
+				queue := []string{root}
+				for len(queue) > 0 {
+					pkg := queue[0]
+					queue = queue[1:]
+					if pkg != root && banned(pkg) {
+						t.Errorf("%s must not reach %s: %s", root, pkg, chain(via, pkg))
+					}
+					for _, imp := range graph[pkg] {
+						if _, seen := via[imp]; !seen {
+							via[imp] = pkg
+							queue = append(queue, imp)
+						}
+					}
+				}
+			}
+			reach("nodes", func(p string) bool {
+				return p == "action" || p == "maintenanceui" || p == "internal/nodeswire" || p == "transcode" || strings.HasPrefix(p, "transcode/")
+			})
+			for _, engine := range []string{"action", "transcode"} {
+				reach(engine, func(p string) bool { return p == "nodes" || p == "internal/nodeswire" })
+			}
+		})
+	}
+}

@@ -16,7 +16,9 @@ import (
 
 func pauseEngine(t *testing.T, m1, m4 transcode.Executor) *Engine {
 	t.Helper()
-	return NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: twoWorkers(t, m1, m4, 0), DrainSettle: -1})
+	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: twoWorkers(t, m1, m4, 0), DrainSettle: -1})
+	e.SetBuildRecords(newFakeRecords())
+	return e
 }
 
 func pauseNode(t *testing.T, e *Engine, node, mode string) transcode.NodePauseStatus {

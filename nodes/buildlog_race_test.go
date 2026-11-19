@@ -1,4 +1,4 @@
-package action
+package nodes
 
 import (
 	"context"
@@ -9,12 +9,10 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/jakenesler/navigatorr/store"
 )
 
 func TestBuildLogEvictsEndedBuffersBeforeRunningOnes(t *testing.T) {
-	e, clock := buildEngine(t, &mockTranscodeExecutor{})
+	e, clock := buildSvc(t)
 	running := startBuild(t, e, "laptop", "", 0)
 	e.HeartbeatBuild(context.Background(), running.ID, nil, 0, "keep me") // the oldest buffer
 	var ended []string
@@ -23,11 +21,11 @@ func TestBuildLogEvictsEndedBuffersBeforeRunningOnes(t *testing.T) {
 		b := startBuild(t, e, "laptop", "", 0)
 		e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "x")
 		if i%2 == 0 {
-			e.FinishBuild(context.Background(), b.ID, store.BuildSucceeded, nil)
+			e.FinishBuild(context.Background(), b.ID, BuildSucceeded, nil)
 			ended = append(ended, b.ID)
 		}
 	}
-	if n := len(e.buildLogs.ids()); n != buildLogMaxBuilds {
+	if n := len(e.logs.ids()); n != buildLogMaxBuilds {
 		t.Fatalf("%d buffers", n)
 	}
 	// Two more builds: the two oldest ended buffers go, the old running one stays.
@@ -36,15 +34,15 @@ func TestBuildLogEvictsEndedBuffersBeforeRunningOnes(t *testing.T) {
 		b := startBuild(t, e, "laptop", "", 0)
 		e.HeartbeatBuild(context.Background(), b.ID, nil, 0, "new")
 	}
-	if lines, _ := e.buildLogs.get(running.ID); len(lines) != 1 {
+	if lines, _, _ := e.logs.get(running.ID); len(lines) != 1 {
 		t.Fatal("a running build lost its output while ended ones were kept")
 	}
 	for _, id := range ended[:2] {
-		if lines, _ := e.buildLogs.get(id); lines != nil {
+		if lines, _, _ := e.logs.get(id); lines != nil {
 			t.Fatalf("the oldest ended build %s kept its buffer", id)
 		}
 	}
-	if lines, _ := e.buildLogs.get(ended[2]); lines == nil {
+	if lines, _, _ := e.logs.get(ended[2]); lines == nil {
 		t.Fatal("only as many ended buffers as needed go")
 	}
 }
@@ -56,16 +54,16 @@ func TestBuildLogEvictsTheLeastRecentRunningBufferWhenNoneEnded(t *testing.T) {
 		l.append(fmt.Sprintf("b%d", i), []string{"x"}, now.Add(time.Duration(i)*time.Second), func(string) bool { return false })
 	}
 	l.append("new", []string{"x"}, now.Add(time.Hour), func(string) bool { return false })
-	if lines, _ := l.get("b0"); lines != nil {
+	if lines, _, _ := l.get("b0"); lines != nil {
 		t.Fatal("the least recently updated running buffer goes when none ended")
 	}
-	if lines, _ := l.get("b1"); lines == nil {
+	if lines, _, _ := l.get("b1"); lines == nil {
 		t.Fatal("only one goes")
 	}
 }
 
 func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *testing.T) {
-	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	e, _ := buildSvc(t)
 	b := startBuild(t, e, "laptop", "", 0)
 	// Widen the gap between the store update and the append, so a heartbeat
 	// is regularly caught in it when the finish lands: without the engine's
@@ -102,7 +100,7 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 				switch {
 				case err == nil:
 					accepted[line] = true
-				case errors.Is(err, store.ErrBuildEnded):
+				case errors.Is(err, ErrBuildEnded):
 					refused++
 				default:
 					t.Errorf("heartbeat: %v", err)
@@ -116,7 +114,7 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 			<-finished
 			_, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, fmt.Sprintf("w%d-late", w))
 			mu.Lock()
-			if errors.Is(err, store.ErrBuildEnded) {
+			if errors.Is(err, ErrBuildEnded) {
 				refused++
 			} else {
 				t.Errorf("a heartbeat after the end: %v", err)
@@ -129,7 +127,7 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 		defer wg.Done()
 		<-start
 		<-reached
-		if _, _, err := e.FinishBuild(context.Background(), b.ID, store.BuildCancelled, nil); err != nil {
+		if _, _, err := e.FinishBuild(context.Background(), b.ID, BuildCancelled, nil); err != nil {
 			t.Errorf("finish: %v", err)
 		}
 		// The output as the finish leaves it: nothing may change it afterwards.
@@ -168,14 +166,14 @@ func TestBuildLogConcurrentHeartbeatsKeepOrderAndNothingLandsAfterTheEnd(t *test
 }
 
 func TestBuildLogInvalidLinesOnAnEndedOrUnknownBuild(t *testing.T) {
-	e, _ := buildEngine(t, &mockTranscodeExecutor{})
+	e, _ := buildSvc(t)
 	bad := []string{"a\nb"}
-	if _, err := e.HeartbeatBuild(context.Background(), "nope", nil, 0, bad...); !errors.Is(err, store.ErrBuildNotFound) {
+	if _, err := e.HeartbeatBuild(context.Background(), "nope", nil, 0, bad...); !errors.Is(err, ErrBuildNotFound) {
 		t.Fatal(err)
 	}
 	b := startBuild(t, e, "laptop", "", 0)
-	e.FinishBuild(context.Background(), b.ID, store.BuildSucceeded, nil)
-	if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, bad...); !errors.Is(err, store.ErrBuildEnded) {
+	e.FinishBuild(context.Background(), b.ID, BuildSucceeded, nil)
+	if _, err := e.HeartbeatBuild(context.Background(), b.ID, nil, 0, bad...); !errors.Is(err, ErrBuildEnded) {
 		t.Fatal("an ended build answers 409 whatever the lines:", err)
 	}
 }

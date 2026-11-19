@@ -2,7 +2,6 @@ package action
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -43,7 +42,7 @@ func TestRunningBuildRecordChangesNoPauseReader(t *testing.T) {
 
 	before := readerAnswers(e)
 	b := startBuild(t, e, "m1", store.WorkerPauseImmediate, 120)
-	if b.Status != store.BuildRunning || b.HoldsTranscodeNode {
+	if b.Status != "running" {
 		t.Fatalf("%+v", b)
 	}
 	tick(e)
@@ -57,45 +56,5 @@ func TestRunningBuildRecordChangesNoPauseReader(t *testing.T) {
 	}
 	if st := e.NodePauseStatuses(context.Background())["m1"]; st.Paused || st.HeldBy != "" {
 		t.Fatalf("%+v", st)
-	}
-}
-
-// A low priority create comes back running: the server never queues it.
-func TestLowBuildCreateReturnsRunning(t *testing.T) {
-	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
-	seedEncoding(t, e, "enc", "m1", "job-enc")
-	b := lowBuild(t, e, "m1", 120)
-	if b.Status != store.BuildRunning || b.Priority != store.BuildPriorityLow {
-		t.Fatalf("%+v", b)
-	}
-}
-
-func TestBuildsPausedCreateIs409Code(t *testing.T) {
-	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
-	pauseBuilds(t, e, "m1", true)
-	_, err := createBuild(e, "m1", "")
-	var refused *BuildsPausedError
-	if !errors.As(err, &refused) {
-		t.Fatalf("%v", err)
-	}
-}
-
-// A node target must come from the node's own lease; any other target is a
-// plain record.
-func TestNodeTargetRequiresTheNodeLease(t *testing.T) {
-	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
-	_, err := e.CreateBuild(context.Background(), BuildInput{Target: "m1", Source: "ci-tool", Title: "run"})
-	var need *NodeLeaseRequiredError
-	if !errors.As(err, &need) || need.Node != "m1" {
-		t.Fatalf("a node target without via: %v", err)
-	}
-	if list, _ := e.ListBuilds(store.BuildFilter{}); len(list) != 0 {
-		t.Fatalf("nothing recorded: %+v", list)
-	}
-	if _, err := e.CreateBuild(context.Background(), BuildInput{Target: "m1", Source: "ci-tool", Title: "run", Via: BuildViaNodeLease}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.CreateBuild(context.Background(), BuildInput{Target: "laptop", Source: "ci-tool", Title: "run"}); err != nil {
-		t.Fatalf("a non-node target is a plain record: %v", err)
 	}
 }

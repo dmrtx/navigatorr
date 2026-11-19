@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/internal/nodeswire"
+	"github.com/jakenesler/navigatorr/nodes"
 	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 	"github.com/mark3labs/mcp-go/server"
@@ -27,6 +29,12 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	reg, err := nodes.Open(nodes.Options{Path: filepath.Join(t.TempDir(), "nodes.db"), Topology: nodeswire.Topology(set), Transcode: nodeswire.TranscodeView(engine)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	nodeswire.Wire(engine, reg)
 	s := server.NewMCPServer("test", "0")
 	registerWorkerHealth(s, engine)
 	registerWorkerPause(s, engine)
@@ -53,8 +61,8 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 	if got := read(map[string]any{"node": "node-a", "builds_paused": true})["node-a"]; !got.BuildsPaused || got.Paused {
 		t.Fatalf("the tool pauses builds only: %+v", got)
 	}
-	_, err = engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Via: action.BuildViaNodeLease, Source: "ci", Title: "run"})
-	var refused *action.BuildsPausedError
+	_, err = reg.CreateBuild(context.Background(), nodes.BuildInput{Target: "node-a", Via: nodes.BuildViaNodeLease, Source: "ci", Title: "run"})
+	var refused *nodes.BuildsPausedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("a build on the paused node is refused: %v", err)
 	}
@@ -72,7 +80,7 @@ func TestWorkerPauseToolTogglesTheBuildsPause(t *testing.T) {
 	if got := read(map[string]any{"node": "node-a", "builds_paused": false})["node-a"]; got.BuildsPaused {
 		t.Fatalf("resume: %+v", got)
 	}
-	if _, err := engine.CreateBuild(context.Background(), action.BuildInput{Target: "node-a", Via: action.BuildViaNodeLease, Source: "ci", Title: "run"}); err != nil {
+	if _, err := reg.CreateBuild(context.Background(), nodes.BuildInput{Target: "node-a", Via: nodes.BuildViaNodeLease, Source: "ci", Title: "run"}); err != nil {
 		t.Fatal("resumed", err)
 	}
 
@@ -117,6 +125,12 @@ func TestWorkerPauseToolRefusesMixedOrMistypedBuildsRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	reg, err := nodes.Open(nodes.Options{Path: filepath.Join(t.TempDir(), "nodes.db"), Topology: nodeswire.Topology(set), Transcode: nodeswire.TranscodeView(engine)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	nodeswire.Wire(engine, reg)
 	s := server.NewMCPServer("test", "0")
 	registerWorkerPause(s, engine)
 	for _, bad := range []map[string]any{

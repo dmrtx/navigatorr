@@ -2,12 +2,12 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/nodes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcode"
 )
 
@@ -53,7 +53,7 @@ func TestBuildsPausedRefusesCreateWith409AndACode(t *testing.T) {
 	if w.Code != 409 || refusal["error"] != "builds paused on "+node || refusal["code"] != "builds_paused" {
 		t.Fatal("a build on a builds-paused node is a 409 with its code", w.Code, w.Body.String())
 	}
-	if list, _ := s.engine.ListBuilds(store.BuildFilter{}); len(list) != 1 {
+	if list, _ := s.nodes.ListBuilds(nodes.BuildFilter{}); len(list) != 1 {
 		t.Fatal("a refused create records nothing", list)
 	}
 	// A non-node target is unaffected; a bad request is still a 400.
@@ -67,7 +67,7 @@ func TestBuildsPausedRefusesCreateWith409AndACode(t *testing.T) {
 	if w := withBuildsToken(h, "POST", path+"/"+running.ID+"/heartbeat", `{}`); w.Code != 200 {
 		t.Fatal("a registered build still heartbeats", w.Code, w.Body.String())
 	}
-	if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+running.ID, "")); got.Status != store.BuildRunning {
+	if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+running.ID, "")); got.Status != nodes.BuildRunning {
 		t.Fatalf("pausing builds does not touch a running build: %+v", got)
 	}
 
@@ -78,7 +78,7 @@ func TestBuildsPausedRefusesCreateWith409AndACode(t *testing.T) {
 	if w := create(node); w.Code != 200 {
 		t.Fatal("resumed", w.Code, w.Body.String())
 	}
-	if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+running.ID, "")); got.Status != store.BuildRunning {
+	if got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+running.ID, "")); got.Status != nodes.BuildRunning {
 		t.Fatalf("resuming does not touch a running build: %+v", got)
 	}
 }
@@ -133,7 +133,7 @@ func TestWorkerPauseRequestsForTheBuildsSwitch(t *testing.T) {
 	if w := request(h, "POST", pausePath, `{"node":"nowhere","builds_paused":true}`, true); w.Code != 404 {
 		t.Fatal("an unknown node is a 404", w.Code)
 	}
-	if pauses, _ := s.engine.Deps().Store.ListBuildPauses(); len(pauses) != 0 {
+	if pauses, _ := s.nodes.BuildsPauses(); len(pauses) != 0 {
 		t.Fatal("a refused request pauses nothing", pauses)
 	}
 

@@ -11,8 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jakenesler/navigatorr/action"
-	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/nodes"
 )
 
 // buildsUIWithClock is the builds server over an engine whose clock the test
@@ -25,14 +24,13 @@ func buildsUIWithClock(t *testing.T) (http.Handler, *testClock) {
 		t.Fatal(err)
 	}
 	clock := &testClock{t: time.Now().UTC().Truncate(time.Second)}
-	deps := base.engine.Deps()
-	deps.Now = clock.now
 	cfg := *base.cfg
 	cfg.Web.BuildsTokenFile = path
-	s, err := New(&cfg, base.registry, action.NewEngine(deps), base.mcp)
+	s, err := New(&cfg, base.registry, base.engine, base.mcp)
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachNodes(t, s, base.engine, clock.now)
 	return s.Handler(), clock
 }
 
@@ -53,7 +51,7 @@ func (c *testClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-func newBuild(t *testing.T, h http.Handler, title string) store.Build {
+func newBuild(t *testing.T, h http.Handler, title string) nodes.Build {
 	t.Helper()
 	return decodeBuild(t, withBuildsToken(h, "POST", "/api/maintenance/builds", fmt.Sprintf(`{"target":"laptop","source":"ci","title":%q}`, title)))
 }
@@ -219,7 +217,7 @@ func TestBuildLogExpiryOverHTTP(t *testing.T) {
 	b := newBuild(t, h, "short")
 	withBuildsToken(h, "POST", path+"/"+b.ID+"/heartbeat", `{"log":["kept for now"]}`)
 	withBuildsToken(h, "POST", path+"/"+b.ID+"/finish", `{"status":"succeeded"}`)
-	clock.advance(action.BuildLogRetention - time.Second)
+	clock.advance(nodes.BuildLogRetention - time.Second)
 	if got := decodeBuildLog(t, withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String()); len(got.Lines) != 1 {
 		t.Fatal("the output goes only after the retention", got)
 	}

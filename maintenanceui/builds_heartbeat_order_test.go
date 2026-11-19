@@ -1,11 +1,10 @@
 package maintenanceui
 
 import (
+	"github.com/jakenesler/navigatorr/nodes"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jakenesler/navigatorr/store"
 )
 
 // The build is looked up from the path before the body is read: an unknown one
@@ -44,7 +43,7 @@ func TestBuildHeartbeatLooksTheBuildUpBeforeTheBody(t *testing.T) {
 			t.Errorf("expired build, %.20q: %d %s", body, w.Code, w.Body.String())
 		}
 		got := decodeBuild(t, withBuildsToken(h, "GET", path+"/"+b.ID, ""))
-		if got.Status != store.BuildLost || got.Progress != "before" {
+		if got.Status != nodes.BuildLost || got.Progress != "before" {
 			t.Errorf("expired build, %.20q: %+v", body, got)
 		}
 		if lines := decodeBuildLog(t, withBuildsToken(h, "GET", path+"/"+b.ID+"/log", "").Body.String()).Lines; len(lines) != 0 {

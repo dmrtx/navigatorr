@@ -17,8 +17,8 @@ import (
 
 // Reporting leases to the server.
 //
-// The server keeps a record of every build (Queue rows, build_list,
-// build_status, build_cancel, Pause builds, /builds/nodes), so the worker
+// The server keeps a record of every build (Queue rows, the Nodes
+// API's GET /nodes/v1/builds, Pause builds, /builds/nodes), so the worker
 // tells it about each lease through the same builds API nbuild uses without a
 // worker: it registers the lease, forwards the heartbeats with the progress
 // and the output lines, and finishes it. The server then also freezes the node

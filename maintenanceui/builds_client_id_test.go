@@ -2,10 +2,9 @@ package maintenanceui
 
 import (
 	"encoding/json"
+	"github.com/jakenesler/navigatorr/nodes"
 	"sync"
 	"testing"
-
-	"github.com/jakenesler/navigatorr/store"
 )
 
 // A create that names an id is idempotent: the worker retries a registration
@@ -28,7 +27,7 @@ func TestBuildCreateWithAClientIDIsIdempotent(t *testing.T) {
 				t.Errorf("create %d: %d %s", i, w.Code, w.Body.String())
 				return
 			}
-			var b store.Build
+			var b nodes.Build
 			_ = json.Unmarshal(w.Body.Bytes(), &b)
 			ids[i] = b.ID
 		}()
@@ -40,7 +39,7 @@ func TestBuildCreateWithAClientIDIsIdempotent(t *testing.T) {
 		}
 	}
 	var list struct {
-		Builds []store.Build `json:"builds"`
+		Builds []nodes.Build `json:"builds"`
 	}
 	if err := json.Unmarshal(withBuildsToken(h, "GET", path, "").Body.Bytes(), &list); err != nil {
 		t.Fatal(err)
@@ -53,7 +52,7 @@ func TestBuildCreateWithAClientIDIsIdempotent(t *testing.T) {
 	if w := withBuildsToken(h, "POST", path+"/bld_lease0001/finish", `{"status":"succeeded","exit_code":0}`); w.Code != 200 {
 		t.Fatalf("finish: %d %s", w.Code, w.Body.String())
 	}
-	if b := decodeBuild(t, withBuildsToken(h, "POST", path, body)); b.ID != "bld_lease0001" || b.Status != store.BuildSucceeded {
+	if b := decodeBuild(t, withBuildsToken(h, "POST", path, body)); b.ID != "bld_lease0001" || b.Status != nodes.BuildSucceeded {
 		t.Fatalf("retry after the end: %+v", b)
 	}
 

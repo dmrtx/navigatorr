@@ -7,7 +7,7 @@ finish/cancel, expiry to `lost`, history and prune, logs) plus the per-node
 a dispatch, a requeue, a hold or a freeze on the server. The worker reports its
 active leases (id, title, source, status, started_at) in its scheduler
 observation; the server uses that list only to word `suspended_by`.
-The invariants N1 to N3 are in the doc comment at the top of `action/builds.go`.
+The invariants N1 to N3 are in the doc comment at the top of `action/build_records.go` and of package `nodes` (`nodes/doc.go`); the worker enforces N1 and N3 (tests in `internal/transcodeworker`).
 
 A create that targets a configured node must come from that node's worker: its
 registration carries `"via": "node_lease"`. Without it the server answers 409
@@ -122,8 +122,9 @@ closed and is retried. A worker without `build_node` ignores the file.
 ## How the server learns about it
 
 In the background, never on the lease's path: the worker registers the lease
-with the existing builds API (so Queue rows, `build_list`, `build_status`,
-`build_cancel`, Pause builds and `/builds/nodes` keep working), forwards each
+with the existing builds API (so Queue rows, the Nodes API (`GET /nodes/v1/builds`,
+`POST /nodes/v1/builds/{id}/cancel`, reached through `call_api` on the service `nodes`), Pause builds and
+`/builds/nodes` keep working; the MCP tools `build_list`, `build_status` and `build_cancel` no longer exist), forwards each
 heartbeat's progress and log lines (with the lease's ttl, and an idle lease is
 kept alive at a third of it, at most every 20 s), and finishes it (a lost lease is finished as
 `failed`). The one synchronous call is the registration of a normal lease, with a

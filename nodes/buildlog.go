@@ -1,12 +1,14 @@
-package action
+package nodes
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"github.com/jakenesler/navigatorr/store"
 )
 
 // Build output tail. A build's heartbeat may carry the new lines of its output;
@@ -30,8 +32,23 @@ const (
 )
 
 type buildLogBuffer struct {
-	lines     []string
+	lines []string
+	// total is how many lines the build ever sent, kept or not: the number of
+	// the last kept line. The first kept line is number total-len(lines)+1.
+	total     int
 	updatedAt time.Time
+	// gen names this buffer: random, new each time a buffer is created for a
+	// build (first output, after an eviction or retention drop, after a
+	// restart). Line numbers only mean something within one generation.
+	gen string
+}
+
+func newLogGeneration() string {
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return hex.EncodeToString(raw)
 }
 
 // buildLogs is the in-memory store of build output tails.
@@ -81,14 +98,14 @@ func (l *buildLogs) forgetDroppedLocked(id string) {
 // single lines, no NUL.
 func checkBuildLog(lines []string) error {
 	if len(lines) > BuildLogMaxBatch {
-		return invalidBuild("log must have at most %d lines per heartbeat", BuildLogMaxBatch)
+		return invalid("log must have at most %d lines per heartbeat", BuildLogMaxBatch)
 	}
 	for i, l := range lines {
 		switch {
 		case utf8.RuneCountInString(l) > BuildLogMaxLine:
-			return invalidBuild("log line %d must be at most %d characters", i+1, BuildLogMaxLine)
+			return invalid("log line %d must be at most %d characters", i+1, BuildLogMaxLine)
 		case strings.ContainsAny(l, "\r\n\x00"):
-			return invalidBuild("log line %d must be a single line", i+1)
+			return invalid("log line %d must be a single line", i+1)
 		}
 	}
 	return nil
@@ -123,10 +140,11 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 			l.markDroppedLocked(oldest)
 		}
 		l.forgetDroppedLocked(id)
-		buf = &buildLogBuffer{}
+		buf = &buildLogBuffer{gen: newLogGeneration()}
 		l.bufs[id] = buf
 	}
 	buf.lines = append(buf.lines, lines...)
+	buf.total += len(lines)
 	if over := len(buf.lines) - BuildLogKeep; over > 0 {
 		// Copy so the dropped head is released.
 		buf.lines = append([]string(nil), buf.lines[over:]...)
@@ -134,14 +152,20 @@ func (l *buildLogs) append(id string, lines []string, now time.Time, ended func(
 	buf.updatedAt = now
 }
 
-func (l *buildLogs) get(id string) ([]string, time.Time) {
+func (l *buildLogs) get(id string) (lines []string, updated time.Time, total int) {
+	lines, updated, total, _ = l.getGen(id)
+	return lines, updated, total
+}
+
+// getGen is get with the generation of the buffer ("" when there is none).
+func (l *buildLogs) getGen(id string) (lines []string, updated time.Time, total int, gen string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	buf := l.bufs[id]
 	if buf == nil {
-		return nil, time.Time{}
+		return nil, time.Time{}, 0, ""
 	}
-	return append([]string(nil), buf.lines...), buf.updatedAt
+	return append([]string(nil), buf.lines...), buf.updatedAt, buf.total, buf.gen
 }
 
 // drop forgets a build altogether (its record is gone).
@@ -189,7 +213,7 @@ func (l *buildLogs) ids() []string {
 
 // buildLogExpired is whether the build ended long enough ago for its output to
 // be forgotten.
-func buildLogExpired(b store.Build, now time.Time) bool {
+func buildLogExpired(b Build, now time.Time) bool {
 	if b.EndedAt == "" {
 		return false
 	}
@@ -200,19 +224,28 @@ func buildLogExpired(b store.Build, now time.Time) bool {
 // buildEnded is whether a build is over or gone. A store error that says
 // nothing about the build counts as not ended, so a hiccup never makes a live
 // build the first buffer to go.
-func (e *Engine) buildEnded(id string) bool {
-	b, err := e.deps.Store.GetBuild(id)
+func (s *Service) buildEnded(id string) bool {
+	b, err := s.reg.get(id)
 	if err != nil {
-		return errorsIsBuildNotFound(err)
+		return errors.Is(err, ErrBuildNotFound)
 	}
-	return b.Status != store.BuildRunning && b.Status != store.BuildWaiting
+	return !b.Active()
 }
 
 // BuildOutput is what a reader gets of a build's output.
 type BuildOutput struct {
-	Build   store.Build
+	Build   Build
 	Lines   []string
 	Updated time.Time
+	// Total is how many lines the build sent while its buffer lived (the
+	// number of the last line in Lines). First is the number of Lines[0]
+	// (Total-len(Lines)+1; 0 when there are no lines).
+	Total int
+	First int
+	// Generation names the buffer the numbers belong to ("" when the build has
+	// no buffer). It changes whenever the buffer is recreated, which restarts
+	// the numbering at 1: a restart, an eviction or the retention dropping it.
+	Generation string
 	// Expired is true only when a buffer this build had was dropped: its
 	// retention passed or the cap on buffers pushed it out. A build that never
 	// sent output, or whose output a restart forgot, is not expired.
@@ -221,51 +254,49 @@ type BuildOutput struct {
 
 // BuildLog is a build's output tail: at most BuildLogKeep lines, oldest first.
 // updated is the zero time when nothing was logged. An unknown build gives
-// store.ErrBuildNotFound; a build whose retention passed gives no lines.
-func (e *Engine) BuildLog(id string) (build store.Build, lines []string, updated time.Time, err error) {
-	out, err := e.BuildOutput(id)
+// ErrBuildNotFound; a build whose retention passed gives no lines.
+func (s *Service) BuildLog(id string) (build Build, lines []string, updated time.Time, err error) {
+	out, err := s.BuildOutput(id)
 	return out.Build, out.Lines, out.Updated, err
 }
 
 // BuildOutput is BuildLog with the reason a buffer is empty. Only a build the
 // store says is unknown loses its buffer here; any other store error is
 // returned and the buffer stays for the next read.
-func (e *Engine) BuildOutput(id string) (BuildOutput, error) {
-	if e.deps.Store == nil {
-		return BuildOutput{}, errStoreForBuilds
-	}
-	b, err := e.deps.Store.GetBuild(id)
+func (s *Service) BuildOutput(id string) (BuildOutput, error) {
+	b, err := s.reg.get(id)
 	if err != nil {
-		if errorsIsBuildNotFound(err) {
-			e.buildLogs.drop(id)
+		if errors.Is(err, ErrBuildNotFound) {
+			s.logs.drop(id)
 		}
 		return BuildOutput{}, err
 	}
-	if buildLogExpired(b, e.now()) {
-		e.buildLogs.expire(id)
+	if buildLogExpired(b, s.now()) {
+		s.logs.expire(id)
 	}
-	lines, updated := e.buildLogs.get(id)
+	lines, updated, total, gen := s.logs.getGen(id)
 	if lines == nil {
 		lines = []string{}
 	}
-	return BuildOutput{Build: b, Lines: lines, Updated: updated, Expired: len(lines) == 0 && e.buildLogs.wasDropped(id)}, nil
+	first := 0
+	if len(lines) > 0 {
+		first = total - len(lines) + 1
+	}
+	return BuildOutput{Build: b, Lines: lines, Updated: updated, Total: total, First: first, Generation: gen, Expired: len(lines) == 0 && s.logs.wasDropped(id)}, nil
 }
 
 // pruneBuildLogs drops the buffers of builds that are gone or whose output
 // retention passed. The reconcile tick calls it.
-func (e *Engine) pruneBuildLogs() {
-	if e.deps.Store == nil {
-		return
-	}
-	now := e.now()
-	for _, id := range append(e.buildLogs.ids(), e.buildLogs.droppedIDs()...) {
-		b, err := e.deps.Store.GetBuild(id)
+func (s *Service) pruneBuildLogs() {
+	now := s.now()
+	for _, id := range append(s.logs.ids(), s.logs.droppedIDs()...) {
+		b, err := s.reg.get(id)
 		switch {
-		case err != nil && !errorsIsBuildNotFound(err):
+		case err != nil && !errors.Is(err, ErrBuildNotFound):
 		case err != nil:
-			e.buildLogs.drop(id)
+			s.logs.drop(id)
 		case buildLogExpired(b, now):
-			e.buildLogs.expire(id)
+			s.logs.expire(id)
 		}
 	}
 }

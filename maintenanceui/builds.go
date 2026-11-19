@@ -12,13 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakenesler/navigatorr/action"
-	"github.com/jakenesler/navigatorr/store"
+	"github.com/jakenesler/navigatorr/nodes"
 )
 
-// Builds API. A build is a job another tool runs on a machine (the target);
-// when the target is a transcode node it holds that node while it runs (see
-// action/builds.go).
+// Legacy builds API. A build is a job another tool runs on a machine (the
+// target). The registry is package nodes; these routes are thin aliases onto
+// it, kept byte for byte for nbuild and old workers (the successor is
+// /nodes/v1, see nodes/api.go). They are not extended: new capabilities go to
+// /nodes/v1 only.
 //
 //	POST /api/maintenance/builds                create; 200 with the build; 409
 //	                                            {"error": "builds paused on <node>",
@@ -104,7 +105,7 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, `send {"target", "source", "title", "id"?, "holder"?, "kind"?, "preempt_mode"?, "priority"?, "ttl_seconds"?, "progress"?}`)
 			return
 		}
-		b, err := s.engine.CreateBuild(r.Context(), action.BuildInput{ID: body.ID, Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, Via: body.Via, TTLSeconds: body.TTLSeconds})
+		b, err := s.nodes.CreateBuild(r.Context(), nodes.BuildInput{ID: body.ID, Target: body.Target, Source: body.Source, Holder: body.Holder, Kind: body.Kind, Title: body.Title, PreemptMode: body.PreemptMode, Priority: body.Priority, Progress: body.Progress, Via: body.Via, TTLSeconds: body.TTLSeconds})
 		if s.buildError(w, err) {
 			return
 		}
@@ -121,7 +122,7 @@ func (s *Server) buildsRoot(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	q := r.URL.Query()
-	list, err := s.engine.ListBuilds(store.BuildFilter{Target: q.Get("target"), Status: q.Get("status"), Source: q.Get("source"), Limit: limit})
+	list, err := s.nodes.ListBuilds(nodes.BuildFilter{Target: q.Get("target"), Status: q.Get("status"), Source: q.Get("source"), Limit: limit})
 	if err != nil {
 		fail(w, 500, "builds could not be read")
 		return
@@ -150,29 +151,29 @@ func (s *Server) buildsNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	want := r.URL.Query().Get("node")
 	statuses := s.engine.AttachNodeBuilds(s.engine.NodePauseStatesStored(r.Context()))
-	nodes := make([]nodeState, 0, len(statuses))
+	out := make([]nodeState, 0, len(statuses))
 	for name, st := range statuses {
 		if want != "" && name != want {
 			continue
 		}
 		n := nodeState{Node: name, TranscodePaused: st.Paused, TranscodeMode: st.Mode, BuildsPaused: st.BuildsPaused, RunningBuilds: []runningBuild{}}
 		for _, b := range st.Builds {
-			if b.Status == store.BuildRunning {
+			if b.Status == nodes.BuildRunning {
 				n.RunningBuilds = append(n.RunningBuilds, runningBuild{ID: b.ID, Source: b.Source, Label: b.Title, StartedAt: b.StartedAt})
 			}
 		}
-		nodes = append(nodes, n)
+		out = append(out, n)
 	}
-	if want != "" && len(nodes) == 0 {
+	if want != "" && len(out) == 0 {
 		fail(w, 404, "unknown node "+want)
 		return
 	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Node < nodes[j].Node })
-	writeJSON(w, 200, map[string]any{"nodes": nodes})
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	writeJSON(w, 200, map[string]any{"nodes": out})
 }
 
 func (s *Server) buildOne(w http.ResponseWriter, r *http.Request) {
-	b, err := s.engine.GetBuild(r.PathValue("id"))
+	b, err := s.nodes.GetBuild(r.PathValue("id"))
 	if s.buildError(w, err) {
 		return
 	}
@@ -184,7 +185,7 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	// The build comes first, from the path alone: unknown is 404 and over (or
 	// past its expiry) is 409, whatever the body is or how large. Only then is the
 	// body read and judged (400).
-	if b, err := s.engine.OpenBuild(r.Context(), id); errors.Is(err, store.ErrBuildEnded) {
+	if b, err := s.nodes.OpenBuild(r.Context(), id); errors.Is(err, nodes.ErrBuildEnded) {
 		writeBuildEnded(w, b)
 		return
 	} else if s.buildError(w, err) {
@@ -229,8 +230,8 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	// The engine judges the values (length, range) and, if the build ended in
 	// the meantime, answers 409.
-	b, err := s.engine.HeartbeatBuild(r.Context(), id, progress, ttl, lines...)
-	if errors.Is(err, store.ErrBuildEnded) {
+	b, err := s.nodes.HeartbeatBuild(r.Context(), id, progress, ttl, lines...)
+	if errors.Is(err, nodes.ErrBuildEnded) {
 		writeBuildEnded(w, b)
 		return
 	}
@@ -242,14 +243,14 @@ func (s *Server) buildHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 // writeBuildEnded is the 409 of a heartbeat to a build that is over; the
 // record is the one the engine marked (see Engine.GetBuild, HeartbeatBuild).
-func writeBuildEnded(w http.ResponseWriter, b store.Build) {
+func writeBuildEnded(w http.ResponseWriter, b nodes.Build) {
 	writeJSON(w, 409, map[string]any{"error": "build already ended", "build": b})
 }
 
 // buildLog answers the output tail of a build: the last lines its heartbeats
 // sent, oldest first. They are kept in memory only (see action/buildlog.go).
 func (s *Server) buildLog(w http.ResponseWriter, r *http.Request) {
-	out, err := s.engine.BuildOutput(r.PathValue("id"))
+	out, err := s.nodes.BuildOutput(r.PathValue("id"))
 	if s.buildError(w, err) {
 		return
 	}
@@ -273,7 +274,7 @@ func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, `send {"status": "succeeded"|"failed"|"cancelled", "exit_code"?}`)
 		return
 	}
-	b, _, err := s.engine.FinishBuild(r.Context(), r.PathValue("id"), body.Status, body.ExitCode)
+	b, _, err := s.nodes.FinishBuild(r.Context(), r.PathValue("id"), body.Status, body.ExitCode)
 	if s.buildError(w, err) {
 		return
 	}
@@ -282,10 +283,10 @@ func (s *Server) buildFinish(w http.ResponseWriter, r *http.Request) {
 
 // buildError answers an error of a build call and reports whether it did.
 func (s *Server) buildError(w http.ResponseWriter, err error) bool {
-	var invalid *action.BuildInvalidError
-	var paused *action.BuildsPausedError
-	var taken *action.BuildIDTakenError
-	var needLease *action.NodeLeaseRequiredError
+	var invalid *nodes.InvalidError
+	var paused *nodes.BuildsPausedError
+	var taken *nodes.BuildIDTakenError
+	var needLease *nodes.NodeLeaseRequiredError
 	switch {
 	case err == nil:
 		return false
@@ -293,15 +294,59 @@ func (s *Server) buildError(w http.ResponseWriter, err error) bool {
 		fail(w, 400, invalid.Reason)
 	case errors.As(err, &paused):
 		// Nothing was created; the code is stable for scripts.
-		writeJSON(w, 409, map[string]string{"error": paused.Error(), "code": action.BuildsPausedCode})
+		writeJSON(w, 409, map[string]string{"error": paused.Error(), "code": nodes.BuildsPausedCode})
 	case errors.As(err, &needLease):
-		writeJSON(w, 409, map[string]string{"error": needLease.Error(), "code": action.NodeLeaseRequiredCode})
+		writeJSON(w, 409, map[string]string{"error": needLease.Error(), "code": nodes.NodeLeaseRequiredCode})
 	case errors.As(err, &taken):
-		writeJSON(w, 409, map[string]string{"error": taken.Error(), "code": action.BuildIDTakenCode})
-	case errors.Is(err, store.ErrBuildNotFound):
+		writeJSON(w, 409, map[string]string{"error": taken.Error(), "code": nodes.BuildIDTakenCode})
+	case errors.Is(err, nodes.ErrBuildNotFound):
 		fail(w, 404, "build not found")
 	default:
 		fail(w, 500, "build not saved")
 	}
 	return true
+}
+
+// SetNodes gives the server the build registry (package nodes). Without it the
+// builds routes answer 503.
+func (s *Server) SetNodes(n *nodes.Service) { s.nodes = n }
+
+// withNodes answers 503 while no registry is attached.
+func (s *Server) withNodes(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.nodes == nil {
+			fail(w, 503, "builds are not available")
+			return
+		}
+		h(w, r)
+	}
+}
+
+// nodesAPI serves /nodes/v1 (auth was checked by Handler's wrapper).
+func (s *Server) nodesAPI(w http.ResponseWriter, r *http.Request) {
+	if s.nodes == nil {
+		writeJSON(w, 503, map[string]string{"error": "nodes is not available", "code": "unavailable"})
+		return
+	}
+	s.nodes.Handler().ServeHTTP(w, r)
+}
+
+// nodesAuthorized is whether a /nodes/v1 call may proceed: the builds token as
+// X-Api-Key (what call_api sends) or as a bearer, or a signed-in session (a
+// change through a session also needs the same-origin header, as everywhere).
+func (s *Server) nodesAuthorized(r *http.Request) bool {
+	if s.hasBuildsToken {
+		tok := r.Header.Get("X-Api-Key")
+		if auth := r.Header.Get("Authorization"); tok == "" && strings.HasPrefix(auth, "Bearer ") {
+			tok = strings.TrimPrefix(auth, "Bearer ")
+		}
+		if tok != "" {
+			h := sha256.Sum256([]byte(tok))
+			return subtle.ConstantTimeCompare(h[:], s.buildsTokenHash[:]) == 1
+		}
+	}
+	if !s.authorized(r) {
+		return false
+	}
+	return r.Method == http.MethodGet || r.Method == http.MethodHead || r.Header.Get("X-Navigatorr-Request") == "1"
 }

@@ -78,6 +78,15 @@ concurrency:
 #   - auth_prefix: custom prefix for the key (e.g. "Bearer ")
 #   - api_version: custom API prefix (e.g. "/api/v3")
 #   - openapi_url: custom URL to fetch OpenAPI specification
+#
+# Nodes (the build registry served by Navigatorr itself, see docs/nodes/README.md)
+# is registered like any other service, so the MCP reaches it with
+# list_services / search_api / call_api. The key is web.builds_token_file's token:
+#   nodes:
+#     url: "http://localhost:8080"            # this server's web address
+#     api_key: "<builds token>"
+#     api_version: "/nodes/v1"
+#     openapi_url: "http://localhost:8080/nodes/v1/openapi.json"
 services:
   sonarr:
     url: "http://localhost:8989"
@@ -296,6 +305,7 @@ queue:
 # and audit logs. Survives restarts as long as the directory is mounted in Docker.
 database:
   path: ""                      # Defaults to ~/.cache/navigatorr/navigatorr.db
+  # nodes_path: ""              # Nodes build registry; defaults to nodes.db next to the file above
 
 # ==============================================================================
 # 8. FILESYSTEM & MEDIA INSPECTION

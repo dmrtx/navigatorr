@@ -55,6 +55,7 @@ func twoNodeBuildsUI(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
+	attachNodes(t, s, e, nil)
 	return s.Handler()
 }
 

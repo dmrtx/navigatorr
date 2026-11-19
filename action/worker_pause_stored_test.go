@@ -46,8 +46,8 @@ func TestNodePauseStatesStoredEqualsObservedState(t *testing.T) {
 
 			snapshot := func() [3]any {
 				pauses, _ := e.deps.Store.ListWorkerPauses()
-				builds, _ := e.deps.Store.ListBuildPauses()
-				list, _ := e.deps.Store.ListBuilds(store.BuildFilter{})
+				builds, _ := records(e).BuildsPauses()
+				list := append(records(e).NodeBuildRecords("m1"), records(e).NodeBuildRecords("m4")...)
 				return [3]any{pauses, builds, list}
 			}
 			before := snapshot()

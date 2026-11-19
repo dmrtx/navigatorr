@@ -90,6 +90,11 @@ jobs:
         env:
           CGO_ENABLED: "0"
 
+      - name: Race detector (build registry and its callers)
+        run: go test -race -count=1 ./action/... ./nodes/... ./internal/nodeswire/...
+        env:
+          CGO_ENABLED: "1"
+
   # Compiles and vets the whole module for the worker's platform on a cheap
   # Linux runner, so a darwin-only break shows up on every change even when the
   # native macOS run below is skipped.

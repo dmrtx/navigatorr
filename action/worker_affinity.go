@@ -60,12 +60,6 @@ type workerState struct {
 	// another request for the same node.
 	pauseMu sync.Mutex
 
-	// buildsPauseMu serialises the builds-pause toggle with a build create on
-	// the node, so a build is either refused or registered before the pause. It
-	// is separate from pauseMu: a create must not wait for a request that talks
-	// to the worker.
-	buildsPauseMu sync.Mutex
-
 	// leases is what the node's worker reported of its active leases in its
 	// latest observation (nil when none, or the worker could not be reached).
 	leasesMu sync.Mutex
