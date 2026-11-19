@@ -247,6 +247,16 @@ func TestLeaseSocketGroup(t *testing.T) {
 		t.Fatalf("temporary bind directories left: %v", m)
 	}
 
+	// A socket named like a lock file is refused before anything is made.
+	lk := filepath.Join(dir, "x.lock")
+	kw := NewWorker(&WorkerConfig{StateDir: t.TempDir(), BuildNode: "nodeA", BuildSocket: lk})
+	if err := kw.StartBuildLeases(ctx); err == nil || !strings.Contains(err.Error(), ".lock") {
+		t.Fatalf("a socket ending in .lock: %v", err)
+	}
+	if _, err := os.Lstat(lk); err == nil {
+		t.Fatal("nothing may be made for a .lock socket")
+	}
+
 	def := NewWorker(&WorkerConfig{StateDir: filepath.Join(dir, "st"), BuildNode: "nodeA", BuildSocketGroup: g.Name})
 	if err := def.StartBuildLeases(ctx); err == nil {
 		t.Fatal("a group needs build_socket")

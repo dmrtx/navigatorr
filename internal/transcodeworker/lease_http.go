@@ -140,6 +140,10 @@ func (w *Worker) serveLeaseSocket(ctx context.Context, path string) error {
 	if n := len(filepath.Dir(path)) + leaseBindExtra(path); n >= 104 {
 		return fmt.Errorf("build socket directory is too long for a Unix socket (%d bytes while binding): set a shorter build_socket", n)
 	}
+	// "<socket>.lock" is the lock file, so no socket may be one.
+	if strings.HasSuffix(path, ".lock") {
+		return errors.New("build_socket must not end in .lock (that name is the socket's lock file)")
+	}
 	// The group first: a bad one changes nothing on disk (not even a stale
 	// socket of an earlier worker).
 	gid, err := leaseSocketGroupID(w.cfg.BuildSocketGroup, strings.TrimSpace(w.cfg.BuildSocket) != "")
