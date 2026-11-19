@@ -422,10 +422,10 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		ownGroup  bool
-		wantState string // of the grandchild while the child is frozen
+		wantState string // of the grandchild while the child is frozen; "" = alive, not stopped
 	}{
 		{"group leader", true, "T"},
-		{"not a leader", false, "S"},
+		{"not a leader", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctl := newSuspendControl()
@@ -461,19 +461,27 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 			// signal on its own schedule, so the child can show stopped
 			// before the grandchild does; wait for the grandchild too. A child
 			// that is not a leader is signalled alone: the grandchild, though
-			// in the same group, must stay as it was for a while, not only at
-			// the first look.
-			var last string
+			// in the same group, must stay alive and not stopped (running or
+			// sleeping, whichever it is doing) for a while, not only at the
+			// first look.
 			if tc.ownGroup {
-				for end := time.Now().Add(5 * time.Second); !strings.HasPrefix(last, tc.wantState); time.Sleep(10 * time.Millisecond) {
-					if last = procState(grandchild); !strings.HasPrefix(last, tc.wantState) && !time.Now().Before(end) {
-						t.Fatalf("grandchild state = %q, want %q", last, tc.wantState)
+				for end := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+					got := procState(grandchild)
+					if strings.HasPrefix(got, tc.wantState) {
+						break
+					}
+					if !time.Now().Before(end) {
+						t.Fatalf("grandchild state = %q, want %q", got, tc.wantState)
 					}
 				}
 			} else {
-				for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
-					if last = procState(grandchild); !strings.HasPrefix(last, tc.wantState) {
-						t.Fatalf("grandchild state = %q, want %q", last, tc.wantState)
+				for end := time.Now().Add(300 * time.Millisecond); ; time.Sleep(20 * time.Millisecond) {
+					got := procState(grandchild)
+					if got == "" || strings.HasPrefix(got, "T") {
+						t.Fatalf("grandchild state = %q, want alive and not stopped", got)
+					}
+					if !time.Now().Before(end) {
+						break
 					}
 				}
 			}
