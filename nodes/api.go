@@ -418,6 +418,21 @@ var logWaitUnit = time.Second
 // recreated, ctx ends or max passes. It then answers like BuildOutput. tooMany
 // is true when the cap of waiting readers is reached (nothing was read).
 func (s *Service) waitBuildOutput(ctx context.Context, id string, after int, gen string, max time.Duration) (out BuildOutput, err error, tooMany bool) {
+	startGen := ""
+	ready := func(out BuildOutput) bool {
+		return !out.Build.Active() || out.Expired ||
+			out.Total > after || after > out.Total ||
+			(gen != "" && gen != out.Generation) || // as the answer without wait: a reset
+			(startGen != "" && out.Generation != startGen)
+	}
+	// Answer at once, without a waiter slot, when there is no reason to wait
+	// (lines already past after, build ended, unknown build): the cap only
+	// limits readers that actually wait.
+	out, err = s.BuildOutput(id)
+	if err != nil || ready(out) {
+		return out, err, false
+	}
+	startGen = out.Generation
 	release, werr := s.logs.watch(id)
 	if werr != nil {
 		return BuildOutput{}, nil, true
@@ -425,24 +440,12 @@ func (s *Service) waitBuildOutput(ctx context.Context, id string, after int, gen
 	defer release()
 	timer := time.NewTimer(max)
 	defer timer.Stop()
-	startGen := ""
-	for first := true; ; first = false {
+	for {
 		// Take the channel before reading: a change after the read closes it.
 		ch := s.logs.current(id)
 		out, err = s.BuildOutput(id)
-		if err != nil {
+		if err != nil || ready(out) {
 			return out, err, false
-		}
-		if first {
-			startGen = out.Generation
-		}
-		switch {
-		case !out.Build.Active(), out.Expired,
-			out.Total > after,
-			after > out.Total,
-			gen != "" && out.Generation != "" && gen != out.Generation,
-			startGen != "" && out.Generation != startGen:
-			return out, nil, false
 		}
 		select {
 		case <-ch:

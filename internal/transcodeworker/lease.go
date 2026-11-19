@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -175,6 +176,8 @@ type leaseState struct {
 	now      func() time.Time
 	reporter leaseReporter
 	kick     chan struct{}
+	// logKickSet is true while a timer to send held output is pending: one at a time.
+	logKickSet atomic.Bool
 }
 
 type leasePending struct {

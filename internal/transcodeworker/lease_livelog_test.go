@@ -140,6 +140,30 @@ func TestLeaseProgressIsNotHeldAndFailedOutputIsRequeued(t *testing.T) {
 	if n != leaseLogMax {
 		t.Fatalf("kept %d lines, want the cap %d", n, leaseLogMax)
 	}
+
+	// When the server is back, the kept lines go out at most leaseLogBatch per
+	// heartbeat (the server refuses more), oldest first, none lost or doubled.
+	rep.mu.Lock()
+	rep.down = false
+	from := len(rep.beats)
+	rep.mu.Unlock()
+	for i := 0; i < 20; i++ {
+		offset += leaseLogEvery
+		w.leaseReportPass()
+	}
+	rep.mu.Lock()
+	var got []string
+	for _, b := range rep.beats[from:] {
+		if len(b.log) > leaseLogBatch {
+			t.Errorf("a heartbeat carried %d lines", len(b.log))
+		}
+		got = append(got, b.log...)
+	}
+	rep.mu.Unlock()
+	want := logLines(12*256-leaseLogMax, leaseLogMax)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("delivered %d lines, want %d in order (first %v)", len(got), len(want), got[:min(3, len(got))])
+	}
 }
 
 func TestLeaseHeartbeatBatchLimit(t *testing.T) {

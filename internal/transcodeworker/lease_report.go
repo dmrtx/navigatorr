@@ -301,20 +301,35 @@ func (w *Worker) leaseReportPass() {
 				continue
 			}
 			if p.dirty || now.Sub(p.lastSent) >= leaseKeepaliveEvery(l) {
-				work = append(work, job{l: *l, p: *p, hbs: true})
-				if len(p.log) > 0 {
+				// At most leaseLogBatch lines per heartbeat (the server refuses
+				// more), oldest first; the rest waits for the next leaseLogEvery.
+				sent := *p
+				var rest []string
+				if len(p.log) > leaseLogBatch {
+					sent.log = p.log[:leaseLogBatch:leaseLogBatch]
+					rest = append([]string(nil), p.log[leaseLogBatch:]...)
+				}
+				work = append(work, job{l: *l, p: sent, hbs: true})
+				if len(sent.log) > 0 {
 					p.lastLog = now
 				}
-				p.dirty, p.progress, p.log, p.lastSent = false, nil, nil, now
+				p.dirty, p.progress, p.log, p.lastSent = len(rest) > 0, nil, rest, now
+				if len(rest) > 0 && (holdLog == 0 || leaseLogEvery < holdLog) {
+					holdLog = leaseLogEvery
+				}
 			}
 		case !l.active() && !l.Reported:
 			work = append(work, job{l: *l}) // without a server id it is only marked reported
 		}
 	}
 	s.mu.Unlock()
-	if holdLog > 0 {
-		// Come back when the held output may go; a kick in between is harmless.
-		time.AfterFunc(holdLog, w.leaseKickReporter)
+	if holdLog > 0 && s.logKickSet.CompareAndSwap(false, true) {
+		// Come back when the held output may go; a kick in between is
+		// harmless. One timer at a time: a pass while it is pending adds none.
+		time.AfterFunc(holdLog, func() {
+			s.logKickSet.Store(false)
+			w.leaseKickReporter()
+		})
 	}
 
 	for _, j := range work {

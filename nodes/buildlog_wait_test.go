@@ -243,6 +243,19 @@ func TestLogWaitRefusesBadValuesAndTooManyReaders(t *testing.T) {
 	if code, _ := call(t, h, "GET", p+"/log", ""); code != 200 {
 		t.Fatal(code)
 	}
+	// With the cap full, a reader that would not wait still gets its answer:
+	// lines already past after, or an unknown build.
+	call(t, h, "POST", p+"/heartbeat", `{"log":["one"]}`)
+	code, e = call(t, h, "GET", p+"/log?after=0&wait=5", "")
+	if ls, _ := e["lines"].([]any); code != 200 || len(ls) != 1 {
+		t.Fatalf("cap full, lines ready: %d %v", code, e)
+	}
+	if code, _ := call(t, h, "GET", "/nodes/v1/builds/nope/log?wait=5", ""); code != 404 {
+		t.Fatalf("cap full, unknown build: %d", code)
+	}
+	if code, e := call(t, h, "GET", p+"/log?after=1&wait=5", ""); code != 429 || e["code"] != "too_many_waiters" {
+		t.Fatalf("cap full, would wait: %d %v", code, e)
+	}
 	for _, r := range releases {
 		r()
 		r() // releasing twice is harmless
@@ -282,4 +295,18 @@ func decodeBody(b []byte) map[string]any {
 	var out map[string]any
 	_ = json.Unmarshal(b, &out)
 	return out
+}
+
+// A reader whose generation is gone (buffer dropped, nothing new since) gets
+// its reset at once, as without wait, rather than after the whole wait.
+func TestLogWaitStaleGenerationOnEmptyBufferAnswersAtOnce(t *testing.T) {
+	s, _ := buildSvc(t)
+	h := s.Handler()
+	p := registerLogBuild(t, h, "bld_wait0009")
+	s.logs.drop("bld_wait0009")
+	ch := pollLog(t, h, context.Background(), p+"/log?after=0&generation=old&wait=25")
+	a := waitFor(t, ch, 2*time.Second)
+	if a.code != 200 || a.body["reset"] != true {
+		t.Fatalf("%+v", a)
+	}
 }
