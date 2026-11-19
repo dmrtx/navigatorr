@@ -457,14 +457,25 @@ func TestSuspendSignalsDescendantsOnlyOfAGroupLeader(t *testing.T) {
 				t.Fatal("the child must be reported frozen")
 			}
 			waitFor(t, "the child to stop", func() bool { return strings.HasPrefix(procState(cmd.Process.Pid), "T") })
-			// A signal to the group reaches each member on its own schedule:
-			// the child can show stopped before the grandchild does, so wait
-			// for the grandchild too. A grandchild outside the group is never
-			// signalled and stays as it was.
+			// A group leader is stopped with its group: each member gets the
+			// signal on its own schedule, so the child can show stopped
+			// before the grandchild does; wait for the grandchild too. A child
+			// that is not a leader is signalled alone: the grandchild, though
+			// in the same group, must stay as it was for a while, not only at
+			// the first look.
+			var last string
 			if tc.ownGroup {
-				waitFor(t, "the grandchild to stop", func() bool { return strings.HasPrefix(procState(grandchild), "T") })
-			} else if got := procState(grandchild); !strings.HasPrefix(got, tc.wantState) {
-				t.Fatalf("grandchild state = %q, want %q", got, tc.wantState)
+				for end := time.Now().Add(5 * time.Second); !strings.HasPrefix(last, tc.wantState); time.Sleep(10 * time.Millisecond) {
+					if last = procState(grandchild); !strings.HasPrefix(last, tc.wantState) && !time.Now().Before(end) {
+						t.Fatalf("grandchild state = %q, want %q", last, tc.wantState)
+					}
+				}
+			} else {
+				for end := time.Now().Add(300 * time.Millisecond); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+					if last = procState(grandchild); !strings.HasPrefix(last, tc.wantState) {
+						t.Fatalf("grandchild state = %q, want %q", last, tc.wantState)
+					}
+				}
 			}
 			ctl.apply(false)
 		})
