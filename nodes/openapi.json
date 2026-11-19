@@ -250,7 +250,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "next_cursor from the previous page (opaque; anything else is 400 invalid_cursor).",
+            "description": "next_cursor from the previous page (an opaque position: any well-formed value is accepted, and one that did not come from next_cursor simply starts from that position; only a malformed value is 400 invalid_cursor).",
             "schema": {
               "type": "string"
             }
@@ -816,6 +816,16 @@
           },
           "401": {
             "description": "Missing or wrong builds token (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "after is not a whole number of 0 or more (code invalid_request).",
             "content": {
               "application/json": {
                 "schema": {
