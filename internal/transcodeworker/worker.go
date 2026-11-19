@@ -1219,7 +1219,7 @@ func (w *Worker) Submit(ctx context.Context, req SubmitRequest, selfExe, configP
 	// A paused or build-held node takes no new job: it says so now and the
 	// coordinator keeps the job in its own queue. The disk and retention
 	// limits are applied when the slot comes up (admitAtStartLocked).
-	if _, msg := w.holdRefusal(); msg != "" {
+	if _, msg := w.holdRefusalFor(plan != nil && plan.Podcast != nil); msg != "" {
 		_ = os.Remove(jobDir)
 		return SubmitResponse{ID: trimmedID, Error: msg}, errors.New(msg)
 	}
@@ -1496,24 +1496,34 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		if err := ctx.Err(); err != nil {
 			return started, errors.Join(append(errs, err)...)
 		}
-		// Pause all: queued jobs stay queued; only running ones finish.
-		if w.queueHeld() {
-			// A build lease says why the queue waits: record it on the
-			// queued jobs so the coordinator takes them back. Drain and
-			// operator holds stay silent (those jobs wait in place).
-			if w.leaseHolds() {
+		// An operator hold or suspend stops every lane: queued jobs stay
+		// queued; only running ones finish.
+		leaseHeld := w.leaseHolds()
+		if w.operatorHeld() {
+			if leaseHeld {
 				if err := w.recordHoldRefusalOnQueued(); err != nil {
 					errs = append(errs, err)
 				}
 			}
 			return started, errors.Join(errs...)
 		}
+		// A running build lease holds the conversion lane only. It says why
+		// the video jobs wait (recorded on them so the coordinator takes them
+		// back); a podcast job starts as usual.
+		if leaseHeld {
+			if err := w.recordHoldRefusalOnQueued(); err != nil {
+				errs = append(errs, err)
+			}
+		}
 		limits := w.slotLimits()
 		use, err := w.countActiveJobsByKind("")
 		if err != nil {
 			errs = append(errs, err)
 		}
-		if err != nil || (!limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use)) {
+		anyRoom := func(u slotCounts) bool {
+			return (!leaseHeld && limits.hasRoom(jobSlot{kind: slotKindVideo}, u)) || limits.hasRoom(jobSlot{kind: slotKindPodcast}, u)
+		}
+		if err != nil || !anyRoom(use) {
 			return started, errors.Join(errs...)
 		}
 		queued, scanErr := w.listQueuedJobsObserved()
@@ -1525,8 +1535,11 @@ func (w *Worker) scheduleQueuedLocked(ctx context.Context, selfExe, configPath s
 		}
 		progressed := false
 		for _, q := range queued {
-			if !limits.hasRoom(jobSlot{kind: slotKindVideo}, use) && !limits.hasRoom(jobSlot{kind: slotKindPodcast}, use) {
+			if !anyRoom(use) {
 				return started, errors.Join(errs...)
+			}
+			if leaseHeld && jobSlotKind(q) != slotKindPodcast {
+				continue // the build holds the conversion lane
 			}
 			if !limits.hasRoom(jobSlotOf(q), use) {
 				continue // its pool (or the x265 cap) is full; another job may still start
@@ -1628,8 +1641,8 @@ func (w *Worker) recordHoldRefusalOnQueued() error {
 	queued, scanErr := w.listQueuedJobsObserved()
 	errs := []error{scanErr}
 	for _, q := range queued {
-		if q.PID != 0 {
-			continue
+		if q.PID != 0 || jobSlotKind(q) == slotKindPodcast {
+			continue // a podcast job is never refused for a build
 		}
 		jobDir := filepath.Join(w.cfg.StateDir, q.ID)
 		lock, err := acquireJobLock(jobDir)

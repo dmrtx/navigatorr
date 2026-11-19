@@ -180,10 +180,15 @@ func (w *Worker) ClearFreeableSourceCache() (int64, error) {
 	return freed, nil
 }
 
-// holdRefusal words why the node takes no new job, "" when it takes jobs.
-func (w *Worker) holdRefusal() (reason, msg string) {
+// holdRefusal words why the node takes no new conversion job, "" when it takes
+// jobs. A podcast job is refused only by an operator pause (holdRefusalFor).
+func (w *Worker) holdRefusal() (reason, msg string) { return w.holdRefusalFor(false) }
+
+// holdRefusalFor is holdRefusal for one lane: a running build lease refuses
+// conversions, never podcasts.
+func (w *Worker) holdRefusalFor(podcast bool) (reason, msg string) {
 	switch {
-	case w.leaseHolds():
+	case !podcast && w.leaseHolds():
 		return retentionBlockedHold, "worker busy (" + transcode.RoomRefusalTag + "): a build is running on this node"
 	case w.Held() || w.Suspended():
 		return retentionBlockedHold, "worker busy (" + transcode.RoomRefusalTag + "): this node is paused"
@@ -271,7 +276,7 @@ func (w *Worker) admitAtStartLocked(jobFile string, job *JobRecord) (bool, error
 	var fallback bool
 	var err error
 	prevOwn := job.RoomOwnKey
-	if reason, msg := w.holdRefusal(); reason != "" {
+	if reason, msg := w.holdRefusalFor(jobSlotKind(job) == slotKindPodcast); reason != "" {
 		err = &retentionRefusal{reason: reason, msg: msg}
 	} else {
 		fallback, err = w.admitRoomLocked(job)
