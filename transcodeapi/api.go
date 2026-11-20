@@ -5,7 +5,8 @@
 // routes and the MCP tools already call, and are mounted here by NewHandler so
 // that exactly the routes of Routes() exist and no others.
 //
-// Phase 1a is read-only: every route is a GET. Writes arrive in phase 1b.
+// Phase 1a served reads; phase 1b adds the writes (POST, PUT and DELETE routes
+// on the same resources). Both are listed in Routes().
 //
 // Invariant N2: Transcode never imports or consults Nodes. This package
 // imports nothing of the module (internal/importguard checks it, and that
@@ -18,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // BasePath is where the HTTP API lives.
@@ -59,21 +61,32 @@ func (r Route) Key() string { return r.Method + " " + r.Path }
 // Order is the order the spec presents them in.
 func Routes() []Route {
 	g := func(p string) Route { return Route{Method: "GET", Path: BasePath + p} }
+	w := func(method, p string) Route { return Route{Method: method, Path: BasePath + p} }
 	return []Route{
 		g("/workers"),
 		g("/workers/{name}"),
 		g("/workers/{name}/slots"),
+		w("PUT", "/workers/{name}/slots"),
 		g("/activity"),
 		g("/state"),
 		g("/drain"),
+		w("PUT", "/drain"),
 		g("/pauses"),
 		g("/pauses/{name}"),
+		w("PUT", "/pauses/{name}"),
+		w("DELETE", "/pauses/{name}"),
 		g("/actions"),
+		w("POST", "/actions"),
 		g("/actions/{id}"),
+		w("POST", "/actions/{id}/cancel"),
+		w("POST", "/actions/{id}/resume"),
+		w("POST", "/actions/{id}/retry"),
 		g("/actions/{id}/detail/{section}"),
 		g("/actions/{id}/podcast/blocks"),
 		{Method: "GET", Path: BasePath + "/actions/{id}/podcast/blocks/{block_id}", NoHead: true},
 		g("/actions/{id}/podcast/artifacts/{artifact}"),
+		w("POST", "/actions/{id}/podcast/classify"),
+		w("POST", "/actions/{id}/podcast/review"),
 		g("/history"),
 		g("/catalog"),
 		g("/batches/{id}/items"),
@@ -81,16 +94,31 @@ func Routes() []Route {
 		g("/batches/{id}/candidates"),
 		g("/batches/{id}/promotion-plan"),
 		g("/batches/{id}/preview"),
+		g("/batches/{id}/goal"),
+		w("POST", "/batches/{id}/goal"),
 		g("/backups"),
 		g("/backups/candidates"),
+		w("POST", "/backups/candidates/{id}/discard"),
+		w("POST", "/backups/{id}/clean"),
+		w("POST", "/backups/{id}/restore"),
+		w("POST", "/backups/{id}/discard"),
+		w("POST", "/backups/{id}/discard-duplicate"),
 		g("/recipes"),
 		g("/recipes/{name}"),
+		w("PUT", "/recipes/{name}"),
+		w("DELETE", "/recipes/{name}"),
 		g("/recipes/{name}/history"),
 		g("/recipe-bundle"),
+		w("POST", "/recipe-bundle/reload"),
+		w("POST", "/recipe-bundle/update"),
+		w("POST", "/recipe-bundle/rollback"),
 		g("/podcasts"),
 		g("/podcasts/{id}/local-library"),
 		g("/podcasts/{id}/ad-library"),
+		w("DELETE", "/podcasts/{id}/ad-library/{entry}"),
 		g("/review-queue"),
+		w("POST", "/review-queue/{id}/close"),
+		w("POST", "/review-queue/{id}/decisions"),
 	}
 }
 
@@ -98,13 +126,14 @@ func Routes() []Route {
 type Handlers map[string]http.HandlerFunc
 
 // NewHandler mounts handlers, which must be exactly the routes of Routes().
-// Anything else under BasePath answers a JSON error: 405 (with Allow) for a
-// known path used with another method (the API is read-only in this phase),
-// 404 otherwise. It does no authentication: the caller wraps it.
+// Anything else under BasePath answers a JSON error: 405 (with Allow listing
+// the methods that path serves) for a known path used with another method, 404
+// otherwise. It does no authentication: the caller wraps it.
 func NewHandler(handlers Handlers) (http.Handler, error) {
 	want := map[string]bool{}
 	paths := http.NewServeMux()
-	allow := map[string]string{} // path pattern -> Allow header of its 405
+	methods := map[string][]string{} // path pattern -> methods its routes serve
+	noHead := map[string]bool{}
 	mux := http.NewServeMux()
 	for _, r := range Routes() {
 		want[r.Key()] = true
@@ -112,9 +141,12 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 		if !ok || fn == nil {
 			return nil, fmt.Errorf("transcodeapi: no handler for %s", r.Key())
 		}
-		allow[r.Path] = "GET, HEAD"
-		if r.NoHead {
-			allow[r.Path] = "GET"
+		if _, seen := methods[r.Path]; !seen {
+			paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
+		}
+		methods[r.Path] = append(methods[r.Path], r.Method)
+		if r.NoHead && r.Method == http.MethodGet {
+			noHead[r.Path] = true
 			// A GET pattern also serves HEAD; refuse it here so the route's
 			// handler never runs for a HEAD.
 			get := fn
@@ -129,7 +161,6 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 			}
 		}
 		mux.HandleFunc(r.Key(), fn)
-		paths.HandleFunc(r.Path, func(http.ResponseWriter, *http.Request) {})
 	}
 	var extra []string
 	for k := range handlers {
@@ -141,24 +172,49 @@ func NewHandler(handlers Handlers) (http.Handler, error) {
 		sort.Strings(extra)
 		return nil, fmt.Errorf("transcodeapi: handlers for routes that are not in Routes(): %v", extra)
 	}
+	allow := map[string]string{}
+	for p, ms := range methods {
+		allow[p] = AllowHeader(ms, noHead[p])
+	}
 	mux.HandleFunc(BasePath+"/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == SpecPath && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			// The spec is served by the caller's own GET route; any other
 			// method lands here.
 			w.Header().Set("Allow", "GET, HEAD")
 			WriteError(w, 405, "method_not_allowed", "this endpoint is read-only: only GET is served",
-				"GET "+SpecPath+" lists the endpoints of this API; writes arrive in a later version")
+				"GET "+SpecPath+" lists the endpoints of this API")
 			return
 		}
 		if _, pattern := paths.Handler(r); pattern != "" {
 			w.Header().Set("Allow", allow[pattern])
-			WriteError(w, 405, "method_not_allowed", "this endpoint is read-only: only GET is served",
-				"GET "+SpecPath+" lists the endpoints of this API; writes arrive in a later version")
+			WriteError(w, 405, "method_not_allowed", "this endpoint does not serve "+r.Method,
+				"the Allow header lists the methods it serves; GET "+SpecPath+" lists the endpoints of this API")
 			return
 		}
 		WriteError(w, 404, "not_found", "no such endpoint", "GET "+SpecPath+" lists the endpoints of this API")
 	})
 	return mux, nil
+}
+
+// AllowHeader is the Allow header of a path whose routes use methods: GET also
+// serves HEAD (unless the route refuses it), then the writes in a fixed order.
+func AllowHeader(methods []string, noHead bool) string {
+	have := map[string]bool{}
+	for _, m := range methods {
+		have[m] = true
+	}
+	var out []string
+	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"} {
+		switch {
+		case m == "HEAD":
+			if have["GET"] && !noHead {
+				out = append(out, m)
+			}
+		case have[m]:
+			out = append(out, m)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // WriteJSON writes v as the JSON body of status.
@@ -190,6 +246,12 @@ func CodeForStatus(status int) string {
 		return "forbidden"
 	case 404:
 		return "not_found"
+	case 413:
+		return "payload_too_large"
+	case 415:
+		return "unsupported_media_type"
+	case 422:
+		return "rejected"
 	case 405:
 		return "method_not_allowed"
 	case 409:

@@ -42,6 +42,7 @@ func TestSpecAndRoutesAgree(t *testing.T) {
 			OperationID string                      `json:"operationId"`
 			Parameters  []struct{ Name, In string } `json:"parameters"`
 			Responses   map[string]any              `json:"responses"`
+			RequestBody any                         `json:"requestBody"`
 		} `json:"paths"`
 	}
 	if err := json.Unmarshal(Spec(), &doc); err != nil {
@@ -53,9 +54,6 @@ func TestSpecAndRoutesAgree(t *testing.T) {
 		for m, op := range ops {
 			key := strings.ToUpper(m) + " " + p
 			inSpec[key] = true
-			if m != "get" {
-				t.Errorf("%s: this version is read-only", key)
-			}
 			if op.Summary == "" || op.Description == "" || op.OperationID == "" {
 				t.Errorf("%s needs a summary, a description and an operationId", key)
 			}
@@ -63,9 +61,32 @@ func TestSpecAndRoutesAgree(t *testing.T) {
 				t.Errorf("duplicate operationId %s", op.OperationID)
 			}
 			ids[op.OperationID] = true
-			for _, c := range []string{"200", "401"} {
-				if _, ok := op.Responses[c]; !ok {
-					t.Errorf("%s has no %s response", key, c)
+			ok2xx := false
+			for c := range op.Responses {
+				ok2xx = ok2xx || strings.HasPrefix(c, "2")
+			}
+			if _, ok := op.Responses["401"]; !ok || !ok2xx {
+				t.Errorf("%s needs a 2xx and a 401 response", key)
+			}
+			if _, ok := op.Responses["405"]; !ok {
+				t.Errorf("%s has no 405 response", key)
+			}
+			if m != "get" {
+				// a write documents its body (when it has one) and its refusals
+				for _, c := range []string{"404", "409", "500"} {
+					if _, ok := op.Responses[c]; !ok {
+						t.Errorf("%s has no %s response", key, c)
+					}
+				}
+				if m == "put" && op.RequestBody == nil {
+					t.Errorf("%s: a PUT needs a request body", key)
+				}
+				if op.RequestBody != nil {
+					for _, c := range []string{"400", "413", "415"} {
+						if _, ok := op.Responses[c]; !ok {
+							t.Errorf("%s has a body but no %s response", key, c)
+						}
+					}
 				}
 			}
 			// every {placeholder} of the path is a declared path parameter
@@ -149,13 +170,14 @@ func TestRoutesAnswerAndTheRestIsJSONErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range Routes() {
-		p := strings.NewReplacer("{name}", "m1", "{id}", "job1", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript").Replace(r.Path)
-		if code, _, _ := do(t, h, "GET", p); code != 200 {
-			t.Errorf("GET %s = %d", p, code)
+		p := strings.NewReplacer("{name}", "m1", "{id}", "job1", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript", "{entry}", "e1").Replace(r.Path)
+		if code, _, _ := do(t, h, r.Method, p); code != 200 {
+			t.Errorf("%s %s = %d", r.Method, p, code)
 		}
-		code, body, hdr := do(t, h, "POST", p)
-		if code != 405 || body["code"] != "method_not_allowed" || !strings.Contains(hdr.Get("Allow"), "GET") {
-			t.Errorf("POST %s = %d %v %q", p, code, body, hdr.Get("Allow"))
+		// PATCH is served by no route: the 405 names the methods the path has.
+		code, body, hdr := do(t, h, "PATCH", p)
+		if code != 405 || body["code"] != "method_not_allowed" || !strings.Contains(hdr.Get("Allow"), r.Method) {
+			t.Errorf("PATCH %s = %d %v %q", p, code, body, hdr.Get("Allow"))
 		}
 	}
 	code, body, _ := do(t, h, "GET", BasePath+"/nope")
@@ -173,23 +195,39 @@ func TestAllowHeaderFollowsTheRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	noHead := 0
+	methods := map[string][]string{}
+	noHeadPath := map[string]bool{}
 	for _, r := range Routes() {
-		p := strings.NewReplacer("{name}", "m1", "{id}", "job1", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript").Replace(r.Path)
-		want := "GET, HEAD"
+		methods[r.Path] = append(methods[r.Path], r.Method)
+		noHeadPath[r.Path] = noHeadPath[r.Path] || r.NoHead
 		if r.NoHead {
-			want = "GET"
 			noHead++
 		}
-		if _, _, hdr := do(t, h, "DELETE", p); hdr.Get("Allow") != want {
-			t.Errorf("DELETE %s: Allow %q, want %q", p, hdr.Get("Allow"), want)
+	}
+	for path, ms := range methods {
+		p := strings.NewReplacer("{name}", "m1", "{id}", "job1", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript", "{entry}", "e1").Replace(path)
+		want := AllowHeader(ms, noHeadPath[path])
+		if _, _, hdr := do(t, h, "PATCH", p); hdr.Get("Allow") != want {
+			t.Errorf("PATCH %s: Allow %q, want %q", p, hdr.Get("Allow"), want)
 		}
-		// NewHandler itself keeps HEAD away from a NoHead route's handler.
-		if code, _, hdr := do(t, h, "HEAD", p); r.NoHead != (code == 405) || (r.NoHead && hdr.Get("Allow") != "GET") {
-			t.Errorf("HEAD %s = %d (Allow %q), NoHead %v", p, code, hdr.Get("Allow"), r.NoHead)
+		// NewHandler keeps HEAD away from a NoHead GET handler.
+		hasGet := strings.Contains(want, "GET")
+		if code, _, hdr := do(t, h, "HEAD", p); (noHeadPath[path] || !hasGet) != (code == 405) || (code == 405 && hdr.Get("Allow") != want) {
+			t.Errorf("HEAD %s = %d (Allow %q), NoHead %v", p, code, hdr.Get("Allow"), noHeadPath[path])
 		}
 	}
-	if noHead != 1 {
-		t.Errorf("%d routes refuse HEAD, want 1 (the podcast block)", noHead)
+	// a few Allow values spelled out, so the helper is not only compared with itself
+	for path, want := range map[string]string{
+		"/workers":                   "GET, HEAD",
+		"/pauses/m1":                 "GET, HEAD, PUT, DELETE",
+		"/actions":                   "GET, HEAD, POST",
+		"/actions/job1/cancel":       "POST",
+		"/recipes/m1":                "GET, HEAD, PUT, DELETE",
+		"/podcasts/p1/ad-library/e1": "DELETE",
+	} {
+		if _, _, hdr := do(t, h, "PATCH", BasePath+path); hdr.Get("Allow") != want {
+			t.Errorf("PATCH %s: Allow %q, want %q", path, hdr.Get("Allow"), want)
+		}
 	}
 	for _, m := range []string{"POST", "PUT", "DELETE"} {
 		code, body, hdr := do(t, h, m, SpecPath)
@@ -200,7 +238,7 @@ func TestAllowHeaderFollowsTheRoute(t *testing.T) {
 }
 
 func TestCodeForStatus(t *testing.T) {
-	for st, want := range map[int]string{400: "invalid_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 405: "method_not_allowed", 409: "conflict", 503: "unavailable", 500: "internal", 502: "internal"} {
+	for st, want := range map[int]string{400: "invalid_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 405: "method_not_allowed", 409: "conflict", 413: "payload_too_large", 415: "unsupported_media_type", 422: "rejected", 503: "unavailable", 500: "internal", 502: "internal"} {
 		if got := CodeForStatus(st); got != want {
 			t.Errorf("%d: %s, want %s", st, got, want)
 		}

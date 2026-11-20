@@ -179,4 +179,4 @@ The larger design for an index with change tokens, and what the NAS helper can a
 
 ## Transcode API
 
-A read-only HTTP API for transcode (workers, actions, batches, recipes, backups, podcasts, review queue) is served under `/transcode/v1`, with its OpenAPI document at `/transcode/v1/openapi.json`. Its own key is `web.transcode_token_file`; see [transcode/API_V1.md](transcode/API_V1.md).
+An HTTP API for transcode, reads and writes (workers, actions, batches, recipes, backups, podcasts, review queue) is served under `/transcode/v1`, with its OpenAPI document at `/transcode/v1/openapi.json`. Its own key is `web.transcode_token_file`; a write made with the console sign-in needs the same `X-Navigatorr-Request: 1` header and same-host Origin (checked when the browser sends one; a write with no `Origin` is accepted, the header being the CSRF defence) as the `/api/` writes; see [transcode/API_V1.md](transcode/API_V1.md).

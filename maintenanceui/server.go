@@ -230,7 +230,7 @@ func (s *Server) Handler() http.Handler {
 	// The successor API and its spec (see package nodes).
 	mux.Handle("GET "+nodes.SpecPath, nodes.SpecHandler())
 	mux.HandleFunc(nodes.BasePath+"/", s.nodesAPI)
-	// The read-only Transcode API and its spec (see package transcodeapi).
+	// The Transcode API and its spec (see package transcodeapi).
 	mux.Handle("GET "+transcodeapi.SpecPath, transcodeapi.SpecHandler())
 	mux.Handle(transcodeapi.BasePath+"/", s.transcodeV1())
 	mux.HandleFunc("GET /api/maintenance/worker-slots", s.workerSlots)
@@ -274,10 +274,17 @@ func (s *Server) Handler() http.Handler {
 				"hint": "send the builds token as the X-Api-Key header (or Authorization: Bearer)"})
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath && !s.transcodeAuthorized(r) {
-			writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
-				"hint": "send the transcode API key as the X-Api-Key header (or Authorization: Bearer), or sign in to the web UI"})
-			return
+		if strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath {
+			if ok, status := s.transcodeAccess(r); !ok {
+				if status == 403 {
+					writeJSON(w, 403, map[string]string{"error": "cross-origin request denied", "code": "forbidden",
+						"hint": "a change made with the web sign-in must come from this host; scripts should use the transcode API key"})
+					return
+				}
+				writeJSON(w, 401, map[string]string{"error": "authentication required", "code": "unauthorized",
+					"hint": "send the transcode API key as the X-Api-Key header (or Authorization: Bearer), or sign in to the web UI (a change also needs the X-Navigatorr-Request: 1 header)"})
+				return
+			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			// The builds token is a bearer for scripts, accepted on the build
@@ -305,10 +312,21 @@ func (s *Server) Handler() http.Handler {
 		served := time.Now()
 		// Requests already being served when this one began (not counting itself).
 		others := s.inFlight.Add(1) - 1
+		// A transcode write invalidates the caches only when it succeeded.
+		transcodeWrite := strings.HasPrefix(r.URL.Path, transcodeapi.BasePath+"/") && r.URL.Path != transcodeapi.SpecPath && r.Method != http.MethodGet && r.Method != http.MethodHead
+		sw := &statusWriter{ResponseWriter: w, status: 200}
 		func() {
 			defer s.inFlight.Add(-1)
-			mux.ServeHTTP(w, r)
+			if transcodeWrite {
+				mux.ServeHTTP(sw, r)
+			} else {
+				mux.ServeHTTP(w, r)
+			}
 		}()
+		if transcodeWrite && sw.status/100 == 2 {
+			s.fileStatusCache.invalidate()
+			s.arrLists.forget()
+		}
 		if d := time.Since(served); d > slowRequest && strings.HasPrefix(r.URL.Path, "/api/") {
 			// Only the path: a query can carry file names. The timing says which
 			// step waited, and the count whether other requests were in the way.
@@ -590,3 +608,16 @@ func (s *Server) tool(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, res)
 }
+
+// statusWriter remembers the status a handler answered with.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }

@@ -118,24 +118,37 @@ func TestTranscodeKeyIsValidatedAtStartup(t *testing.T) {
 	}
 }
 
-// This version only reads: every other method is refused, with or without
-// the key, and nothing changes.
-func TestTranscodeV1RejectsWrites(t *testing.T) {
+// A method a path does not serve is a 405 naming the methods it does (with or
+// without the key), and a write with no credential at all is a 401 that
+// changes nothing.
+func TestTranscodeV1RejectsWhatItDoesNotServe(t *testing.T) {
 	s, h := transcodeUI(t)
-	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", map[string]any{"path": "/media/Show S01E01.mkv"}, nil, nil)
-	for _, m := range []string{"POST", "PUT", "PATCH", "DELETE"} {
-		for _, p := range []string{"/transcode/v1/actions/job1", "/transcode/v1/pauses/m1", "/transcode/v1/drain", "/transcode/v1/recipes/x"} {
+	seedOperation(t, s.engine.Deps().Store, "job1", "transcode_media", "running", map[string]any{"path": "/media/Example Show S01E01.mkv"}, nil, nil)
+	for p, want := range map[string]string{
+		"/transcode/v1/actions/job1":        "GET, HEAD",
+		"/transcode/v1/actions/job1/cancel": "POST",
+		"/transcode/v1/pauses/video-worker": "GET, HEAD, PUT, DELETE",
+		"/transcode/v1/drain":               "GET, HEAD, PUT",
+		"/transcode/v1/recipes/x":           "GET, HEAD, PUT, DELETE",
+	} {
+		for _, m := range []string{"PATCH", "TRACE"} {
 			w := v1(h, m, p, `{}`, keyHdr())
 			var e map[string]string
 			_ = json.Unmarshal(w.Body.Bytes(), &e)
-			if w.Code != 405 || e["code"] != "method_not_allowed" || !strings.Contains(w.Header().Get("Allow"), "GET") {
-				t.Fatalf("%s %s: %d %s", m, p, w.Code, w.Body.String())
+			if w.Code != 405 || e["code"] != "method_not_allowed" || w.Header().Get("Allow") != want {
+				t.Fatalf("%s %s: %d Allow %q %s", m, p, w.Code, w.Header().Get("Allow"), w.Body.String())
 			}
 		}
-		// Not signed in at all: 401 first.
-		if w := v1(h, m, "/transcode/v1/actions/job1", `{}`, nil); w.Code != 401 {
-			t.Fatal(m, w.Code)
+	}
+	for _, p := range []string{"/transcode/v1/actions/job1/cancel", "/transcode/v1/actions", "/transcode/v1/pauses/video-worker", "/transcode/v1/recipes/x"} {
+		for _, m := range []string{"POST", "PUT", "DELETE"} {
+			if w := v1(h, m, p, `{}`, nil); w.Code != 401 && w.Code != 405 {
+				t.Fatal(m, p, w.Code)
+			}
 		}
+	}
+	if w := v1(h, "POST", "/transcode/v1/actions/job1/cancel", `{}`, nil); w.Code != 401 {
+		t.Fatal(w.Code)
 	}
 	inst, _ := s.engine.Deps().Store.GetActionInstance("job1")
 	if inst == nil || inst.Status != "running" {
@@ -152,10 +165,14 @@ func TestTranscodeV1RejectsWrites(t *testing.T) {
 // filled with ids that do not exist, answers a JSON object.
 func TestTranscodeV1EveryRouteIsMounted(t *testing.T) {
 	_, h := transcodeUI(t)
-	rep := strings.NewReplacer("{name}", "nodeZ", "{id}", "nope", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript")
+	rep := strings.NewReplacer("{name}", "nodeZ", "{id}", "nope", "{section}", "inputs", "{block_id}", "b1", "{artifact}", "transcript", "{entry}", "e1")
 	for _, r := range transcodeapi.Routes() {
 		p := rep.Replace(r.Path)
-		w := v1(h, "GET", p, "", keyHdr())
+		hd := keyHdr()
+		if r.Method != "GET" {
+			hd["Content-Type"] = "application/json"
+		}
+		w := v1(h, r.Method, p, map[bool]string{true: "", false: `{}`}[r.Method == "GET" || r.Method == "DELETE"], hd)
 		if w.Code == 401 || w.Code == 405 || w.Code >= 500 && w.Code != 503 {
 			t.Errorf("%s: %d %s", p, w.Code, w.Body.String())
 		}
@@ -165,7 +182,7 @@ func TestTranscodeV1EveryRouteIsMounted(t *testing.T) {
 		}
 		var e struct{ Code string }
 		_ = json.Unmarshal(w.Body.Bytes(), &e)
-		if w.Code == 404 && e.Code == "not_found" && !strings.Contains(r.Path, "{section}") && !strings.Contains(r.Path, "podcast/") {
+		if w.Code == 404 && e.Code == "not_found" && !strings.Contains(r.Path, "{section}") && !strings.Contains(r.Path, "podcast") {
 			t.Errorf("%s fell to the catch-all", p)
 		}
 	}
@@ -346,17 +363,59 @@ func TestTranscodeV1DetailParametersAreValidated(t *testing.T) {
 	}
 }
 
-func TestTranscodeV1UIAuthWriteNeedsTheSameOriginHeader(t *testing.T) {
+// A write made with the web sign-in goes through the console's own write
+// checks (see the wrapper in server.go): the X-Navigatorr-Request header, and
+// an Origin that names this host. The API key is no ambient credential and
+// needs neither.
+func TestTranscodeV1UIAuthWriteNeedsTheConsoleWriteChecks(t *testing.T) {
 	_, h := transcodeUI(t)
-	// A cookie-less browser POST without the header is 401; with it, it is the
-	// method that is refused. Either way nothing is written.
-	w := v1(h, "POST", "/transcode/v1/drain", `{}`, map[string]string{"Authorization": "Bearer " + testToken})
-	if w.Code != 401 {
+	const drain = "/transcode/v1/drain"
+	bearer := map[string]string{"Authorization": "Bearer " + testToken, "Content-Type": "application/json"}
+	with := func(extra map[string]string) map[string]string {
+		m := map[string]string{}
+		for k, v := range bearer {
+			m[k] = v
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	drainOn := func() bool {
+		_, e := get(t, h, drain, bearer)
+		b, _ := json.Marshal(e)
+		return strings.Contains(string(b), `"enabled":true`) || strings.Contains(string(b), `"drain":true`)
+	}
+	// No header: 401. A foreign Origin with the header: 403. Neither writes.
+	if w := v1(h, "PUT", drain, `{"enabled":true}`, bearer); w.Code != 401 || drainOn() {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	w = v1(h, "POST", "/transcode/v1/drain", `{}`, map[string]string{"Authorization": "Bearer " + testToken, "X-Navigatorr-Request": "1"})
-	if w.Code != 405 {
+	if w := v1(h, "PUT", drain, `{"enabled":true}`, with(map[string]string{"X-Navigatorr-Request": "1", "Origin": "https://elsewhere.example"})); w.Code != 403 || drainOn() {
 		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := v1(h, "PUT", drain, `{"enabled":false}`, bearer); w.Code != 401 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := v1(h, "PUT", drain, `{"enabled":false}`, with(map[string]string{"X-Navigatorr-Request": "1", "Origin": "https://elsewhere.example"})); w.Code != 403 || !strings.Contains(w.Body.String(), `"forbidden"`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Header and a same-host Origin (httptest requests are for example.com): through.
+	if w := v1(h, "PUT", drain, `{"enabled":false}`, with(map[string]string{"X-Navigatorr-Request": "1", "Origin": "http://example.com"})); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if w := v1(h, "PUT", drain, `{"enabled":false}`, with(map[string]string{"X-Navigatorr-Request": "1"})); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// The key needs neither header nor Origin, even with a foreign Origin.
+	hd := keyHdr()
+	hd["Content-Type"] = "application/json"
+	hd["Origin"] = "https://elsewhere.example"
+	if w := v1(h, "PUT", drain, `{"enabled":false}`, hd); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	// Reads need only the credential.
+	if c, _ := get(t, h, drain, bearer); c != 200 {
+		t.Fatal(c)
 	}
 }
 
@@ -713,8 +772,8 @@ func TestTranscodeV1LegacyServerErrorDoesNotLeak(t *testing.T) {
 }
 
 // The podcast block route refuses HEAD, so its 405 says Allow: GET; the others
-// say GET, HEAD. A write to the spec is a 405 too (public or not, it only
-// answers GET and HEAD).
+// say GET, HEAD, plus the writes they serve. A write to the spec is a 405 too
+// (public or not, it only answers GET and HEAD).
 func TestTranscodeV1AllowHeaderAndSpecWrites(t *testing.T) {
 	s, h := transcodeUI(t)
 	seedOperation(t, s.engine.Deps().Store, "pod1", "clean_podcast_ads", "waiting_decision", nil, nil, nil)
@@ -722,9 +781,12 @@ func TestTranscodeV1AllowHeaderAndSpecWrites(t *testing.T) {
 		"/transcode/v1/actions/pod1/podcast/blocks/b1": "GET",
 		"/transcode/v1/actions/pod1/podcast/blocks":    "GET, HEAD",
 		"/transcode/v1/workers":                        "GET, HEAD",
+		"/transcode/v1/actions":                        "GET, HEAD, POST",
+		"/transcode/v1/batches/pod1/goal":              "GET, HEAD, POST",
+		"/transcode/v1/actions/pod1/podcast/review":    "POST",
 	} {
-		if w := v1(h, "POST", p, "{}", keyHdr()); w.Code != 405 || w.Header().Get("Allow") != want {
-			t.Errorf("POST %s: %d Allow %q, want %q", p, w.Code, w.Header().Get("Allow"), want)
+		if w := v1(h, "PATCH", p, "{}", keyHdr()); w.Code != 405 || w.Header().Get("Allow") != want {
+			t.Errorf("PATCH %s: %d Allow %q, want %q", p, w.Code, w.Header().Get("Allow"), want)
 		}
 	}
 	for _, hd := range []map[string]string{nil, keyHdr()} {
