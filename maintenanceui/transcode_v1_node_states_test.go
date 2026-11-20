@@ -38,7 +38,9 @@ func httpView(t *testing.T, h http.Handler) viewAdapter {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := transcodeview.New(transcodeview.Options{BaseURL: srv.URL, APIKey: testTranscodeKey})
+	k := testTranscodeKey
+	opts := transcodeview.Options{BaseURL: srv.URL, APIKey: k}
+	c, err := transcodeview.New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
