@@ -7,13 +7,15 @@ actions, recording decisions, changing a batch goal, pausing and draining
 workers, changing worker slots, recipes, backups, podcast review and the review
 queue.
 
-The server still registers the transcode MCP tools (`action_*` except
-`action_history`, `recipe_*`, `worker_health`, `worker_drain`, `worker_pause`,
-`transcode_backups`, `transcode_goal_change`, `podcast_*`): the maintenance
-console and these routes call them internally. A deployment that publishes the
-server through a gateway with a tool allowlist can leave them out and have
-clients use this API through `call_api` instead; the reference deployment does
-that since phase 1c.
+The server still registers the transcode MCP tools: the maintenance console
+and these routes call them internally. A deployment that publishes the server
+through a gateway with a tool allowlist can leave out the ones this API covers
+completely (`recipe_*`, `worker_health`, `worker_drain`, `worker_pause`,
+`transcode_backups`, `transcode_goal_change`, `podcast_*`) and have clients use
+`call_api` instead; the reference deployment does that since phase 1c. Keep the
+`action_*` tools: `POST /transcode/v1/actions` starts only the transcode and
+podcast workflows, while `action_run` also starts every other workflow in the
+catalog.
 
 The routes reuse the functions the maintenance console and the MCP tools
 already call, so an answer here is the same answer they give, and a write keeps
