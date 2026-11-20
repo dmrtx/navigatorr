@@ -135,6 +135,8 @@ func TestSpecIsFoundBySearchAPI(t *testing.T) {
 		"batch":   "/transcode/v1/batches/{id}/items",
 		"recipe":  "/transcode/v1/recipes/{name}",
 		"backups": "/transcode/v1/backups",
+		"queue":   "/transcode/v1/queue",
+		"hold":    "/transcode/v1/queue/actions/{id}/hold",
 	} {
 		found := false
 		for _, e := range idx.Search(query) {

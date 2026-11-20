@@ -33,6 +33,10 @@
     {
       "name": "queue",
       "description": "The review queue."
+    },
+    {
+      "name": "transcode-queue",
+      "description": "The order conversions wait in for a worker: read it, hold and release one conversion or a whole batch, move one to another place."
     }
   ],
   "paths": {
@@ -2463,6 +2467,2480 @@
             }
           }
         ]
+      }
+    },
+    "/transcode/v1/queue": {
+      "get": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "getQueue",
+        "summary": "Read the transcode queue in order",
+        "description": "Every conversion waiting for a worker, in the order they will be served: standalone conversions, waiting conversions of a batch and queued batch items that have no conversion yet. Each entry has ref (kind and id, to use in hold, release and move), position (1-based, held entries included), held and held_by, path, media_type when known, batch_id, waiting_condition and waiting_reason. queue_revision changes with every hold, release and move; send it back as queue_revision to refuse a change made from a stale view. Read-only.",
+        "responses": {
+          "200": {
+            "description": "The queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "queue_revision": {
+                      "type": "integer"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "properties": {
+                          "ref": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "kind",
+                              "id"
+                            ],
+                            "properties": {
+                              "kind": {
+                                "type": "string",
+                                "enum": [
+                                  "action",
+                                  "item",
+                                  "batch"
+                                ]
+                              },
+                              "id": {
+                                "description": "The id: a string for an action or a batch, a number for an item.",
+                                "oneOf": [
+                                  {
+                                    "type": "string"
+                                  },
+                                  {
+                                    "type": "integer"
+                                  }
+                                ]
+                              }
+                            }
+                          },
+                          "position": {
+                            "type": "integer",
+                            "description": "1-based place in the queue, held entries included."
+                          },
+                          "held": {
+                            "type": "boolean"
+                          },
+                          "held_by": {
+                            "type": "string",
+                            "enum": [
+                              "conversion",
+                              "batch"
+                            ],
+                            "description": "Set when held: the conversion itself, or its whole batch."
+                          },
+                          "path": {
+                            "type": "string"
+                          },
+                          "media_type": {
+                            "type": "string",
+                            "description": "Only when known."
+                          },
+                          "batch_id": {
+                            "type": "string",
+                            "description": "The batch it belongs to, when it does."
+                          },
+                          "waiting_condition": {
+                            "type": "string",
+                            "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                          },
+                          "waiting_reason": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 7,
+                  "entries": [
+                    {
+                      "ref": {
+                        "kind": "action",
+                        "id": "act-transcode-media-example"
+                      },
+                      "position": 1,
+                      "held": false,
+                      "path": "/media/Example/File.mkv",
+                      "media_type": "movie",
+                      "waiting_condition": "worker_busy",
+                      "waiting_reason": "Every worker is busy"
+                    },
+                    {
+                      "ref": {
+                        "kind": "action",
+                        "id": "act-transcode-media-example"
+                      },
+                      "position": 2,
+                      "held": true,
+                      "held_by": "conversion",
+                      "path": "/media/Example/File.mkv",
+                      "media_type": "episode",
+                      "batch_id": "act-transcode-batch-example",
+                      "waiting_condition": "queue_held",
+                      "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/actions/{id}/hold": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "holdAction",
+        "summary": "Hold a waiting conversion",
+        "description": "Holds a waiting conversion: it keeps its exact place in the queue, never starts, and does not make anyone behind it wait. Release it to let it go on. Holding twice is not an error. Cancel stays the way to stop a conversion for good. 409 when it already has a worker (use cancel, or pause its node: a hold never stops a running conversion), when it is not waiting, or when queue_revision is stale. Holding one conversion of a batch does not stop the batch.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id of a waiting transcode_media conversion, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the hold, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/actions/{id}/release": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "releaseAction",
+        "summary": "Release a waiting conversion",
+        "description": "Releases a waiting conversion that was held: it takes part in the queue again, in the place it kept. Releasing something that is not held is not an error. 409 when queue_revision is stale.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id of a waiting transcode_media conversion, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the release, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/actions/{id}/move": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "moveAction",
+        "summary": "Move a waiting conversion in the queue",
+        "description": "Moves a waiting conversion to the front (first), before a reference or after one. Send exactly one of first, before and after. Only the moved subject gets a new place: nobody else is renumbered. 400 when the body does not name exactly one place, or names itself. 409 when it already has a worker, when the reference is not waiting, or when queue_revision is stale. Positions and refs come from GET /transcode/v1/queue.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Action id of a waiting transcode_media conversion, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Where to put it.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "first": {
+                    "type": "boolean",
+                    "description": "Put it at the front of the queue."
+                  },
+                  "before": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "after": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "Optional: refuse (409) when the queue has changed since this revision."
+                  }
+                }
+              },
+              "examples": {
+                "first": {
+                  "summary": "To the front",
+                  "value": {
+                    "first": true
+                  }
+                },
+                "before": {
+                  "summary": "Before another entry",
+                  "value": {
+                    "before": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "queue_revision": 7
+                  }
+                },
+                "after": {
+                  "summary": "After a batch",
+                  "value": {
+                    "after": {
+                      "kind": "batch",
+                      "id": "act-transcode-batch-example"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the move, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/items/{id}/hold": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "holdItem",
+        "summary": "Hold a queued batch item that has no conversion yet",
+        "description": "Holds a queued batch item that has no conversion yet: it keeps its exact place in the queue, never starts, and does not make anyone behind it wait. Release it to let it go on. Holding twice is not an error. Cancel stays the way to stop a conversion for good. 409 when it already has a worker (use cancel, or pause its node: a hold never stops a running conversion), when it is not waiting, or when queue_revision is stale. A hold on a queued item carries over to the conversion made for it.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Number of a queued batch item, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the hold, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/items/{id}/release": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "releaseItem",
+        "summary": "Release a queued batch item that has no conversion yet",
+        "description": "Releases a queued batch item that has no conversion yet that was held: it takes part in the queue again, in the place it kept. Releasing something that is not held is not an error. 409 when queue_revision is stale.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Number of a queued batch item, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the release, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/items/{id}/move": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "moveItem",
+        "summary": "Move a queued batch item that has no conversion yet in the queue",
+        "description": "Moves a queued batch item that has no conversion yet to the front (first), before a reference or after one. Send exactly one of first, before and after. Only the moved subject gets a new place: nobody else is renumbered. 400 when the body does not name exactly one place, or names itself. 409 when it already has a worker, when the reference is not waiting, or when queue_revision is stale. Positions and refs come from GET /transcode/v1/queue.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Number of a queued batch item, as in GET /transcode/v1/queue (ref.id).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Where to put it.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "first": {
+                    "type": "boolean",
+                    "description": "Put it at the front of the queue."
+                  },
+                  "before": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "after": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "Optional: refuse (409) when the queue has changed since this revision."
+                  }
+                }
+              },
+              "examples": {
+                "first": {
+                  "summary": "To the front",
+                  "value": {
+                    "first": true
+                  }
+                },
+                "before": {
+                  "summary": "Before another entry",
+                  "value": {
+                    "before": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "queue_revision": 7
+                  }
+                },
+                "after": {
+                  "summary": "After a batch",
+                  "value": {
+                    "after": {
+                      "kind": "batch",
+                      "id": "act-transcode-batch-example"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the move, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "entry": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "ref": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "action",
+                                "item",
+                                "batch"
+                              ]
+                            },
+                            "id": {
+                              "description": "The id: a string for an action or a batch, a number for an item.",
+                              "oneOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            }
+                          }
+                        },
+                        "position": {
+                          "type": "integer",
+                          "description": "1-based place in the queue, held entries included."
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "held_by": {
+                          "type": "string",
+                          "enum": [
+                            "conversion",
+                            "batch"
+                          ],
+                          "description": "Set when held: the conversion itself, or its whole batch."
+                        },
+                        "path": {
+                          "type": "string"
+                        },
+                        "media_type": {
+                          "type": "string",
+                          "description": "Only when known."
+                        },
+                        "batch_id": {
+                          "type": "string",
+                          "description": "The batch it belongs to, when it does."
+                        },
+                        "waiting_condition": {
+                          "type": "string",
+                          "description": "queue_held when held, otherwise why it waits (for example worker_busy or queued)."
+                        },
+                        "waiting_reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "entry": {
+                    "ref": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "position": 2,
+                    "held": true,
+                    "held_by": "conversion",
+                    "path": "/media/Example/File.mkv",
+                    "media_type": "episode",
+                    "batch_id": "act-transcode-batch-example",
+                    "waiting_condition": "queue_held",
+                    "waiting_reason": "Held: it keeps its place in the queue and starts only after you release it"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/batches/{id}/hold": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "holdBatch",
+        "summary": "Hold a whole batch",
+        "description": "Holds a whole batch: it keeps its exact place in the queue, never starts, and does not make anyone behind it wait. Release it to let it go on. Holding twice is not an error. Cancel stays the way to stop a conversion for good. 409 when the batch is finished or being cancelled, or when queue_revision is stale. Holding a batch is the batch pause: its running conversions finish, nothing new starts, and everything keeps its place.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Batch id, as in GET /transcode/v1/queue (batch_id) or GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the hold, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "batch": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "waiting": {
+                          "type": "integer",
+                          "description": "How many of its entries wait in the queue."
+                        },
+                        "first_position": {
+                          "type": "integer",
+                          "description": "Place of the first of them, 0 when none."
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "batch": {
+                    "id": "act-transcode-batch-example",
+                    "held": true,
+                    "waiting": 12,
+                    "first_position": 3
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/batches/{id}/release": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "releaseBatch",
+        "summary": "Release a whole batch",
+        "description": "Releases a whole batch that was held: it takes part in the queue again, in the place it kept. Releasing something that is not held is not an error. 409 when queue_revision is stale.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Batch id, as in GET /transcode/v1/queue (batch_id) or GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Optional.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "The queue_revision of the view the change is based on; a different current one is a 409 and nothing changes."
+                  }
+                }
+              },
+              "example": {
+                "queue_revision": 7
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the release, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "batch": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "waiting": {
+                          "type": "integer",
+                          "description": "How many of its entries wait in the queue."
+                        },
+                        "first_position": {
+                          "type": "integer",
+                          "description": "Place of the first of them, 0 when none."
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "batch": {
+                    "id": "act-transcode-batch-example",
+                    "held": true,
+                    "waiting": 12,
+                    "first_position": 3
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/queue/batches/{id}/move": {
+      "post": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "moveBatch",
+        "summary": "Move a whole batch in the queue",
+        "description": "Moves a whole batch to the front (first), before a reference or after one. Send exactly one of first, before and after. Only the moved subject gets a new place: nobody else is renumbered. A batch moves as one block: its waiting conversions and queued items follow it; the ones already running are untouched. 400 when the body does not name exactly one place, or names itself. 409 when it already has a worker, when the reference is not waiting, or when queue_revision is stale. Positions and refs come from GET /transcode/v1/queue.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Batch id, as in GET /transcode/v1/queue (batch_id) or GET /transcode/v1/actions.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "Where to put it.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "first": {
+                    "type": "boolean",
+                    "description": "Put it at the front of the queue."
+                  },
+                  "before": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "after": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "kind",
+                      "id"
+                    ],
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "action",
+                          "item",
+                          "batch"
+                        ]
+                      },
+                      "id": {
+                        "description": "The id: a string for an action or a batch, a number for an item.",
+                        "oneOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "integer"
+                          }
+                        ]
+                      }
+                    }
+                  },
+                  "queue_revision": {
+                    "type": "integer",
+                    "description": "Optional: refuse (409) when the queue has changed since this revision."
+                  }
+                }
+              },
+              "examples": {
+                "first": {
+                  "summary": "To the front",
+                  "value": {
+                    "first": true
+                  }
+                },
+                "before": {
+                  "summary": "Before another entry",
+                  "value": {
+                    "before": {
+                      "kind": "action",
+                      "id": "act-transcode-media-example"
+                    },
+                    "queue_revision": 7
+                  }
+                },
+                "after": {
+                  "summary": "After a batch",
+                  "value": {
+                    "after": {
+                      "kind": "batch",
+                      "id": "act-transcode-batch-example"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The entry (or batch) after the move, with the new queue_revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "batch": {
+                      "type": "object",
+                      "additionalProperties": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "held": {
+                          "type": "boolean"
+                        },
+                        "waiting": {
+                          "type": "integer",
+                          "description": "How many of its entries wait in the queue."
+                        },
+                        "first_position": {
+                          "type": "integer",
+                          "description": "Place of the first of them, 0 when none."
+                        }
+                      }
+                    },
+                    "queue_revision": {
+                      "type": "integer",
+                      "description": "The queue revision after the change; send it back as queue_revision to refuse a change made on an older view."
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 8,
+                  "batch": {
+                    "id": "act-transcode-batch-example",
+                    "held": true,
+                    "waiting": 12,
+                    "first_position": 3
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The state, revision, digest or version is not what the request expects, or the change is refused in the current state (code conflict). Read the resource again and retry with the current values.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/transcode/v1/history": {

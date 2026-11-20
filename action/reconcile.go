@@ -276,6 +276,11 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 	if (condition == drainWaitCondition || condition == pauseWaitCondition) && delay < drainPollDelay {
 		delay = drainPollDelay
 	}
+	if condition == queueHeldCondition && delay < queueHeldPollDelay {
+		// A held conversion waits for the operator, not for a slot: it asks
+		// again every so often, so a release takes effect within that time.
+		delay = queueHeldPollDelay
+	}
 	if condition == "worker_busy" && (hasSlotTicket(ec.State) || transcodeQueueWaiting(ec.State)) {
 		// Waiting for a slot. When the worker refused with Retry-After, the
 		// next poll lands on that hint (+1 s, applied below). Otherwise (a

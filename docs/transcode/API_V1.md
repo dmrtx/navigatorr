@@ -146,6 +146,7 @@ Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 | `GET /recipes`, `/recipes/{name}`, `/recipes/{name}/history`, `/recipe-bundle` | `recipe_list`, `recipe_get`, `recipe_history`, `recipe_status` |
 | `GET /podcasts`, `/podcasts/{id}/local-library`, `/podcasts/{id}/ad-library` | `/api/maintenance/podcasts`, `/api/maintenance/podcast-local-library`, `podcast_ad_library` |
 | `GET /review-queue` | `/api/maintenance/maintenance-queue` |
+| `GET /queue` | the order conversions wait in for a worker (new; see "The queue") |
 
 The writes are listed under "Writes". `/actions/{id}`, the batch routes and every
 write under `/actions/{id}` or `/backups/{id}` answer 404 for an action that is not a
@@ -213,6 +214,33 @@ of the server (5xx) never carry their cause.
 | `DELETE /podcasts/{id}/ad-library/{entry}` | `podcast_ad_library` revoke | none | |
 | `POST /review-queue/{id}/close` | the console's queue handler | `outcome` (`processed` or `dismissed`), `note` | |
 | `POST /review-queue/{id}/decisions` | `decision_record` (201) | `title`, `decision`, release fields, `reasons` | |
+| `POST /queue/actions/{id}/hold`, `/release` | the engine's queue marks | `queue_revision` (optional) | a conversion that already has a worker is 409 (cancel it or pause its node) |
+| `POST /queue/items/{id}/hold`, `/release` | same, for a queued batch item | `queue_revision` (optional) | `{id}` is the item number |
+| `POST /queue/batches/{id}/hold`, `/release` | the batch pause and resume | `queue_revision` (optional) | |
+| `POST /queue/{actions,items,batches}/{id}/move` | same | exactly one of `first`, `before`, `after`; `queue_revision` (optional) | 409 for a stale revision, a subject with a worker, or a reference that is not waiting; 400 for moving relative to itself |
+
+### The queue
+
+`GET /queue` lists what is waiting for a worker, in the order it will be served:
+standalone conversions, waiting conversions of a batch and queued batch items
+that have no conversion yet. Each entry has `ref` (`kind` `action`, `item` or
+`batch`, and `id`: a string for an action or batch, a number for an item),
+`position` (1-based, held entries included), `held` (and `held_by`:
+`conversion` or `batch`), `path`, `media_type` when known, `batch_id`,
+`waiting_condition` and `waiting_reason`; the answer carries `queue_revision`.
+
+- Hold: the entry keeps its exact place, never starts and does not make anyone
+  behind it wait (`waiting_condition` is `queue_held`). Holding a conversion of
+  a batch does not stop the batch, and the hold of a queued item carries over to
+  the conversion made for it. Holding a whole batch is the batch pause. Cancel
+  stays the definitive way to stop a conversion.
+- Move: `{"first": true}`, `{"before": {"kind": ..., "id": ...}}` or
+  `{"after": {...}}`. Only the moved subject gets a new place; a batch moves as
+  one block and the conversions already running are untouched.
+- `queue_revision` (optional in the body of any of these) is refused with 409
+  (`stale_queue_revision`) when the queue has changed since that revision. Every
+  answer carries the entry (or the batch) after the change and the new
+  `queue_revision`.
 
 ### Confirmation flows
 

@@ -48,7 +48,7 @@ func TestMigrationV25ToV26KeepsRowsAndAddsBuildPauses(t *testing.T) {
 	}
 	defer s.Close()
 	var ver int
-	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&ver); err != nil || ver != 26 {
+	if err := s.db.QueryRow(`SELECT MAX(version) FROM schema_version`).Scan(&ver); err != nil || ver != SchemaVersion {
 		t.Fatalf("version %d, %v", ver, err)
 	}
 	if pauses, err := s.ListWorkerPauses(); err != nil || pauses["node-a"].Mode != WorkerPauseGraceful || pauses["node-a"].Revision != 3 {

@@ -8,6 +8,19 @@ type QueuedBatchItemRow struct {
 	ItemID         int64
 	// Priority is the batch's Run next: it goes ahead of the queue as a whole.
 	Priority bool
+	// Held is the operator's hold on this one item: it keeps its place and
+	// starts nothing. ItemOrder is the key the operator gave the item alone and
+	// BatchOrder the key prefix the operator gave its whole batch ("" for
+	// none); the item sorts by ItemOrder, else by BatchOrder.
+	Held       bool
+	ItemOrder  string
+	BatchOrder string
+	// BatchPaused marks an item of a paused batch: only the listing that asks
+	// for them returns them.
+	BatchPaused bool
+	// FilePath and MediaType describe the file, MediaType "" when unknown.
+	FilePath  string
+	MediaType string
 }
 
 // ListQueuedBatchItems returns the queued items of the batches that can still
@@ -15,16 +28,39 @@ type QueuedBatchItemRow struct {
 // being cancelled. A batch waiting for a decision starts nothing, so its
 // items do not hold anyone back.
 func (s *Store) ListQueuedBatchItems() ([]QueuedBatchItemRow, error) {
+	return s.listQueuedBatchItems(false)
+}
+
+// ListQueuedBatchItemsWithPaused is ListQueuedBatchItems with the items of
+// paused batches, flagged BatchPaused: they still wait in line, for the queue
+// listing, though they hold no one back.
+func (s *Store) ListQueuedBatchItemsWithPaused() ([]QueuedBatchItemRow, error) {
+	return s.listQueuedBatchItems(true)
+}
+
+func (s *Store) listQueuedBatchItems(withPaused bool) ([]QueuedBatchItemRow, error) {
+	pausedFilter := `AND COALESCE(json_extract(a.state_json, '$.paused'), 0) NOT IN (1, 'true')`
+	statuses := `'pending', 'running', 'waiting_external'`
+	if withPaused {
+		// A paused batch waits for a decision.
+		pausedFilter = `AND (a.status != 'waiting_decision' OR COALESCE(json_extract(a.state_json, '$.paused'), 0) IN (1, 'true'))`
+		statuses += `, 'waiting_decision'`
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT i.batch_id, a.created_at, i.id,
-			CASE WHEN json_valid(a.inputs_json) AND json_extract(a.inputs_json, '$.queue_priority') IN (1, 'true') THEN 1 ELSE 0 END
+			CASE WHEN json_valid(a.inputs_json) AND json_extract(a.inputs_json, '$.queue_priority') IN (1, 'true') THEN 1 ELSE 0 END,
+			i.queue_held, COALESCE(i.queue_order, ''), COALESCE(bm.queue_order, ''),
+			COALESCE(json_extract(a.state_json, '$.paused'), 0) IN (1, 'true'),
+			i.file_path,
+			CASE WHEN json_valid(a.inputs_json) THEN COALESCE(json_extract(a.inputs_json, '$.media_type'), '') ELSE '' END
 		FROM transcode_batch_items i JOIN action_instances a ON a.id = i.batch_id
+		LEFT JOIN transcode_queue_marks bm ON bm.kind = 'batch' AND bm.id = i.batch_id
 		WHERE i.status = 'queued'
 		AND a.action_name = 'transcode_batch'
-		AND a.status IN ('pending', 'running', 'waiting_external')
+		AND a.status IN (` + statuses + `)
 		AND json_valid(a.state_json)
-		AND COALESCE(json_extract(a.state_json, '$.paused'), 0) NOT IN (1, 'true')
+		` + pausedFilter + `
 		AND COALESCE(json_extract(a.state_json, '$.cancel_requested'), 0) NOT IN (1, 'true')
 		ORDER BY i.id`)
 	if err != nil {
@@ -34,11 +70,12 @@ func (s *Store) ListQueuedBatchItems() ([]QueuedBatchItemRow, error) {
 	var out []QueuedBatchItemRow
 	for rows.Next() {
 		var r QueuedBatchItemRow
-		var priority int
-		if err := rows.Scan(&r.BatchID, &r.BatchCreatedAt, &r.ItemID, &priority); err != nil {
+		var priority, held int
+		if err := rows.Scan(&r.BatchID, &r.BatchCreatedAt, &r.ItemID, &priority, &held, &r.ItemOrder, &r.BatchOrder, &r.BatchPaused, &r.FilePath, &r.MediaType); err != nil {
 			return nil, err
 		}
 		r.Priority = priority == 1
+		r.Held = held != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -62,32 +99,71 @@ type TranscodeQueueWaiterRow struct {
 	Refusals string
 	// SizeUnreadable marks a source whose size can never be read.
 	SizeUnreadable bool
+	// Held is the operator's hold: the conversion keeps its place and takes no
+	// worker. QueueOrder is already the operator's key when one was given.
+	Held bool
+	// BatchID is the batch of a child ("" for a standalone conversion) and
+	// BatchPaused marks a child of a paused batch (only the listing that asks
+	// for them returns them).
+	BatchID     string
+	BatchPaused bool
+	// Path, MediaType, WaitingCondition and WaitingReason describe it for the
+	// queue listing.
+	Path             string
+	MediaType        string
+	WaitingCondition string
+	WaitingReason    string
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
 // the transcode queue (transcode_queue_order) and have no worker yet. A
 // paused conversion, or the child of a paused or finished batch, is left out:
-// it cannot take a slot now.
+// it cannot take a slot now. A held conversion is returned, flagged Held.
 func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
+	return s.listTranscodeQueueWaiters(false)
+}
+
+// ListTranscodeQueueWaitersWithPaused is ListTranscodeQueueWaiters with the
+// children of paused batches, flagged BatchPaused.
+func (s *Store) ListTranscodeQueueWaitersWithPaused() ([]TranscodeQueueWaiterRow, error) {
+	return s.listTranscodeQueueWaiters(true)
+}
+
+func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWaiterRow, error) {
+	pausedFilter := `AND COALESCE(json_extract(p.state_json, '$.paused'), 0) NOT IN (1, 'true')`
+	parentStatuses := `'pending', 'running', 'waiting_external'`
+	if withPaused {
+		// A paused batch waits for a decision.
+		pausedFilter = `AND (p.status != 'waiting_decision' OR COALESCE(json_extract(p.state_json, '$.paused'), 0) IN (1, 'true'))`
+		parentStatuses += `, 'waiting_decision'`
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT a.id, json_extract(a.state_json, '$.transcode_queue_order'), a.updated_at,
+	rows, err := s.db.Query(`SELECT a.id, COALESCE(NULLIF(m.queue_order, ''), json_extract(a.state_json, '$.transcode_queue_order')), a.updated_at,
 			CAST(COALESCE(json_extract(a.state_json, '$.submitted_source_bytes'), 0) AS INTEGER),
 			COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '') = '',
 			CAST(COALESCE(json_extract(a.state_json, '$.room_reserve_bytes'), 0) AS INTEGER),
 			COALESCE(json_extract(a.state_json, '$.room_refusals'), ''),
-			COALESCE(json_extract(a.state_json, '$.source_size_unreadable'), 0) IN (1, 'true')
+			COALESCE(json_extract(a.state_json, '$.source_size_unreadable'), 0) IN (1, 'true'),
+			COALESCE(m.held, 0),
+			COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), ''),
+			COALESCE(json_extract(p.state_json, '$.paused'), 0) IN (1, 'true'),
+			COALESCE(json_extract(a.inputs_json, '$.path'), ''),
+			COALESCE(json_extract(a.inputs_json, '$.media_type'), ''),
+			COALESCE(a.waiting_condition, ''), COALESCE(a.waiting_reason, '')
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
+		LEFT JOIN transcode_queue_marks m ON m.kind = 'action' AND m.id = a.id
 		WHERE a.action_name = 'transcode_media'
 		AND a.status IN ('pending', 'running', 'waiting_external')
 		AND json_valid(a.state_json)
+		AND json_valid(a.inputs_json)
 		AND json_type(a.state_json, '$.transcode_queue_order') = 'text'
 		AND json_type(a.state_json, '$.worker') IS NULL
 		AND COALESCE(json_extract(a.state_json, '$.paused'), 0) NOT IN (1, 'true')
-		AND (p.id IS NULL OR (p.status IN ('pending', 'running', 'waiting_external')
+		AND (p.id IS NULL OR (p.status IN (` + parentStatuses + `)
 			AND json_valid(p.state_json)
-			AND COALESCE(json_extract(p.state_json, '$.paused'), 0) NOT IN (1, 'true')
+			` + pausedFilter + `
 			AND COALESCE(json_extract(p.state_json, '$.cancel_requested'), 0) NOT IN (1, 'true')))
 		ORDER BY a.id`)
 	if err != nil {
@@ -97,9 +173,12 @@ func (s *Store) ListTranscodeQueueWaiters() ([]TranscodeQueueWaiterRow, error) {
 	var out []TranscodeQueueWaiterRow
 	for rows.Next() {
 		var r TranscodeQueueWaiterRow
-		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals, &r.SizeUnreadable); err != nil {
+		var held int
+		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals, &r.SizeUnreadable,
+			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason); err != nil {
 			return nil, err
 		}
+		r.Held = held != 0
 		out = append(out, r)
 	}
 	return out, rows.Err()
