@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,8 +43,18 @@ func warm(e *Engine) {
 // queued items behind it.
 func ticketWaiter(t *testing.T, e *Engine, id, node string, age time.Duration) {
 	t.Helper()
+	ticketWaiterOf(t, e, id, node, "", age)
+}
+
+// ticketWaiterOf is ticketWaiter for a child of the batch parent.
+func ticketWaiterOf(t *testing.T, e *Engine, id, node, parent string, age time.Duration) {
+	t.Helper()
 	since := e.now().Add(-age)
-	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusWaitingExternal, 0, "", map[string]any{}, map[string]any{
+	inputs := map[string]any{}
+	if parent != "" {
+		inputs["parent_action_id"] = parent
+	}
+	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusWaitingExternal, 0, "", inputs, map[string]any{
 		"worker":               node,
 		workerSlotWaitSinceKey: since.Format(time.RFC3339Nano),
 		transcodeQueueOrderKey: queueOrder(queueRankPlain, since, id, 0),
@@ -912,22 +923,34 @@ func singleNodeEngine(t *testing.T) (*Engine, *placementClock) {
 	return e, clock
 }
 
-// T1: a single node is judged by its report like any other: dispatch needs no
-// report to send work to it, but the plan has nothing else to speak from.
-func TestQueueNextSingleNodeUnknownWithoutARecentReport(t *testing.T) {
+// A single node needs no report for dispatch to use it, and with nothing
+// waiting nothing refreshes one, so the plan does not call it unknown: it uses
+// what was last read, or the configured capacity, and asks nothing.
+func TestQueueNextSingleNodeNeedsNoReport(t *testing.T) {
 	e, clock := singleNodeEngine(t)
 	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	w, _ := e.deps.Workers.Get("m4")
+	calls := func() int32 { return atomic.LoadInt32(&w.Executor.(*roomReporter).doctorCalls) }
+	before := calls()
 	n := planNode(t, mustPlan(t, e), "m4")
-	if n.State != NodeUnknown || n.Next != nil || n.WhyNone.Code != ReasonNodeUnknown {
+	if n.State != NodeReady || n.FreeSlots != 1 || nextID(n) != "a" {
 		t.Fatalf("never reported: %+v", n)
 	}
-	warm(e)
-	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeReady || nextID(n) != "a" {
-		t.Fatalf("reported: %+v", n)
+	if calls() != before {
+		t.Fatal("the plan asked the worker")
 	}
-	clock.advance(3 * time.Minute)
-	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown {
+	clock.advance(5 * time.Minute)
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeReady || nextID(n) != "a" {
 		t.Fatalf("an old report: %+v", n)
+	}
+	// A hold the node reports still counts when the report is fresh.
+	e2, _ := singleNodeEngine(t)
+	sizedWaiter(t, e2, "a", 10*time.Minute, 10*gib, nil)
+	w2, _ := e2.deps.Workers.Get("m4")
+	w2.Executor.(*roomReporter).hold = "paused"
+	warm(e2)
+	if n := planNode(t, mustPlan(t, e2), "m4"); n.State != NodePaused || n.WhyNone.Code != ReasonNodeOnHold {
+		t.Fatalf("on hold: %+v", n)
 	}
 }
 
@@ -966,7 +989,7 @@ func TestQueueNextNodeStateWinsOverAnEmptyQueue(t *testing.T) {
 func TestQueueNextOnHoldNodeIsNotUnknownForItsPool(t *testing.T) {
 	m4 := diskNode(1000*gib, 10*gib, 500*gib)
 	m4.hold = "paused"
-	e, clock := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
+	e, _ := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
 	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
 	// Only the report is read; the pool never is.
 	e.WorkerObservation(context.Background())
@@ -978,7 +1001,6 @@ func TestQueueNextOnHoldNodeIsNotUnknownForItsPool(t *testing.T) {
 	if n := planNode(t, plan, "m1"); n.State != NodeUnknown {
 		t.Fatalf("m1: %+v", n)
 	}
-	_ = clock
 }
 
 // N2: an operator hold says held even when the waiter is also stale.
@@ -1095,4 +1117,147 @@ func twoSlotM4(t *testing.T, m4, m1 transcode.Executor) (*Engine, *placementCloc
 	e.deps.Now = clock.now
 	e.windowSweepInline = true
 	return e, clock
+}
+
+// failMark makes the queue mark of one conversion unreadable.
+func failMark(t *testing.T, raw *sql.DB, id string) {
+	t.Helper()
+	if _, err := raw.Exec(`INSERT INTO transcode_queue_marks (kind, id, held, queue_order, updated_at) VALUES ('action', ?, 'x', '', '2026-01-01T00:00:00Z')`, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A batch never reads the mark of its own children for its gate: a mark it
+// cannot read there changes nothing, while an unreadable mark of another
+// batch's waiter stops it, in dispatch and in the plan alike.
+func TestQueueNextUnreadableMarkFollowsDispatch(t *testing.T) {
+	setup := func(t *testing.T) (*Engine, *sql.DB, store.TranscodeBatchItem) {
+		e, raw := faultEngine(t)
+		items := seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+		return e, raw, items[0]
+	}
+	started := func(plan QueuePlan, id int64) bool {
+		_, ok := plan.started[QueueKindItem+":"+strconv.FormatInt(id, 10)]
+		return ok
+	}
+	t.Run("own child", func(t *testing.T) {
+		e, raw, item := setup(t)
+		ticketWaiterOf(t, e, "own-child", "m1", "batch-1", 5*time.Hour)
+		failMark(t, raw, "own-child")
+		if !dispatchStartsItems(t, e, "batch-1")[item.ID] {
+			t.Fatal("dispatch should go on")
+		}
+		if !started(nextPlan(t, e), item.ID) {
+			t.Fatal("the plan should go on too")
+		}
+	})
+	t.Run("another batch's waiter", func(t *testing.T) {
+		e, raw, item := setup(t)
+		ticketWaiterOf(t, e, "foreign", "m1", "batch-2", 5*time.Hour)
+		failMark(t, raw, "foreign")
+		items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+		if _, ok := e.batchDispatchCandidates(context.Background(), "batch-1", items); ok && dispatchStartsItems(t, e, "batch-1")[item.ID] {
+			t.Fatal("dispatch should schedule nothing")
+		}
+		if started(nextPlan(t, e), item.ID) {
+			t.Fatal("the plan should start nothing")
+		}
+	})
+}
+
+// A node that reports it is on hold: dispatch counts its free slot when it
+// decides to make a child for a queued item, but the child cannot start there.
+// The plan names the node the conversion would really start on, and nothing
+// when there is none.
+func TestQueueNextOnHoldNodeAndBatchDispatch(t *testing.T) {
+	held := func() *roomReporter {
+		m4 := diskNode(1000*gib, 10*gib, 500*gib)
+		m4.hold = "paused"
+		return m4
+	}
+	t.Run("the other node is free", func(t *testing.T) {
+		e, _ := placementEngine(t, held(), diskNode(1000*gib, 10*gib, 500*gib))
+		items := seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+		plan := nextPlan(t, e)
+		if plan.started[QueueKindItem+":"+strconv.FormatInt(items[0].ID, 10)] != "m1" {
+			t.Fatalf("started: %v", plan.started)
+		}
+		if !dispatchStartsItems(t, e, "batch-1")[items[0].ID] {
+			t.Fatal("dispatch should make the child")
+		}
+	})
+	t.Run("the other node is full", func(t *testing.T) {
+		e, _ := placementEngine(t, held(), diskNode(1000*gib, 10*gib, 500*gib))
+		busy(t, e, "run-m1", "m1")
+		items := seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+		plan := nextPlan(t, e)
+		if len(plan.started) != 0 {
+			t.Fatalf("started: %v", plan.started)
+		}
+		// Dispatch counts the held node's slot and makes a child that then
+		// waits for a slot: no conversion starts, which is what the plan says.
+		// (This difference is documented in docs/transcode/API_V1.md.)
+		if !dispatchStartsItems(t, e, "batch-1")[items[0].ID] {
+			t.Fatal("dispatch no longer counts the held node's slot for the child; update the plan and the docs")
+		}
+	})
+}
+
+// The state of a node wins over an empty queue, whatever the state is.
+func TestQueueNextEmptyQueueStatesPerNode(t *testing.T) {
+	// own hold, paused and build
+	for _, hold := range []string{"paused", "build"} {
+		m4 := diskNode(1000*gib, 10*gib, 500*gib)
+		m4.hold = hold
+		e, _ := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
+		n := planNode(t, nextPlan(t, e), "m4")
+		want := ReasonNodeOnHold
+		if hold == "build" {
+			want = ReasonNodeBuild
+		}
+		if n.State != NodePaused || n.FreeSlots != 0 || n.WhyNone.Code != want {
+			t.Fatalf("hold %s: %+v", hold, n)
+		}
+	}
+	// busy
+	e, _ := openEngine(t)
+	busy(t, e, "run-m4", "m4")
+	if n := planNode(t, nextPlan(t, e), "m4"); n.State != NodeBusy || n.WhyNone.Code != ReasonNoFreeSlot {
+		t.Fatalf("busy: %+v", n)
+	}
+	// closed window
+	e, clock := openEngine(t)
+	windowAt(t, e, clock, "m4", -time.Minute, 0)
+	if n := planNode(t, nextPlan(t, e), "m4"); n.State != NodeClosed || n.WhyNone.Code != windowWaitCondition {
+		t.Fatalf("closed: %+v", n)
+	}
+}
+
+// The age of the pool counts only where the pool is read.
+func TestQueueNextPoolAgeOnlyWhereItIsRead(t *testing.T) {
+	e, clock := openEngine(t)
+	warm(e)
+	// An expired (not absent) pool on a ready node: unknown.
+	st := e.workerStateFor("m4")
+	st.poolMu.Lock()
+	st.pool.at = e.now().Add(-10 * time.Minute)
+	st.poolMu.Unlock()
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown {
+		t.Fatalf("expired pool: %+v", n)
+	}
+	// A node the operator paused, or whose window closed, is not read from its
+	// pool: it keeps its state, pool or no pool.
+	if _, err := e.SetNodePause(context.Background(), "m4", store.WorkerPauseGraceful); err != nil {
+		t.Fatal(err)
+	}
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodePaused {
+		t.Fatalf("paused: %+v", n)
+	}
+	if _, err := e.SetNodePause(context.Background(), "m4", ""); err != nil {
+		t.Fatal(err)
+	}
+	windowAt(t, e, clock, "m4", -time.Minute, 0)
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeClosed {
+		t.Fatalf("closed: %+v", n)
+	}
 }

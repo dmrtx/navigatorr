@@ -277,10 +277,16 @@ long time, so it holds no one back and is never named as next), `node_build`,
 
 Limits: queued batch items have no conversion yet, so they are placed by media
 type and window only (no disk check); a node whose last report is missing or older
-than 2 minutes (or whose slot pool was not read in that time) is `unknown`, a
-single node included: no free slots are claimed and nothing is asked of it, and
-the state of a node (unknown, offline, paused, closed, busy) is what `why_none`
-says even when the queue is empty; and the walk stops once every node has its `next`, so it says
+than 2 minutes (or whose slot pool was not read in that time) is `unknown`: no
+free slots are claimed and nothing is asked of it. With a single node nothing is
+`unknown`: dispatch needs no report from it, so the plan uses the last report
+and pool it has, or the configured capacity. The state of a node (unknown,
+offline, paused, closed, busy) is what `why_none` says even when the queue is
+empty. A node that reports it is on hold or building shows as `paused` and takes
+no queued item in the plan; batch dispatch still counts its free slot when it
+decides to make a child for a queued item, and that child then waits for a slot
+(it cannot start there), so the plan may say nothing starts while the batch
+makes a waiting child; and the walk stops once every node has its `next`, so it says
 nothing about what would start after those.
 
 ### Confirmation flows

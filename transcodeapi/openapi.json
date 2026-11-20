@@ -3199,7 +3199,7 @@
                               "offline",
                               "unknown"
                             ],
-                            "description": "ready: a free slot; busy: every slot in use; paused: the operator paused the node or it reports it is on hold; closed: its availability window has closed; offline: not ready; unknown: no report from the node in the last 2 minutes (or no recent slot report), so nothing is said about it."
+                            "description": "ready: a free slot; busy: every slot in use; paused: the operator paused the node or it reports it is on hold or building; closed: its availability window has closed; offline: not ready; unknown: no report from the node in the last 2 minutes (or no recent slot report), so nothing is said about it."
                           },
                           "free_slots": {
                             "type": "integer",

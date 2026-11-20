@@ -289,9 +289,9 @@ func TestTranscodeV1QueueIdsAreNormalisedAndTyped(t *testing.T) {
 func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
-	// A node nobody has asked yet is unknown, whatever the queue holds.
-	if _, un := get(t, h, "/transcode/v1/queue/next", keyHdr()); un["nodes"].([]any)[0].(map[string]any)["why_none"].(map[string]any)["code"] != "node_unknown" {
-		t.Fatalf("a cold node: %v", un)
+	// A single node needs no report for dispatch, so a cold one is not unknown.
+	if _, cold := get(t, h, "/transcode/v1/queue/next", keyHdr()); cold["nodes"].([]any)[0].(map[string]any)["state"] != "ready" {
+		t.Fatalf("a cold single node: %v", cold)
 	}
 	s.engine.WarmWorkerReports(context.Background())
 	// With nothing waiting every node says so.

@@ -32,7 +32,7 @@ import (
 const (
 	NodeReady   = "ready"   // it has a free slot and takes work
 	NodeBusy    = "busy"    // every slot is in use
-	NodePaused  = "paused"  // the operator paused it
+	NodePaused  = "paused"  // the operator paused it, or it reports it is on hold or building
 	NodeClosed  = "closed"  // its availability window has closed
 	NodeOffline = "offline" // not ready: unreachable or failing its checks
 	NodeUnknown = "unknown" // no recent report from it: nothing is said about its slots
@@ -149,9 +149,15 @@ func (e *Engine) QueueNext(ctx context.Context) (QueuePlan, error) {
 // WarmWorkerReports asks every worker for its report and its slots now, so
 // that QueueNext (which asks nothing) can speak for them. Dispatch does the same
 // on every poll of a waiting conversion; this is for a caller with nothing
-// waiting.
+// waiting. It is meant for tests and start-up: the plan itself never asks.
 func (e *Engine) WarmWorkerReports(ctx context.Context) {
+	if e.deps.Workers == nil {
+		return
+	}
 	for _, w := range e.deps.Workers.All() {
+		if ctx.Err() != nil {
+			return
+		}
 		e.workerObservation(ctx, w)
 		e.workerVideoCapacity(ctx, w)
 	}
@@ -166,31 +172,48 @@ const planReportMaxAge = 2 * time.Minute
 // reads without asking (it must not probe). A marked node is made not ready and
 // has no free slot: the plan says nothing about it. The age of the pool counts
 // only where capacity is read from it (a node that is ready and not on hold).
-// A node that reports it is on hold has no free slot for the plan either, so a
-// queued item (placed by media type and window only) is never planned onto it.
+// With a single node there is no choice to make and dispatch needs no report
+// from it (it counts as ready, its slots read when a conversion asks), and with
+// nothing waiting nothing refreshes the report, so no node is marked: the plan
+// uses what was last read or the configured capacity, as dispatch does.
+// A node that reports any hold takes nothing new, so it has no free slot for
+// the plan either, and a queued item (placed by media type and window only) is
+// never planned onto it; the child dispatch would make for it cannot start
+// there.
 func (e *Engine) planUnreported(ctx context.Context, q queueSlots) []bool {
 	out := make([]bool, len(q.workers))
 	now := e.now()
 	tooOld := func(at time.Time) bool { return at.IsZero() || now.Sub(at) > planReportMaxAge }
 	for i, w := range q.workers {
-		obs := e.workerObservation(ctx, w)
-		old := tooOld(obs.CheckedAt)
 		hold := e.planRoomHold(ctx, w)
-		if _, reads := w.Executor.(workerSlotReader); reads && !old && q.ready[i] && hold == "" &&
-			!e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
-			old = tooOld(e.workerPoolAt(w.Name))
+		old := false
+		if len(q.workers) > 1 {
+			old = tooOld(e.workerObservation(ctx, w).CheckedAt)
+			if _, reads := w.Executor.(workerSlotReader); reads && !old && q.ready[i] && hold == "" &&
+				!e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
+				old = tooOld(e.workerPoolAt(w.Name))
+			}
 		}
 		switch {
 		case old:
 			out[i] = true
 			q.ready[i] = false
 			delete(q.free, w.Name)
-		case hold == "paused":
+		case hold != "":
 			q.free[w.Name] = 0
 		}
 	}
 	q.placer.unreported = out
 	return out
+}
+
+// nodeOwnHold is the hold the node's report names when the operator has not
+// paused it ("" otherwise).
+func (e *Engine) nodeOwnHold(ctx context.Context, w transcode.NamedWorker) string {
+	if e.workerPaused(w.Name) {
+		return ""
+	}
+	return e.planRoomHold(ctx, w)
 }
 
 // planRoomHold is the hold the node's own fresh report names ("paused",
@@ -212,7 +235,7 @@ func (e *Engine) planNodeState(ctx context.Context, q queueSlots, i int) (string
 		return NodeUnknown, 0
 	case !q.ready[i]:
 		return NodeOffline, 0
-	case e.workerPaused(w.Name), e.planRoomHold(ctx, w) == "paused":
+	case e.workerPaused(w.Name), e.planRoomHold(ctx, w) != "":
 		return NodePaused, 0
 	case e.workerWindowClosed(w.Name):
 		return NodeClosed, 0
@@ -325,7 +348,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 			if len(a.skips) >= maxPlanSkipped && len(cs) > maxPlanSkipped {
 				n.SkippedTruncated = true
 			}
-			n.WhyNone = planWhyNone(w.Name, a.state, !e.workerPaused(w.Name) && e.planRoomHold(q.placer.ctx, w) == "paused", entries)
+			n.WhyNone = planWhyNone(w.Name, a.state, e.nodeOwnHold(q.placer.ctx, w), entries)
 		}
 		nodes[ni] = n
 	}
@@ -382,7 +405,8 @@ func (g *planGates) gated(batchID, key string, done map[string]bool) bool {
 	if !g.readOK {
 		return true
 	}
-	return batchSlotGateFrom(pg.items, pg.keys, foreignOf(g.waiters, batchID), done).blocks(key)
+	foreign, ok := foreignOf(g.waiters, batchID)
+	return !ok || batchSlotGateFrom(pg.items, pg.keys, foreign, done).blocks(key)
 }
 
 // queuedItemGated says whether a batch must not start the queued item with
@@ -432,7 +456,9 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 		switch {
 		case e.workerPaused(w.Name):
 			return PlanReason{ReasonNodePaused, "Node " + w.Name + " is paused and takes nothing new."}
-		case e.planRoomHold(sim.placer.ctx, w) == "paused":
+		case e.planRoomHold(sim.placer.ctx, w) == "build":
+			return PlanReason{ReasonNodeBuild, "A build is running on node " + w.Name + ", so it takes nothing new."}
+		case e.planRoomHold(sim.placer.ctx, w) != "":
 			return PlanReason{ReasonNodeOnHold, "Node " + w.Name + " reports that it is on hold and takes nothing new."}
 		case e.workerWindowClosed(w.Name):
 			return PlanReason{windowWaitCondition, "Node " + w.Name + "'s availability window has closed; it takes nothing new."}
@@ -446,7 +472,7 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 }
 
 // planWhyNone says why nothing would start on the node.
-func planWhyNone(node, state string, hold bool, entries []QueueEntry) *PlanReason {
+func planWhyNone(node, state, hold string, entries []QueueEntry) *PlanReason {
 	// The state of the node wins: an empty queue does not make an unknown,
 	// offline, paused or closed node look idle.
 	switch state {
@@ -455,7 +481,11 @@ func planWhyNone(node, state string, hold bool, entries []QueueEntry) *PlanReaso
 	case NodeUnknown:
 		return &PlanReason{ReasonNodeUnknown, "Node " + node + " has sent no recent report, so nothing is said about it until it does."}
 	case NodePaused:
-		if hold {
+		switch hold {
+		case "build":
+			return &PlanReason{ReasonNodeBuild, "A build is running on node " + node + ", so it takes nothing new."}
+		case "":
+		default:
 			return &PlanReason{ReasonNodeOnHold, "Node " + node + " reports that it is on hold and takes nothing new."}
 		}
 		return &PlanReason{ReasonNodePaused, "Node " + node + " is paused and takes nothing new."}

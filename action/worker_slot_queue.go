@@ -249,7 +249,11 @@ func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) 
 
 // slotWaiterKey is a waiter for a slot, the batch it belongs to ("" for none)
 // and its place in the queue.
-type slotWaiterKey struct{ id, key, parentID string }
+type slotWaiterKey struct {
+	id, key, parentID string
+	// failed: the mark or the place of this waiter could not be read.
+	failed bool
+}
 
 // foreignSlotWaiters is foreignSlotWaiterKeys with the id of each waiter.
 func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok bool) {
@@ -258,23 +262,29 @@ func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok
 		log.Printf("worker slot queue: reading the waiters for batch %s failed (scheduling nothing new)", batchID)
 		return nil, false
 	}
-	return foreignOf(all, batchID), true
+	return foreignOf(all, batchID)
 }
 
-// foreignOf are the waiters that do not belong to batchID.
-func foreignOf(all []slotWaiterKey, batchID string) []slotWaiterKey {
-	var out []slotWaiterKey
+// foreignOf are the waiters that do not belong to batchID. ok is false when
+// the mark or the place of one of them could not be read: those of the batch
+// itself are never read for it, so a failure there does not count.
+func foreignOf(all []slotWaiterKey, batchID string) (out []slotWaiterKey, ok bool) {
 	for _, w := range all {
-		if w.parentID != batchID {
-			out = append(out, w)
+		if w.parentID == batchID {
+			continue
 		}
+		if w.failed {
+			return nil, false
+		}
+		out = append(out, w)
 	}
-	return out
+	return out, true
 }
 
 // slotWaitersWithKeys are all the waiters for a slot that the operator has not
 // held, with their place in the queue: one read that any number of batches can
-// filter. ok is false when they or their marks could not be read.
+// filter (foreignOf). ok is false when the list could not be read; a waiter
+// whose mark could not be read is returned as failed.
 func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 	if e.deps.Store == nil {
 		return nil, true
@@ -290,7 +300,8 @@ func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 		m, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, w.id)
 		if err != nil {
 			log.Printf("worker slot queue: reading the hold of %s: %v (scheduling nothing new)", w.id, err)
-			return nil, false
+			waiters = append(waiters, slotWaiterKey{id: w.id, parentID: w.parentID, failed: true})
+			continue
 		}
 		if m.Held {
 			continue
@@ -298,7 +309,8 @@ func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 		key, err := e.childQueueKey(w.id)
 		if err != nil {
 			log.Printf("worker slot queue: reading the place of %s: %v (scheduling nothing new)", w.id, err)
-			return nil, false
+			waiters = append(waiters, slotWaiterKey{id: w.id, parentID: w.parentID, failed: true})
+			continue
 		}
 		// A waiter with no queue key (key "") counts as ahead of every item on
 		// purpose: nothing can say it is behind, so it keeps the conservative
