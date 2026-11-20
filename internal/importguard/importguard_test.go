@@ -186,31 +186,32 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 	}
 }
 
-// TestArrtoolsStaysStateless guards the stateless MCP tools: arrtools must be
-// importable by a separate gateway binary without pulling in the action
-// engine, the maintenance store, the UI, the nodes registry, the transcode
-// stack, the podcast pipeline, the queue or the stateful tools package.
+// bannedPrefixes reports whether pkg is one of the named packages or lives
+// below one of them.
+func bannedPrefixes(pkg string, names ...string) bool {
+	for _, b := range names {
+		if pkg == b || strings.HasPrefix(pkg, b+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// checkStatelessRoot fails when root reaches a banned package, directly or
+// transitively, as resolved for every platform.
 //
 // config is a known shared dependency of arrservice and openapi, and it
 // still imports the transcode and podcast packages for its settings types.
 // Only those edges (config -> transcode*, config -> podcast*) are exempt
 // until config is split; every other import of config, and every other
-// package arrtools reaches, is still checked. A second walk starts below the
+// package root reaches, is still checked. A second walk starts below the
 // exempt edges, so whatever transcode* and podcast* pull in is checked too:
 // only transcode* and podcast* themselves are tolerated there.
-func TestArrtoolsStaysStateless(t *testing.T) {
-	banned := func(p string) bool {
-		for _, b := range []string{"action", "store", "maintenanceui", "nodes", "internal/nodeswire", "podcast", "queue", "tools", "transcode", "transcodeapi"} {
-			if p == b || strings.HasPrefix(p, b+"/") {
-				return true
-			}
-		}
-		return false
-	}
+func checkStatelessRoot(t *testing.T, root string, banned func(string) bool) {
+	t.Helper()
 	configExempt := func(p string) bool {
 		return p == "transcode" || strings.HasPrefix(p, "transcode/") || p == "podcast" || strings.HasPrefix(p, "podcast/")
 	}
-	const root = "arrtools"
 	for _, p := range platforms {
 		t.Run(p[0]+"/"+p[1], func(t *testing.T) {
 			graph := moduleImports(t, p[0], p[1])
@@ -218,7 +219,7 @@ func TestArrtoolsStaysStateless(t *testing.T) {
 			if _, ok := graph[root]; !ok {
 				t.Fatalf("root package %q is not in the import graph (%d packages): the guard would check nothing", root, len(graph))
 			}
-			// First walk: everything arrtools reaches without the exempt edges.
+			// First walk: everything root reaches without the exempt edges.
 			via := map[string]string{root: ""}
 			queue := []string{root}
 			var exempt []string
@@ -263,4 +264,26 @@ func TestArrtoolsStaysStateless(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestArrtoolsStaysStateless guards the stateless MCP tools: arrtools must be
+// importable by a separate gateway binary without pulling in the action
+// engine, the maintenance store, the UI, the nodes registry, the transcode
+// stack, the podcast pipeline, the queue or the stateful tools package.
+func TestArrtoolsStaysStateless(t *testing.T) {
+	checkStatelessRoot(t, "arrtools", func(p string) bool {
+		return bannedPrefixes(p, "action", "store", "maintenanceui", "nodes", "internal/nodeswire", "podcast", "queue", "tools", "transcode", "transcodeapi")
+	})
+}
+
+// TestGatewayStaysStateless guards the gateway binary: it must never link
+// the action engine, the store, the web UI, nodes, anything transcode*, the
+// podcast pipeline, the queue or the stateful tools package, or it would no
+// longer be a stateless front for them. The same config exemption as for
+// arrtools applies (see checkStatelessRoot).
+func TestGatewayStaysStateless(t *testing.T) {
+	checkStatelessRoot(t, "cmd/navigatorr-gateway", func(p string) bool {
+		return bannedPrefixes(p, "action", "store", "maintenanceui", "nodes", "internal/nodeswire", "internal/transcodeworker", "podcast", "queue", "tools") ||
+			strings.HasPrefix(p, "transcode")
+	})
 }

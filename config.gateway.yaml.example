@@ -1,0 +1,46 @@
+# Example config for navigatorr-gateway, the stateless MCP gateway.
+#
+# It reads the same file format as the server: the top-level keys below
+# (services, qbittorrent, transmission, sabnzbd, max_response_size_kb,
+# allow_destructive) mean the same thing. Only the gateway block is new, and
+# the server ignores it, so one generated file can serve both binaries.
+#
+# The gateway serves the API-documentation tools, call_api and the download
+# client tools itself. Everything with state (actions, memory, maintenance,
+# files, queue, ...) is forwarded to the Transcode server over MCP.
+
+gateway:
+  # Where the gateway listens. Defaults to 127.0.0.1:8099. Publish the port on
+  # the host loopback only; do not expose it on all interfaces.
+  listen: "0.0.0.0:8099"
+
+  # Required. The internal /mcp endpoint of the Transcode server.
+  upstream_url: "http://transcode:8098/mcp"
+
+  # Optional. A file holding the shared key (at least 32 characters, mode
+  # 0600). When set, the gateway sends it to Transcode as X-Api-Key and refuses
+  # to start if the file is missing, empty or too short. When unset, no key is
+  # sent. The key is read once at start-up.
+  # key_file: /run/secrets/mcp_key
+
+  # Optional. Where downloaded OpenAPI specs are cached (give it its own
+  # volume). Defaults to ~/.cache/navigatorr.
+  # cache_dir: /cache/openapi
+
+# The services the call_api tool can reach. Every URL must be reachable from
+# the gateway container; a loopback address would point at the gateway itself.
+services:
+  sonarr:
+    url: "http://sonarr:8989"
+    api_key: "REPLACE_ME"
+  # transcode and nodes are ordinary services here, reached by call_api.
+  # transcode:
+  #   url: "http://transcode:8098"
+
+qbittorrent:
+  url: "http://qbittorrent:8080"
+  username: "admin"
+  password: "REPLACE_ME"
+
+max_response_size_kb: 50
+allow_destructive: false
