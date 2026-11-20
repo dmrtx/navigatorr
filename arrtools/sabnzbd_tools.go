@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"context"
@@ -22,7 +22,7 @@ var sabPriorities = map[string]string{
 	"force":   "2",
 }
 
-func registerSabnzbdTools(s *server.MCPServer, client *sabnzbd.Client, allowDestructive bool) {
+func RegisterSabnzbdTools(s *server.MCPServer, client *sabnzbd.Client, allowDestructive bool) {
 	// sabnzbd_list_queue
 	s.AddTool(
 		mcp.NewTool("sabnzbd_list_queue",

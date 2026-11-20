@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func registerQbitTools(s *server.MCPServer, client *qbit.Client, allowDestructive bool) {
+func RegisterQbitTools(s *server.MCPServer, client *qbit.Client, allowDestructive bool) {
 	// qbit_list_torrents
 	s.AddTool(
 		mcp.NewTool("qbit_list_torrents",

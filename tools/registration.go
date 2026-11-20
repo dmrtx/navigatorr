@@ -6,6 +6,7 @@ import (
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/arrservice"
+	"github.com/jakenesler/navigatorr/arrtools"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/fsop"
 	"github.com/jakenesler/navigatorr/internal/nashelper"
@@ -23,16 +24,16 @@ import (
 // keep their names and behavior; the maintenance agent tools are added
 // alongside and are only registered when a state store is available.
 func RegisterAll(s *server.MCPServer, cfg *config.Config, registry *arrservice.Registry, specStore *openapi.Store, txClient *transmission.Client, qbClient *qbit.Client, sabClient *sabnzbd.Client, qStore *queue.Store) {
-	registerDocTools(s, registry, specStore)
-	registerAPICallTool(s, registry, specStore, cfg.MaxResponseSizeKB, cfg.AllowDestructive)
+	arrtools.RegisterDocTools(s, registry, specStore)
+	arrtools.RegisterAPICallTool(s, registry, specStore, cfg.MaxResponseSizeKB, cfg.AllowDestructive)
 	if txClient != nil {
-		registerTransmissionTools(s, txClient, cfg.AllowDestructive)
+		arrtools.RegisterTransmissionTools(s, txClient, cfg.AllowDestructive)
 	}
 	if qbClient != nil {
-		registerQbitTools(s, qbClient, cfg.AllowDestructive)
+		arrtools.RegisterQbitTools(s, qbClient, cfg.AllowDestructive)
 	}
 	if sabClient != nil {
-		registerSabnzbdTools(s, sabClient, cfg.AllowDestructive)
+		arrtools.RegisterSabnzbdTools(s, sabClient, cfg.AllowDestructive)
 	}
 	if qStore != nil {
 		registerQueueTools(s, qStore)

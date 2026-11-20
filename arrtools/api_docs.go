@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func registerDocTools(s *server.MCPServer, registry *arrservice.Registry, store *openapi.Store) {
+func RegisterDocTools(s *server.MCPServer, registry *arrservice.Registry, store *openapi.Store) {
 	// list_services
 	s.AddTool(
 		mcp.NewTool("list_services",

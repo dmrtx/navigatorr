@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"context"
@@ -59,8 +59,8 @@ func TestTorrentDeletesRespectAllowDestructive(t *testing.T) {
 			t.Cleanup(srv.Close)
 
 			s := server.NewMCPServer("test", "0.0.0")
-			registerQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), false)
-			registerTransmissionTools(s, transmission.NewClient(srv.URL, "u", "p"), false)
+			RegisterQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), false)
+			RegisterTransmissionTools(s, transmission.NewClient(srv.URL, "u", "p"), false)
 
 			res := callTool(t, s, tt.tool, tt.args)
 
@@ -91,8 +91,8 @@ func TestNonDestructiveActionsAreNotGated(t *testing.T) {
 			}))
 			t.Cleanup(srv.Close)
 
-			registerQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), false)
-			registerTransmissionTools(s, transmission.NewClient(srv.URL, "u", "p"), false)
+			RegisterQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), false)
+			RegisterTransmissionTools(s, transmission.NewClient(srv.URL, "u", "p"), false)
 
 			text := resultText(t, callTool(t, s, tt.tool, tt.args))
 			for _, refusal := range []string{"Deleting is disabled", "Removing is disabled"} {
@@ -114,7 +114,7 @@ func TestDeletesGoThroughWhenAllowed(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := server.NewMCPServer("test", "0.0.0")
-	registerQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), true)
+	RegisterQbitTools(s, qbit.NewClient(srv.URL, "u", "p"), true)
 
 	text := resultText(t, callTool(t, s, "qbit_manage_torrent", map[string]any{"action": "delete", "hashes": "abc"}))
 	if strings.Contains(text, "Deleting is disabled") {
@@ -142,7 +142,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("destructive operations blocked when allow_destructive=false", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, nil, 100, false)
+		RegisterAPICallTool(s, reg, nil, 100, false)
 
 		cases := []struct {
 			name   string
@@ -182,7 +182,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("non-destructive operations allowed when allow_destructive=false", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, nil, 100, false)
+		RegisterAPICallTool(s, reg, nil, 100, false)
 
 		// Regular GET
 		resGet := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "GET", "path": "/movie"})
@@ -204,7 +204,7 @@ func TestAPICallDestructiveSafetyClassification(t *testing.T) {
 
 	t.Run("all operations allowed when allow_destructive=true", func(t *testing.T) {
 		s := server.NewMCPServer("test", "0.0.0")
-		registerAPICallTool(s, reg, nil, 100, true)
+		RegisterAPICallTool(s, reg, nil, 100, true)
 
 		resDel := callTool(t, s, "call_api", map[string]any{"service": "radarr", "method": "DELETE", "path": "/movie/1"})
 		if resDel.IsError && strings.Contains(resultText(t, resDel), "destructive operations are disabled") {
