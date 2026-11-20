@@ -46,7 +46,7 @@ func openRegistry(path string) (*registry, error) {
 		return nil, fmt.Errorf("creating nodes database directory: %w", err)
 	}
 	// One process owns the database: the lock comes before anything opens it.
-	lock, err := lockFile(path + ".lock")
+	lock, err := lockFile(lockPath(path))
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +57,18 @@ func openRegistry(path string) (*registry, error) {
 	}
 	reg.lock = lock
 	return reg, nil
+}
+
+// lockPath names the lock beside the real database file, so a path reached
+// through a symlink (to the file or to its directory) shares one lock.
+func lockPath(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real + ".lock"
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		return filepath.Join(dir, filepath.Base(path)) + ".lock"
+	}
+	return path + ".lock"
 }
 
 // openDB opens the database and applies the schema, without the process lock.

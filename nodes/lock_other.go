@@ -2,7 +2,13 @@
 
 package nodes
 
-import "os"
+import (
+	"errors"
+	"os"
+)
 
-// lockFile is a no-op where flock is not available.
-func lockFile(string) (*os.File, error) { return nil, nil }
+// lockFile refuses to run where flock is not available: without the lock two
+// processes could write the same nodes.db.
+func lockFile(string) (*os.File, error) {
+	return nil, errors.New("nodes.db needs flock, which this platform does not have")
+}

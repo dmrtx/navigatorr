@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package nodes
 
 import (
@@ -36,6 +38,53 @@ func TestOpenTakesTheDatabaseLock(t *testing.T) {
 	again.Close()
 	if _, err := os.Stat(path + ".lock"); err != nil {
 		t.Fatalf("the lock file stays after the second Close: %v", err)
+	}
+}
+
+// A database file reached through a symlink takes the same lock as its target.
+func TestOpenLocksTheResolvedPath(t *testing.T) {
+	real := filepath.Join(t.TempDir(), "nodes.db")
+	first, err := Open(Options{Path: real, Topology: fakeTopology{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	alias := filepath.Join(t.TempDir(), "nodes.db")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(Options{Path: alias, Topology: fakeTopology{}}); err == nil || !strings.Contains(err.Error(), "held by another process") {
+		t.Fatalf("Open through a symlink must see the held lock: %v", err)
+	}
+}
+
+// When the database cannot be opened, the lock is released again.
+func TestOpenReleasesTheLockWhenTheDatabaseFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nodes.db")
+	if err := os.Mkdir(path, 0o700); err != nil { // a directory is not a database
+		t.Fatal(err)
+	}
+	if _, err := Open(Options{Path: path, Topology: fakeTopology{}}); err == nil {
+		t.Fatal("Open on a directory must fail")
+	}
+	f, err := lockFile(path + ".lock")
+	if err != nil {
+		t.Fatalf("the failed Open must release the lock: %v", err)
+	}
+	unlock(f)
+}
+
+func TestNodesListRejectsABadTranscodeParam(t *testing.T) {
+	e, _ := buildSvc(t)
+	tv := &countingView{}
+	e.tv = tv
+	code, _ := call(t, e.Handler(), "GET", "/nodes/v1/nodes?transcode=nope", "")
+	if code != 400 || tv.calls.Load() != 0 {
+		t.Fatalf("a bad transcode value is a 400 without asking the view: %d calls=%d", code, tv.calls.Load())
+	}
+	call(t, e.Handler(), "GET", "/nodes/v1/nodes?transcode=0", "")
+	if tv.calls.Load() != 0 {
+		t.Fatalf("transcode=0 means false: calls=%d", tv.calls.Load())
 	}
 }
 

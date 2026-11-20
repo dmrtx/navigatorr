@@ -54,6 +54,16 @@
               }
             }
           },
+          "400": {
+            "description": "transcode is not a boolean (code invalid_request).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "401": {
             "description": "Missing or wrong builds token (code unauthorized).",
             "content": {
@@ -1014,7 +1024,7 @@
                 },
                 "status": {
                   "type": "string",
-                  "description": "running, or waiting on a record an earlier server left."
+                  "description": "Always running: running_builds lists only running builds."
                 },
                 "priority": {
                   "type": "string"
