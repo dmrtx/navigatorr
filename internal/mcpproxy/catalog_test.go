@@ -1,6 +1,7 @@
 package mcpproxy
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -234,5 +235,58 @@ func TestTranscodeDownAtStartThenRecovers(t *testing.T) {
 	g.clock.Advance(61 * time.Second)
 	if n := listedNames(t, g.list()); len(n) != 50 {
 		t.Fatalf("last good catalog: %d tools", len(n))
+	}
+}
+
+func TestRefreshRightAfterAnotherDoesNotFetchAgain(t *testing.T) {
+	f := newFake(t)
+	g := newGateway(t, f.url(), nil)
+	if _, err := g.f.cat.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.f.cat.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if f.lists.Load() != 1 {
+		t.Errorf("tools/list sent %d times, want 1", f.lists.Load())
+	}
+}
+
+func TestSessionChangeBetweenPagesAbortsTheRefresh(t *testing.T) {
+	f := newFake(t)
+	twoPages(f)
+	g := newGateway(t, f.url(), nil)
+	g.list()
+	g.clock.Advance(61 * time.Second)
+	// While the first page is being served, another caller replaces the
+	// shared session; the second page must not go out on the new one.
+	var once sync.Once
+	f.onList = func(w http.ResponseWriter, r *http.Request, env envelope) bool {
+		if !strings.Contains(string(env.Params), "p2") {
+			once.Do(func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				if _, err := g.f.up.ensure(ctx, g.f.up.current()); err != nil {
+					t.Error(err)
+				}
+			})
+		}
+		return false
+	}
+	f.mu.Lock()
+	f.cursors = nil
+	f.mu.Unlock()
+	if len(listedNames(t, g.list())) != 50 {
+		t.Fatal("the previous catalog must be served")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.cursors) != 1 {
+		t.Errorf("cursors %q: page 2 must not have been requested", f.cursors)
+	}
+	g.f.cat.mu.Lock()
+	defer g.f.cat.mu.Unlock()
+	if !g.f.cat.fetched.Before(g.clock.Now()) {
+		t.Error("the cache must be untouched")
 	}
 }

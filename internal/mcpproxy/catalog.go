@@ -70,6 +70,19 @@ func (c *catalog) get(ctx context.Context) ([]json.RawMessage, error) {
 }
 
 func (c *catalog) refresh() (any, error) {
+	// A refresh that finished just before this flight started has already
+	// done the work (or backed off): do not fetch again.
+	c.mu.Lock()
+	if c.have {
+		now := c.now()
+		if now.Sub(c.fetched) < c.ttl || now.Before(c.retryAt) {
+			t := c.tools
+			c.mu.Unlock()
+			return t, nil
+		}
+	}
+	c.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), c.budget)
 	defer cancel()
 	tools, err := c.fetch(ctx)
@@ -93,6 +106,7 @@ func (c *catalog) fetch(ctx context.Context) ([]json.RawMessage, error) {
 	found := make(map[string]json.RawMessage, len(c.names))
 	seen := map[string]struct{}{}
 	cursor := ""
+	var sess *session // every page after the first stays on the first one's
 	for page := 0; ; page++ {
 		if page >= c.maxPages {
 			return nil, fmt.Errorf("catalog has more than %d pages", c.maxPages)
@@ -102,8 +116,10 @@ func (c *catalog) fetch(ctx context.Context) ([]json.RawMessage, error) {
 			params, _ = json.Marshal(map[string]string{"cursor": cursor})
 		}
 		// Only the first page may start over on a new session; a session
-		// change in the middle would leave the cursor meaningless.
-		raw, cerr := c.up.do(ctx, c.up.nextID(), "tools/list", params, page == 0)
+		// change in the middle would leave the cursor meaningless, so later
+		// pages are pinned to the session of the first and abort otherwise.
+		raw, used, cerr := c.up.doOn(ctx, sess, c.up.nextID(), "tools/list", params, page == 0)
+		sess = used
 		if cerr != nil {
 			return nil, fmt.Errorf("page %d: %w", page+1, cerr)
 		}

@@ -205,8 +205,13 @@ func (f *Frontier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid session ID", http.StatusNotFound)
 		return
 	}
-	if !validID(env.ID) || env.JSONRPC != mcp.JSONRPC_VERSION {
+	if !validID(env.ID) {
 		writeJSON(w, rpcError(nil, mcp.INVALID_REQUEST, "a request needs jsonrpc 2.0 and a string or number id"))
+		return
+	}
+	if env.JSONRPC != mcp.JSONRPC_VERSION {
+		// The id is usable, so the client can match the answer.
+		writeJSON(w, rpcError(env.ID, mcp.INVALID_REQUEST, "a request needs jsonrpc 2.0 and a string or number id"))
 		return
 	}
 

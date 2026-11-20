@@ -10,7 +10,6 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -75,6 +74,9 @@ type upstream struct {
 	cur  *session
 	init singleflight.Group
 	ids  atomic.Int64
+
+	// afterCheck is a test hook, run between the fast-path check and the flight.
+	afterCheck func()
 }
 
 func newUpstream(url, apiKey string, hc *http.Client, initTimeout time.Duration, logf, errorf func(string, ...any)) *upstream {
@@ -86,7 +88,14 @@ func newUpstream(url, apiKey string, hc *http.Client, initTimeout time.Duration,
 		tr.DisableKeepAlives = true
 		tr.Proxy = nil
 		hc = &http.Client{Transport: tr}
+	} else {
+		c := *hc // never mutate the caller's client
+		hc = &c
 	}
+	// A redirect would replay a tools/call (a 307 keeps the method and body)
+	// at a place nobody configured, with the key attached. A 3xx is the
+	// answer: outcome unknown.
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &upstream{url: url, apiKey: apiKey, hc: hc, initTimeout: initTimeout, logf: logf, errorf: errorf}
 }
 
@@ -100,37 +109,61 @@ func (u *upstream) nextID() json.RawMessage {
 // The handshake runs in its own context, so a caller that gives up does not
 // abort it for the callers waiting on the same flight.
 func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error) {
-	u.mu.Lock()
-	if u.cur != nil && u.cur != failed {
-		s := u.cur
-		u.mu.Unlock()
-		return s, nil
-	}
-	u.mu.Unlock()
-
-	ch := u.init.DoChan("init", func() (any, error) {
-		hctx, cancel := context.WithTimeout(context.Background(), u.initTimeout)
-		defer cancel()
-		fresh, err := u.handshake(hctx)
-		if err != nil {
-			return nil, err
-		}
+	for attempt := 0; attempt < 2; attempt++ {
 		u.mu.Lock()
-		defer u.mu.Unlock()
-		if u.cur == nil || u.cur == failed {
-			u.cur = fresh
+		if u.cur != nil && u.cur != failed {
+			s := u.cur
+			u.mu.Unlock()
+			return s, nil
 		}
-		return u.cur, nil
-	})
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return nil, r.Err
+		u.mu.Unlock()
+		if u.afterCheck != nil {
+			u.afterCheck()
 		}
-		return r.Val.(*session), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+
+		ch := u.init.DoChan("init", func() (any, error) {
+			// A flight that finished between the check above and this one
+			// has already replaced the session: use it, do not handshake again.
+			u.mu.Lock()
+			if u.cur != nil && u.cur != failed {
+				s := u.cur
+				u.mu.Unlock()
+				return s, nil
+			}
+			u.mu.Unlock()
+
+			hctx, cancel := context.WithTimeout(context.Background(), u.initTimeout)
+			defer cancel()
+			fresh, err := u.handshake(hctx)
+			if err != nil {
+				return nil, err
+			}
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			if u.cur == nil || u.cur == failed {
+				u.cur = fresh
+			}
+			return u.cur, nil
+		})
+		select {
+		case r := <-ch:
+			if r.Err != nil {
+				return nil, r.Err
+			}
+			if s := r.Val.(*session); s != failed {
+				return s, nil
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
+	return nil, errors.New("upstream session could not be replaced")
+}
+
+func (u *upstream) current() *session {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.cur
 }
 
 // handshake runs initialize and notifications/initialized. The session is
@@ -221,25 +254,42 @@ func (u *upstream) newRequest(ctx context.Context, method string, s *session, bo
 // With retry set, a call proven not to have been dispatched is repeated once
 // on a fresh session. ctx carries the whole time budget.
 func (u *upstream) do(ctx context.Context, id json.RawMessage, method string, params json.RawMessage, retry bool) ([]byte, *callError) {
-	sess, err := u.ensure(ctx, nil)
-	if err != nil {
-		return nil, notDispatched(fmt.Errorf("upstream session: %w", err))
+	raw, _, cerr := u.doOn(ctx, nil, id, method, params, retry)
+	return raw, cerr
+}
+
+// doOn is do, and also reports the session the answer came from. A non-nil
+// pin keeps the request on that session: it never starts a new one, and it
+// fails if the shared session is no longer the pinned one. Paged reads use it
+// so a cursor is only ever sent to the session that issued it.
+func (u *upstream) doOn(ctx context.Context, pin *session, id json.RawMessage, method string, params json.RawMessage, retry bool) ([]byte, *session, *callError) {
+	sess := pin
+	if pin != nil {
+		retry = false
+		if u.current() != pin {
+			return nil, pin, notDispatched(errors.New("upstream session changed"))
+		}
+	} else {
+		var err error
+		if sess, err = u.ensure(ctx, nil); err != nil {
+			return nil, nil, notDispatched(fmt.Errorf("upstream session: %w", err))
+		}
 	}
 	body := buildRequest(id, method, params)
 	for attempt := 0; ; attempt++ {
 		raw, _, cerr := u.exchange(ctx, sess, body, id)
 		if cerr == nil {
-			return raw, nil
+			return raw, sess, nil
 		}
 		if !cerr.retryable {
-			return nil, cerr
+			return nil, sess, cerr
 		}
 		if !retry || attempt > 0 {
-			return nil, notDispatched(cerr.cause)
+			return nil, sess, notDispatched(cerr.cause)
 		}
-		sess, err = u.ensure(ctx, sess)
-		if err != nil {
-			return nil, notDispatched(fmt.Errorf("upstream session: %w", err))
+		var err error
+		if sess, err = u.ensure(ctx, sess); err != nil {
+			return nil, nil, notDispatched(fmt.Errorf("upstream session: %w", err))
 		}
 	}
 }
@@ -264,9 +314,13 @@ func (u *upstream) exchange(ctx context.Context, s *session, body []byte, wantID
 
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		// Transcode's key middleware answers before the MCP layer.
-		u.errorf("Transcode rejected the gateway key (HTTP 401): check the shared key file")
-		return nil, nil, notDispatched(errors.New("upstream authentication failed (HTTP 401)"))
+		// Only the key middleware's own answer proves the request never
+		// reached the MCP layer; any other 401 (a proxy, a handler) may not.
+		if isKeyRejection(resp) {
+			u.errorf("Transcode rejected the gateway key (HTTP 401): check the shared key file")
+			return nil, nil, notDispatched(errors.New("upstream authentication failed (HTTP 401)"))
+		}
+		return nil, nil, unknown(errors.New("upstream HTTP 401"))
 	case resp.StatusCode == http.StatusNotFound:
 		if isSessionGone(resp) {
 			ce := notDispatched(errors.New("upstream session no longer valid (HTTP 404)"))
@@ -312,20 +366,33 @@ func (u *upstream) exchange(ctx context.Context, s *session, body []byte, wantID
 }
 
 // isSessionGone matches the 404 mcp-go answers, before dispatching anything,
-// when a session id is not valid: text/plain and exactly one of two bodies.
-// Any other 404 may come from elsewhere (a proxy, a wrong path) and is never
-// retried.
+// when a session id is not valid: text/plain and exactly one of two bodies, as
+// http.Error writes them. Any other 404 may come from elsewhere (a proxy, a
+// wrong path) and is never retried.
 func isSessionGone(resp *http.Response) bool {
+	b, ok := plainBody(resp, 64)
+	return ok && (b == "Invalid session ID\n" || b == "Session terminated\n")
+}
+
+// isKeyRejection matches what mcpkey.Require writes: 401, text/plain and the
+// body "unauthorized\n".
+func isKeyRejection(resp *http.Response) bool {
+	b, ok := plainBody(resp, 64)
+	return ok && b == "unauthorized\n"
+}
+
+// plainBody returns the body of a text/plain response, read up to max bytes
+// (a longer body is reported as not plain, so it never matches).
+func plainBody(resp *http.Response, max int64) (string, bool) {
 	mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil || mt != "text/plain" {
-		return false
+		return "", false
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 256))
-	if err != nil {
-		return false
+	b, err := io.ReadAll(io.LimitReader(resp.Body, max+1))
+	if err != nil || int64(len(b)) > max {
+		return "", false
 	}
-	t := strings.TrimSpace(string(b))
-	return t == "Invalid session ID" || t == "Session terminated"
+	return string(b), true
 }
 
 // checkResponse validates a JSON-RPC response message: version, exactly one
@@ -364,13 +431,17 @@ func readSSE(r io.Reader, wantID json.RawMessage) ([]byte, error) {
 	sc.Buffer(make([]byte, 0, 64<<10), maxBody)
 	var data []byte
 	pending := false
+	eventType := ""
 
+	// dispatch follows the SSE rules: an event with no data is not
+	// dispatched, and neither is one whose type is set and is not "message"
+	// (pings and the like). Either way the buffers start over.
 	dispatch := func() ([]byte, bool, error) {
-		if !pending {
+		msg, typ, had := data, eventType, pending
+		data, pending, eventType = nil, false, ""
+		if !had || len(msg) == 0 || (typ != "" && typ != "message") {
 			return nil, false, nil
 		}
-		msg := data
-		data, pending = nil, false
 		var env envelope
 		if err := json.Unmarshal(msg, &env); err != nil {
 			return nil, false, fmt.Errorf("malformed upstream event: %w", err)
@@ -399,15 +470,17 @@ func readSSE(r io.Reader, wantID json.RawMessage) ([]byte, error) {
 			continue
 		}
 		field, value, _ := bytes.Cut(line, []byte(":"))
-		if string(field) != "data" {
-			continue
-		}
 		value = bytes.TrimPrefix(value, []byte(" "))
-		if pending {
-			data = append(data, '\n')
-		}
-		data = append(data, value...)
-		pending = true
+		switch string(field) {
+		case "data":
+			if pending {
+				data = append(data, '\n')
+			}
+			data = append(data, value...)
+			pending = true
+		case "event":
+			eventType = string(value)
+		} // id, retry and unknown fields are ignored
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("reading upstream stream: %w", err)

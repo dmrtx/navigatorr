@@ -75,10 +75,14 @@ func TestRealTranscodeStatelessRestartNeedsNoReinit(t *testing.T) {
 	rt := newRealTranscode(t, false)
 	g := newGateway(t, rt.url(), nil)
 	toolResult(t, g.call("1", "memory_set", `{"q":"x"}`))
+	before := g.f.up.current()
 	rt.restart()
 	toolResult(t, g.call("2", "memory_set", `{"q":"x"}`))
 	if rt.effects.Load() != 2 {
 		t.Errorf("effects %d", rt.effects.Load())
+	}
+	if before == nil || g.f.up.current() != before {
+		t.Error("a stateless Transcode keeps no sessions, so no new initialize is needed")
 	}
 }
 

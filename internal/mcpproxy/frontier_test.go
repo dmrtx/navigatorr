@@ -367,3 +367,19 @@ func TestCloseDeletesTheUpstreamSession(t *testing.T) {
 		t.Errorf("DELETE count %d, want 1", f.deletes.Load())
 	}
 }
+
+func TestWrongVersionKeepsTheClientID(t *testing.T) {
+	f := newFake(t)
+	g := newGateway(t, f.url(), nil)
+	r := g.post(goodSession, `{"jsonrpc":"1.0","id":"abc","method":"tools/list"}`)
+	want200JSON(t, r)
+	id, res, e := r.rpc(t)
+	if string(id) != `"abc"` || res != nil || !strings.Contains(string(e), "-32600") {
+		t.Errorf("id=%s result=%s error=%s", id, res, e)
+	}
+	// No usable id: null.
+	r = g.post(goodSession, `{"jsonrpc":"1.0","method":"tools/list"}`)
+	if id, _, _ := r.rpc(t); string(id) != "null" && len(id) != 0 {
+		t.Errorf("id %s, want null", id)
+	}
+}

@@ -131,18 +131,24 @@ func TestErrorClassification(t *testing.T) {
 	status := func(code int) func(http.ResponseWriter, *http.Request, envelope) {
 		return func(w http.ResponseWriter, _ *http.Request, _ envelope) { http.Error(w, "x", code) }
 	}
-	body := func(ctype, b string) func(http.ResponseWriter, *http.Request, envelope) {
+	bodyCode := func(code int, ctype, b string) func(http.ResponseWriter, *http.Request, envelope) {
 		return func(w http.ResponseWriter, _ *http.Request, _ envelope) {
 			w.Header().Set("Content-Type", ctype)
+			if code != 0 {
+				w.WriteHeader(code)
+			}
 			fmt.Fprint(w, b)
 		}
+	}
+	body := func(ctype, b string) func(http.ResponseWriter, *http.Request, envelope) {
+		return bodyCode(0, ctype, b)
 	}
 	cases := map[string]func(http.ResponseWriter, *http.Request, envelope){
 		"403":                 status(403),
 		"400":                 status(400),
 		"404 route":           text404,
 		"404 other body":      func(w http.ResponseWriter, _ *http.Request, _ envelope) { http.Error(w, "Session not found", 404) },
-		"404 json body":       body("application/json", "Invalid session ID"),
+		"404 json body":       bodyCode(404, "application/json", "Invalid session ID\n"),
 		"500":                 status(500),
 		"502":                 status(502),
 		"malformed JSON":      body("application/json", `{"jsonrpc":"2.0","id":5,"result":`),
