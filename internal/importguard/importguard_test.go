@@ -193,16 +193,20 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 //
 // config is a known shared dependency of arrservice and openapi, and it
 // still imports the transcode and podcast packages for its settings types.
-// Those edges are exempt until config is split: the walk does not descend
-// below config, and arrtools itself (and everything else it reaches) may not
-// import the banned packages directly.
+// Only those edges (config -> transcode*, config -> podcast*) are exempt
+// until config is split; every other import of config, and every other
+// package arrtools reaches, is still checked.
 func TestArrtoolsStaysStateless(t *testing.T) {
 	banned := func(p string) bool {
-		switch p {
-		case "action", "store", "maintenanceui", "nodes", "internal/nodeswire", "podcast", "queue", "tools", "transcodeapi":
-			return true
+		for _, b := range []string{"action", "store", "maintenanceui", "nodes", "internal/nodeswire", "podcast", "queue", "tools", "transcode", "transcodeapi"} {
+			if p == b || strings.HasPrefix(p, b+"/") {
+				return true
+			}
 		}
-		return p == "transcode" || strings.HasPrefix(p, "transcode/") || strings.HasPrefix(p, "podcast/")
+		return false
+	}
+	configExempt := func(p string) bool {
+		return p == "transcode" || strings.HasPrefix(p, "transcode/") || p == "podcast" || strings.HasPrefix(p, "podcast/")
 	}
 	const root = "arrtools"
 	for _, p := range platforms {
@@ -220,10 +224,10 @@ func TestArrtoolsStaysStateless(t *testing.T) {
 				if pkg != root && banned(pkg) {
 					t.Errorf("%s must not reach %s: %s", root, pkg, chain(via, pkg))
 				}
-				if pkg == "config" {
-					continue
-				}
 				for _, imp := range graph[pkg] {
+					if pkg == "config" && configExempt(imp) {
+						continue
+					}
 					if _, seen := via[imp]; !seen {
 						via[imp] = pkg
 						queue = append(queue, imp)
