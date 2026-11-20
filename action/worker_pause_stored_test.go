@@ -52,7 +52,7 @@ func TestNodePauseStatesStoredEqualsObservedState(t *testing.T) {
 			}
 			before := snapshot()
 			stored := e.NodePauseStatesStored(ctx)
-			withObs := e.nodePauseStatuses(ctx, observed)
+			withObs := e.nodePauseStatuses(ctx, observed, true)
 			if !reflect.DeepEqual(before, snapshot()) {
 				t.Fatal("reading the state wrote to the store")
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -174,17 +175,54 @@ func (e *Engine) runningLeaseMode(node string) string {
 // reports running; a running record with no reported lease holds nothing.
 func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
 	for name, st := range statuses {
+		st = e.applyLeaseHold(name, st)
 		st.Builds = e.NodeBuildRecords(name)
-		// An operator pause wins over the display of a lease.
-		if st.HeldBy == "" {
-			if running, since := e.RunningLeases(name); running > 0 {
-				st.Paused, st.HeldBy = true, "builds"
-				st.Since = since
-				st.Mode = e.runningLeaseMode(name)
-				st.Message = fmt.Sprintf("Busy with %d running build(s). New conversions wait on this node; podcast jobs still run.", running)
-			}
-		}
 		statuses[name] = st
 	}
 	return statuses
+}
+
+// applyLeaseHold is the state half of AttachNodeBuilds: it shows a node as
+// held by builds when its worker reports running leases, and reads no build
+// record. An operator pause wins over the display of a lease.
+func (e *Engine) applyLeaseHold(name string, st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	if st.HeldBy != "" {
+		return st
+	}
+	if running, since := e.RunningLeases(name); running > 0 {
+		st.Paused, st.HeldBy = true, "builds"
+		st.Since = since
+		st.Mode = e.runningLeaseMode(name)
+		st.Message = fmt.Sprintf("Busy with %d running build(s). New conversions wait on this node; podcast jobs still run.", running)
+	}
+	return st
+}
+
+// NodeTranscodeState is what Nodes shows of a node's transcode side.
+type NodeTranscodeState struct {
+	Node    string
+	Paused  bool
+	Mode    string
+	Since   string
+	HeldBy  string
+	Message string
+}
+
+// NodeTranscodeStates is every configured node's transcode state (paused,
+// mode, since, held_by, message) for a Nodes process that runs apart from the
+// engine. It reads the stored pauses and the last worker observation only: no
+// worker is probed, no network call is made, and neither a build record nor
+// the builds pause (both live in the registry) is read, so
+// the registry can ask the engine without the engine asking it back. The
+// result is a copy, sorted by node. It is the same state AttachNodeBuilds
+// shows: an operator pause wins over a running lease.
+func (e *Engine) NodeTranscodeStates(ctx context.Context) []NodeTranscodeState {
+	stored := e.nodePauseStatuses(ctx, transcode.WorkerObservation{}, false)
+	out := make([]NodeTranscodeState, 0, len(stored))
+	for name, st := range stored {
+		st = e.applyLeaseHold(name, st)
+		out = append(out, NodeTranscodeState{Node: name, Paused: st.Paused, Mode: st.Mode, Since: st.Since, HeldBy: st.HeldBy, Message: st.Message})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Node < out[j].Node })
+	return out
 }

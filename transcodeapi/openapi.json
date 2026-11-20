@@ -1451,6 +1451,90 @@
         }
       }
     },
+    "/transcode/v1/node-states": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "listNodeStates",
+        "summary": "List every node's transcode state",
+        "description": "Each configured node's transcode state as the engine holds it, for a Nodes process that runs apart from the engine: node, paused, mode (graceful, immediate, suspend or empty), since, held_by (operator when an operator pause holds the node, builds when the node's worker reports running build leases) and message. An operator pause wins over a running lease. Read-only, sorted by node. It reads stored state and the last worker observation only: no worker is probed and no build record is read. paused is always present; mode, since, held_by and message are left out when empty.",
+        "responses": {
+          "200": {
+            "description": "The node states.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/NodeState"
+                      }
+                    }
+                  },
+                  "required": [
+                    "nodes"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is invalid (code invalid_request); the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/transcode/v1/windows": {
       "get": {
         "tags": [
@@ -11425,6 +11509,45 @@
             "format": "date-time"
           }
         }
+      },
+      "NodeState": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "node": {
+            "type": "string",
+            "minLength": 1
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "graceful",
+              "immediate",
+              "suspend"
+            ]
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "held_by": {
+            "type": "string",
+            "enum": [
+              "operator",
+              "builds"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "node",
+          "paused"
+        ]
       }
     }
   }

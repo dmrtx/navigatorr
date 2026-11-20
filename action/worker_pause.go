@@ -538,7 +538,7 @@ func requeueLeftoverEntries(state map[string]any) []any {
 // NodePauseStatuses is every configured node's pause by node name: the mode,
 // and for a paused node what is left before the machine is free.
 func (e *Engine) NodePauseStatuses(ctx context.Context) map[string]transcode.NodePauseStatus {
-	return e.nodePauseStatuses(ctx, e.observeWorkers(ctx))
+	return e.nodePauseStatuses(ctx, e.observeWorkers(ctx), true)
 }
 
 // NodePauseStatesStored is NodePauseStatuses without the worker health probes:
@@ -549,10 +549,13 @@ func (e *Engine) NodePauseStatuses(ctx context.Context) map[string]transcode.Nod
 // TestNodePauseStatesStoredEqualsObservedState). nodePauseStatuses only reads:
 // it writes nothing to the store, expiry included.
 func (e *Engine) NodePauseStatesStored(ctx context.Context) map[string]transcode.NodePauseStatus {
-	return e.nodePauseStatuses(ctx, transcode.WorkerObservation{})
+	return e.nodePauseStatuses(ctx, transcode.WorkerObservation{}, true)
 }
 
-func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObservation) map[string]transcode.NodePauseStatus {
+// nodePauseStatuses reads the builds pause from the registry only when
+// withBuildsPause is set; NodeTranscodeStates leaves it out because it must
+// never call the registry.
+func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObservation, withBuildsPause bool) map[string]transcode.NodePauseStatus {
 	now := time.Now().UTC()
 	out := map[string]transcode.NodePauseStatus{}
 	for _, w := range e.deps.Workers.All() {
@@ -570,7 +573,11 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	pauses, perr := e.workerPauses()
 	// An unreadable builds-pause state reads as paused, like the transcode
 	// pause: the create path fails closed too, so the page must not say otherwise.
-	buildPauses, bperr := e.buildsPauses()
+	var buildPauses map[string]string
+	var bperr bool
+	if withBuildsPause {
+		buildPauses, bperr = e.buildsPauses()
+	}
 	rows, rerr := e.deps.Store.ListDrainActions()
 	encoding := map[string]int{}
 	if rerr == nil {

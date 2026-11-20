@@ -121,6 +121,8 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 		s.v1Legacy(s.workerPause, func(*http.Request) url.Values { return url.Values{"node": {name}} }, v1Err{notFound: "unknown_worker", hint: hintWorkers})(w, r)
 	})
 
+	get("/node-states", s.v1NodeStates)
+
 	// Actions.
 	get("/actions", s.v1Actions)
 	detailHint := "GET " + b + "/actions/{id}/detail/{section} without key lists the keys of a section; steps pages through the step log"

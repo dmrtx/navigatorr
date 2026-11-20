@@ -287,3 +287,11 @@ func TestGatewayStaysStateless(t *testing.T) {
 			strings.HasPrefix(p, "transcode")
 	})
 }
+
+// TestTranscodeViewStaysApart guards the HTTP client Nodes reads the engine's
+// node states with: it must link neither the registry nor the engine nor the
+// store, or the separate Nodes binary would carry them (and the loop the
+// endpoint exists to break). It imports no package of the module at all.
+func TestTranscodeViewStaysApart(t *testing.T) {
+	checkStatelessRoot(t, "internal/transcodeview", func(p string) bool { return p != "internal/transcodeview" })
+}
