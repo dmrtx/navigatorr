@@ -688,11 +688,11 @@ func TestQueueNextColdReadDoesNotProbe(t *testing.T) {
 		t.Fatal("a cold read asked a worker")
 	}
 	for _, n := range plan.Nodes {
-		if n.State != NodeUnknown || n.FreeSlots != 0 || n.Next != nil || n.WhyNone.Code != ReasonNodeUnknown {
+		if n.State != NodeUnknown || n.FreeSlots != 0 || n.Next != nil || n.WhyNone == nil || n.WhyNone.Code != ReasonNodeUnknown {
 			t.Fatalf("%s: %+v", n.Worker, n)
 		}
 		if s := wantSkip(t, n, "a", ReasonNodeUnknown); !strings.Contains(s.Text, "has sent no recent report") ||
-			n.WhyNone == nil || !strings.Contains(n.WhyNone.Text, "has sent no recent report") {
+			!strings.Contains(n.WhyNone.Text, "has sent no recent report") {
 			t.Fatalf("no report, text: %q / %q", s.Text, n.WhyNone.Text)
 		}
 	}
