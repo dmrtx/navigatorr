@@ -269,3 +269,17 @@ func TestCheckReleasesTheLockOnFailures(t *testing.T) {
 		unlock(lk)
 	}
 }
+
+func TestCheckAcceptsAPathWithALeadingDoubleSlash(t *testing.T) {
+	path := importedDB(t, true)
+	if !filepath.IsAbs(path) {
+		t.Skip("needs an absolute temp path")
+	}
+	rep, err := Check(context.Background(), "/"+path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Ok() || rep.Integrity != "ok" {
+		t.Fatalf("report %+v: %s", rep, problems(rep))
+	}
+}

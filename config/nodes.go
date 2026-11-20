@@ -65,7 +65,8 @@ func (n NodesConfig) CheckListen() error {
 
 // ValidateURLs checks the two base URLs when they are set.
 func (n NodesConfig) ValidateURLs() error {
-	for name, v := range map[string]string{"nodes.url": n.URL, "nodes.transcode_url": n.TranscodeURL} {
+	for _, f := range []struct{ name, v string }{{"nodes.url", n.URL}, {"nodes.transcode_url", n.TranscodeURL}} {
+		name, v := f.name, f.v
 		if strings.TrimSpace(v) == "" {
 			continue
 		}

@@ -390,11 +390,10 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	if rep.Integrity != "" {
 		fmt.Fprintf(stdout, "integrity:     %s\n", rep.Integrity)
 	}
-	if rep.Integrity != "ok" {
-		// The mark is read only from a database that passed the integrity check.
-	} else if rep.LegacyImportSet {
+	switch {
+	case rep.LegacyImportSet:
 		fmt.Fprintf(stdout, "legacy_import: %s\n", rep.LegacyImport)
-	} else {
+	case rep.LegacyImportMissing:
 		fmt.Fprintf(stdout, "legacy_import: (missing)\n")
 	}
 	if !rep.Ok() {

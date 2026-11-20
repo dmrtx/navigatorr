@@ -680,7 +680,7 @@ func TestCheckCommand(t *testing.T) {
 		if code != 1 || !strings.Contains(errs, "-wal") {
 			t.Fatalf("exit %d: %s", code, errs)
 		}
-		if strings.Contains(out, "legacy_import") {
+		if strings.Contains(out, "legacy_import:") {
 			t.Errorf("the mark was not read, yet the output reports it:\n%s", out)
 		}
 		if code, out, errs := check("--path", path, "--checkpoint"); code != 0 || !strings.Contains(out, "checkpointed:  true") {
@@ -695,6 +695,26 @@ func TestCheckCommand(t *testing.T) {
 		writeFile(t, filepath.Dir(path), "nodes.db", strings.Repeat("not a database ", 500))
 		if code, _, errs := check("--path", path); code != 1 || !strings.Contains(errs, "integrity_check") {
 			t.Fatalf("exit %d: %s", code, errs)
+		}
+	})
+	t.Run("unreadable legacy_import", func(t *testing.T) {
+		// A sound SQLite file with no meta table: the mark cannot be read, so
+		// the output must not claim it is missing.
+		path := filepath.Join(t.TempDir(), "nodes.db")
+		db, err := sql.Open("sqlite", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE other(x)`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+		code, out, errs := check("--path", path)
+		if code != 1 || !strings.Contains(errs, "legacy_import") {
+			t.Fatalf("exit %d\n%s\n%s", code, out, errs)
+		}
+		if strings.Contains(out, "legacy_import:") {
+			t.Errorf("the mark was not read, yet the output reports it:\n%s", out)
 		}
 	})
 	t.Run("missing legacy_import", func(t *testing.T) {

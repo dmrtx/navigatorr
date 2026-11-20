@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -29,6 +30,9 @@ type CheckReport struct {
 	// LegacyImport is the value of the legacy_import mark, when LegacyImportSet.
 	LegacyImport    string
 	LegacyImportSet bool
+	// LegacyImportMissing is true only when the meta table was read and has
+	// no legacy_import row (as opposed to a mark that could not be read).
+	LegacyImportMissing bool
 	// Problems is every reason the database is not ready to be served; empty
 	// when it is.
 	Problems []string
@@ -89,7 +93,13 @@ func Check(ctx context.Context, path string, checkpoint bool) (CheckReport, erro
 	if checkpoint {
 		params = "?mode=rw&_pragma=busy_timeout(5000)"
 	}
-	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+params)
+	// An absolute, cleaned path: "//dir/x.db" must not become a URI authority.
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		rep.Problems = append(rep.Problems, "opening: "+err.Error())
+		return rep, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: abs}).EscapedPath()+params)
 	if err != nil {
 		rep.Problems = append(rep.Problems, "opening: "+err.Error())
 		return rep, nil
@@ -140,6 +150,7 @@ func Check(ctx context.Context, path string, checkpoint bool) (CheckReport, erro
 	case err == nil:
 		rep.LegacyImport, rep.LegacyImportSet = v, true
 	case errors.Is(err, sql.ErrNoRows):
+		rep.LegacyImportMissing = true
 		rep.Problems = append(rep.Problems, "the "+metaLegacyImport+" mark is missing: the builds of the main database were never imported here")
 	default:
 		rep.Problems = append(rep.Problems, "reading the "+metaLegacyImport+" mark: "+err.Error())

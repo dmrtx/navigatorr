@@ -69,3 +69,12 @@ func TestNodesBlockLoadsAndRejectsUnknownKeys(t *testing.T) {
 		t.Errorf("an unknown nodes key must name its section, got %v", err)
 	}
 }
+
+func TestNodesURLErrorsAreReportedInOrder(t *testing.T) {
+	n := NodesConfig{URL: "ftp://a", TranscodeURL: "ftp://b"}
+	for i := 0; i < 20; i++ {
+		if err := n.ValidateURLs(); err == nil || !strings.HasPrefix(err.Error(), "nodes.url ") {
+			t.Fatalf("want the nodes.url error first, got %v", err)
+		}
+	}
+}
