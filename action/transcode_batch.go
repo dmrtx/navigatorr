@@ -697,7 +697,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					case StatusWaitingDecision:
 						items[i].Status = "waiting_decision"
 					case StatusWaitingExternal:
-						if resumedRes.WaitingCondition == "worker_busy" || resumedRes.WaitingCondition == queueHeldCondition {
+						if resumedRes.WaitingCondition == "worker_busy" || resumedRes.WaitingCondition == queueHeldCondition || resumedRes.WaitingCondition == windowWaitCondition {
 							items[i].Status = "waiting_for_slot"
 						} else {
 							items[i].Status = "running"
@@ -799,7 +799,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
 					}
 				case StatusWaitingExternal:
-					if existingChild.WaitingCondition == "worker_busy" || existingChild.WaitingCondition == queueHeldCondition {
+					if existingChild.WaitingCondition == "worker_busy" || existingChild.WaitingCondition == queueHeldCondition || existingChild.WaitingCondition == windowWaitCondition {
 						if it.Status != "waiting_for_slot" {
 							it.Status = "waiting_for_slot"
 							_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
@@ -1401,7 +1401,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		return false, nil
 
 	case StatusWaitingExternal:
-		if isWorkerBusy || childRes.WaitingCondition == queueHeldCondition {
+		if isWorkerBusy || childRes.WaitingCondition == queueHeldCondition || childRes.WaitingCondition == windowWaitCondition {
 			item.Status = "waiting_for_slot"
 		} else {
 			// Normal child waiting_external => running!

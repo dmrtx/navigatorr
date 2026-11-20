@@ -243,7 +243,7 @@ func (e *Engine) shouldReconcile(inst *store.ActionInstance, tmpl ActionTemplate
 	// parent's durable lease. Pending children are still reconciled so they can
 	// be driven to a terminal state safely; accepted jobs keep being tracked.
 	// A slot waiter skips the rest of its backoff once a worker job ended.
-	if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, "next_poll_at")); err == nil && e.now().Before(at) && !(inst.WaitingCondition == "worker_busy" && e.slotWakeDue(ec.State)) {
+	if at, err := time.Parse(time.RFC3339Nano, getString(ec.State, "next_poll_at")); err == nil && e.now().Before(at) && !((inst.WaitingCondition == "worker_busy" || inst.WaitingCondition == windowWaitCondition) && e.slotWakeDue(ec.State)) {
 		return false
 	}
 	// Recover running actions only after durable progress exists. In particular,
@@ -280,6 +280,14 @@ func (e *Engine) scheduleReconcile(ec *ExecutionContext, condition string) {
 		// A held conversion waits for the operator, not for a slot: it asks
 		// again every so often, so a release takes effect within that time.
 		delay = queueHeldPollDelay
+	}
+	if condition == windowWaitCondition {
+		// Held back by a node's window: it looks again every so often, and a
+		// window change or a freed slot wakes it sooner (slotWakeDue).
+		if delay < windowPollDelay {
+			delay = windowPollDelay
+		}
+		ec.State[workerSlotPolledAtKey] = e.now().Format(time.RFC3339Nano)
 	}
 	if condition == "worker_busy" && (hasSlotTicket(ec.State) || transcodeQueueWaiting(ec.State)) {
 		// Waiting for a slot. When the worker refused with Retry-After, the

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -468,7 +470,7 @@ func (e *Engine) cancelForPause(ctx context.Context, ec *ExecutionContext, jobID
 // own job identity, since the node still knows the cancelled one.
 func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance, ec *ExecutionContext, jobID, node string) error {
 	fresh := map[string]any{}
-	for _, key := range []string{"request_origin", "mode_policy", transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusalsKey, runnerKilledKey, runnerKilledJobKey} {
+	for _, key := range []string{"request_origin", "mode_policy", queueProbeKey, transcodeQueueOrderKey, transcodeQueueSinceKey, "previous_job_id", requeueLeftoversKey, SubmittedSourceBytesKey, roomReserveKey, roomRefusalsKey, runnerKilledKey, runnerKilledJobKey} {
 		if v, ok := ec.State[key]; ok {
 			fresh[key] = v
 		}
@@ -478,6 +480,17 @@ func (e *Engine) resetForRequeue(ctx context.Context, inst *store.ActionInstance
 		fresh[requeueRetryCountKey] = getInt(ec.State, requeueRetryCountKey) + 1
 	} else if n := getInt(ec.State, requeueRetryCountKey); n > 0 {
 		fresh[requeueRetryCountKey] = n
+	}
+	if _, has := fresh[queueProbeKey]; !has {
+		// What the preflight probed of the source stays known to the queue.
+		if dur, _ := probeOfState(ec.State); dur > 0 {
+			if o, ok := ec.State["original"].(map[string]any); ok {
+				w, h, _ := strings.Cut(getString(o, "resolution"), "x")
+				wi, _ := strconv.Atoi(w)
+				hi, _ := strconv.Atoi(h)
+				fresh[queueProbeKey] = map[string]any{"duration_sec": dur, "width": wi, "height": hi}
+			}
+		}
 	}
 	fresh[requeueCountKey] = getInt(ec.State, requeueCountKey) + 1
 	fresh[requeuedFromKey] = node

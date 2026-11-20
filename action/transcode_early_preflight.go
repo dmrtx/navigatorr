@@ -66,6 +66,11 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 		return res, true
 	}
 	ec.State[earlyPreflightKey] = true
+	// What it probed of the source, for the queue (the node windows estimate
+	// the encode from it before the conversion has a node).
+	if probe, ok := check.State[queueProbeKey]; ok {
+		ec.State[queueProbeKey] = probe
+	}
 	return StepResult{}, false
 }
 

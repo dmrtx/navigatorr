@@ -2,6 +2,8 @@ package action
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -30,7 +32,12 @@ import (
 //	    room, so the node fails it with the real error instead of it waiting
 //	    forever. Without a resolver it is placed as needing no room too.
 //	I4  Batch items not yet started as children are disk-only (placement{}):
-//	    they are not waiter rows and have no size to read.
+//	    they are not waiter rows and have no size to read, and no media type
+//	    or probe: the node windows do not check them (windowShape{}).
+//	I5  A node's availability window (worker_window.go) is part of the same
+//	    decision: placeable answers false for a node whose window does not take
+//	    the conversion, and waitReason words it (node_window) when the windows
+//	    are all that keeps the conversion off every node it could use.
 
 // Who may take which free slot.
 //
@@ -58,6 +65,7 @@ type placement struct {
 	need        transcode.RoomNeed
 	refusals    map[string]time.Time
 	sizeUnknown bool
+	window      windowShape
 }
 
 // placementOf is the placement of the conversion being scheduled.
@@ -67,6 +75,7 @@ func (e *Engine) placementOf(ec *ExecutionContext) placement {
 		need:        conversionRoomNeed(ec),
 		refusals:    refusalsFromState(ec.State[roomRefusalsKey]),
 		sizeUnknown: e.deps.Fs != nil && size <= 0 && !getBool(ec.State, sourceSizeUnreadableKey),
+		window:      windowShapeOfState(ec.Inputs, ec.State),
 	}
 }
 
@@ -76,6 +85,8 @@ func (e *Engine) waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
 		need:        roomNeed(w.Standalone, w.SourceBytes, w.ReserveBytes),
 		refusals:    parseRefusals(w.Refusals),
 		sizeUnknown: e.deps.Fs != nil && w.SourceBytes <= 0 && !w.SizeUnreadable,
+		window: windowShape{check: true, mediaType: normalizedMediaType(w.MediaType), durationSec: w.ProbeDurationSec,
+			class: ResolutionClass(w.ProbeWidth, w.ProbeHeight)},
 	}
 }
 
@@ -105,6 +116,11 @@ type placer struct {
 	workers []transcode.NamedWorker
 	ready   []bool
 	elig    map[transcode.RoomNeed][]bool
+	// windows are the nodes' availability windows, read once on first use; an
+	// error closes every node (fail closed).
+	winRead bool
+	wins    map[string]store.WorkerWindow
+	winErr  error
 }
 
 func (e *Engine) newPlacer(ctx context.Context, workers []transcode.NamedWorker, ready []bool) *placer {
@@ -121,10 +137,23 @@ func (pl *placer) eligible(need transcode.RoomNeed) []bool {
 	return el
 }
 
+// windowOK says whether the node's availability window takes the conversion
+// now, with the reason when it does not.
+func (pl *placer) windowOK(p placement, node string) (bool, string) {
+	if !p.window.check {
+		return true, ""
+	}
+	if !pl.winRead {
+		pl.wins, pl.winErr = pl.e.workerWindows()
+		pl.winRead = true
+	}
+	return pl.e.windowVerdict(pl.wins, pl.winErr, p.window, node)
+}
+
 // placeable says, for each worker, whether the conversion may be given it now,
 // free slot or not: the worker is ready, open and reports room for it, and did
-// not refuse it a moment ago. A conversion whose size is unknown is placeable
-// nowhere.
+// not refuse it a moment ago, and its availability window takes it. A
+// conversion whose size is unknown is placeable nowhere.
 func (pl *placer) placeable(p placement) []bool {
 	out := make([]bool, len(pl.workers))
 	if p.sizeUnknown {
@@ -133,6 +162,9 @@ func (pl *placer) placeable(p placement) []bool {
 	el := pl.eligible(p.need)
 	for i, w := range pl.workers {
 		out[i] = pl.ready[i] && el[i] && !pl.e.refusedRecently(p, w.Name)
+		if out[i] {
+			out[i], _ = pl.windowOK(p, w.Name)
+		}
 	}
 	return out
 }
@@ -150,15 +182,22 @@ func (pl *placer) waitReason(p placement) (condition, reason string) {
 	}
 	el := pl.eligible(p.need)
 	withRoom, refused := 0, 0
+	var excluded []string
 	for i, w := range pl.workers {
 		if pl.ready[i] && el[i] {
 			withRoom++
 			if pl.e.refusedRecently(p, w.Name) {
 				refused++
+			} else if ok, why := pl.windowOK(p, w.Name); !ok {
+				excluded = append(excluded, fmt.Sprintf("node %s: %s", w.Name, why))
 			}
 		}
 	}
 	switch {
+	case withRoom > 0 && len(excluded) == withRoom:
+		// Only the windows keep it off the nodes with room: it holds no slot
+		// against anyone (some node being full is a different wait).
+		return windowWaitCondition, "Not placeable by the availability windows (" + strings.Join(excluded, "; ") + ")"
 	case withRoom > 0 && refused == withRoom:
 		return "worker_busy", "A node with room refused it a moment ago; it is asked again shortly"
 	case withRoom == 0 && p.need.SourceBytes > 0:

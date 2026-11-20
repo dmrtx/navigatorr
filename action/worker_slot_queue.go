@@ -363,7 +363,8 @@ func (e *Engine) slotWakeDue(state map[string]any) bool {
 	if !hasSlotTicket(state) && !transcodeQueueWaiting(state) {
 		return false
 	}
-	freed := e.slotFreedAt.Load()
+	// A node's window being written frees what it held back as a slot does.
+	freed := max(e.slotFreedAt.Load(), e.windowChangedAt.Load())
 	if freed == 0 {
 		return false
 	}

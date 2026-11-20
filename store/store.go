@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 27
+const SchemaVersion = 28
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -487,6 +487,12 @@ var migrations = []migration{
 		// refuse to act on a queue it read before the change.
 		`CREATE TABLE IF NOT EXISTS transcode_queue_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)`,
 		`INSERT OR IGNORE INTO transcode_queue_revision (id, revision) VALUES (1, 0)`,
+	}},
+	{version: 28, statements: []string{
+		// A node's availability window: until when (less a margin) it takes new
+		// conversions and of which media types (a comma list; '' is all). One
+		// row while the operator keeps a window on the node, none otherwise.
+		`CREATE TABLE IF NOT EXISTS worker_windows (worker TEXT PRIMARY KEY, until TEXT, margin_sec INTEGER NOT NULL DEFAULT 0, media_types TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
 	}},
 }
 

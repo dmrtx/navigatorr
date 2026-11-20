@@ -113,6 +113,11 @@ type TranscodeQueueWaiterRow struct {
 	MediaType        string
 	WaitingCondition string
 	WaitingReason    string
+	// ProbeDurationSec, ProbeWidth and ProbeHeight are the source's length and
+	// picture size as the early check probed them (0 until it has).
+	ProbeDurationSec float64
+	ProbeWidth       int
+	ProbeHeight      int
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
@@ -150,7 +155,10 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 			COALESCE(json_extract(p.state_json, '$.paused'), 0) IN (1, 'true'),
 			COALESCE(json_extract(a.inputs_json, '$.path'), ''),
 			COALESCE(json_extract(a.inputs_json, '$.media_type'), ''),
-			COALESCE(a.waiting_condition, ''), COALESCE(a.waiting_reason, '')
+			COALESCE(a.waiting_condition, ''), COALESCE(a.waiting_reason, ''),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.duration_sec'), 0) AS REAL),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.width'), 0) AS INTEGER),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.height'), 0) AS INTEGER)
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
 		LEFT JOIN transcode_queue_marks m ON m.kind = 'action' AND m.id = a.id
@@ -175,7 +183,8 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 		var r TranscodeQueueWaiterRow
 		var held int
 		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals, &r.SizeUnreadable,
-			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason); err != nil {
+			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason,
+			&r.ProbeDurationSec, &r.ProbeWidth, &r.ProbeHeight); err != nil {
 			return nil, err
 		}
 		r.Held = held != 0

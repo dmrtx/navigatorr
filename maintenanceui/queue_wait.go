@@ -3,7 +3,6 @@ package maintenanceui
 import (
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -15,69 +14,28 @@ import (
 // finish, and hand them to the waiters in queue order. Anything the estimate
 // needs and the history cannot give leaves the job without a number.
 
-// encodeShape is what an encode's duration depends on, read from a record.
-type encodeShape struct {
-	worker, class, family string
-	durationSec           float64
+// encodeRecord is the part of a record the encode history is read from; the
+// reading itself (action.RecordEncodeShape, action.EncodeSamples) is shared
+// with the nodes' availability windows.
+func encodeRecord(r operationRecord) action.EncodeRecord {
+	return action.EncodeRecord{ID: r.inst.ID, ActionName: r.inst.ActionName, Status: r.inst.Status, UpdatedAt: r.inst.UpdatedAt, Outputs: r.outputs, State: r.state}
 }
 
 // recordEncodeShape reads a transcode job's worker, height class, encoder
-// family and video length from the trimmed snapshot. The family comes from the
-// encoder the plan chose: the size budget's encoder choice, else the search's
-// winner, which the snapshot keeps; an audio-only plan copies the video. A job
-// that skipped the transcode has none.
-func recordEncodeShape(r operationRecord) (encodeShape, bool) {
-	if r.inst.ActionName != "transcode_media" || operationValue(r, "skip_transcode") == true {
-		return encodeShape{}, false
-	}
-	original := operationMap(operationValue(r, "original"))
-	width, height := 0, 0
-	if w, h, ok := strings.Cut(operationString(original["resolution"]), "x"); ok {
-		width, _ = strconv.Atoi(w)
-		height, _ = strconv.Atoi(h)
-	}
-	family := ""
-	if operationValue(r, "size_audio_only") == true {
-		family = action.EncodeFamilyCopy
-	} else {
-		codec := operationString(operationMap(operationMap(operationValue(r, "size_budget"))["encoder_choice"])["video_codec"])
-		if codec == "" {
-			codec = operationString(operationMap(operationMap(operationValue(r, "benchmark_decision"))["winner"])["video_codec"])
-		}
-		if codec == "" {
-			// A size goal without a budget runs the quality ladder instead.
-			codec = operationString(operationMap(operationValue(r, "quality_ladder"))["video_codec"])
-		}
-		family = action.EncodeFamily(codec)
-	}
-	s := encodeShape{worker: operationString(r.state["worker"]), class: action.ResolutionClass(width, height), family: family, durationSec: operationNumber(original["duration_sec"])}
-	return s, s.worker != "" && s.class != "" && s.family != "" && s.durationSec > 0
+// family and video length from the trimmed snapshot.
+func recordEncodeShape(r operationRecord) (action.EncodeShape, bool) {
+	return action.RecordEncodeShape(encodeRecord(r))
 }
 
 // encodeSamples are the finished encodes of the history, newest first.
 func encodeSamples(records []operationRecord) []action.EncodeSample {
-	done := []operationRecord{}
+	recs := make([]action.EncodeRecord, 0, len(records))
 	for _, r := range records {
 		if r.inst.ActionName == "transcode_media" && r.inst.Status == store.ActionStatusCompleted {
-			done = append(done, r)
+			recs = append(recs, encodeRecord(r))
 		}
 	}
-	sort.Slice(done, func(i, j int) bool {
-		if done[i].inst.UpdatedAt == done[j].inst.UpdatedAt {
-			return done[i].inst.ID > done[j].inst.ID
-		}
-		return done[i].inst.UpdatedAt > done[j].inst.UpdatedAt
-	})
-	var out []action.EncodeSample
-	for _, r := range done {
-		ms := operationNumber(operationValue(r, "encode_duration_ms"))
-		shape, ok := recordEncodeShape(r)
-		if ms <= 0 || !ok {
-			continue
-		}
-		out = append(out, action.EncodeSample{Worker: shape.worker, Class: shape.class, Family: shape.family, DurationSec: shape.durationSec, EncodeSec: ms / 1000})
-	}
-	return out
+	return action.EncodeSamples(recs)
 }
 
 // queueWaiter is a job in a worker's slot queue with the encode time it will
@@ -175,7 +133,7 @@ func queueWaits(records []operationRecord) map[string]int64 {
 		shape, shaped := recordEncodeShape(r)
 		estimate, estimated := 0.0, false
 		if shaped {
-			estimate, estimated = action.EstimateEncodeSeconds(samples, worker, shape.class, shape.family, shape.durationSec)
+			estimate, estimated = action.EstimateEncodeSeconds(samples, worker, shape.Class, shape.Family, shape.DurationSec)
 		}
 		// A frozen node or a paused job starts nothing on a clock this page
 		// can see: no numbers for that worker.

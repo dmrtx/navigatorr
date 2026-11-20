@@ -426,10 +426,18 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 		clearWaitingForWorker(ec)
 		return StepResult{}, false, safe
 	}
+	condition, reason := q.placer.waitReason(p)
+	if condition == windowWaitCondition {
+		// Only the nodes' windows keep it off every node it could use: it is no
+		// contender for a slot, takes no place in the line and is looked at
+		// again shortly (a window change or a free slot wakes it sooner).
+		delete(ec.State, workerSlotPositionKey)
+		clearWaitingForWorker(ec)
+		return StepResult{Status: StepWaitingExternal, WaitingCondition: condition, WaitingReason: reason}, true, nil
+	}
 	position := ahead + 1
 	ec.State[workerSlotPositionKey] = position
 	markWaitingForWorker(ec)
-	condition, reason := q.placer.waitReason(p)
 	if reason == "" {
 		condition = "worker_busy"
 		reason = fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
@@ -665,14 +673,25 @@ func (e *Engine) withoutHeldItems(batchID string, items []store.TranscodeBatchIt
 		log.Printf("transcode queue: reading the held items of batch %s: %v (scheduling nothing new)", batchID, err)
 		return nil, false
 	}
-	if len(held) == 0 {
+	// A conversion that only a node's availability window keeps waiting is
+	// out of the way in the same manner: it contends for no slot, and the
+	// items behind it go on.
+	windowed, err := e.deps.Store.WindowWaitingBatchItemIDs(batchID)
+	if err != nil {
+		log.Printf("transcode queue: reading the window-waiting items of batch %s: %v (scheduling nothing new)", batchID, err)
+		return nil, false
+	}
+	if len(held) == 0 && len(windowed) == 0 {
 		return items, true
 	}
 	view := make([]store.TranscodeBatchItem, len(items))
 	copy(view, items)
 	for i := range view {
-		if held[view[i].ID] {
+		switch {
+		case held[view[i].ID]:
 			view[i].Status = queueHeldCondition
+		case windowed[view[i].ID]:
+			view[i].Status = windowWaitCondition
 		}
 	}
 	return view, true
