@@ -491,7 +491,7 @@ func TestFailedRefreshDoesNotBlockLazyLoad(t *testing.T) {
 	}
 }
 
-func TestRefreshWithCancelledContextKeepsCache(t *testing.T) {
+func TestRefreshWithCancelledContextDoesNothing(t *testing.T) {
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
