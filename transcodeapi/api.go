@@ -73,6 +73,7 @@ func Routes() []Route {
 		w("PUT", "/drain"),
 		g("/pauses"),
 		g("/pauses/{name}"),
+		g("/node-states"),
 		w("PUT", "/pauses/{name}"),
 		w("DELETE", "/pauses/{name}"),
 		g("/windows"),
