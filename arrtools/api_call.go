@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"bytes"
@@ -29,7 +29,7 @@ const (
 	ContentTypeMultipartForm  = "multipart/form-data"
 )
 
-func registerAPICallTool(s *server.MCPServer, registry *arrservice.Registry, specStore *openapi.Store, maxResponseSizeKB int, allowDestructive bool) {
+func RegisterAPICallTool(s *server.MCPServer, registry *arrservice.Registry, specStore *openapi.Store, maxResponseSizeKB int, allowDestructive bool) {
 	s.AddTool(
 		mcp.NewTool("call_api",
 			mcp.WithDescription("Make an authenticated API call to any configured *arr service. Returns the JSON response. Supports real field projections, snapshot caching, and cursor-based pagination for large collections."),

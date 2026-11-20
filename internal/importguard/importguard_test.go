@@ -185,3 +185,51 @@ func TestNodesAndTheEngineStayApart(t *testing.T) {
 		})
 	}
 }
+
+// TestArrtoolsStaysStateless guards the stateless MCP tools: arrtools must be
+// importable by a separate gateway binary without pulling in the action
+// engine, the maintenance store, the UI, the nodes registry, the transcode
+// stack, the podcast pipeline, the queue or the stateful tools package.
+//
+// config is a known shared dependency of arrservice and openapi, and it
+// still imports the transcode and podcast packages for its settings types.
+// Those edges are exempt until config is split: the walk does not descend
+// below config, and arrtools itself (and everything else it reaches) may not
+// import the banned packages directly.
+func TestArrtoolsStaysStateless(t *testing.T) {
+	banned := func(p string) bool {
+		switch p {
+		case "action", "store", "maintenanceui", "nodes", "internal/nodeswire", "podcast", "queue", "tools", "transcodeapi":
+			return true
+		}
+		return p == "transcode" || strings.HasPrefix(p, "transcode/") || strings.HasPrefix(p, "podcast/")
+	}
+	const root = "arrtools"
+	for _, p := range platforms {
+		t.Run(p[0]+"/"+p[1], func(t *testing.T) {
+			graph := moduleImports(t, p[0], p[1])
+			// A package missing from the graph must fail the test, not pass it empty.
+			if _, ok := graph[root]; !ok {
+				t.Fatalf("root package %q is not in the import graph (%d packages): the guard would check nothing", root, len(graph))
+			}
+			via := map[string]string{root: ""}
+			queue := []string{root}
+			for len(queue) > 0 {
+				pkg := queue[0]
+				queue = queue[1:]
+				if pkg != root && banned(pkg) {
+					t.Errorf("%s must not reach %s: %s", root, pkg, chain(via, pkg))
+				}
+				if pkg == "config" {
+					continue
+				}
+				for _, imp := range graph[pkg] {
+					if _, seen := via[imp]; !seen {
+						via[imp] = pkg
+						queue = append(queue, imp)
+					}
+				}
+			}
+		})
+	}
+}

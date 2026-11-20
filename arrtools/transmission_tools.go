@@ -1,4 +1,4 @@
-package tools
+package arrtools
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func registerTransmissionTools(s *server.MCPServer, client *transmission.Client, allowDestructive bool) {
+func RegisterTransmissionTools(s *server.MCPServer, client *transmission.Client, allowDestructive bool) {
 	// transmission_list_torrents
 	s.AddTool(
 		mcp.NewTool("transmission_list_torrents",
