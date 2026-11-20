@@ -6,8 +6,8 @@
 // the engine (transcode_url). It reads the same config.yaml as the server, plus
 // a "nodes" block and database.nodes_path.
 //
-//	navigatorr-nodes -config config.yaml          serve
-//	navigatorr-nodes check --path nodes.db        inspect a stopped database
+//	navigatorr-nodes [-config config.yaml]                  run the registry
+//	navigatorr-nodes check --path nodes.db [--checkpoint]   inspect a stopped database
 //
 // Every route but /healthz needs the service key (nodes.key_file) as
 // X-Api-Key or Authorization: Bearer.
@@ -53,14 +53,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "check" {
 		os.Exit(runCheck(os.Args[2:], os.Stdout, os.Stderr))
 	}
-	configPath := flag.String("config", "", "path to config.yaml (default: ~/.config/navigatorr/config.yaml)")
-	flag.Parse()
-	if flag.NArg() > 0 {
-		fmt.Fprintf(os.Stderr, "unexpected argument %q\nusage: navigatorr-nodes [-config config.yaml] | navigatorr-nodes check --path nodes.db [--checkpoint]\n", flag.Arg(0))
+	configPath, ok := parseServeArgs(os.Args[1:], os.Stderr)
+	if !ok {
 		os.Exit(2)
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -84,6 +82,22 @@ func main() {
 		os.Exit(1)
 	}
 	internal.Logf("nodes stopped cleanly")
+}
+
+// parseServeArgs reads the flags of the serve mode. It refuses stray
+// positional arguments (a mistyped subcommand must not start the server).
+func parseServeArgs(args []string, stderr io.Writer) (string, bool) {
+	fs := flag.NewFlagSet("navigatorr-nodes", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to config.yaml (default: ~/.config/navigatorr/config.yaml)")
+	if err := fs.Parse(args); err != nil {
+		return "", false
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "unexpected argument %q\nusage: navigatorr-nodes [-config config.yaml] | navigatorr-nodes check --path nodes.db [--checkpoint]\n", fs.Arg(0))
+		return "", false
+	}
+	return *configPath, true
 }
 
 // instance is a configured, opened registry and the handler in front of it.
@@ -250,6 +264,11 @@ func newHTTPServer(h http.Handler) *http.Server {
 // registry, so the database ends without a -wal file and the lock is released.
 func (in *instance) serve(ctx context.Context, ln net.Listener, drain time.Duration) error {
 	srv := newHTTPServer(in.handler)
+	// Every request context derives from base, cancelled once the server is
+	// closed: net/http alone does not cancel a request whose body is unread.
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	srv.BaseContext = func(net.Listener) context.Context { return base }
 	reconCtx, stopRecon := context.WithCancel(context.Background())
 	reconDone := in.svc.Start(reconCtx, 0)
 
@@ -268,9 +287,11 @@ func (in *instance) serve(ctx context.Context, ln net.Listener, drain time.Durat
 		}
 	}
 	_ = srv.Close()
-	// Close cancels the requests still running but does not wait for them;
-	// the database must not close (and the lock must not drop) under one.
-	if !in.inflight.wait(handlerGrace) {
+	cancelBase()
+	// Close does not wait for the requests it cancelled; the database must not
+	// close (and the lock must not drop) under one. A request that reaches the
+	// handler from now on is refused without touching the registry.
+	if !in.inflight.closeAndWait(handlerGrace) {
 		internal.Logf("nodes: handlers still running %s after close; closing the database anyway", handlerGrace)
 	}
 	stopRecon()
@@ -284,9 +305,10 @@ func (in *instance) serve(ctx context.Context, ln net.Listener, drain time.Durat
 // inflight counts the HTTP requests being handled, so serve can wait for the
 // ones srv.Close cancelled before it closes the database.
 type inflight struct {
-	mu   sync.Mutex
-	n    int
-	zero chan struct{} // closed while n == 0
+	mu     sync.Mutex
+	n      int
+	closed bool          // set by closeAndWait: new requests are refused
+	zero   chan struct{} // closed while n == 0
 }
 
 func newInflight() *inflight {
@@ -298,6 +320,11 @@ func newInflight() *inflight {
 func (f *inflight) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
+		if f.closed {
+			f.mu.Unlock()
+			http.Error(w, "shutting down", http.StatusServiceUnavailable)
+			return
+		}
 		if f.n == 0 {
 			f.zero = make(chan struct{})
 		}
@@ -315,9 +342,11 @@ func (f *inflight) wrap(next http.Handler) http.Handler {
 	})
 }
 
-// wait reports whether every request finished within d.
-func (f *inflight) wait(d time.Duration) bool {
+// closeAndWait refuses new requests and reports whether every request in
+// flight finished within d.
+func (f *inflight) closeAndWait(d time.Duration) bool {
 	f.mu.Lock()
+	f.closed = true
 	z := f.zero
 	f.mu.Unlock()
 	select {
@@ -361,7 +390,9 @@ func runCheck(args []string, stdout, stderr io.Writer) int {
 	if rep.Integrity != "" {
 		fmt.Fprintf(stdout, "integrity:     %s\n", rep.Integrity)
 	}
-	if rep.LegacyImportSet {
+	if rep.Integrity != "ok" {
+		// The mark is read only from a database that passed the integrity check.
+	} else if rep.LegacyImportSet {
 		fmt.Fprintf(stdout, "legacy_import: %s\n", rep.LegacyImport)
 	} else {
 		fmt.Fprintf(stdout, "legacy_import: (missing)\n")

@@ -676,9 +676,12 @@ func TestCheckCommand(t *testing.T) {
 	t.Run("wal present", func(t *testing.T) {
 		path := cleanDB(t, true)
 		writeFile(t, filepath.Dir(path), "nodes.db-wal", "")
-		code, _, errs := check("--path", path)
+		code, out, errs := check("--path", path)
 		if code != 1 || !strings.Contains(errs, "-wal") {
 			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if strings.Contains(out, "legacy_import") {
+			t.Errorf("the mark was not read, yet the output reports it:\n%s", out)
 		}
 		if code, out, errs := check("--path", path, "--checkpoint"); code != 0 || !strings.Contains(out, "checkpointed:  true") {
 			t.Fatalf("with --checkpoint: exit %d\n%s\n%s", code, out, errs)
@@ -741,11 +744,8 @@ func TestShutdownWaitsForCancelledHandlersBeforeClosingTheDatabase(t *testing.T)
 	}
 }
 
-func TestInflightWaitTimesOut(t *testing.T) {
+func TestInflightCloseAndWait(t *testing.T) {
 	f := newInflight()
-	if !f.wait(time.Millisecond) {
-		t.Fatal("an idle counter must not wait")
-	}
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	h := f.wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -754,11 +754,37 @@ func TestInflightWaitTimesOut(t *testing.T) {
 	}))
 	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 	<-entered
-	if f.wait(50 * time.Millisecond) {
-		t.Fatal("wait returned true with a request in flight")
+	if f.closeAndWait(50 * time.Millisecond) {
+		t.Fatal("closeAndWait returned true with a request in flight")
+	}
+	// A request that reaches the handler after the close never runs it.
+	late := httptest.NewRecorder()
+	ran := false
+	f.wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { ran = true })).ServeHTTP(late, httptest.NewRequest("GET", "/", nil))
+	if ran || late.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a late request ran=%v code=%d", ran, late.Code)
 	}
 	close(release)
-	if !f.wait(5 * time.Second) {
-		t.Fatal("wait did not see the request finish")
+	if !f.closeAndWait(5 * time.Second) {
+		t.Fatal("closeAndWait did not see the request finish")
+	}
+	if !newInflight().closeAndWait(time.Millisecond) {
+		t.Fatal("an idle counter must not wait")
+	}
+}
+
+func TestServeArgsRefuseStrayArguments(t *testing.T) {
+	var stderr strings.Builder
+	if p, ok := parseServeArgs([]string{"-config", "c.yaml"}, &stderr); !ok || p != "c.yaml" {
+		t.Fatalf("got %q %v", p, ok)
+	}
+	if p, ok := parseServeArgs(nil, &stderr); !ok || p != "" {
+		t.Fatalf("no args: got %q %v", p, ok)
+	}
+	for _, args := range [][]string{{"chek", "--path", "x"}, {"-config", "c.yaml", "serve"}, {"-nope"}} {
+		stderr.Reset()
+		if _, ok := parseServeArgs(args, &stderr); ok {
+			t.Errorf("%v was accepted", args)
+		}
 	}
 }
