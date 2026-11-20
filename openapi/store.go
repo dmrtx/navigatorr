@@ -35,11 +35,14 @@ const (
 	defaultFetchTimeout  = 10 * time.Second
 )
 
-// NewStore creates a new spec store.
+// NewStore creates a new spec store caching under ~/.cache/navigatorr.
 func NewStore(cfg *config.Config) *Store {
 	home, _ := os.UserHomeDir()
-	cacheDir := filepath.Join(home, ".cache", "navigatorr")
+	return NewStoreAt(cfg, filepath.Join(home, ".cache", "navigatorr"))
+}
 
+// NewStoreAt creates a spec store that caches specs in cacheDir.
+func NewStoreAt(cfg *config.Config, cacheDir string) *Store {
 	return &Store{
 		cfg:     cfg,
 		cache:   NewCache(cacheDir),

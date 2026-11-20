@@ -36,6 +36,7 @@ type Config struct {
 	MCP               MCPConfig                `yaml:"mcp"`
 	Web               WebConfig                `yaml:"web"`
 	NASHelper         NASHelperConfig          `yaml:"nas_helper"`
+	Gateway           GatewayConfig            `yaml:"gateway"`
 	Cleanup           CleanupConfig            `yaml:"cleanup"`
 	Builds            BuildsConfig             `yaml:"builds"`
 	MaxResponseSizeKB int                      `yaml:"max_response_size_kb"`
