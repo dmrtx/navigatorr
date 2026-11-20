@@ -152,6 +152,20 @@ func (w WebConfig) ValidateAuth() error {
 type MCPConfig struct {
 	Transport string `yaml:"transport"`
 	Listen    string `yaml:"listen"`
+	// TokenFile, when set, holds the API key every request to /mcp and /mcp/
+	// must carry (X-Api-Key or Authorization: Bearer). It is read once at
+	// start-up; a missing, empty or short key stops the server. Empty keeps
+	// /mcp open as before.
+	TokenFile string `yaml:"token_file"`
+}
+
+// Validate rejects a relative token file so the key cannot depend on the
+// working directory.
+func (c MCPConfig) Validate() error {
+	if c.TokenFile != "" && !filepath.IsAbs(c.TokenFile) {
+		return fmt.Errorf("mcp.token_file must be an absolute path")
+	}
+	return nil
 }
 
 type ConcurrencyConfig struct {
@@ -1090,6 +1104,9 @@ func Load(path string) (*Config, error) {
 	}
 	if err := cfg.Web.ValidateAuth(); err != nil {
 		return nil, err
+	}
+	if err := cfg.MCP.Validate(); err != nil {
+		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
 	if err := cfg.NASHelper.Validate(); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)

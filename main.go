@@ -16,6 +16,7 @@ import (
 	"github.com/jakenesler/navigatorr/arrservice"
 	"github.com/jakenesler/navigatorr/config"
 	"github.com/jakenesler/navigatorr/internal"
+	"github.com/jakenesler/navigatorr/internal/mcpkey"
 	"github.com/jakenesler/navigatorr/internal/nodeswire"
 	"github.com/jakenesler/navigatorr/maintenanceui"
 	"github.com/jakenesler/navigatorr/nodes"
@@ -48,6 +49,19 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+	// Load the /mcp key before anything starts, so a bad key file stops the
+	// server with nothing to clean up.
+	var mcpKey string
+	if cfg.MCP.TokenFile != "" {
+		if transportOpts.Transport != "streamable-http" {
+			internal.Warnf("mcp.token_file is set but the transport is %s; the key only guards the streamable-http endpoint", transportOpts.Transport)
+		}
+		mcpKey, err = mcpkey.Load(cfg.MCP.TokenFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: mcp.token_file: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if cfg.Web.Enabled && transportOpts.Transport != "streamable-http" {
 		fmt.Fprintln(os.Stderr, "error: web.enabled requires the persistent streamable-http transport")
@@ -308,13 +322,14 @@ func main() {
 			server.WithEndpointPath(endpointPath),
 			server.WithStreamableHTTPServer(srv),
 		)
-		mux := http.NewServeMux()
-		mux.Handle(endpointPath, mcpHTTP)
-		mux.Handle(endpointPath+"/", mcpHTTP)
+		var web http.Handler
 		if webUI != nil {
-			mux.Handle("/", webUI.Handler())
+			web = webUI.Handler()
 		}
-		srv.Handler = mux
+		srv.Handler = httpMux(endpointPath, mcpHTTP, mcpKey, web)
+		if mcpKey != "" {
+			internal.Logf("MCP endpoint requires the API key from mcp.token_file")
+		}
 
 		ln, err := net.Listen("tcp", transportOpts.Listen)
 		if err != nil {
@@ -393,4 +408,20 @@ func buildTranscodeWorkers(tc config.TranscodeConfig) (*transcode.WorkerSet, err
 	default:
 		return nil, fmt.Errorf("automatic transcode executor %q is not valid; only \"http\" is supported for automatic execution", tc.Executor)
 	}
+}
+
+// httpMux routes the streamable-http listener: /mcp and everything under
+// /mcp/ go to the MCP handler, behind the API key when key is set; every
+// other path goes to web, when there is one.
+func httpMux(endpointPath string, mcp http.Handler, key string, web http.Handler) *http.ServeMux {
+	if key != "" {
+		mcp = mcpkey.Require(key, mcp)
+	}
+	mux := http.NewServeMux()
+	mux.Handle(endpointPath, mcp)
+	mux.Handle(endpointPath+"/", mcp)
+	if web != nil {
+		mux.Handle("/", web)
+	}
+	return mux
 }
