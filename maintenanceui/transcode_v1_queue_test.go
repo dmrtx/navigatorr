@@ -3,6 +3,7 @@ package maintenanceui
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -237,6 +238,49 @@ func TestTranscodeV1QueueRoutesNeedTheKeyAndAreInTheSpec(t *testing.T) {
 	for _, want := range []string{`"/transcode/v1/queue"`, `/queue/batches/{id}/move`, `queue_held`} {
 		if !strings.Contains(spec, want) {
 			t.Errorf("the served spec lacks %s", want)
+		}
+	}
+}
+
+// "01" and "+1" are the item 1; an id that is not a string is refused for an
+// action or a batch rather than read as one.
+func TestTranscodeV1QueueIdsAreNormalisedAndTyped(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	seedWaiter(t, st, "solo", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/S.mkv", nil)
+	seedOperation(t, st, "batch-q", "transcode_batch", "waiting_external", nil, nil, map[string]any{})
+	for _, k := range []string{"k1", "k2"} {
+		if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-q", ItemKey: k, FilePath: "/media/" + k + ".mkv", Status: "queued"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, _ := st.GetTranscodeBatchItem("batch-q", "k1")
+	second, _ := st.GetTranscodeBatchItem("batch-q", "k2")
+	n1, n2 := strconv.FormatInt(first.ID, 10), strconv.FormatInt(second.ID, 10)
+
+	for _, id := range []string{"0" + n1, "+" + n1, "00" + n1} {
+		code, r := postQ(t, h, "/transcode/v1/queue/items/"+id+"/hold", ``)
+		if code != 200 || r["entry"].(map[string]any)["held"] != true {
+			t.Fatalf("hold on item %q: %d %v", id, code, r)
+		}
+		if code, r := postQ(t, h, "/transcode/v1/queue/items/"+n1+"/release", ``); code != 200 {
+			t.Fatal(code, r)
+		}
+	}
+	// In a body reference, as a string or a number.
+	for _, ref := range []string{`{"kind":"item","id":"+` + n2 + `"}`, `{"kind":"item","id":"0` + n2 + `"}`, `{"kind":"item","id":` + n2 + `}`} {
+		if code, r := postQ(t, h, "/transcode/v1/queue/items/"+n1+"/move", `{"after":`+ref+`}`); code != 200 {
+			t.Fatalf("move after %s: %d %v", ref, code, r)
+		}
+	}
+	for _, body := range []string{
+		`{"after":{"kind":"action","id":5}}`,
+		`{"before":{"kind":"batch","id":7}}`,
+		`{"after":{"kind":"action","id":true}}`,
+		`{"after":{"kind":"batch","id":{"a":1}}}`,
+	} {
+		if code, r := postQ(t, h, "/transcode/v1/queue/actions/solo/move", body); code != 400 || r["code"] != "invalid_request" {
+			t.Errorf("%s: %d %v, want 400 invalid_request", body, code, r)
 		}
 	}
 }

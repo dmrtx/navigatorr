@@ -54,6 +54,8 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
+	// afterQueueRead, set by tests, runs between the reads of a queue view.
+	afterQueueRead func()
 	// lifecycle is the service's context, known once StartReconciler runs: work
 	// that outlives the request that asked for it still ends with the service.
 	lifecycle atomic.Pointer[context.Context]

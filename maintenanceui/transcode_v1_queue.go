@@ -40,21 +40,27 @@ func (q queueRefJSON) toRef() (action.QueueRef, string) {
 		return action.QueueRef{}, "id is required"
 	}
 	var id string
-	if raw[0] == '"' {
+	switch {
+	case raw[0] == '"':
 		if err := json.Unmarshal(raw, &id); err != nil {
 			return action.QueueRef{}, "id must be a string or a number"
 		}
-	} else {
+	case q.Kind == action.QueueKindItem:
 		id = string(raw)
+	default:
+		return action.QueueRef{}, "the id of an action or a batch must be a string"
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return action.QueueRef{}, "id is required"
 	}
 	if q.Kind == action.QueueKindItem {
-		if n, err := strconv.ParseInt(id, 10, 64); err != nil || n <= 0 {
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || n <= 0 {
 			return action.QueueRef{}, "the id of an item is its number"
 		}
+		// "01" and "+1" are the item 1.
+		id = strconv.FormatInt(n, 10)
 	}
 	return action.QueueRef{Kind: q.Kind, ID: id}, ""
 }

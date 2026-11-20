@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -92,22 +93,60 @@ type QueueResult struct {
 	Batch    *QueueBatch // set for a batch
 }
 
+// queueViewReads is how many times the queue is read for one consistent view.
+const queueViewReads = 3
+
+// staleQueueErr is the refusal for a write the store found stale.
+func staleQueueErr(err error) error {
+	var stale *store.StaleQueueRevisionError
+	if errors.As(err, &stale) {
+		return queueErr(QueueConflict, "%s", stale.Error())
+	}
+	return err
+}
+
 // TranscodeQueueView lists the queue in order. It reads only.
 func (e *Engine) TranscodeQueueView() (QueueView, error) {
 	if e.deps.Store == nil {
 		return QueueView{}, fmt.Errorf("the queue needs the store")
 	}
-	rev, err := e.deps.Store.QueueRevision()
-	if err != nil {
-		return QueueView{}, err
+	// The revision, the waiters and the items are read apart: a write between
+	// the reads would show its entries under the old revision. Read again until
+	// the revision is the same before and after; if writes keep coming, answer
+	// with the older revision, which a later change refuses as stale.
+	var rev, first int64
+	stable := false
+	var waiters []store.TranscodeQueueWaiterRow
+	var items []store.QueuedBatchItemRow
+	for attempt := 0; attempt < queueViewReads; attempt++ {
+		before, err := e.deps.Store.QueueRevision()
+		if err != nil {
+			return QueueView{}, err
+		}
+		if waiters, err = e.deps.Store.ListTranscodeQueueWaitersWithPaused(); err != nil {
+			return QueueView{}, err
+		}
+		if items, err = e.deps.Store.ListQueuedBatchItemsWithPaused(); err != nil {
+			return QueueView{}, err
+		}
+		if e.afterQueueRead != nil {
+			e.afterQueueRead()
+		}
+		after, err := e.deps.Store.QueueRevision()
+		if err != nil {
+			return QueueView{}, err
+		}
+		if attempt == 0 {
+			first = before
+		}
+		rev = before
+		if after == before {
+			stable = true
+			break
+		}
 	}
-	waiters, err := e.deps.Store.ListTranscodeQueueWaitersWithPaused()
-	if err != nil {
-		return QueueView{}, err
-	}
-	items, err := e.deps.Store.ListQueuedBatchItemsWithPaused()
-	if err != nil {
-		return QueueView{}, err
+	if !stable {
+		rev = first
 	}
 	var entries []QueueEntry
 	for _, w := range waiters {
@@ -304,41 +343,26 @@ func (e *Engine) setQueueHold(ctx context.Context, ref QueueRef, revision *int64
 		n, _ := strconv.ParseInt(ref.ID, 10, 64)
 		w.ItemHeld = map[int64]bool{n: hold}
 	}
+	w.ExpectRevision = revision
 	if _, err := e.deps.Store.ApplyQueueWrite(w); err != nil {
-		return QueueResult{}, err
+		return QueueResult{}, staleQueueErr(err)
 	}
-	if !hold {
-		e.WakeReconciler()
-	}
+	// A hold frees the slot its conversion was next in line for, a release
+	// gives it back: either way the others look again now.
+	e.WakeReconciler()
 	return e.queueResult(ref)
 }
 
 // setBatchHold holds a batch by pausing it and releases it by resuming it.
 func (e *Engine) setBatchHold(ctx context.Context, ref QueueRef, revision *int64, hold bool) (QueueResult, error) {
-	v, err := e.TranscodeQueueView()
+	// Under bindMu the checks and the revision bump are one step against the
+	// other queue changes. The bump comes before the pause or resume, which
+	// runs the batch's step: that assigns workers under bindMu itself.
+	needed, err := e.bumpForBatchHold(ref, revision, hold)
 	if err != nil {
 		return QueueResult{}, err
 	}
-	if err := checkQueueRevision(v, revision); err != nil {
-		return QueueResult{}, err
-	}
-	inst, err := e.deps.Store.GetActionInstanceIfExists(ref.ID)
-	if err != nil {
-		return QueueResult{}, err
-	}
-	if inst == nil || inst.ActionName != "transcode_batch" {
-		return QueueResult{}, queueErr(QueueNotFound, "no such transcode batch")
-	}
-	switch inst.Status {
-	case StatusCompleted, StatusFailed, StatusCancelled:
-		return QueueResult{}, queueErr(QueueConflict, "this batch has finished (its status is %s); there is nothing to hold or release", inst.Status)
-	}
-	var state map[string]any
-	_ = json.Unmarshal([]byte(inst.StateJSON), &state)
-	if getBool(state, "cancel_requested") {
-		return QueueResult{}, queueErr(QueueConflict, "this batch is being cancelled; it cannot be held or released")
-	}
-	if getBool(state, "paused") != hold {
+	if needed {
 		decision := "resume"
 		if hold {
 			decision = "pause"
@@ -351,6 +375,44 @@ func (e *Engine) setBatchHold(ctx context.Context, ref QueueRef, revision *int64
 		}
 	}
 	return e.queueResult(ref)
+}
+
+// bumpForBatchHold checks that the batch can be held or released and that the
+// caller's revision is current, and moves the revision when the batch has to
+// change. It reports whether the batch has to change.
+func (e *Engine) bumpForBatchHold(ref QueueRef, revision *int64, hold bool) (bool, error) {
+	e.bindMu.Lock()
+	defer e.bindMu.Unlock()
+	v, err := e.TranscodeQueueView()
+	if err != nil {
+		return false, err
+	}
+	if err := checkQueueRevision(v, revision); err != nil {
+		return false, err
+	}
+	inst, err := e.deps.Store.GetActionInstanceIfExists(ref.ID)
+	if err != nil {
+		return false, err
+	}
+	if inst == nil || inst.ActionName != "transcode_batch" {
+		return false, queueErr(QueueNotFound, "no such transcode batch")
+	}
+	switch inst.Status {
+	case StatusCompleted, StatusFailed, StatusCancelled:
+		return false, queueErr(QueueConflict, "this batch has finished (its status is %s); there is nothing to hold or release", inst.Status)
+	}
+	var state map[string]any
+	_ = json.Unmarshal([]byte(inst.StateJSON), &state)
+	if getBool(state, "cancel_requested") {
+		return false, queueErr(QueueConflict, "this batch is being cancelled; it cannot be held or released")
+	}
+	if getBool(state, "paused") == hold {
+		return false, nil
+	}
+	if _, err := e.deps.Store.ApplyQueueWrite(store.QueueWrite{ExpectRevision: revision}); err != nil {
+		return false, staleQueueErr(err)
+	}
+	return true, nil
 }
 
 // QueueMove says where to put a subject: first, before a reference or after
@@ -493,21 +555,33 @@ func (e *Engine) MoveQueued(ctx context.Context, ref QueueRef, to QueueMove, rev
 			if en.Kind != QueueKindAction {
 				continue
 			}
+			// Every child needs its own place in the block, so each must be
+			// tied to its item: guessing a place would give two children the
+			// same key.
 			inst, err := e.deps.Store.GetActionInstanceIfExists(en.ID)
-			if err != nil || inst == nil {
-				continue
+			if err != nil {
+				return QueueResult{}, err
+			}
+			if inst == nil {
+				return QueueResult{}, queueErr(QueueConflict, "the batch cannot be moved: conversion %s is gone; read the queue again", en.ID)
 			}
 			var inputs map[string]any
 			_ = json.Unmarshal([]byte(inst.InputsJSON), &inputs)
-			var seq int64
-			if item, err := e.batchChildItem(en.ID, inputs); err == nil && item != nil {
-				seq = item.ID
+			item, err := e.batchChildItem(en.ID, inputs)
+			if err != nil {
+				return QueueResult{}, err
 			}
-			w.ActionOrder[en.ID] = batchBlockKey(key, seq)
+			if item == nil {
+				return QueueResult{}, queueErr(QueueConflict, "the batch cannot be moved yet: conversion %s is not tied to its batch item", en.ID)
+			}
+			w.ActionOrder[en.ID] = batchBlockKey(key, item.ID)
 		}
 	}
+	w.ExpectRevision = revision
 	if _, err := e.deps.Store.ApplyQueueWrite(w); err != nil {
-		return QueueResult{}, err
+		return QueueResult{}, staleQueueErr(err)
 	}
+	// A move can put the subject, or free the place of another, at the head.
+	e.WakeReconciler()
 	return e.queueResult(ref)
 }

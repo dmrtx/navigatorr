@@ -886,21 +886,12 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
-		// Find next batch of items (both queued and waiting_for_slot are candidates)
-		// A conversion the operator holds keeps its place and starts nothing: it
-		// is left out of what the batch schedules and of what the other items
-		// wait for, and the batch goes on with the rest.
-		view := e.withoutHeldItems(ec.InstanceID, items)
-		var pendingIndices []int
-		for i := range view {
-			if view[i].Status == "queued" || view[i].Status == "waiting_for_slot" {
-				pendingIndices = append(pendingIndices, i)
-			}
+		// Find next batch of items (both queued and waiting_for_slot are
+		// candidates), in queue order; none when the holds cannot be read.
+		pendingIndices, readable := e.batchDispatchCandidates(ctx, ec.InstanceID, items)
+		if !readable {
+			break
 		}
-		pendingIndices = e.slotFairPending(ctx, ec.InstanceID, view, pendingIndices)
-		// New children only for the free slots older work does not wait for
-		// (see transcode_queue.go).
-		pendingIndices = queueOrderPending(view, pendingIndices, e.batchQueueAllowance(ctx, ec.InstanceID))
 
 		if len(pendingIndices) == 0 {
 			break

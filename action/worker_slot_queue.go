@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"math"
 	"math/rand/v2"
 	"sort"
 	"time"
@@ -270,21 +269,29 @@ func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []st
 	if len(pending) == 0 {
 		return pending
 	}
+	// Candidates go in queue order: an item the operator moved ahead of an
+	// earlier one is ahead of it here too, and "later than the first waiting
+	// child" is judged by queue key, not by item id.
+	keys := e.batchItemKeys(batchID, items)
+	sortByQueueKey(items, pending, keys)
 	hasQueued := false
-	firstWaiting := int64(math.MaxInt64)
+	hasWaiting := false
+	firstWaiting := ""
 	for _, it := range items {
 		switch it.Status {
 		case "queued":
 			hasQueued = true
 		case "waiting_for_slot":
-			firstWaiting = min(firstWaiting, it.ID)
+			if k := keys[it.ID]; !hasWaiting || k < firstWaiting {
+				hasWaiting, firstWaiting = true, k
+			}
 		}
 	}
 	foreign := hasQueued && e.foreignSlotWaiter(batchID)
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if it.Status == "queued" && (foreign || it.ID > firstWaiting) {
+		if it.Status == "queued" && (foreign || (hasWaiting && keys[it.ID] > firstWaiting)) {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {

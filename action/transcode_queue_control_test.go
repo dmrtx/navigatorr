@@ -422,7 +422,7 @@ func TestHeldItemsAreLeftOutOfTheFanOut(t *testing.T) {
 		}
 	}
 	items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
-	view := e.withoutHeldItems("batch-1", items)
+	view, _ := e.withoutHeldItems("batch-1", items)
 	if view[0].Status != "queue_held" || view[1].Status != "queue_held" || view[2].Status != "queued" {
 		t.Fatalf("view: %s %s %s", view[0].Status, view[1].Status, view[2].Status)
 	}
@@ -437,7 +437,7 @@ func TestHeldItemsAreLeftOutOfTheFanOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	items, _ = e.deps.Store.ListTranscodeBatchItems("batch-1")
-	view = e.withoutHeldItems("batch-1", items)
+	view, _ = e.withoutHeldItems("batch-1", items)
 	if view[2].Status != "queue_held" {
 		t.Fatalf("the held child's item is %s", view[2].Status)
 	}

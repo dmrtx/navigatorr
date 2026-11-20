@@ -86,6 +86,19 @@ type QueueWrite struct {
 	ItemOrder   map[int64]string
 	// ClearItemOrdersOf clears the order of every item of these batches.
 	ClearItemOrdersOf []string
+	// ExpectRevision, when set, is the revision the change was decided on: the
+	// write is refused with a StaleQueueRevisionError if the queue moved since.
+	ExpectRevision *int64
+}
+
+// StaleQueueRevisionError is a write refused because the queue's revision is
+// not the one the change was decided on.
+type StaleQueueRevisionError struct {
+	Want, Have int64
+}
+
+func (e *StaleQueueRevisionError) Error() string {
+	return fmt.Sprintf("the queue changed since it was read (queue_revision %d, now %d); read it again", e.Want, e.Have)
 }
 
 // ApplyQueueWrite applies w in one transaction and returns the new revision.
@@ -97,6 +110,15 @@ func (s *Store) ApplyQueueWrite(w QueueWrite) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if w.ExpectRevision != nil {
+		var have int64
+		if err := tx.QueryRow(`SELECT revision FROM transcode_queue_revision WHERE id = 1`).Scan(&have); err != nil {
+			return 0, err
+		}
+		if have != *w.ExpectRevision {
+			return 0, &StaleQueueRevisionError{Want: *w.ExpectRevision, Have: have}
+		}
+	}
 	now := nowStr()
 	for id, held := range w.ActionHeld {
 		if _, err := tx.Exec(`INSERT INTO transcode_queue_marks (kind, id, held, queue_order, updated_at) VALUES ('action', ?, ?, '', ?)
@@ -152,13 +174,14 @@ func b2i(b bool) int {
 }
 
 // HeldBatchItemIDs are the items of a batch the operator holds: a queued item
-// held itself, or an item whose child conversion is held.
+// held itself (its own hold ends once it has a child: the child's mark is the
+// hold then), or an item whose child conversion is held.
 func (s *Store) HeldBatchItemIDs(batchID string) (map[int64]bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT i.id FROM transcode_batch_items i
 		WHERE i.batch_id = ? AND i.status IN ('queued', 'waiting_for_slot')
-		AND (i.queue_held = 1 OR EXISTS (SELECT 1 FROM transcode_queue_marks m
+		AND ((i.queue_held = 1 AND i.status = 'queued' AND COALESCE(i.child_action_id, '') = '') OR EXISTS (SELECT 1 FROM transcode_queue_marks m
 			WHERE m.kind = 'action' AND m.id = i.child_action_id AND m.held = 1))`, batchID)
 	if err != nil {
 		return nil, err
