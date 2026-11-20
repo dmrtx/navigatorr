@@ -63,3 +63,41 @@ func TestFetchLoopbackSpecSkipsDiskCache(t *testing.T) {
 		t.Fatalf("cache file was rewritten: %q, %v", got, err)
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A remote spec keeps the disk cache: the first fetch stores it, the second is
+// served from disk without a request. A loopback spec leaves no file behind.
+func TestFetchRemoteSpecUsesDiskCache(t *testing.T) {
+	var calls atomic.Int32
+	orig := fetchClient.Transport
+	fetchClient.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		rec := httptest.NewRecorder()
+		rec.WriteString(`{"openapi":"3.0.0"}`)
+		return rec.Result(), nil
+	})
+	t.Cleanup(func() { fetchClient.Transport = orig })
+
+	dir := t.TempDir()
+	c := NewCache(dir)
+	const remote = "https://specs.example.com/openapi.json"
+	for i := 0; i < 2; i++ {
+		if data, err := Fetch(context.Background(), remote, c); err != nil || string(data) != `{"openapi":"3.0.0"}` {
+			t.Fatalf("fetch %d: %q, %v", i, data, err)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("remote spec requested %d times, want 1 (second from cache)", n)
+	}
+
+	const loopback = "http://127.0.0.1:8098/nodes/v1/openapi.json"
+	if _, err := Fetch(context.Background(), loopback, c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(c.cacheFile(loopback)); !os.IsNotExist(err) {
+		t.Fatalf("loopback spec was written to the cache (stat err %v)", err)
+	}
+}
