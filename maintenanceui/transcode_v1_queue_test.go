@@ -289,6 +289,11 @@ func TestTranscodeV1QueueIdsAreNormalisedAndTyped(t *testing.T) {
 func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
+	// A node nobody has asked yet is unknown, whatever the queue holds.
+	if _, un := get(t, h, "/transcode/v1/queue/next", keyHdr()); un["nodes"].([]any)[0].(map[string]any)["why_none"].(map[string]any)["code"] != "node_unknown" {
+		t.Fatalf("a cold node: %v", un)
+	}
+	s.engine.WarmWorkerReports(context.Background())
 	// With nothing waiting every node says so.
 	code, empty := get(t, h, "/transcode/v1/queue/next", keyHdr())
 	if code != 200 || empty["queue_revision"] == nil {
@@ -348,7 +353,7 @@ func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
 func TestTranscodeV1QueueNextNamesWhatStartsAndTheItem(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
-	s.engine.WorkerObservation(context.Background())
+	s.engine.WarmWorkerReports(context.Background())
 	seedWaiter(t, st, "c-held", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
 	seedWaiter(t, st, "c-go", "1|2026-01-01T00:00:02Z|g|00000000000000000002", "/media/Example Show S01E02.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
 	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-held/hold", `{}`); c != 200 {
@@ -379,7 +384,7 @@ func TestTranscodeV1QueueNextNamesWhatStartsAndTheItem(t *testing.T) {
 func TestTranscodeV1QueueNextNamesABatchItem(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
-	s.engine.WorkerObservation(context.Background())
+	s.engine.WarmWorkerReports(context.Background())
 	seedOperation(t, st, "batch-q", "transcode_batch", "waiting_external", nil, nil, map[string]any{})
 	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-q", ItemKey: "k1", FilePath: "/media/Example Show S01E03.mkv", Status: "queued"}); err != nil {
 		t.Fatal(err)
@@ -400,7 +405,7 @@ func TestTranscodeV1QueueNextNamesABatchItem(t *testing.T) {
 func TestTranscodeV1QueueNextWhyNoneSaysAllHeld(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
-	s.engine.WorkerObservation(context.Background())
+	s.engine.WarmWorkerReports(context.Background())
 	seedWaiter(t, st, "c-a", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
 	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-a/hold", `{}`); c != 200 {
 		t.Fatal(c, out)

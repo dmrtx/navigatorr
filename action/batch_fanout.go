@@ -143,7 +143,7 @@ func (e *Engine) workerVideoPool(ctx context.Context, w transcode.NamedWorker) i
 	if isPassive(ctx) {
 		return st.pool.video
 	}
-	now := time.Now()
+	now := e.now()
 	if !st.pool.at.IsZero() && now.Sub(st.pool.at) < workerPoolTTL {
 		return st.pool.video
 	}

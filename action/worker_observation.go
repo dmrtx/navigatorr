@@ -127,7 +127,7 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 		}
 	}
 	defer st.obsMu.Unlock()
-	now := time.Now().UTC()
+	now := e.now()
 	if isPassive(ctx) {
 		if st.obs.CheckedAt.IsZero() {
 			return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, Name: w.Name, Podcast: w.Podcast, Configured: true, Message: "Not observed yet."}
@@ -182,7 +182,7 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 	if out.Health == "degraded" {
 		out.Message = "Worker reachable; scheduler is degraded. See sweep diagnostics."
 	}
-	out.CheckedAt = time.Now().UTC()
+	out.CheckedAt = e.now()
 	st.obs = out
 	st.setLeases(out.Leases)
 	if out.Reachable {

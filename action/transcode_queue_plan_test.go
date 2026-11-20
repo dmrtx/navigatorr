@@ -513,16 +513,6 @@ func mustWorkerSet(t *testing.T, workers ...transcode.NamedWorker) *transcode.Wo
 // state: each scenario is planned, then every waiter takes its turn through
 // the engine's own step path in queue order.
 func TestQueueNextAgreesWithDispatch(t *testing.T) {
-	twoSlotM4 := func(t *testing.T, m4, m1 transcode.Executor) (*Engine, *placementClock) {
-		set := mustWorkerSet(t,
-			transcode.NamedWorker{Name: "m4", Executor: m4, MaxParallelJobs: 2, PublishPolicy: transcode.PublishPolicyOnApproval},
-			transcode.NamedWorker{Name: "m1", Executor: m1, MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval, Podcast: true})
-		e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
-		clock := &placementClock{}
-		e.deps.Now = clock.now
-		e.windowSweepInline = true
-		return e, clock
-	}
 	scenarios := []struct {
 		name  string
 		build func(t *testing.T) (*Engine, []string)
@@ -700,7 +690,7 @@ func TestQueueNextColdReadDoesNotProbe(t *testing.T) {
 	// A report that is too old is not spoken for either.
 	st := e.workerStateFor("m4")
 	st.obsMu.Lock()
-	st.obs.CheckedAt = time.Now().Add(-10 * time.Minute)
+	st.obs.CheckedAt = e.now().Add(-10 * time.Minute)
 	st.obsMu.Unlock()
 	plan, _ = e.QueueNext(context.Background())
 	if n := planNode(t, plan, "m4"); n.State != NodeUnknown {
@@ -729,13 +719,26 @@ func TestQueueNextNodeOnHoldByItsOwnReport(t *testing.T) {
 	}
 }
 
-// The reasons print the need of the node they judge.
+// The reasons are the verdict and the need of the node they judge: m4 does not
+// retain candidates, so it is judged on disk alone; m1 does, so it is judged on
+// its approval budget first.
 func TestQueueNextRoomReasonUsesTheNodesOwnNeed(t *testing.T) {
-	e, _ := placementEngine(t, diskNode(500*gib, 20*gib, 60*gib), diskNode(4000*gib, 20*gib, 900*gib))
-	sizedWaiter(t, e, "w", time.Minute, 120*gib, nil)
-	s := wantSkip(t, planNode(t, nextPlan(t, e), "m4"), "w", ReasonNoDiskRoom)
-	if !strings.Contains(s.Text, "needs") || !strings.Contains(s.Text, "GB") {
-		t.Fatalf("text: %q", s.Text)
+	m4 := diskNode(1000*gib, 20*gib, 60*gib)
+	m1 := newRoomReporter(100*gib, 10*gib)
+	m1.disk, m1.floor, m1.diskRoom = 4000*gib, 20*gib, 900*gib
+	set := mustWorkerSet(t,
+		transcode.NamedWorker{Name: "m4", Executor: m4, MaxParallelJobs: 1, PublishPolicy: ""},
+		transcode.NamedWorker{Name: "m1", Executor: m1, MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval, Podcast: true})
+	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
+	sizedWaiter(t, e, "w", time.Minute, 100*gib, nil)
+	plan := nextPlan(t, e)
+	s4 := wantSkip(t, planNode(t, plan, "m4"), "w", ReasonNoDiskRoom)
+	if !strings.Contains(s4.Text, "64.4 GB") || !strings.Contains(s4.Text, "needs 161.1 GB") {
+		t.Fatalf("m4: %q", s4.Text)
+	}
+	s1 := wantSkip(t, planNode(t, plan, "m1"), "w", ReasonApprovalRoom)
+	if !strings.Contains(s1.Text, "10.7 GB") || !strings.Contains(s1.Text, "needs 53.7 GB") {
+		t.Fatalf("m1: %q", s1.Text)
 	}
 }
 
@@ -861,4 +864,235 @@ func TestQueueNextAgreesWithBatchDispatchForItems(t *testing.T) {
 			t.Fatalf("nothing should start: %v", plan.started)
 		}
 	})
+}
+
+func seedBatchItems(t *testing.T, e *Engine, id string, paths ...string) []store.TranscodeBatchItem {
+	t.Helper()
+	seedActionInstance(t, e.deps.Store, id, "transcode_batch", StatusRunning, 0, "", map[string]any{}, map[string]any{})
+	for i, p := range paths {
+		if err := e.deps.Store.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: id, ItemKey: "i" + string(rune('1'+i)), FilePath: p, Status: "queued"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := e.deps.Store.ListTranscodeBatchItems(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return items
+}
+
+func dispatchStartsItems(t *testing.T, e *Engine, batch string) map[int64]bool {
+	t.Helper()
+	items, err := e.deps.Store.ListTranscodeBatchItems(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, ok := e.batchDispatchCandidates(context.Background(), batch, items)
+	if !ok {
+		t.Fatal("the batch could not read its queue")
+	}
+	out := map[int64]bool{}
+	for _, i := range pending {
+		if items[i].Status == "queued" {
+			out[items[i].ID] = true
+		}
+	}
+	return out
+}
+
+func singleNodeEngine(t *testing.T) (*Engine, *placementClock) {
+	t.Helper()
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "m4", Executor: diskNode(1000*gib, 10*gib, 500*gib), MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
+	clock := &placementClock{}
+	e.deps.Now = clock.now
+	return e, clock
+}
+
+// T1: a single node is judged by its report like any other: dispatch needs no
+// report to send work to it, but the plan has nothing else to speak from.
+func TestQueueNextSingleNodeUnknownWithoutARecentReport(t *testing.T) {
+	e, clock := singleNodeEngine(t)
+	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	n := planNode(t, mustPlan(t, e), "m4")
+	if n.State != NodeUnknown || n.Next != nil || n.WhyNone.Code != ReasonNodeUnknown {
+		t.Fatalf("never reported: %+v", n)
+	}
+	warm(e)
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeReady || nextID(n) != "a" {
+		t.Fatalf("reported: %+v", n)
+	}
+	clock.advance(3 * time.Minute)
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown {
+		t.Fatalf("an old report: %+v", n)
+	}
+}
+
+func mustPlan(t *testing.T, e *Engine) QueuePlan {
+	t.Helper()
+	plan, err := e.QueueNext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+// T3: what the node is wins over an empty queue.
+func TestQueueNextNodeStateWinsOverAnEmptyQueue(t *testing.T) {
+	e, _ := openEngine(t)
+	for _, n := range mustPlan(t, e).Nodes {
+		if n.WhyNone.Code != ReasonNodeUnknown {
+			t.Fatalf("cold %s: %+v", n.Worker, n.WhyNone)
+		}
+	}
+	warm(e)
+	if _, err := e.SetNodePause(context.Background(), "m4", store.WorkerPauseGraceful); err != nil {
+		t.Fatal(err)
+	}
+	plan := mustPlan(t, e)
+	if n := planNode(t, plan, "m4"); n.State != NodePaused || n.WhyNone.Code != ReasonNodePaused {
+		t.Fatalf("paused: %+v", n)
+	}
+	if n := planNode(t, plan, "m1"); n.WhyNone.Code != ReasonQueueEmpty {
+		t.Fatalf("idle: %+v", n)
+	}
+}
+
+// N1: the age of the pool counts only where the pool is read. A node on hold
+// by its own report keeps that, however old its pool is.
+func TestQueueNextOnHoldNodeIsNotUnknownForItsPool(t *testing.T) {
+	m4 := diskNode(1000*gib, 10*gib, 500*gib)
+	m4.hold = "paused"
+	e, clock := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
+	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	// Only the report is read; the pool never is.
+	e.WorkerObservation(context.Background())
+	plan := mustPlan(t, e)
+	if n := planNode(t, plan, "m4"); n.State != NodePaused || n.WhyNone.Code != ReasonNodeOnHold {
+		t.Fatalf("m4: %+v", n)
+	}
+	// The other node's pool was never read: unknown, not offline or ready.
+	if n := planNode(t, plan, "m1"); n.State != NodeUnknown {
+		t.Fatalf("m1: %+v", n)
+	}
+	_ = clock
+}
+
+// N2: an operator hold says held even when the waiter is also stale.
+func TestQueueNextHeldStaleWaiterSaysHeld(t *testing.T) {
+	e, raw := faultEngine(t)
+	sizedWaiter(t, e, "old", 50*time.Minute, 10*gib, nil)
+	backdate(t, raw, "old", 20*time.Minute)
+	if _, err := e.HoldQueued(context.Background(), act("old"), nil); err != nil {
+		t.Fatal(err)
+	}
+	wantSkip(t, planNode(t, nextPlan(t, e), "m4"), "old", ReasonHeld)
+}
+
+// N3: the waiters are read once per plan, so every batch is judged on one
+// snapshot.
+func TestQueueNextReadsTheSlotWaitersOnce(t *testing.T) {
+	e, raw := faultEngine(t)
+	ticketWaiter(t, e, "other", "m1", 5*time.Hour)
+	seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+	seedBatchItems(t, e, "batch-2", "/x/Example Show S02E01.mkv")
+	g := planGates{e: e, byBatch: map[string]*planGate{}}
+	items1, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+	items2, _ := e.deps.Store.ListTranscodeBatchItems("batch-2")
+	k1, _ := e.batchItemKeys("batch-1", items1)
+	k2, _ := e.batchItemKeys("batch-2", items2)
+	if !g.gated("batch-1", k1[items1[0].ID], nil) {
+		t.Fatal("batch-1 should be held behind the other waiter")
+	}
+	// The waiter goes away; the plan in progress keeps its snapshot.
+	if _, err := raw.Exec(`DELETE FROM action_instances WHERE id = 'other'`); err != nil {
+		t.Fatal(err)
+	}
+	if !g.gated("batch-2", k2[items2[0].ID], nil) {
+		t.Fatal("batch-2 was judged on a newer read")
+	}
+}
+
+// N4: a node that reports it is on hold is never planned a queued item.
+func TestQueueNextOnHoldNodeTakesNoQueuedItem(t *testing.T) {
+	m4 := diskNode(1000*gib, 10*gib, 500*gib)
+	m4.hold = "paused"
+	e, _ := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
+	busy(t, e, "run-m1", "m1")
+	seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+	plan := nextPlan(t, e)
+	if len(plan.started) != 0 {
+		t.Fatalf("the item was planned onto a node that is on hold: %v", plan.started)
+	}
+	if n := planNode(t, plan, "m4"); n.State != NodePaused || n.Next != nil {
+		t.Fatalf("m4: %+v", n)
+	}
+}
+
+// N7: a conversion that starts earlier in the walk ends its batch's wait, so
+// the queued item behind it takes the second free slot.
+func TestQueueNextStartedChildUnblocksTheItemBehindIt(t *testing.T) {
+	e, _ := twoSlotM4(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	items := seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv", "/x/Example Show S01E02.mkv")
+	waiter(t, e, "child-1", 30*time.Minute, map[string]any{"parent_action_id": "batch-1"}, map[string]any{SubmittedSourceBytesKey: 10 * gib})
+	first := items[0]
+	first.Status, first.ChildActionID = "waiting_for_slot", "child-1"
+	if err := e.deps.Store.UpdateTranscodeBatchItem(first); err != nil {
+		t.Fatal(err)
+	}
+	plan := nextPlan(t, e)
+	itemKey := QueueKindItem + ":" + strconv.FormatInt(items[1].ID, 10)
+	if plan.started["action:child-1"] == "" || plan.started[itemKey] == "" {
+		t.Fatalf("both should start: %v", plan.started)
+	}
+	// Dispatch: the child takes its turn, the batch sees the item running, and
+	// the second item may then go.
+	if w, _, _ := turn(t, e, "child-1"); w == "" {
+		t.Fatal("the child did not start")
+	}
+	first.Status = "running"
+	if err := e.deps.Store.UpdateTranscodeBatchItem(first); err != nil {
+		t.Fatal(err)
+	}
+	if !dispatchStartsItems(t, e, "batch-1")[items[1].ID] {
+		t.Fatal("dispatch does not start the second item")
+	}
+}
+
+// T2: a stale child of the batch still keeps the items behind it waiting, in
+// dispatch (which counts every waiting_for_slot item) and in the plan.
+func TestQueueNextStaleChildGatesLikeDispatch(t *testing.T) {
+	e, raw := faultEngine(t)
+	items := seedBatchItems(t, e, "batch-1", "/x/Example Show S01E01.mkv", "/x/Example Show S01E02.mkv")
+	waiter(t, e, "child-1", 30*time.Minute, map[string]any{"parent_action_id": "batch-1"}, map[string]any{SubmittedSourceBytesKey: 10 * gib})
+	backdate(t, raw, "child-1", 20*time.Minute)
+	first := items[0]
+	first.Status, first.ChildActionID = "waiting_for_slot", "child-1"
+	if err := e.deps.Store.UpdateTranscodeBatchItem(first); err != nil {
+		t.Fatal(err)
+	}
+	plan := nextPlan(t, e)
+	_, started := plan.started[QueueKindItem+":"+strconv.FormatInt(items[1].ID, 10)]
+	if started != dispatchStartsItems(t, e, "batch-1")[items[1].ID] {
+		t.Fatalf("plan %v, dispatch %v", started, dispatchStartsItems(t, e, "batch-1"))
+	}
+	if started {
+		t.Fatal("both gate in dispatch: the item should wait")
+	}
+}
+
+// twoSlotM4 is m4 with two video slots and m1 with one.
+func twoSlotM4(t *testing.T, m4, m1 transcode.Executor) (*Engine, *placementClock) {
+	t.Helper()
+	set := mustWorkerSet(t,
+		transcode.NamedWorker{Name: "m4", Executor: m4, MaxParallelJobs: 2, PublishPolicy: transcode.PublishPolicyOnApproval},
+		transcode.NamedWorker{Name: "m1", Executor: m1, MaxParallelJobs: 1, PublishPolicy: transcode.PublishPolicyOnApproval, Podcast: true})
+	e := NewEngine(EngineDeps{Store: setupTestStore(t), Config: &config.Config{}, Workers: set})
+	clock := &placementClock{}
+	e.deps.Now = clock.now
+	e.windowSweepInline = true
+	return e, clock
 }

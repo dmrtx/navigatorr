@@ -247,23 +247,44 @@ func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) 
 	return keys, ok
 }
 
-// slotWaiterKey is a waiter of another batch and its place in the queue.
-type slotWaiterKey struct{ id, key string }
+// slotWaiterKey is a waiter for a slot, the batch it belongs to ("" for none)
+// and its place in the queue.
+type slotWaiterKey struct{ id, key, parentID string }
 
 // foreignSlotWaiters is foreignSlotWaiterKeys with the id of each waiter.
 func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok bool) {
+	all, ok := e.slotWaitersWithKeys()
+	if !ok {
+		log.Printf("worker slot queue: reading the waiters for batch %s failed (scheduling nothing new)", batchID)
+		return nil, false
+	}
+	return foreignOf(all, batchID), true
+}
+
+// foreignOf are the waiters that do not belong to batchID.
+func foreignOf(all []slotWaiterKey, batchID string) []slotWaiterKey {
+	var out []slotWaiterKey
+	for _, w := range all {
+		if w.parentID != batchID {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// slotWaitersWithKeys are all the waiters for a slot that the operator has not
+// held, with their place in the queue: one read that any number of batches can
+// filter. ok is false when they or their marks could not be read.
+func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 	if e.deps.Store == nil {
 		return nil, true
 	}
 	all, err := e.workerSlotWaiters()
 	if err != nil {
-		log.Printf("worker slot queue: listing waiters for batch %s: %v (scheduling nothing new)", batchID, err)
+		log.Printf("worker slot queue: listing waiters: %v (scheduling nothing new)", err)
 		return nil, false
 	}
 	for _, w := range all {
-		if w.parentID == batchID {
-			continue
-		}
 		// A held conversion keeps its place but starts nothing: it holds no
 		// one back.
 		m, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, w.id)
@@ -282,7 +303,7 @@ func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok
 		// A waiter with no queue key (key "") counts as ahead of every item on
 		// purpose: nothing can say it is behind, so it keeps the conservative
 		// behaviour the batch had before items could be moved.
-		waiters = append(waiters, slotWaiterKey{w.id, key})
+		waiters = append(waiters, slotWaiterKey{id: w.id, key: key, parentID: w.parentID})
 	}
 	return waiters, true
 }
@@ -305,6 +326,18 @@ func (g batchGate) blocks(key string) bool {
 // (the plan): they wait no longer, so they count in neither list. ok is false
 // when the waiters or their marks could not be read.
 func (e *Engine) batchSlotGate(batchID string, items []store.TranscodeBatchItem, keys map[int64]string, needForeign bool, done map[string]bool) (batchGate, bool) {
+	var foreign []slotWaiterKey
+	if needForeign {
+		var ok bool
+		if foreign, ok = e.foreignSlotWaiters(batchID); !ok {
+			return batchGate{}, false
+		}
+	}
+	return batchSlotGateFrom(items, keys, foreign, done), true
+}
+
+// batchSlotGateFrom is batchSlotGate with the foreign waiters already read.
+func batchSlotGateFrom(items []store.TranscodeBatchItem, keys map[int64]string, foreign []slotWaiterKey, done map[string]bool) batchGate {
 	var g batchGate
 	for _, it := range items {
 		if it.Status != "waiting_for_slot" || (it.ChildActionID != "" && done[it.ChildActionID]) {
@@ -314,18 +347,12 @@ func (e *Engine) batchSlotGate(batchID string, items []store.TranscodeBatchItem,
 			g.hasWaiting, g.firstWaiting = true, k
 		}
 	}
-	if needForeign {
-		ws, ok := e.foreignSlotWaiters(batchID)
-		if !ok {
-			return batchGate{}, false
-		}
-		for _, w := range ws {
-			if !done[w.id] {
-				g.foreign = append(g.foreign, w.key)
-			}
+	for _, w := range foreign {
+		if !done[w.id] {
+			g.foreign = append(g.foreign, w.key)
 		}
 	}
-	return g, true
+	return g
 }
 
 // slotFairPending narrows a batch's dispatch candidates to what it may start

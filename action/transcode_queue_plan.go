@@ -146,32 +146,47 @@ func (e *Engine) QueueNext(ctx context.Context) (QueuePlan, error) {
 	return plan, nil
 }
 
+// WarmWorkerReports asks every worker for its report and its slots now, so
+// that QueueNext (which asks nothing) can speak for them. Dispatch does the same
+// on every poll of a waiting conversion; this is for a caller with nothing
+// waiting.
+func (e *Engine) WarmWorkerReports(ctx context.Context) {
+	for _, w := range e.deps.Workers.All() {
+		e.workerObservation(ctx, w)
+		e.workerVideoCapacity(ctx, w)
+	}
+}
+
 // planReportMaxAge is how old the last report of a node may be for the plan to
 // speak for it. Waiting conversions poll every 30 to 60 seconds and each poll
 // refreshes it.
 const planReportMaxAge = 2 * time.Minute
 
 // planUnreported marks the nodes that have no recent report, which the plan
-// reads without asking (it must not probe). With one node dispatch does not
-// ask a report for readiness either, so none is marked. A marked node is made
-// not ready and has no free slot: the plan says nothing about it.
+// reads without asking (it must not probe). A marked node is made not ready and
+// has no free slot: the plan says nothing about it. The age of the pool counts
+// only where capacity is read from it (a node that is ready and not on hold).
+// A node that reports it is on hold has no free slot for the plan either, so a
+// queued item (placed by media type and window only) is never planned onto it.
 func (e *Engine) planUnreported(ctx context.Context, q queueSlots) []bool {
 	out := make([]bool, len(q.workers))
-	if len(q.workers) < 2 {
-		return out
-	}
+	now := e.now()
+	tooOld := func(at time.Time) bool { return at.IsZero() || now.Sub(at) > planReportMaxAge }
 	for i, w := range q.workers {
 		obs := e.workerObservation(ctx, w)
-		old := obs.CheckedAt.IsZero() || time.Since(obs.CheckedAt) > planReportMaxAge
-		// The pool counts only where capacity is read from it.
-		if _, reads := w.Executor.(workerSlotReader); reads && !old && !e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
-			at := e.workerPoolAt(w.Name)
-			old = at.IsZero() || time.Since(at) > planReportMaxAge
+		old := tooOld(obs.CheckedAt)
+		hold := e.planRoomHold(ctx, w)
+		if _, reads := w.Executor.(workerSlotReader); reads && !old && q.ready[i] && hold == "" &&
+			!e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
+			old = tooOld(e.workerPoolAt(w.Name))
 		}
-		if old {
+		switch {
+		case old:
 			out[i] = true
 			q.ready[i] = false
 			delete(q.free, w.Name)
+		case hold == "paused":
+			q.free[w.Name] = 0
 		}
 	}
 	q.placer.unreported = out
@@ -330,6 +345,10 @@ func (e *Engine) waiterStale(w store.TranscodeQueueWaiterRow) bool {
 type planGates struct {
 	e       *Engine
 	byBatch map[string]*planGate
+	// waiters are the slot waiters, read once for the whole plan.
+	waiters []slotWaiterKey
+	read    bool
+	readOK  bool
 }
 
 type planGate struct {
@@ -356,8 +375,14 @@ func (g *planGates) gated(batchID, key string, done map[string]bool) bool {
 	if !pg.ok {
 		return true
 	}
-	gate, ok := g.e.batchSlotGate(batchID, pg.items, pg.keys, true, done)
-	return !ok || gate.blocks(key)
+	if !g.read {
+		g.waiters, g.readOK = g.e.slotWaitersWithKeys()
+		g.read = true
+	}
+	if !g.readOK {
+		return true
+	}
+	return batchSlotGateFrom(pg.items, pg.keys, foreignOf(g.waiters, batchID), done).blocks(key)
 }
 
 // queuedItemGated says whether a batch must not start the queued item with
@@ -393,10 +418,10 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 	switch {
 	case c.held && en.HeldBy == "batch":
 		return PlanReason{ReasonBatchHeld, "Its batch is on hold; it keeps its place and starts after the batch is released."}
-	case c.stale:
-		return PlanReason{ReasonNotPolling, "Nothing has polled it for a long time, so it is not waiting for a slot and holds no one back; look at the conversion itself to see what keeps it."}
 	case c.held:
 		return PlanReason{ReasonHeld, "Held by the operator; it keeps its place and starts after it is released."}
+	case c.stale:
+		return PlanReason{ReasonNotPolling, "Nothing has polled it for a long time, so it is not waiting for a slot and holds no one back; look at the conversion itself to see what keeps it."}
 	case gated:
 		return PlanReason{ReasonBatchGating, "Its batch starts no new conversion while one ahead of it in the queue waits for a free slot."}
 	}
@@ -422,9 +447,8 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 
 // planWhyNone says why nothing would start on the node.
 func planWhyNone(node, state string, hold bool, entries []QueueEntry) *PlanReason {
-	if len(entries) == 0 {
-		return &PlanReason{ReasonQueueEmpty, "Nothing is waiting in the transcode queue."}
-	}
+	// The state of the node wins: an empty queue does not make an unknown,
+	// offline, paused or closed node look idle.
 	switch state {
 	case NodeOffline:
 		return &PlanReason{ReasonNodeOffline, "Node " + node + " is not ready (offline or failing its checks), so it takes nothing new."}
@@ -439,6 +463,9 @@ func planWhyNone(node, state string, hold bool, entries []QueueEntry) *PlanReaso
 		return &PlanReason{windowWaitCondition, "Node " + node + "'s availability window has closed; it takes nothing new until the window changes."}
 	case NodeBusy:
 		return &PlanReason{ReasonNoFreeSlot, "Every video slot on node " + node + " is in use."}
+	}
+	if len(entries) == 0 {
+		return &PlanReason{ReasonQueueEmpty, "Nothing is waiting in the transcode queue."}
 	}
 	held := 0
 	for _, en := range entries {
