@@ -957,6 +957,7 @@ func TestWriteToolWriteErrorDestructiveSwitchAndOrder(t *testing.T) {
 		`got "x 'allow_destructive" for "needs allow_destructive"`:            400,
 		"invalid reason: \"needs `allow_destructive\"":                        400,
 		`discard requires 'allow_destructive'`:                                403,
+		"action refused:\n'allow_destructive' must be enabled":                403,
 	} {
 		w := httptest.NewRecorder()
 		writeToolWriteError(w, msg, v1WriteErr{})

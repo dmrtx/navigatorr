@@ -165,7 +165,7 @@ var quotedSwitches = map[string]bool{`"allow_destructive"`: true, "`allow_destru
 // name kept.
 func destructiveRefusal(msg string) bool {
 	low := quotedValues.ReplaceAllStringFunc(strings.ToLower(msg), func(seg string) string {
-		if q := strings.TrimLeft(seg, " \t([:=,"); quotedSwitches[q] {
+		if q := strings.TrimLeft(seg, " \t\n\r\f([:=,"); quotedSwitches[q] {
 			return seg[:len(seg)-len(q)] + "allow_destructive"
 		}
 		return " "
