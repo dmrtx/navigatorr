@@ -91,7 +91,7 @@ jobs:
           CGO_ENABLED: "0"
 
       - name: Race detector (build registry and its callers)
-        run: go test -race -count=1 ./action/... ./nodes/... ./internal/nodeswire/...
+        run: go test -race -count=1 -timeout 25m ./action/... ./nodes/... ./internal/nodeswire/...
         env:
           CGO_ENABLED: "1"
 

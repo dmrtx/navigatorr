@@ -1,11 +1,13 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -282,5 +284,142 @@ func TestTranscodeV1QueueIdsAreNormalisedAndTyped(t *testing.T) {
 		if code, r := postQ(t, h, "/transcode/v1/queue/actions/solo/move", body); code != 400 || r["code"] != "invalid_request" {
 			t.Errorf("%s: %d %v, want 400 invalid_request", body, code, r)
 		}
+	}
+}
+
+func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	// A single node needs no report for dispatch, so a cold one is not unknown.
+	if _, cold := get(t, h, "/transcode/v1/queue/next", keyHdr()); cold["nodes"].([]any)[0].(map[string]any)["state"] != "ready" || cold["nodes"].([]any)[0].(map[string]any)["report_at"] != nil {
+		t.Fatalf("a cold single node: %v", cold)
+	}
+	s.engine.WarmWorkerReports(context.Background())
+	if _, warm := get(t, h, "/transcode/v1/queue/next", keyHdr()); warm["nodes"].([]any)[0].(map[string]any)["report_at"] == nil {
+		t.Fatalf("a reported node has no report_at: %v", warm)
+	} else if _, err := time.Parse(time.RFC3339, warm["nodes"].([]any)[0].(map[string]any)["report_at"].(string)); err != nil {
+		t.Fatal(err)
+	}
+	// With nothing waiting every node says so.
+	code, empty := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if code != 200 || empty["queue_revision"] == nil {
+		t.Fatal(code, empty)
+	}
+	nodes, _ := empty["nodes"].([]any)
+	if len(nodes) == 0 {
+		t.Skip("the test engine has no workers")
+	}
+	for _, n := range nodes {
+		node := n.(map[string]any)
+		why := node["why_none"].(map[string]any)
+		if node["next"] != nil || why["code"] != "queue_empty" || why["reason"] == "" {
+			t.Fatalf("an empty queue: %v", node)
+		}
+	}
+
+	seedWaiter(t, st, "c-a", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", nil)
+	seedWaiter(t, st, "c-b", "1|2026-01-01T00:00:02Z|g|00000000000000000002", "/media/Example Show S01E02.mkv", nil)
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-a/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, q := queueIDsOf(t, h)
+	code, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if code != 200 || plan["queue_revision"] != q["queue_revision"] {
+		t.Fatal(code, plan, q["queue_revision"])
+	}
+	first := plan["nodes"].([]any)[0].(map[string]any)
+	if first["worker"] == "" || first["state"] == "" || first["skipped_truncated"] != false {
+		t.Fatalf("the node: %v", first)
+	}
+	skipped := first["skipped"].([]any)
+	if len(skipped) == 0 {
+		t.Fatalf("the held conversion is not listed: %v", first)
+	}
+	sk := skipped[0].(map[string]any)
+	if sk["reason_code"] != "held" || sk["ref"].(map[string]any)["id"] != "c-a" || sk["position"] != float64(1) ||
+		!strings.Contains(sk["reason"].(string), "POST /transcode/v1/queue/actions/c-a/release") {
+		t.Fatalf("the held entry: %v", sk)
+	}
+	// Reading it twice changes nothing.
+	_, again := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if _, q2 := queueIDsOf(t, h); q2["queue_revision"] != q["queue_revision"] {
+		t.Fatal("the read moved the queue revision")
+	}
+	if a, _ := json.Marshal(again["nodes"]); string(a) != mustJSON(t, plan["nodes"]) {
+		t.Fatalf("two reads differ: %s vs %s", a, mustJSON(t, plan["nodes"]))
+	}
+	// The route needs the key like every v1 route.
+	if c, e := get(t, h, "/transcode/v1/queue/next", nil); c != 401 || e["code"] != "unauthorized" {
+		t.Fatal(c, e)
+	}
+}
+
+// What would start carries its path, media type and batch, and an item is named
+// by its number; why_none and skipped carry the endpoint that would change them.
+func TestTranscodeV1QueueNextNamesWhatStartsAndTheItem(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WarmWorkerReports(context.Background())
+	seedWaiter(t, st, "c-held", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	seedWaiter(t, st, "c-go", "1|2026-01-01T00:00:02Z|g|00000000000000000002", "/media/Example Show S01E02.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-held/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	next, _ := node["next"].(map[string]any)
+	if next == nil {
+		t.Fatalf("nothing would start: %v", node)
+	}
+	ref := next["ref"].(map[string]any)
+	if ref["kind"] != "action" || ref["id"] != "c-go" || next["position"] != float64(2) ||
+		next["path"] != "/media/Example Show S01E02.mkv" || next["media_type"] != "episode" {
+		t.Fatalf("next: %v", next)
+	}
+	if _, has := node["why_none"]; has && node["why_none"] != nil {
+		t.Fatalf("why_none beside a next: %v", node["why_none"])
+	}
+	sk := node["skipped"].([]any)[0].(map[string]any)
+	if sk["reason_code"] != "held" || !strings.Contains(sk["reason"].(string), "/release") {
+		t.Fatalf("skipped: %v", sk)
+	}
+
+}
+
+// A queued batch item that would start is named by its number and carries its batch.
+func TestTranscodeV1QueueNextNamesABatchItem(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WarmWorkerReports(context.Background())
+	seedOperation(t, st, "batch-q", "transcode_batch", "waiting_external", nil, nil, map[string]any{})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-q", ItemKey: "k1", FilePath: "/media/Example Show S01E03.mkv", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	next, _ := node["next"].(map[string]any)
+	if next == nil {
+		t.Fatalf("the item would not start: %v", node)
+	}
+	ref := next["ref"].(map[string]any)
+	if _, isNum := ref["id"].(float64); !isNum || ref["kind"] != "item" || next["batch_id"] != "batch-q" ||
+		next["path"] != "/media/Example Show S01E03.mkv" {
+		t.Fatalf("next: %v", next)
+	}
+}
+
+func TestTranscodeV1QueueNextWhyNoneSaysAllHeld(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WarmWorkerReports(context.Background())
+	seedWaiter(t, st, "c-a", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-a/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	why, _ := node["why_none"].(map[string]any)
+	if node["next"] != nil || why["code"] != "all_held" || why["reason"] == "" {
+		t.Fatalf("why_none: %v", node)
 	}
 }

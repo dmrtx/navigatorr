@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcodeapi"
@@ -231,9 +232,99 @@ func (s *Server) queueMove(kind string) http.HandlerFunc {
 	})
 }
 
+// planHint is the endpoint that would change a reason, when there is one.
+func planHint(code, kind, id, batchID, node string) string {
+	const b = transcodeapi.BasePath
+	switch code {
+	case action.ReasonHeld:
+		if kind == action.QueueKindItem {
+			return " Release it with POST " + b + "/queue/items/" + id + "/release."
+		}
+		return " Release it with POST " + b + "/queue/actions/" + id + "/release."
+	case action.ReasonBatchHeld:
+		if batchID != "" {
+			return " Release the batch with POST " + b + "/queue/batches/" + batchID + "/release."
+		}
+	case action.ReasonNotPolling:
+		if kind == action.QueueKindAction {
+			return " See GET " + b + "/actions/" + id + "."
+		}
+	case action.ReasonNodePaused:
+		return " Resume the node with DELETE " + b + "/pauses/" + node + "."
+	case action.ReasonBatchGating, action.ReasonSlotTakenAhead:
+		return " Move it with POST " + b + "/queue/" + kind + "s/" + id + "/move."
+	case action.ReasonNodeWindow, action.ReasonMediaType, action.ReasonNoFit,
+		action.ReasonNoProbe, action.ReasonNoHistory, action.ReasonWindowUnreadable:
+		return " Change the node's window with PUT " + b + "/workers/" + node + "/window or DELETE the same path."
+	}
+	return ""
+}
+
+func planReasonOut(code, text, hint string) map[string]any {
+	return map[string]any{"code": code, "reason": text + hint}
+}
+
+// v1GetQueueNext explains what would start next on each node. It only reads:
+// the answer comes from the code dispatch uses (action.QueueNext) and claims
+// nothing.
+func (s *Server) v1GetQueueNext(w http.ResponseWriter, r *http.Request) {
+	plan, err := s.engine.QueueNext(r.Context())
+	if err != nil {
+		v1QueueError(w, err)
+		return
+	}
+	nodes := make([]map[string]any, 0, len(plan.Nodes))
+	for _, n := range plan.Nodes {
+		out := map[string]any{
+			"worker":            n.Worker,
+			"state":             n.State,
+			"free_slots":        n.FreeSlots,
+			"next":              nil,
+			"skipped":           []map[string]any{},
+			"skipped_truncated": n.SkippedTruncated,
+		}
+		if !n.ReportAt.IsZero() {
+			out["report_at"] = n.ReportAt.UTC().Format(time.RFC3339)
+		}
+		if n.Next != nil {
+			next := map[string]any{
+				"ref":      queueRefOut(n.Next.Kind, n.Next.ID),
+				"position": n.Next.Position,
+				"path":     n.Next.Path,
+			}
+			if n.Next.MediaType != "" {
+				next["media_type"] = n.Next.MediaType
+			}
+			if n.Next.BatchID != "" {
+				next["batch_id"] = n.Next.BatchID
+			}
+			if n.Next.HasEstimate {
+				next["estimate_sec"] = n.Next.EstimateSec
+			}
+			out["next"] = next
+		}
+		if n.WhyNone != nil {
+			out["why_none"] = planReasonOut(n.WhyNone.Code, n.WhyNone.Text, planHint(n.WhyNone.Code, "", "", "", n.Worker))
+		}
+		skipped := make([]map[string]any, 0, len(n.Skipped))
+		for _, sk := range n.Skipped {
+			skipped = append(skipped, map[string]any{
+				"ref":         queueRefOut(sk.Kind, sk.ID),
+				"position":    sk.Position,
+				"reason_code": sk.Code,
+				"reason":      sk.Text + planHint(sk.Code, sk.Kind, sk.ID, sk.BatchID, n.Worker),
+			})
+		}
+		out["skipped"] = skipped
+		nodes = append(nodes, out)
+	}
+	transcodeapi.WriteJSON(w, 200, map[string]any{"queue_revision": plan.Revision, "nodes": nodes})
+}
+
 func (s *Server) transcodeQueueHandlers(h transcodeapi.Handlers) {
 	const b = transcodeapi.BasePath
 	h["GET "+b+"/queue"] = s.v1GetQueue
+	h["GET "+b+"/queue/next"] = s.v1GetQueueNext
 	for _, kind := range []struct{ path, kind string }{
 		{"/queue/actions/{id}", action.QueueKindAction},
 		{"/queue/items/{id}", action.QueueKindItem},

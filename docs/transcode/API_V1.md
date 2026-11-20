@@ -148,6 +148,7 @@ Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 | `GET /podcasts`, `/podcasts/{id}/local-library`, `/podcasts/{id}/ad-library` | `/api/maintenance/podcasts`, `/api/maintenance/podcast-local-library`, `podcast_ad_library` |
 | `GET /review-queue` | `/api/maintenance/maintenance-queue` |
 | `GET /queue` | the order conversions wait in for a worker (new; see "The queue") |
+| `GET /queue/next` | what would start next on each node and why the others would not (new; see "What starts next") |
 
 The writes are listed under "Writes". `/actions/{id}`, the batch routes and every
 write under `/actions/{id}` or `/backups/{id}` answer 404 for an action that is not a
@@ -244,6 +245,62 @@ that have no conversion yet. Each entry has `ref` (`kind` `action`, `item` or
   (`stale_queue_revision`) when the queue has changed since that revision. Every
   answer carries the entry (or the batch) after the change and the new
   `queue_revision`.
+
+### What starts next
+
+`GET /queue/next` answers, for each worker node, what would start there next
+and why the other waiting conversions would not. It is computed by the code
+dispatch itself (the placer, the queue claims, node pauses, availability
+windows, batch ordering), from the last report of each worker: it asks no
+worker, claims nothing and writes nothing, so it is safe to call repeatedly. It
+is a prediction for the `queue_revision` it carries.
+
+Each node has `worker`, `state` (`ready`, `busy`, `paused`, `closed`,
+`offline` or `unknown`), `free_slots`, `next` (`ref`, `position`, `path`, `media_type`,
+`batch_id`, and `estimate_sec` when known; `null` when nothing would start),
+`why_none` (when `next` is null) and `skipped`: the conversions ahead of `next`
+in queue order (the whole queue when `next` is null), at most 20, with
+`skipped_truncated` set when there were more. Every reason is a `code` and a
+sentence that names the endpoint that would change it.
+
+Codes: `held`, `batch_held`, `batch_gating` (its batch starts nothing new while
+a conversion ahead of it waits for a slot), `size_unknown`, `node_offline`,
+`node_paused`, `node_on_hold` (the node's own report says it takes nothing
+new), `node_unknown`, `not_polling` (nothing has polled the conversion for a
+long time, so it holds no one back and is never named as next), `node_build`,
+`no_disk_room`, `waiting_for_approvals`,
+`too_big_for_node`, `recently_refused`, `no_free_slot`, `slot_taken_ahead`,
+`starts_elsewhere`, the window codes `node_window`, `media_type_not_allowed`,
+`would_not_fit_window`, `no_duration_estimate`, `no_encode_history` and
+`window_unreadable`, and for `why_none` also `queue_empty`, `all_held` and
+`nothing_eligible`.
+
+Limits: queued batch items have no conversion yet, so they are placed by media
+type and window only (no disk check); a node whose last report is missing or older
+than 2 minutes (or whose slot pool was not read in that time) is `unknown`: no
+free slots are claimed and nothing is asked of it. With a single node nothing is
+`unknown`: dispatch needs no report from it, so the plan shows the last news it
+has, whatever its age (its last pool, its last offline or busy report, or the
+configured capacity when it never reported). That includes a hold: a node whose
+last report said it is on hold or building stays `paused`
+(`node_on_hold`/`node_build`) until a newer report says otherwise, even though
+dispatch itself ignores a hold report older than 45 seconds. Each node carries
+`report_at` (RFC3339 UTC; omitted when the node was never checked), the time of
+the server's last check of the node, successful or failed, so the reader sees
+how old the node's own news is. The slot pool is read separately and may be
+older; an operator pause and the availability window are live. Likewise a
+single node whose last check failed stays `offline` in the plan, while dispatch
+tries it again. The state of a node (unknown,
+offline, paused, closed, busy) is what `why_none` says even when the queue is
+empty. A node that reports it is on hold or building shows as `paused` and takes
+no queued item in the plan; batch dispatch still counts its free slot when it
+decides to make a child for a queued item, and that child then waits for a slot
+(it cannot start there), so the plan may say nothing starts while the batch
+makes a waiting child (with two or more queued items and the other node free,
+dispatch makes a child for each: the first takes the free node and the second
+waits for a slot while the held node cannot take it, whereas the plan only
+lists the first); and the walk stops once every node has its `next`, so it says
+nothing about what would start after those.
 
 ### Confirmation flows
 

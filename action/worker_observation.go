@@ -98,6 +98,22 @@ func summariseWorkerObservations(list []transcode.WorkerObservation) transcode.W
 	return out
 }
 
+// passiveKey marks a context whose worker reads must not touch a worker: the
+// observation and the video pool come from what the engine last saw (the
+// queue's own polling keeps it fresh), however old, and nothing is probed or
+// synced. The queue plan reads that way, so it is safe to call as often as a
+// client likes.
+type passiveKey struct{}
+
+func passiveContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, passiveKey{}, true)
+}
+
+func isPassive(ctx context.Context) bool {
+	v, _ := ctx.Value(passiveKey{}).(bool)
+	return v
+}
+
 // workerObservation observes one worker, at most every five seconds.
 func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker) transcode.WorkerObservation {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
@@ -111,7 +127,15 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 		}
 	}
 	defer st.obsMu.Unlock()
-	now := time.Now().UTC()
+	now := e.now()
+	if isPassive(ctx) {
+		if st.obs.CheckedAt.IsZero() {
+			return transcode.WorkerObservation{SchedulerObservation: transcode.SchedulerObservation{Health: "unknown", Stale: true}, Name: w.Name, Podcast: w.Podcast, Configured: true, Message: "Not observed yet."}
+		}
+		out := st.obs
+		out.SchedulerObservation = transcode.NormalizeSchedulerObservation(out.SchedulerObservation, now)
+		return out
+	}
 	if !st.obs.CheckedAt.IsZero() && now.Sub(st.obs.CheckedAt) < 5*time.Second {
 		out := st.obs
 		out.SchedulerObservation = transcode.NormalizeSchedulerObservation(out.SchedulerObservation, now)
@@ -158,7 +182,7 @@ func (e *Engine) workerObservation(ctx context.Context, w transcode.NamedWorker)
 	if out.Health == "degraded" {
 		out.Message = "Worker reachable; scheduler is degraded. See sweep diagnostics."
 	}
-	out.CheckedAt = time.Now().UTC()
+	out.CheckedAt = e.now()
 	st.obs = out
 	st.setLeases(out.Leases)
 	if out.Reachable {
