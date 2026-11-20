@@ -99,3 +99,16 @@ mcp:
 		t.Errorf("expected mcp.listen=0.0.0.0:8098, got %q", cfg.MCP.Listen)
 	}
 }
+
+func TestMCPTokenFileLoads(t *testing.T) {
+	cfg, err := Load(writeTempConfig(t, "mcp:\n  transport: streamable-http\n  token_file: \"/run/secrets/mcp-key\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCP.TokenFile != "/run/secrets/mcp-key" {
+		t.Fatalf("token_file = %q", cfg.MCP.TokenFile)
+	}
+	if _, err := Load(writeTempConfig(t, "mcp:\n  token_file: \"secrets/mcp-key\"\n")); err == nil || !strings.Contains(err.Error(), "mcp.token_file") {
+		t.Fatalf("a relative mcp.token_file must fail to load: %v", err)
+	}
+}

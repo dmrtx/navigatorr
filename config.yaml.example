@@ -50,6 +50,10 @@ web:
 # mcp:
 #   transport: "streamable-http"
 #   listen: "127.0.0.1:8098"
+#   # Optional API key for /mcp and /mcp/ (X-Api-Key or Authorization: Bearer),
+#   # read once at start-up. A missing, empty or short (< 32 characters) key
+#   # stops the server. Generate one with: openssl rand -hex 32
+#   token_file: "/run/secrets/mcp-key"
 
 # ==============================================================================
 # 2. RESPONSE SIZE & CONCURRENCY GUARDS
