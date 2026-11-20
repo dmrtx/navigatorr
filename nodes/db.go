@@ -68,11 +68,15 @@ func openRegistry(path string) (*registry, error) {
 // symlink whose target is missing is refused: its lock could not match the
 // lock of whoever opens the target directly.
 func lockPath(path string) (string, error) {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
+	real, evalErr := filepath.EvalSymlinks(path)
+	if evalErr == nil {
 		return real + ".lock", nil
 	}
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("nodes database %s is a symlink to a missing file", path)
+		if errors.Is(evalErr, os.ErrNotExist) {
+			return "", fmt.Errorf("nodes database %s is a symlink to a missing file", path)
+		}
+		return "", fmt.Errorf("resolving nodes database symlink %s: %w", path, evalErr)
 	}
 	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
