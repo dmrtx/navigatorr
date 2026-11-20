@@ -329,7 +329,12 @@ func TestCancelledCallerDoesNotPoisonTheLoad(t *testing.T) {
 	s.fetchTimeout = 5 * time.Second
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	go func() {
+		for calls.Load() == 0 {
+			time.Sleep(time.Millisecond)
+		}
+		cancel() // the caller gives up while the load is in flight
+	}()
 	if s.ensure(ctx, "transcode", false) {
 		t.Log("loaded before the cancelled caller returned")
 	}
@@ -341,8 +346,11 @@ func TestCancelledCallerDoesNotPoisonTheLoad(t *testing.T) {
 	if s.GetIndex("transcode") == nil {
 		t.Fatal("load must complete despite the cancelled caller")
 	}
-	if len(s.attempts) != 0 {
-		t.Fatalf("a cancelled caller must not record a failure: %v", s.attempts)
+	s.mu.RLock()
+	failures := len(s.attempts)
+	s.mu.RUnlock()
+	if failures != 0 {
+		t.Fatalf("a cancelled caller must not record a failure: %d", failures)
 	}
 }
 
@@ -382,5 +390,81 @@ func TestRetryMissingDoesNotOvershootDeadline(t *testing.T) {
 	s.RetryMissing(context.Background(), 0, 50*time.Millisecond)
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("overshot with initial=0: %v", d)
+	}
+}
+
+func TestRetryMissingReturnsAtDeadlineWithHungServer(t *testing.T) {
+	release := make(chan struct{})
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-release
+		http.Error(w, "released", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	defer close(release) // runs first: unblocks the handlers
+	s, _ := newLazyStore(t, srv.URL)
+	s.fetchTimeout = 5 * time.Second
+
+	start := time.Now()
+	s.RetryMissing(context.Background(), 10*time.Millisecond, 300*time.Millisecond)
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("returned after %v, want about 300ms", d)
+	}
+	if calls.Load() == 0 {
+		t.Fatal("the round never reached the hung server")
+	}
+}
+
+func TestRefreshWinsOverStaleInFlightLoad(t *testing.T) {
+	const specA = `{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/version-a":{"get":{"summary":"a","responses":{"200":{"description":"ok"}}}}}}`
+	const specB = `{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/version-b":{"get":{"summary":"b","responses":{"200":{"description":"ok"}}}}}}`
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			<-release
+			w.Write([]byte(specA))
+			return
+		}
+		w.Write([]byte(specB))
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	s.fetchTimeout = 10 * time.Second
+
+	go s.EnsureLoaded(context.Background(), "transcode")
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	refreshed := make(chan error, 1)
+	go func() { refreshed <- s.Refresh(context.Background(), "transcode") }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-refreshed; err != nil {
+		t.Fatal(err)
+	}
+	idx := s.GetIndex("transcode")
+	if idx == nil || idx.Endpoints["/version-b"] == nil || idx.Endpoints["/version-a"] != nil {
+		t.Fatalf("final index must be version B: %+v", idx)
+	}
+}
+
+func TestCancelledContextStartsNoLoads(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(syntheticSpec))
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.LoadAll(ctx)
+	s.EnsureAll(ctx)
+	s.EnsureLoaded(ctx, "transcode")
+	time.Sleep(50 * time.Millisecond)
+	if calls.Load() != 0 || s.GetIndex("transcode") != nil {
+		t.Fatalf("a cancelled ctx started %d fetches", calls.Load())
 	}
 }

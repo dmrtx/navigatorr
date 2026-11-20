@@ -130,3 +130,33 @@ func TestSearchAPITruncationListsMatchesPerService(t *testing.T) {
 		t.Errorf("listed %d results, want 50", n)
 	}
 }
+
+// With service= given, the header has no per-service breakdown.
+func TestSearchAPITruncationSingleServiceHeader(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var sb strings.Builder
+	sb.WriteString(`{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{`)
+	for i := 0; i < 60; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString(`"/widget` + strings.Repeat("x", i+1) + `":{"get":{"summary":"List widgets","responses":{"200":{"description":"ok"}}}}`)
+	}
+	sb.WriteString("}}")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(sb.String()))
+	}))
+	defer srv.Close()
+	store := openapi.NewStore(&config.Config{Services: map[string]config.ServiceConfig{"alpha": {OpenAPIURL: srv.URL}}})
+
+	for _, svc := range []string{"alpha", ""} {
+		res, err := handleSearchAPI(context.Background(), store, "widget", svc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := res.Content[0].(mcp.TextContent).Text
+		if !strings.Contains(text, "showing the best 50 of 60)") || strings.Contains(text, "per service") || strings.Contains(text, "narrow") {
+			t.Errorf("service=%q header: %s", svc, text[:200])
+		}
+	}
+}
