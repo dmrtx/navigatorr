@@ -253,7 +253,9 @@ func TestNon200AndBadBodiesAreSoftFailures(t *testing.T) {
 }
 
 func TestBodiesWithoutANodesListAreFailures(t *testing.T) {
-	for _, body := range []string{`{}`, `null`, `{"nodes":null}`, `{"ok":true}`} {
+	for _, body := range []string{`{}`, `null`, `{"nodes":null}`, `{"ok":true}`,
+		`{"nodes":[{"node":"nodeA"}]}`, `{"nodes":[{"paused":true}]}`, `{"nodes":[{"node":"","paused":true}]}`,
+		`{"nodes":[{"node":"nodeA","paused":null}]}`, `{"nodes":[]} {"nodes":[]}`, `{"nodes":[]} junk`} {
 		var hits atomic.Int64
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			hits.Add(1)
@@ -316,5 +318,18 @@ func TestAFlightRechecksTheCacheAndTheBackoff(t *testing.T) {
 	}
 	if !c.failedAt.Equal(t0) {
 		t.Fatalf("the backoff must not be extended: %v", c.failedAt)
+	}
+}
+
+func TestNewRejectsABaseURLWithoutSchemeOrHost(t *testing.T) {
+	for _, base := range []string{"", "  ", "engine:8080", "ftp://engine", "http://", "://x"} {
+		if c, err := New(Options{BaseURL: base}); err == nil || c != nil {
+			t.Fatalf("%q: %v %v", base, c, err)
+		}
+	}
+	for _, base := range []string{"http://engine:8080", "https://engine/", "http://127.0.0.1:1"} {
+		if _, err := New(Options{BaseURL: base}); err != nil {
+			t.Fatalf("%q: %v", base, err)
+		}
 	}
 }

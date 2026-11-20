@@ -30,6 +30,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -71,12 +72,12 @@ type State struct {
 // handler to catch drift).
 type wire struct {
 	Nodes []struct {
-		Node    string `json:"node"`
-		Paused  bool   `json:"paused"`
-		Mode    string `json:"mode"`
-		Since   string `json:"since"`
-		HeldBy  string `json:"held_by"`
-		Message string `json:"message"`
+		Node    *string `json:"node"`
+		Paused  *bool   `json:"paused"`
+		Mode    string  `json:"mode"`
+		Since   string  `json:"since"`
+		HeldBy  string  `json:"held_by"`
+		Message string  `json:"message"`
 	} `json:"nodes"`
 }
 
@@ -113,6 +114,9 @@ func New(o Options) (*Client, error) {
 	base := strings.TrimRight(strings.TrimSpace(o.BaseURL), "/")
 	if base == "" {
 		return nil, errors.New("transcodeview: base URL is required")
+	}
+	if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("transcodeview: base URL %q is not an http(s) URL with a host", base)
 	}
 	c := &Client{url: base + Path, key: o.APIKey, hc: o.HTTPClient, now: o.Now}
 	if c.now == nil {
@@ -212,8 +216,12 @@ func (c *Client) fetch(ctx context.Context) (map[string]State, error) {
 		return nil, fmt.Errorf("transcodeview: engine answered %d", resp.StatusCode)
 	}
 	var w wire
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&w); err != nil {
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxBody))
+	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("transcodeview: unreadable answer: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("transcodeview: unexpected data after the answer")
 	}
 	// Drain what is left so the connection can be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -221,11 +229,13 @@ func (c *Client) fetch(ctx context.Context) (map[string]State, error) {
 		return nil, errors.New("transcodeview: answer has no nodes list")
 	}
 	out := make(map[string]State, len(w.Nodes))
-	for _, n := range w.Nodes {
-		if n.Node == "" {
-			continue
+	for i, n := range w.Nodes {
+		// A node without its name or its paused flag would read as running:
+		// the whole answer is out of contract, not just that entry.
+		if n.Node == nil || *n.Node == "" || n.Paused == nil {
+			return nil, fmt.Errorf("transcodeview: node %d lacks node or paused", i)
 		}
-		out[n.Node] = State{Paused: n.Paused, Mode: n.Mode, Since: n.Since, HeldBy: n.HeldBy, Message: n.Message}
+		out[*n.Node] = State{Paused: *n.Paused, Mode: n.Mode, Since: n.Since, HeldBy: n.HeldBy, Message: n.Message}
 	}
 	return out, nil
 }
