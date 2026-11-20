@@ -56,6 +56,16 @@ func Load(path string) (string, error) {
 // the key is missing or wrong, when either header is repeated, when a Bearer
 // is empty, or when both headers are present and differ.
 func Require(key string, next http.Handler) http.Handler {
+	return RequireWith(key, next, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("unauthorized\n"))
+	}))
+}
+
+// RequireWith is Require with the caller's own 401 answer: deny is called
+// instead of next when the key is missing or wrong, and must write the 401.
+func RequireWith(key string, next, deny http.Handler) http.Handler {
 	want := sha256.Sum256([]byte(key))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok := presented(r.Header)
@@ -64,9 +74,7 @@ func Require(key string, next http.Handler) http.Handler {
 			ok = subtle.ConstantTimeCompare(h[:], want[:]) == 1
 		}
 		if !ok {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte("unauthorized\n"))
+			deny.ServeHTTP(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)

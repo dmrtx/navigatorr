@@ -295,3 +295,18 @@ func TestGatewayStaysStateless(t *testing.T) {
 func TestTranscodeViewStaysApart(t *testing.T) {
 	checkStatelessRoot(t, "internal/transcodeview", func(p string) bool { return p != "internal/transcodeview" })
 }
+
+// TestNodesBinaryStaysApart guards the separate Nodes binary: it runs the
+// builds registry on its own, so it must never link the engine (action,
+// transcode*), the store, the UI, the tools, the podcast pipeline, the queue,
+// nor the packages that join Nodes to the engine or to a remote Nodes
+// (nodeswire, nodesclient, nodesproxy), the MCP proxy or the worker. It may
+// reach nodes, config (with the usual exemption, see checkStatelessRoot),
+// internal, internal/mcpkey and internal/transcodeview.
+func TestNodesBinaryStaysApart(t *testing.T) {
+	checkStatelessRoot(t, "cmd/navigatorr-nodes", func(p string) bool {
+		return bannedPrefixes(p, "action", "store", "maintenanceui", "tools", "arrtools", "queue", "podcast",
+			"transcode", "transcodeapi", "internal/nodeswire", "internal/nodesclient", "internal/nodesproxy",
+			"internal/mcpproxy", "internal/transcodeworker")
+	})
+}
