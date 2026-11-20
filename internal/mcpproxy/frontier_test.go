@@ -361,10 +361,21 @@ func TestCloseDeletesTheUpstreamSession(t *testing.T) {
 	if f.deletes.Load() != 0 {
 		t.Fatal("no session, no DELETE")
 	}
-	g.call("1", "memory_get", "")
-	g.f.Close(context.Background())
-	if f.deletes.Load() != 1 {
-		t.Errorf("DELETE count %d, want 1", f.deletes.Load())
+
+	f2 := newFake(t)
+	g2 := newGateway(t, f2.url(), nil)
+	if isErr, text := toolResult(t, g2.call("1", "memory_get", "")); isErr {
+		t.Fatalf("call before Close failed: %s", text)
+	}
+	g2.f.Close(context.Background())
+	if f2.deletes.Load() != 1 {
+		t.Errorf("DELETE count %d, want 1", f2.deletes.Load())
+	}
+	// After Close no new session is opened: the call is refused unrun.
+	inits := f2.inits.Load()
+	wantNotRun(t, g2.call("2", "memory_get", ""))
+	if f2.inits.Load() != inits {
+		t.Errorf("a session was opened after Close")
 	}
 }
 

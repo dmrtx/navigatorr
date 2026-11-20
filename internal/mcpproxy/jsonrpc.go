@@ -44,6 +44,11 @@ func validID(raw json.RawMessage) bool {
 
 // sameID compares two JSON-RPC ids by value, so 1 and 1.0 match and "1" does not.
 func sameID(a, b json.RawMessage) bool {
+	// Both sides are bounded before big.Rat parses them: the upstream's id is
+	// as untrusted as the client's.
+	if !validID(a) || !validID(b) {
+		return false
+	}
 	var x, y any
 	da := json.NewDecoder(bytes.NewReader(a))
 	da.UseNumber()

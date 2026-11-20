@@ -308,3 +308,81 @@ func TestHugeNumericIDIsRefused(t *testing.T) {
 		t.Fatalf("upstream was asked %d times", up.lists.Load())
 	}
 }
+
+// A slow body is cut off also when the request is not JSON and goes to the SDK.
+func TestSlowNonJSONBodyIsCutOff(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	up := newFake(t)
+	g := newGateway(t, up.url(), nil)
+	srv := httptest.NewServer(g.f)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\n{")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	began := time.Now()
+	// Read until the server closes: an answer alone is not enough, the
+	// connection must not stay held while the server drains the body.
+	_, _ = io.Copy(io.Discard, conn)
+	if waited := time.Since(began); waited > 3*time.Second {
+		t.Fatalf("server held the connection for %s", waited)
+	}
+}
+
+// A key rejection on notifications/initialized is named as such in the log.
+func TestKeyRejectionOnInitializedIsLogged(t *testing.T) {
+	up := newFake(t)
+	up.onInitd = func(w http.ResponseWriter, r *http.Request) bool {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return true
+	}
+	g := newGateway(t, up.url(), nil)
+	if _, err := g.f.up.ensure(context.Background(), nil); err == nil {
+		t.Fatal("ensure succeeded after a 401")
+	}
+	for _, e := range g.logs.errors() {
+		if strings.Contains(e, "rejected the gateway key") {
+			return
+		}
+	}
+	t.Fatalf("errors logged: %q", g.logs.errors())
+}
+
+// A body over 1 MiB that stalls is refused and the connection closed, not
+// drained with no deadline.
+func TestStalledOversizeBodyIsCutOff(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	up := newFake(t)
+	g := newGateway(t, up.url(), nil)
+	srv := httptest.NewServer(g.f)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Leave less than 256 KiB unread: net/http drains that much itself
+	// before reusing the connection (a larger rest makes it close anyway).
+	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n", maxRequestBody+1+100<<10)
+	if _, err := conn.Write([]byte(strings.Repeat(" ", maxRequestBody+1))); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	began := time.Now()
+	got, _ := io.ReadAll(conn) // returns when the server closes
+	if waited := time.Since(began); waited > 3*time.Second {
+		t.Fatalf("server held the connection for %s", waited)
+	}
+	if !strings.Contains(string(got), "-32600") || !strings.Contains(strings.ToLower(string(got)), "connection: close") {
+		t.Fatalf("answer: %.300s", got)
+	}
+}

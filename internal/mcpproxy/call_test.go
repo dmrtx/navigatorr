@@ -71,7 +71,16 @@ func TestSSEResponses(t *testing.T) {
 			return []string{`{"jsonrpc":"2.0","id":99,"method":"sampling/createMessage","params":{}}`,
 				`{"jsonrpc":"2.0","id":` + id + `,"result":{"content":[]}}`}
 		}, ""},
+		{"server request with an odd id still aborts", func(id string) []string {
+			return []string{`{"jsonrpc":"2.0","id":1e5,"method":"sampling/createMessage","params":{}}`,
+				`{"jsonrpc":"2.0","id":` + id + `,"result":{"content":[]}}`}
+		}, ""},
 		{"other id", func(id string) []string { return []string{`{"jsonrpc":"2.0","id":6,"result":{}}`} }, ""},
+		// The upstream's id is bounded too before it is compared exactly.
+		{"huge exponent id", func(id string) []string { return []string{`{"jsonrpc":"2.0","id":1e10000000,"result":{}}`} }, ""},
+		{"overlong id", func(id string) []string {
+			return []string{`{"jsonrpc":"2.0","id":` + strings.Repeat("0", maxNumericID) + id + `,"result":{}}`}
+		}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

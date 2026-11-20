@@ -158,13 +158,15 @@ func (f *Frontier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.next.ServeHTTP(w, r)
 		return
 	}
-	// Let the SDK answer anything that is not JSON, with its own error.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
+	// Let the SDK answer anything that is not JSON, with its own error. The
+	// deadline stays: the SDK answers at once, and the server's drain of an
+	// unread body must not wait on a slow client.
 	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		f.next.ServeHTTP(w, r)
 		return
 	}
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 	if err != nil {
 		// Keep the deadline and close the connection: otherwise the server
@@ -173,11 +175,14 @@ func (f *Frontier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, rpcError(nil, mcp.PARSE_ERROR, "read request body error"))
 		return
 	}
-	_ = rc.SetReadDeadline(time.Time{})
 	if len(body) > maxRequestBody {
+		// The rest of the body is never read: keep the deadline and close
+		// the connection, or the server would drain it with no deadline.
+		w.Header().Set("Connection", "close")
 		writeJSON(w, rpcError(nil, mcp.INVALID_REQUEST, "request body is larger than 1 MiB"))
 		return
 	}
+	_ = rc.SetReadDeadline(time.Time{})
 	// Whatever is delegated must see the body again.
 	restore := func() {
 		r.Body = io.NopCloser(bytes.NewReader(body))

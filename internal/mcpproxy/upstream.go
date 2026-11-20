@@ -109,9 +109,16 @@ func (u *upstream) nextID() json.RawMessage {
 // already replaced it, that replacement is used and nothing is re-initialized).
 // The handshake runs in its own context, so a caller that gives up does not
 // abort it for the callers waiting on the same flight.
+// errShuttingDown is returned once Close has run: no session is opened after it.
+var errShuttingDown = errors.New("gateway is shutting down")
+
 func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		u.mu.Lock()
+		if u.closed {
+			u.mu.Unlock()
+			return nil, errShuttingDown
+		}
 		if u.cur != nil && u.cur != failed {
 			s := u.cur
 			u.mu.Unlock()
@@ -147,7 +154,7 @@ func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error
 				dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer dcancel()
 				u.delete(dctx, fresh)
-				return nil, errors.New("gateway is shutting down")
+				return nil, errShuttingDown
 			}
 			defer u.mu.Unlock()
 			if u.cur == nil || u.cur == failed {
@@ -211,13 +218,14 @@ func (u *upstream) handshake(ctx context.Context) (*session, error) {
 		return nil, fmt.Errorf("notifications/initialized: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		// Read the body for the key check before anything discards it.
 		if resp.StatusCode == http.StatusUnauthorized && isKeyRejection(resp) {
 			u.errorf("Transcode rejected the gateway key (HTTP 401): check the shared key file")
 		}
 		return nil, fmt.Errorf("notifications/initialized: HTTP %d", resp.StatusCode)
 	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	return s, nil
 }
 
@@ -457,7 +465,9 @@ func readSSE(r io.Reader, wantID json.RawMessage) ([]byte, error) {
 			return nil, false, fmt.Errorf("malformed upstream event: %w", err)
 		}
 		if env.Method != "" {
-			if validID(env.ID) {
+			// Any id makes it a request the gateway cannot answer, however
+			// odd the id; only a missing or null id is a notification.
+			if !isNull(env.ID) {
 				return nil, false, errServerRequest
 			}
 			return nil, false, nil // notification
@@ -506,6 +516,7 @@ func (u *upstream) terminate(ctx context.Context) {
 	u.mu.Lock()
 	u.closed = true
 	s := u.cur
+	u.cur = nil
 	u.mu.Unlock()
 	u.delete(ctx, s)
 }
