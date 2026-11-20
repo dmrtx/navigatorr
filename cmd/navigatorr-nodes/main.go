@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -43,6 +44,9 @@ const (
 	drainTimeout = 35 * time.Second
 	// healthTimeout bounds one /healthz probe.
 	healthTimeout = 2 * time.Second
+	// handlerGrace bounds the wait, after the server is closed, for the
+	// requests it cancelled to return before the database closes.
+	handlerGrace = 5 * time.Second
 )
 
 func main() {
@@ -51,6 +55,10 @@ func main() {
 	}
 	configPath := flag.String("config", "", "path to config.yaml (default: ~/.config/navigatorr/config.yaml)")
 	flag.Parse()
+	if flag.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "unexpected argument %q\nusage: navigatorr-nodes [-config config.yaml] | navigatorr-nodes check --path nodes.db [--checkpoint]\n", flag.Arg(0))
+		os.Exit(2)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -80,10 +88,11 @@ func main() {
 
 // instance is a configured, opened registry and the handler in front of it.
 type instance struct {
-	svc     *nodes.Service
-	handler http.Handler
-	listen  string
-	dbPath  string
+	svc      *nodes.Service
+	handler  http.Handler
+	inflight *inflight
+	listen   string
+	dbPath   string
 }
 
 // build validates the configuration and opens the registry. It refuses to
@@ -126,7 +135,8 @@ func build(cfg *config.Config) (*instance, error) {
 	if err != nil {
 		return nil, fmt.Errorf("nodes database %s: %w", dbPath, err)
 	}
-	return &instance{svc: svc, handler: newHandler(svc, key), listen: n.ListenAddr(), dbPath: dbPath}, nil
+	fl := newInflight()
+	return &instance{svc: svc, handler: fl.wrap(newHandler(svc, key)), inflight: fl, listen: n.ListenAddr(), dbPath: dbPath}, nil
 }
 
 // transcodeViewFor is the engine view, or nil (no transcode block) when no
@@ -258,12 +268,64 @@ func (in *instance) serve(ctx context.Context, ln net.Listener, drain time.Durat
 		}
 	}
 	_ = srv.Close()
+	// Close cancels the requests still running but does not wait for them;
+	// the database must not close (and the lock must not drop) under one.
+	if !in.inflight.wait(handlerGrace) {
+		internal.Logf("nodes: handlers still running %s after close; closing the database anyway", handlerGrace)
+	}
 	stopRecon()
 	<-reconDone
-	if cerr := in.svc.Close(); cerr != nil && err == nil {
-		err = fmt.Errorf("closing the nodes database: %w", cerr)
+	if cerr := in.svc.Close(); cerr != nil {
+		err = errors.Join(err, fmt.Errorf("closing the nodes database: %w", cerr))
 	}
 	return err
+}
+
+// inflight counts the HTTP requests being handled, so serve can wait for the
+// ones srv.Close cancelled before it closes the database.
+type inflight struct {
+	mu   sync.Mutex
+	n    int
+	zero chan struct{} // closed while n == 0
+}
+
+func newInflight() *inflight {
+	z := make(chan struct{})
+	close(z)
+	return &inflight{zero: z}
+}
+
+func (f *inflight) wrap(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		if f.n == 0 {
+			f.zero = make(chan struct{})
+		}
+		f.n++
+		f.mu.Unlock()
+		defer func() {
+			f.mu.Lock()
+			f.n--
+			if f.n == 0 {
+				close(f.zero)
+			}
+			f.mu.Unlock()
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// wait reports whether every request finished within d.
+func (f *inflight) wait(d time.Duration) bool {
+	f.mu.Lock()
+	z := f.zero
+	f.mu.Unlock()
+	select {
+	case <-z:
+		return true
+	case <-time.After(d):
+		return false
+	}
 }
 
 // runCheck is `navigatorr-nodes check --path nodes.db [--checkpoint]`: it

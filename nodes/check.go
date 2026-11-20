@@ -82,7 +82,14 @@ func Check(ctx context.Context, path string, checkpoint bool) (CheckReport, erro
 		return rep, nil
 	}
 
-	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+"?mode=rw&_pragma=busy_timeout(5000)")
+	// Without --checkpoint the check only reads: the file is opened read-only
+	// and immutable (no -wal exists and we hold the lock, so nothing can change
+	// it), so a read-only file passes and nothing is created next to it.
+	params := "?mode=ro&immutable=1"
+	if checkpoint {
+		params = "?mode=rw&_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+params)
 	if err != nil {
 		rep.Problems = append(rep.Problems, "opening: "+err.Error())
 		return rep, nil

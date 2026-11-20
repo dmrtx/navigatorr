@@ -496,7 +496,7 @@ func TestShutdownThatExhaustsTheDrainStillClosesTheDatabase(t *testing.T) {
 		}
 	})
 	mux.Handle("/", real)
-	in.handler = mux
+	in.handler = in.inflight.wrap(mux)
 
 	r := start(t, in, 100*time.Millisecond)
 	if code, _ := do(t, "POST", r.base+nodes.BasePath+"/builds", serviceKey, `{"target":"other","source":"synthetic","title":"t"}`); code != 200 {
@@ -551,22 +551,46 @@ func TestLongPollInFlightFinishesBeforeClose(t *testing.T) {
 	}
 	got := make(chan result, 1)
 	started := time.Now()
+	// No t.Fatal in these goroutines: it would leave the test blocked.
 	go func() {
-		c, bd := do(t, "GET", r.base+nodes.BasePath+"/builds/"+b.ID+"/log?wait=1", serviceKey, "")
-		got <- result{c, bd, time.Since(started)}
+		req, _ := http.NewRequest("GET", r.base+nodes.BasePath+"/builds/"+b.ID+"/log?wait=1", nil)
+		req.Header.Set("X-Api-Key", serviceKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			got <- result{0, err.Error(), time.Since(started)}
+			return
+		}
+		bd, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		got <- result{resp.StatusCode, string(bd), time.Since(started)}
 	}()
 	time.Sleep(150 * time.Millisecond) // the poll is parked on the server by now
 	stopped := make(chan error, 1)
-	go func() { stopped <- r.stop(t) }()
-	res := <-got
+	go func() {
+		r.cancel()
+		err := <-r.done
+		r.done <- err // for the cleanup that stops it again
+		stopped <- err
+	}()
+	var res result
+	select {
+	case res = <-got:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the long-poll never answered")
+	}
 	if res.code != 200 {
 		t.Fatalf("the long-poll was cut by the shutdown: %d %s", res.code, res.body)
 	}
 	if res.took < 900*time.Millisecond {
 		t.Errorf("the long-poll answered after %v: it did not wait", res.took)
 	}
-	if err := <-stopped; err != nil {
-		t.Errorf("shutdown: %v", err)
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Errorf("shutdown: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("serve did not return")
 	}
 	if exists(cfg.Database.NodesPath + "-wal") {
 		t.Error("a -wal file is left after exit")
@@ -676,4 +700,65 @@ func TestCheckCommand(t *testing.T) {
 			t.Fatalf("exit %d\n%s\n%s", code, out, errs)
 		}
 	})
+}
+
+// A request that srv.Close cancelled but that takes a moment to return is
+// waited for: the database closes (and the lock drops) only after it is done.
+func TestShutdownWaitsForCancelledHandlersBeforeClosingTheDatabase(t *testing.T) {
+	cfg := testConfig(t)
+	in := mustBuild(t, cfg)
+	real := in.handler
+	entered := make(chan struct{})
+	var returned atomic.Bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-r.Context().Done()
+		time.Sleep(300 * time.Millisecond) // still busy after the cancel
+		if err := in.svc.Healthy(context.Background()); err != nil {
+			t.Errorf("the database closed under a running handler: %v", err)
+		}
+		returned.Store(true)
+	})
+	mux.Handle("/", real)
+	in.handler = in.inflight.wrap(mux)
+
+	r := start(t, in, 50*time.Millisecond)
+	go func() {
+		resp, err := http.Get(r.base + "/slow")
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the slow request never arrived")
+	}
+	_ = r.stop(t)
+	if !returned.Load() {
+		t.Error("serve returned before the cancelled handler finished")
+	}
+}
+
+func TestInflightWaitTimesOut(t *testing.T) {
+	f := newInflight()
+	if !f.wait(time.Millisecond) {
+		t.Fatal("an idle counter must not wait")
+	}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	h := f.wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-release
+	}))
+	go h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
+	<-entered
+	if f.wait(50 * time.Millisecond) {
+		t.Fatal("wait returned true with a request in flight")
+	}
+	close(release)
+	if !f.wait(5 * time.Second) {
+		t.Fatal("wait did not see the request finish")
+	}
 }

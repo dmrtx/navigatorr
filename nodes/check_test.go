@@ -213,3 +213,59 @@ func TestCheckCorruptPagesInAValidFile(t *testing.T) {
 		t.Fatalf("a scrambled database passed: %+v", rep)
 	}
 }
+
+// Without --checkpoint the check only reads: a read-only database passes and
+// nothing is written next to it.
+func TestCheckWithoutCheckpointWorksOnAReadOnlyFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file modes")
+	}
+	path := importedDB(t, true)
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, err := Check(context.Background(), path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Ok() || rep.Integrity != "ok" || !rep.LegacyImportSet {
+		t.Fatalf("report %+v: %s", rep, problems(rep))
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Error("the check changed the database file")
+	}
+	if exists(path+"-wal") || exists(path+"-shm") {
+		t.Error("the check left a -wal or -shm file")
+	}
+}
+
+// The lock is released on every way out of Check, not only on success.
+func TestCheckReleasesTheLockOnFailures(t *testing.T) {
+	for name, path := range map[string]string{
+		"wal without checkpoint": leftoverWAL(t),
+		"missing legacy_import":  importedDB(t, false),
+	} {
+		rep, err := Check(context.Background(), path, false)
+		if err == nil && rep.Ok() {
+			t.Fatalf("%s: the check passed", name)
+		}
+		lp, err := lockPath(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lk, err := lockFile(lp)
+		if err != nil {
+			t.Errorf("%s: the lock is still held: %v", name, err)
+			continue
+		}
+		unlock(lk)
+	}
+}

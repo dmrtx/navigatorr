@@ -56,4 +56,16 @@ func TestNodesBlockLoadsAndRejectsUnknownKeys(t *testing.T) {
 	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "nodes.url") {
 		t.Errorf("a bad nodes.url must be rejected, got %v", err)
 	}
+	if err := os.WriteFile(p, []byte("nodes:\n  transcode_url: \"ftp://engine\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "nodes.transcode_url") {
+		t.Errorf("a bad nodes.transcode_url must be rejected, got %v", err)
+	}
+	if err := os.WriteFile(p, []byte("nodes:\n  nonsense: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "nodes.nonsense") {
+		t.Errorf("an unknown nodes key must name its section, got %v", err)
+	}
 }
