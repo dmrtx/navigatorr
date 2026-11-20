@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -600,6 +601,10 @@ func (e *Engine) childQueueKey(childID string) (string, error) {
 	if child == nil {
 		// A child that no longer exists has no place to read: the caller keeps
 		// the key its item gives it.
+		return "", nil
+	}
+	if strings.TrimSpace(child.StateJSON) == "" {
+		// A child that has not saved any state yet has no key of its own.
 		return "", nil
 	}
 	var state map[string]any

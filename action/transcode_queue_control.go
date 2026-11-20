@@ -116,17 +116,19 @@ func staleQueueErr(err error) error {
 // operator change advances the revision after its state change, and the view
 // reads the revision first: at worst it pairs an older revision with newer
 // entries, and a later write that carries that revision is refused as stale.
-// It can never make a stale write pass.
+// When a batch change could not advance the revision, the next operator
+// change advances it before checking (settleQueueRevisionLocked), so the
+// older revision cannot make a stale write pass then either.
 func (e *Engine) TranscodeQueueView() (QueueView, error) {
-	return e.queueViewLocked()
+	return e.readQueueView()
 }
 
-// queueViewLocked is the reader behind TranscodeQueueView (and the one a
+// readQueueView is the reader behind TranscodeQueueView (and the one a
 // caller inside queueMu uses). The
 // revision is read first: a conversion made ready by the engine's own progress
 // (which does not move it) can show up under an older revision, and an older
 // revision only makes a later change refuse as stale.
-func (e *Engine) queueViewLocked() (QueueView, error) {
+func (e *Engine) readQueueView() (QueueView, error) {
 	if e.deps.Store == nil {
 		return QueueView{}, fmt.Errorf("the queue needs the store")
 	}
@@ -269,7 +271,7 @@ func checkQueueRevision(v QueueView, want *int64) error {
 
 // queueResult answers a change; the caller holds queueMu.
 func (e *Engine) queueResult(ref QueueRef) (QueueResult, error) {
-	v, err := e.queueViewLocked()
+	v, err := e.readQueueView()
 	if err != nil {
 		return QueueResult{}, err
 	}
@@ -316,9 +318,12 @@ func (e *Engine) setQueueHold(ctx context.Context, ref QueueRef, revision *int64
 	}
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
+	if err := e.settleQueueRevisionLocked(); err != nil {
+		return QueueResult{}, err
+	}
 	e.bindMu.Lock()
 	defer e.bindMu.Unlock()
-	v, err := e.queueViewLocked()
+	v, err := e.readQueueView()
 	if err != nil {
 		return QueueResult{}, err
 	}
@@ -360,7 +365,10 @@ func (e *Engine) setBatchHold(ctx context.Context, ref QueueRef, revision *int64
 	// held. Resume runs the batch's step, which takes bindMu (never queueMu).
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
-	v, err := e.queueViewLocked()
+	if err := e.settleQueueRevisionLocked(); err != nil {
+		return QueueResult{}, err
+	}
+	v, err := e.readQueueView()
 	if err != nil {
 		return QueueResult{}, err
 	}
@@ -407,10 +415,25 @@ func (e *Engine) setBatchHold(ctx context.Context, ref QueueRef, revision *int64
 			}
 		}
 		if bumpErr != nil {
+			e.queueRevisionOwed = true
 			return QueueResult{}, fmt.Errorf("the batch was %s, but the queue revision could not be advanced: %w", map[bool]string{true: "held", false: "released"}[hold], bumpErr)
 		}
 	}
 	return e.queueResult(ref)
+}
+
+// settleQueueRevisionLocked bumps the revision a failed batch hold or release
+// still owes, before any other operator change checks a revision against it.
+// The caller holds queueMu.
+func (e *Engine) settleQueueRevisionLocked() error {
+	if !e.queueRevisionOwed {
+		return nil
+	}
+	if _, err := e.deps.Store.ApplyQueueWrite(store.QueueWrite{}); err != nil {
+		return fmt.Errorf("an earlier batch change has not advanced the queue revision yet: %w", err)
+	}
+	e.queueRevisionOwed = false
+	return nil
 }
 
 // QueueMove says where to put a subject: first, before a reference or after
@@ -444,9 +467,12 @@ func (e *Engine) MoveQueued(ctx context.Context, ref QueueRef, to QueueMove, rev
 	}
 	e.queueMu.Lock()
 	defer e.queueMu.Unlock()
+	if err := e.settleQueueRevisionLocked(); err != nil {
+		return QueueResult{}, err
+	}
 	e.bindMu.Lock()
 	defer e.bindMu.Unlock()
-	v, err := e.queueViewLocked()
+	v, err := e.readQueueView()
 	if err != nil {
 		return QueueResult{}, err
 	}

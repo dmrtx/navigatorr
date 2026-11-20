@@ -257,24 +257,33 @@ func TestQueueWriteExpectRevision(t *testing.T) {
 func TestTheQueueViewDoesNotWaitForABatchHold(t *testing.T) {
 	e, batch := pausedBatchEngine(t)
 	waiter(t, e, "a", time.Minute, map[string]any{}, nil)
+	type viewRead struct {
+		v   QueueView
+		err error
+	}
 	var seen QueueView
 	var viewErr error
+	waited := false
 	e.afterQueueCheck = func() {
-		done := make(chan struct{})
+		done := make(chan viewRead, 1)
 		go func() {
-			seen, viewErr = e.TranscodeQueueView()
-			close(done)
+			v, err := e.TranscodeQueueView()
+			done <- viewRead{v, err}
 		}()
 		select {
-		case <-done:
+		case r := <-done:
+			seen, viewErr = r.v, r.err
 		case <-time.After(2 * time.Second):
-			t.Error("the view waited for a batch hold that was inside Resume")
+			waited = true
 		}
 	}
 	if _, err := e.ReleaseQueued(context.Background(), bat(batch), nil); err != nil {
 		t.Fatal(err)
 	}
 	e.afterQueueCheck = nil
+	if waited {
+		t.Fatal("the view waited for a batch hold that was inside Resume")
+	}
 	if viewErr != nil {
 		t.Fatal(viewErr)
 	}
@@ -414,6 +423,28 @@ func TestABatchHoldWhoseRevisionBumpFailsIsReported(t *testing.T) {
 	case <-e.reconcileWake:
 	default:
 		t.Fatal("the reconciler was not woken")
+	}
+	// The bump is still owed: once the store recovers with the revision a
+	// client read before the hold, the next operator change advances it before
+	// checking anything, so that old revision no longer writes.
+	if !e.queueRevisionOwed {
+		t.Fatal("the failed bump is not remembered")
+	}
+	if _, err := raw.Exec(`CREATE TABLE transcode_queue_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO transcode_queue_revision (id, revision) VALUES (1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	stale := int64(0)
+	if _, err := e.MoveQueued(context.Background(), bat("batch-1"), QueueMove{First: true}, &stale); err == nil || !strings.Contains(err.Error(), "queue_revision") {
+		t.Fatalf("a write with the revision from before the hold: %v", err)
+	}
+	if e.queueRevisionOwed {
+		t.Fatal("the owed bump was not paid")
+	}
+	if rev, err := e.deps.Store.QueueRevision(); err != nil || rev != 1 {
+		t.Fatalf("revision after paying the bump: %d %v", rev, err)
 	}
 }
 
