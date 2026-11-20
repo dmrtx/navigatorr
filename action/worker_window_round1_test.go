@@ -336,3 +336,16 @@ func TestBatchNoNodeCanTakeDoesNotLimitAnotherBatch(t *testing.T) {
 		t.Fatalf("a batch that no node takes limited a movie batch: %d", n)
 	}
 }
+
+// Round 3: a first check with a definite answer marks the probe as tried, so a
+// source whose probe gives no shape is not probed again on the next poll.
+func TestEarlyPreflightFirstRunMarksTheProbeTried(t *testing.T) {
+	e, _, media, _ := setupProbeTestEnv(t, &mockTranscodeExecutor{}, ordinaryProbeJSON)
+	ec := earlyCheckEC(t, e, "new", map[string]any{"path": media, "mode": "size"})
+	if _, decided := e.earlyPreflight(context.Background(), ec); decided {
+		t.Fatal("decided")
+	}
+	if !getBool(ec.State, earlyPreflightKey) || !getBool(ec.State, queueProbeTriedKey) {
+		t.Fatalf("first definite run left the markers unset: %v", ec.State)
+	}
+}
