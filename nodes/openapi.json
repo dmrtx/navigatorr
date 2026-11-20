@@ -24,6 +24,17 @@
         "operationId": "listNodes",
         "summary": "List nodes with their build and transcode state",
         "description": "Every machine Navigatorr knows as a node, sorted by name. For each: whether new builds are paused (builds_paused and since), the builds running on it, and, read from the transcode side, whether transcoding is paused or held. Call this first to choose a machine, or to see why a build was refused (builds_paused). Read-only.",
+        "parameters": [
+          {
+            "name": "transcode",
+            "in": "query",
+            "required": false,
+            "description": "Send false to leave out the transcode block: the transcode side is not asked at all.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The nodes.",
@@ -39,6 +50,16 @@
                       }
                     }
                   }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "transcode is not a boolean (code invalid_request).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -999,6 +1020,25 @@
                   "type": "string"
                 },
                 "progress": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string",
+                  "description": "Always running: running_builds lists only running builds."
+                },
+                "priority": {
+                  "type": "string"
+                },
+                "preempt_mode": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "string"
+                },
+                "last_heartbeat_at": {
+                  "type": "string"
+                },
+                "expires_at": {
                   "type": "string"
                 }
               }

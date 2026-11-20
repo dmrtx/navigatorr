@@ -97,3 +97,25 @@ transcode:
 		t.Fatalf("publish policies: %q %q %q", workers[0].PublishPolicy, workers[1].PublishPolicy, workers[2].PublishPolicy)
 	}
 }
+
+func TestNodeNamesAreTheWorkerNames(t *testing.T) {
+	tc := TranscodeConfig{Workers: []TranscodeWorkerConfig{
+		{Name: " m4 ", HTTPExecutorConfig: HTTPExecutorConfig{BaseURL: "http://192.0.2.2:8097"}},
+		{Name: "m1", HTTPExecutorConfig: HTTPExecutorConfig{BaseURL: "http://192.0.2.1:8097"}},
+	}}
+	got, err := tc.NodeNames()
+	if err != nil || len(got) != 2 || got[0] != "m4" || got[1] != "m1" {
+		t.Fatalf("names in config order, trimmed: %v %v", got, err)
+	}
+	single := TranscodeConfig{HTTP: HTTPExecutorConfig{BaseURL: "http://192.0.2.1:8097"}}
+	if got, err := single.NodeNames(); err != nil || len(got) != 1 || got[0] != "video-worker" {
+		t.Fatalf("the single http block is one worker: %v %v", got, err)
+	}
+	dup := TranscodeConfig{Workers: []TranscodeWorkerConfig{
+		{Name: "m1", HTTPExecutorConfig: HTTPExecutorConfig{BaseURL: "http://192.0.2.1:8097"}},
+		{Name: "m1", HTTPExecutorConfig: HTTPExecutorConfig{BaseURL: "http://192.0.2.2:8097"}},
+	}}
+	if _, err := dup.NodeNames(); err == nil {
+		t.Fatal("a malformed worker list is an error")
+	}
+}

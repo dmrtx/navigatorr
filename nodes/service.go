@@ -552,6 +552,13 @@ type RunningBuild struct {
 	Title     string `json:"title"`
 	StartedAt string `json:"started_at,omitempty"`
 	Progress  string `json:"progress,omitempty"`
+	// The rest is the record's own state, so a reader needs no second call.
+	Status          string `json:"status,omitempty"`
+	Priority        string `json:"priority,omitempty"`
+	PreemptMode     string `json:"preempt_mode,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
+	LastHeartbeatAt string `json:"last_heartbeat_at,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
 }
 
 // NodeView is everything the registry knows of one configured node.
@@ -566,6 +573,16 @@ type NodeView struct {
 // Nodes lists every configured node, sorted by name. A builds-pause state that
 // cannot be read reads as paused (the create path fails closed too).
 func (s *Service) Nodes(ctx context.Context) ([]NodeView, error) {
+	return s.nodes(ctx, true)
+}
+
+// NodesWithoutTranscode is Nodes without asking the TranscodeView: no node
+// carries a transcode block.
+func (s *Service) NodesWithoutTranscode(ctx context.Context) ([]NodeView, error) {
+	return s.nodes(ctx, false)
+}
+
+func (s *Service) nodes(ctx context.Context, withTranscode bool) ([]NodeView, error) {
 	if s.topo == nil {
 		return []NodeView{}, nil
 	}
@@ -573,7 +590,7 @@ func (s *Service) Nodes(ctx context.Context) ([]NodeView, error) {
 	sort.Strings(names)
 	pauses, perr := s.reg.listPauses()
 	var states map[string]TranscodeState
-	if s.tv != nil {
+	if withTranscode && s.tv != nil {
 		states = s.tv.TranscodeStates(ctx)
 	}
 	out := make([]NodeView, 0, len(names))
@@ -609,7 +626,10 @@ func (s *Service) nodeView(name string, pauses map[string]BuildPause, perr error
 	}
 	for _, b := range s.ActiveOn(name) {
 		if b.Status == BuildRunning {
-			v.RunningBuilds = append(v.RunningBuilds, RunningBuild{ID: b.ID, Source: b.Source, Holder: b.Holder, Kind: b.Kind, Title: b.Title, StartedAt: b.StartedAt, Progress: b.Progress})
+			v.RunningBuilds = append(v.RunningBuilds, RunningBuild{
+				ID: b.ID, Source: b.Source, Holder: b.Holder, Kind: b.Kind, Title: b.Title, StartedAt: b.StartedAt, Progress: b.Progress,
+				Status: b.Status, Priority: b.Priority, PreemptMode: b.PreemptMode, CreatedAt: b.CreatedAt, LastHeartbeatAt: b.LastHeartbeatAt, ExpiresAt: b.ExpiresAt,
+			})
 		}
 	}
 	if st, ok := states[name]; ok {

@@ -154,7 +154,22 @@ func apiDecode(w http.ResponseWriter, r *http.Request, v any, hint string) bool 
 }
 
 func (s *Service) apiNodes(w http.ResponseWriter, r *http.Request) {
-	list, err := s.Nodes(r.Context())
+	var list []NodeView
+	var err error
+	withTranscode := true
+	if q := r.URL.Query(); q.Has("transcode") {
+		b, perr := strconv.ParseBool(q.Get("transcode"))
+		if perr != nil {
+			apiError(w, 400, "invalid_request", "transcode must be true or false", "leave transcode out, or send transcode=false to skip the transcode block")
+			return
+		}
+		withTranscode = b
+	}
+	if !withTranscode {
+		list, err = s.NodesWithoutTranscode(r.Context())
+	} else {
+		list, err = s.Nodes(r.Context())
+	}
 	if apiFail(w, err) {
 		return
 	}
