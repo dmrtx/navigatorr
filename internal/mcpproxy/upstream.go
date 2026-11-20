@@ -153,8 +153,11 @@ func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error
 			}
 			u.mu.Lock()
 			if u.closed {
-				// Close ran while this handshake was in flight: end the
-				// session it just opened instead of publishing it.
+				// Close ran while this handshake was in flight (or just
+				// before it started, after the check above): end the session
+				// it just opened instead of publishing it. The handshake is
+				// not cancelled on Close on purpose: an aborted initialize can
+				// leave a session upstream whose id the gateway never learns.
 				u.mu.Unlock()
 				dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer dcancel()
