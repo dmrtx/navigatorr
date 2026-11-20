@@ -185,6 +185,7 @@ const planReportMaxAge = 2 * time.Minute
 // there.
 func (e *Engine) planUnreported(ctx context.Context, q queueSlots) (out []bool, reportAt []time.Time) {
 	out = make([]bool, len(q.workers))
+	poolUnread := make([]bool, len(q.workers))
 	reportAt = make([]time.Time, len(q.workers))
 	now := e.now()
 	tooOld := func(at time.Time) bool { return at.IsZero() || now.Sub(at) > planReportMaxAge }
@@ -198,6 +199,7 @@ func (e *Engine) planUnreported(ctx context.Context, q queueSlots) (out []bool, 
 			if _, reads := w.Executor.(workerSlotReader); reads && !old && q.ready[i] && hold == "" &&
 				!e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
 				old = tooOld(e.workerPoolAt(w.Name))
+				poolUnread[i] = old
 			}
 		}
 		switch {
@@ -215,6 +217,7 @@ func (e *Engine) planUnreported(ctx context.Context, q queueSlots) (out []bool, 
 		}
 	}
 	q.placer.unreported = out
+	q.placer.poolUnread = poolUnread
 	return out, reportAt
 }
 
@@ -365,7 +368,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 			if len(a.skips) >= maxPlanSkipped && len(cs) > maxPlanSkipped {
 				n.SkippedTruncated = true
 			}
-			n.WhyNone = planWhyNone(w.Name, a.state, e.nodeOwnHold(q.placer.ctx, w), entries)
+			n.WhyNone = planWhyNone(w.Name, a.state, e.nodeOwnHold(q.placer.ctx, w), ni < len(q.placer.poolUnread) && q.placer.poolUnread[ni], entries)
 		}
 		nodes[ni] = n
 	}
@@ -489,14 +492,14 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 }
 
 // planWhyNone says why nothing would start on the node.
-func planWhyNone(node, state, hold string, entries []QueueEntry) *PlanReason {
+func planWhyNone(node, state, hold string, poolOnly bool, entries []QueueEntry) *PlanReason {
 	// The state of the node wins: an empty queue does not make an unknown,
 	// offline, paused or closed node look idle.
 	switch state {
 	case NodeOffline:
 		return &PlanReason{ReasonNodeOffline, "Node " + node + " is not ready (offline or failing its checks), so it takes nothing new."}
 	case NodeUnknown:
-		return &PlanReason{ReasonNodeUnknown, "Node " + node + " has sent no recent report, so nothing is said about it until it does."}
+		return &PlanReason{ReasonNodeUnknown, "N" + unknownNodeText(node, poolOnly)[1:] + "."}
 	case NodePaused:
 		switch hold {
 		case "build":

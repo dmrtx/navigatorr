@@ -132,6 +132,9 @@ type placer struct {
 	// unreported marks a node the queue plan has no recent report of: it is not
 	// ready for the plan, and says so rather than offline.
 	unreported []bool
+	// poolUnread marks, among them, a node whose report is recent but whose
+	// free slots were not read lately (nothing has asked for one).
+	poolUnread []bool
 	elig       map[transcode.RoomNeed][]bool
 	// windows are the nodes' availability windows, read once on first use; an
 	// error closes every node (fail closed).
@@ -183,7 +186,7 @@ func (pl *placer) verdictAt(p placement, i int, explain bool) (code, reason stri
 	case p.sizeUnknown:
 		return ReasonSizeUnknown, "its source size could not be read yet; it is checked again shortly"
 	case !pl.ready[i] && i < len(pl.unreported) && pl.unreported[i]:
-		return ReasonNodeUnknown, "node " + w.Name + " has sent no recent report, so nothing is said about it until it does"
+		return ReasonNodeUnknown, unknownNodeText(w.Name, i < len(pl.poolUnread) && pl.poolUnread[i])
 	case !pl.ready[i]:
 		return ReasonNodeOffline, "node " + w.Name + " is not ready (offline or failing its checks)"
 	case !pl.eligible(p.need)[i]:
@@ -393,4 +396,13 @@ func (q queueSlots) safeWorkers(cur queueClaim, ahead []queueClaim) map[string]b
 		free[i]++
 	}
 	return safe
+}
+
+// unknownNodeText says why nothing is said about a node: no recent report, or
+// (poolOnly) a recent report but free slots nobody has read lately.
+func unknownNodeText(name string, poolOnly bool) string {
+	if poolOnly {
+		return "node " + name + " is reachable, but its free slots were not read lately (nothing has asked for one), so nothing is said about them until something does"
+	}
+	return "node " + name + " has sent no recent report, so nothing is said about it until it does"
 }

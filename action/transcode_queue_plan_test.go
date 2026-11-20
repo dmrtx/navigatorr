@@ -1337,7 +1337,8 @@ func TestQueueNextPoolAgeOnlyWhereItIsRead(t *testing.T) {
 	st.poolMu.Lock()
 	st.pool.at = e.now().Add(-10 * time.Minute)
 	st.poolMu.Unlock()
-	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown {
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown ||
+		!strings.Contains(n.WhyNone.Text, "free slots were not read lately") {
 		t.Fatalf("expired pool: %+v", n)
 	}
 	// A node the operator paused, or whose window closed, is not read from its

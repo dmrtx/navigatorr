@@ -278,7 +278,9 @@ long time, so it holds no one back and is never named as next), `node_build`,
 Limits: queued batch items have no conversion yet, so they are placed by media
 type and window only (no disk check); a node whose last report is missing or older
 than 2 minutes (or whose slot pool was not read in that time) is `unknown`: no
-free slots are claimed and nothing is asked of it. With a single node nothing is
+free slots are claimed and nothing is asked of it. Its free slots are read only when something waits for one, so with an empty
+queue a healthy node shows `unknown` too; `why_none` then says its slots were
+not read lately, and `report_at` shows its recent report. With a single node nothing is
 `unknown`: dispatch needs no report from it, so the plan shows the last news it
 has, whatever its age (its last pool, its last offline or busy report, or the
 configured capacity when it never reported). That includes a hold: a node whose
