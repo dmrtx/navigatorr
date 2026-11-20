@@ -31,9 +31,10 @@ import (
 //	    or empty) is marked source_size_unreadable and placed as needing no
 //	    room, so the node fails it with the real error instead of it waiting
 //	    forever. Without a resolver it is placed as needing no room too.
-//	I4  Batch items not yet started as children are disk-only (placement{}):
-//	    they are not waiter rows and have no size to read, and no media type
-//	    or probe: the node windows do not check them (windowShape{}).
+//	I4  Batch items not yet started as children are disk-only: they are not
+//	    waiter rows and have no size to read. Of the node windows they are
+//	    held to what is known of them (queuedItemPlacement): the media type
+//	    and a closed window, not the encode's fit, which needs a probe.
 //	I5  A node's availability window (worker_window.go) is part of the same
 //	    decision: placeable answers false for a node whose window does not take
 //	    the conversion, and waitReason words it (node_window) when the windows
@@ -88,6 +89,13 @@ func (e *Engine) waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
 		window: windowShape{check: true, mediaType: normalizedMediaType(w.MediaType), durationSec: w.ProbeDurationSec,
 			class: ResolutionClass(w.ProbeWidth, w.ProbeHeight)},
 	}
+}
+
+// queuedItemPlacement is the placement of a batch item that has no child yet:
+// it needs no room (it is not sized) and the windows see its media type and
+// whether they have closed, not whether its encode fits.
+func queuedItemPlacement(it store.QueuedBatchItemRow) placement {
+	return placement{window: windowShape{check: true, noFit: true, mediaType: normalizedMediaType(it.MediaType)}}
 }
 
 // refusedRecently says whether the node refused the conversion so lately that
@@ -186,10 +194,12 @@ func (pl *placer) waitReason(p placement) (condition, reason string) {
 	for i, w := range pl.workers {
 		if pl.ready[i] && el[i] {
 			withRoom++
-			if pl.e.refusedRecently(p, w.Name) {
-				refused++
-			} else if ok, why := pl.windowOK(p, w.Name); !ok {
+			// A node the window keeps the conversion off counts as excluded
+			// even if it also refused it lately.
+			if ok, why := pl.windowOK(p, w.Name); !ok {
 				excluded = append(excluded, fmt.Sprintf("node %s: %s", w.Name, why))
+			} else if pl.e.refusedRecently(p, w.Name) {
+				refused++
 			}
 		}
 	}
@@ -198,8 +208,12 @@ func (pl *placer) waitReason(p placement) (condition, reason string) {
 		// Only the windows keep it off the nodes with room: it holds no slot
 		// against anyone (some node being full is a different wait).
 		return windowWaitCondition, "Not placeable by the availability windows (" + strings.Join(excluded, "; ") + ")"
-	case withRoom > 0 && refused == withRoom:
-		return "worker_busy", "A node with room refused it a moment ago; it is asked again shortly"
+	case withRoom > 0 && refused > 0 && refused+len(excluded) == withRoom:
+		reason := "A node with room refused it a moment ago; it is asked again shortly"
+		if len(excluded) > 0 {
+			reason += " (the availability windows keep it off " + strings.Join(excluded, "; ") + ")"
+		}
+		return "worker_busy", reason
 	case withRoom == 0 && p.need.SourceBytes > 0:
 		return "worker_busy", pl.e.roomWaitReason(pl.ctx, pl.workers, p.need)
 	}

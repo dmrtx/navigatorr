@@ -76,6 +76,8 @@ type Engine struct {
 	holdSyncing atomic.Bool
 	// pauseSweeping is set while a background sweep of paused nodes runs.
 	pauseSweeping atomic.Bool
+	// windowSweeping is set while a background sweep of the node windows runs.
+	windowSweeping atomic.Bool
 
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the

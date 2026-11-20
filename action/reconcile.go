@@ -52,6 +52,7 @@ func (e *Engine) StartReconciler(ctx context.Context) <-chan struct{} {
 				// Automatic replacements a crash or an error left behind.
 				e.drainAutoReplacements(ctx)
 				e.startNodePauseSweep(ctx)
+				e.startWindowSweep(ctx)
 				if err := e.dispatchReconcile(ctx, d); err != nil && ctx.Err() == nil {
 					log.Printf("action reconciler: %v", err)
 				}

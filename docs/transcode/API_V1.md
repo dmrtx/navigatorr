@@ -299,10 +299,15 @@ means all), `closes_at` (`until` less the margin), `state` (`open` or
 - A conversion starts on the node only if its media type is allowed (a
   conversion with no media type is allowed only when `media_types` is empty)
   and, when `until` is set, now plus the estimated encode time on that node is
-  not past `closes_at`. The estimate is the largest of the copy, x265 and
-  hardware estimates the node has history for, at the source's resolution
-  class. With no estimate the conversion does not start on a node whose window
-  has an `until`; it can still go to other nodes.
+  not past `closes_at`. The estimate is that of the encoder family the plan
+  chose, from the node's own history at the source's resolution class; no other
+  family's history is borrowed. Before the family is known (while the
+  conversion waits for a node) the x265 history counts, or the copy history for
+  a conversion known to be audio-only. With no estimate the conversion does not
+  start on a node whose window has an `until`; it can still go to other nodes.
+  A conversion that is assigned to the node but not yet sent when the window
+  changes, and no longer qualifies, goes back to the queue; one already sent
+  keeps running.
 - At or after `closes_at` the node takes nothing new, and stays closed until the
   window is changed or deleted. Running conversions are never touched.
 - A conversion that no node accepts waits with the condition `node_window` and
@@ -310,3 +315,9 @@ means all), `closes_at` (`until` less the margin), `state` (`open` or
   not hold back other conversions or later items of its batch. Changing or
   deleting a window wakes it.
 - If the window cannot be read, the node takes nothing new until it can.
+- `revision` only goes up per node and survives deleting the window. For a node
+  with no window the expected `revision` is the current counter, which `GET
+  /workers/{name}/window` returns in the `no_window` 404 body as `revision`
+  (0 for a node that never had one). A blank entry in `media_types` is 400
+  `invalid_request`, and so is a `?revision=` on DELETE that is empty or not an
+  integer.

@@ -313,7 +313,7 @@ func (e *Engine) transcodeQueueBefore(q queueSlots, cur queueClaim, key, self st
 	}
 	for _, it := range items {
 		if !it.Held && batchItemQueueOrder(it) < key {
-			c := e.claimFor(q, placement{})
+			c := e.claimFor(q, queuedItemPlacement(it))
 			before = append(before, c)
 			if cur.competesWith(c) {
 				ahead++
@@ -481,10 +481,11 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 		return 0
 	}
 	first := ""
+	var firstRow store.QueuedBatchItemRow
 	for _, it := range items {
 		if it.BatchID == batchID && !it.Held {
 			if k := batchItemQueueOrder(it); first == "" || k < first {
-				first = k
+				first, firstRow = k, it
 			}
 		}
 	}
@@ -496,7 +497,7 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 		log.Printf("transcode queue: counting free slots for batch %s: %v", batchID, err)
 		return 0
 	}
-	before, _, err := e.transcodeQueueBefore(q, e.claimFor(q, placement{}), first, "")
+	before, _, err := e.transcodeQueueBefore(q, e.claimFor(q, queuedItemPlacement(firstRow)), first, "")
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for batch %s: %v", batchID, err)
 		return 0

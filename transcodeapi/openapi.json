@@ -1539,7 +1539,7 @@
         ],
         "operationId": "getWindow",
         "summary": "Show a node's availability window",
-        "description": "One node's availability window with closes_at, state (open or closed) and revision. A node with no window answers 404 no_window; 404 unknown_worker if the name is not configured. Read-only.",
+        "description": "One node's availability window with closes_at, state (open or closed) and revision. A node with no window answers 404 no_window, whose body also carries revision (the node's current revision counter, to send as revision when creating a window); 404 unknown_worker if the name is not configured. Read-only.",
         "responses": {
           "200": {
             "description": "The window.",
@@ -1582,7 +1582,7 @@
             }
           },
           "404": {
-            "description": "The node is not configured (code unknown_worker) or has no window (code no_window); the hint names the listing endpoint.",
+            "description": "The node is not configured (code unknown_worker) or has no window (code no_window, with the current revision in the body); the hint names the listing endpoint.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1630,7 +1630,7 @@
         ],
         "operationId": "putWindow",
         "summary": "Set a node's availability window",
-        "description": "Make a node available until a time: until (RFC3339, optional), margin_minutes (0 to 1440, default 0: the node takes nothing new that long before until) and media_types (a subset of tv, anime, movie; empty means all, so use it for only episodes or only movies). A conversion starts on the node only if its media type is allowed and, when until is set, its estimated encode time fits before until less the margin; without an estimate it does not start there. Past closing the node takes nothing new until the window is changed or deleted; running conversions are never touched. revision (optional) must be the one read from the window; a stale one is 409 stale_window_revision. 404 unknown_worker if the name is not configured.",
+        "description": "Make a node available until a time: until (RFC3339, optional), margin_minutes (0 to 1440, default 0: the node takes nothing new that long before until) and media_types (a subset of tv, anime, movie; empty means all, so use it for only episodes or only movies). A conversion starts on the node only if its media type is allowed and, when until is set, its estimated encode time fits before until less the margin; without an estimate it does not start there. Once the plan has chosen the encoder family only that family's history is used; before that, the x265 history is (the copy history for a conversion known to be audio-only). A blank entry in media_types is 400 invalid_request. Revisions only go up per node: deleting a window keeps the counter, so for a node with no window revision must be the counter that GET answers in its 404 no_window body. A conversion already assigned to the node but not yet sent that no longer qualifies after the change goes back to the queue; one already sent is left alone. Past closing the node takes nothing new until the window is changed or deleted; running conversions are never touched. revision (optional) must be the one read from the window; a stale one is 409 stale_window_revision. 404 unknown_worker if the name is not configured.",
         "responses": {
           "200": {
             "description": "The window as stored.",
@@ -1796,7 +1796,7 @@
                   },
                   "revision": {
                     "type": "integer",
-                    "description": "The window's revision as last read (0 when it has none); a mismatch is 409 stale_window_revision."
+                    "description": "The window's revision as last read; for a node with no window, the counter from the 404 no_window body (0 for a node that never had one). A mismatch is 409 stale_window_revision."
                   }
                 }
               }
@@ -1810,7 +1810,7 @@
         ],
         "operationId": "deleteWindow",
         "summary": "Delete a node's availability window",
-        "description": "Remove a node's availability window so it takes every media type again with no end. Optional ?revision= must match the window's revision, else 409 stale_window_revision. Deleting a window that is not there is a no-op (had_window false). 404 unknown_worker if the name is not configured.",
+        "description": "Remove a node's availability window so it takes every media type again with no end. Optional ?revision= must match the window's revision, else 409 stale_window_revision; present but empty or not an integer is 400 invalid_request. Deleting a window that is not there is a no-op (had_window false). 404 unknown_worker if the name is not configured.",
         "responses": {
           "200": {
             "description": "Whether a window was removed.",

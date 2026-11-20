@@ -34,8 +34,16 @@ func TestTranscodeV1WindowRoutes(t *testing.T) {
 			t.Fatal(name, c, k)
 		}
 	}
-	if c, k := code(t, write(h, "DELETE", p+"?revision=x", ``)); c != 400 || k != "invalid_request" {
-		t.Fatal(c, k)
+	for _, q := range []string{"?revision=x", "?revision=", "?revision"} {
+		if c, k := code(t, write(h, "DELETE", p+q, ``)); c != 400 || k != "invalid_request" {
+			t.Fatal(q, c, k)
+		}
+	}
+	if c, k := code(t, write(h, "PUT", p, `{"media_types":["movie",""]}`)); c != 400 || k != "invalid_request" {
+		t.Fatal("blank media type", c, k)
+	}
+	if c, k := code(t, write(h, "PUT", p, `{"media_types":["  "]}`)); c != 400 || k != "invalid_request" {
+		t.Fatal("blank media type", c, k)
 	}
 
 	w := write(h, "PUT", p, `{"until":"2099-01-01T06:00:00+02:00","margin_minutes":30,"media_types":["Movie","tv"]}`)
@@ -83,8 +91,26 @@ func TestTranscodeV1WindowRoutes(t *testing.T) {
 	if w := write(h, "DELETE", p+"?revision=2", ``); w.Code != 200 || !json.Valid(w.Body.Bytes()) {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if c, e := get(t, h, p, keyHdr()); c != 404 || e["code"] != "no_window" {
+	// Revisions keep counting past the deletion: the missing window says where.
+	if c, e := get(t, h, p, keyHdr()); c != 404 || e["code"] != "no_window" || e["revision"] != float64(3) {
 		t.Fatal(c, e)
+	}
+	// A writer holding the old revision cannot create over the deletion; the
+	// counter is the expected revision of "no window".
+	if c, k := code(t, write(h, "PUT", p, `{"margin_minutes":1,"revision":2}`)); c != 409 || k != "stale_window_revision" {
+		t.Fatal(c, k)
+	}
+	if w := write(h, "PUT", p, `{"margin_minutes":1,"revision":3}`); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	} else {
+		var e map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &e)
+		if e["revision"] != float64(4) || e["state"] != "open" {
+			t.Fatal(e)
+		}
+	}
+	if w := write(h, "DELETE", p, ``); w.Code != 200 {
+		t.Fatal(w.Code)
 	}
 	if w := write(h, "DELETE", p, ``); w.Code != 200 {
 		t.Fatal("deleting nothing is a no-op", w.Code)

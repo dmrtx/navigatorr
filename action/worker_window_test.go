@@ -116,6 +116,10 @@ func TestWindowFitNoFitAndNoEstimate(t *testing.T) {
 		t.Fatalf("no history: %q %q %q", w, cond, reason)
 	}
 
+	// The history is back before the window changes: a window write sweeps
+	// what is assigned and not sent, and "fits" on m4 must still qualify.
+	realtimeSamples(e)
+	e.history = encodeHistory{}
 	// A window without an end needs no estimate; the other node can take what
 	// this one refuses.
 	if _, err := e.DeleteNodeWindow("m1", nil); err != nil {
@@ -147,7 +151,8 @@ func TestClosedWindowTakesNothingNewAndLeavesRunningJobsAlone(t *testing.T) {
 	m4 := diskNode(1000*gib, 10*gib, 500*gib)
 	e, clock := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
 	realtimeSamples(e)
-	busy(t, e, "running", "m4")
+	// A running job: sent to its node, so a window leaves it alone.
+	seedActionInstance(t, e.deps.Store, "running", "transcode_media", StatusRunning, 0, "", map[string]any{}, map[string]any{"worker": "m4", "transcode_submitted": true, "job_id": "j"})
 	windowAt(t, e, clock, "m4", time.Hour, 0)
 	node, _ := e.deps.Workers.Get("m4")
 	if c := e.workerVideoCapacity(context.Background(), node); c != 1 {
@@ -377,11 +382,11 @@ func TestWindowEstimateComesFromTheStoredEncodeHistory(t *testing.T) {
 			"encode_duration_ms": 1800000.0,
 		})
 	}
-	est, ok := e.maxEncodeEstimate("m4", "1080p", 3600)
+	est, ok := EstimateEncodeSeconds(e.encodeSamples(), "m4", "1080p", EncodeFamilyX265, 3600)
 	if !ok || est < 1790 || est > 1810 {
 		t.Fatalf("estimate %v %v from two half-time encodes", est, ok)
 	}
-	if _, ok := e.maxEncodeEstimate("m1", "1080p", 3600); ok {
+	if _, ok := EstimateEncodeSeconds(e.encodeSamples(), "m1", "1080p", EncodeFamilyX265, 3600); ok {
 		t.Fatal("m1 has no history")
 	}
 	windowAt(t, e, clock, "m4", time.Hour, 0)

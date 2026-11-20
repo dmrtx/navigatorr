@@ -56,13 +56,13 @@ func (e *StaleWorkerWindowError) Error() string {
 }
 
 // NormalizeWorkerWindowMediaTypes lower-cases, checks and orders the media
-// types (tv, anime, movie) and drops repeats. An unknown type is an error.
+// types (tv, anime, movie) and drops repeats. An unknown or blank type is an error.
 func NormalizeWorkerWindowMediaTypes(types []string) ([]string, error) {
 	seen := map[string]bool{}
 	for _, t := range types {
 		t = strings.ToLower(strings.TrimSpace(t))
 		if t == "" {
-			continue
+			return nil, errors.New("a media type must not be empty (use tv, anime or movie)")
 		}
 		known := false
 		for _, k := range WorkerWindowMediaTypes {
@@ -163,9 +163,9 @@ func (s *Store) SetWorkerWindow(w WorkerWindow, expectedRevision *int64) (Worker
 	if err != nil {
 		return WorkerWindow{}, err
 	}
-	have := int64(0)
-	if found {
-		have = current.Revision
+	have, err := s.windowRevisionLocked(w.Worker)
+	if err != nil {
+		return WorkerWindow{}, err
 	}
 	if expectedRevision != nil && *expectedRevision != have {
 		return WorkerWindow{}, &StaleWorkerWindowError{Worker: w.Worker, Current: have}
@@ -174,28 +174,62 @@ func (s *Store) SetWorkerWindow(w WorkerWindow, expectedRevision *int64) (Worker
 	if found && current.Until == w.Until && current.MarginSec == w.MarginSec && strings.Join(current.MediaTypes, ",") == stored {
 		return current, nil
 	}
-	if _, err := s.db.Exec(`INSERT INTO worker_windows(worker, until, margin_sec, media_types, revision, updated_at) VALUES(?, NULLIF(?, ''), ?, ?, 1, ?)
+	next := have + 1
+	tx, err := s.db.Begin()
+	if err != nil {
+		return WorkerWindow{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT INTO worker_window_revisions(worker, revision) VALUES(?, ?)
+		ON CONFLICT(worker) DO UPDATE SET revision=excluded.revision`, w.Worker, next); err != nil {
+		return WorkerWindow{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO worker_windows(worker, until, margin_sec, media_types, revision, updated_at) VALUES(?, NULLIF(?, ''), ?, ?, ?, ?)
 		ON CONFLICT(worker) DO UPDATE SET until=excluded.until, margin_sec=excluded.margin_sec, media_types=excluded.media_types,
-		revision=worker_windows.revision+1, updated_at=excluded.updated_at`, w.Worker, w.Until, w.MarginSec, stored, nowStr()); err != nil {
+		revision=excluded.revision, updated_at=excluded.updated_at`, w.Worker, w.Until, w.MarginSec, stored, next, nowStr()); err != nil {
+		return WorkerWindow{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return WorkerWindow{}, err
 	}
 	out, _, err := s.getWorkerWindowLocked(w.Worker)
 	return out, err
 }
 
+// windowRevisionLocked is the revision a node's window has reached: that of
+// the window it has, or of the one it had last (0 for a node that never had
+// one). A write must be made against it.
+func (s *Store) windowRevisionLocked(worker string) (int64, error) {
+	var rev int64
+	err := s.db.QueryRow(`SELECT revision FROM worker_window_revisions WHERE worker=?`, worker).Scan(&rev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return rev, err
+}
+
+// WorkerWindowRevision is the revision to write a node's window against: the
+// window's own, or when it has none the one its last window ended at.
+func (s *Store) WorkerWindowRevision(worker string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.windowRevisionLocked(worker)
+}
+
 // DeleteWorkerWindow removes a node's window. With expectedRevision set it is
 // removed only at that revision, otherwise a *StaleWorkerWindowError. It
-// reports whether a window was there.
+// reports whether a window was there. A removal moves the node's revision on,
+// so a client that read the window before cannot write over what is made next.
 func (s *Store) DeleteWorkerWindow(worker string, expectedRevision *int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current, found, err := s.getWorkerWindowLocked(worker)
+	_, found, err := s.getWorkerWindowLocked(worker)
 	if err != nil {
 		return false, err
 	}
-	have := int64(0)
-	if found {
-		have = current.Revision
+	have, err := s.windowRevisionLocked(worker)
+	if err != nil {
+		return false, err
 	}
 	if expectedRevision != nil && *expectedRevision != have {
 		return false, &StaleWorkerWindowError{Worker: worker, Current: have}
@@ -203,6 +237,16 @@ func (s *Store) DeleteWorkerWindow(worker string, expectedRevision *int64) (bool
 	if !found {
 		return false, nil
 	}
-	_, err = s.db.Exec(`DELETE FROM worker_windows WHERE worker=?`, worker)
-	return err == nil, err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE worker_window_revisions SET revision=? WHERE worker=?`, have+1, worker); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`DELETE FROM worker_windows WHERE worker=?`, worker); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }

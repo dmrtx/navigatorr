@@ -85,7 +85,15 @@ func (s *Server) transcodeWindowReadHandlers(h transcodeapi.Handlers) {
 			return
 		}
 		if !ok {
-			transcodeapi.WriteError(w, 404, "no_window", "this worker has no availability window", hintWindows)
+			// The revision to create one against travels with the refusal.
+			rev, err := s.engine.NodeWindowRevision(name)
+			if err != nil {
+				windowFail(w, err)
+				return
+			}
+			transcodeapi.WriteJSON(w, 404, map[string]any{
+				"error": "this worker has no availability window", "code": "no_window", "hint": hintWindows, "revision": rev,
+			})
 			return
 		}
 		transcodeapi.WriteJSON(w, 200, windowViewOf(st))
@@ -137,11 +145,7 @@ func (s *Server) transcodeWindowWriteHandlers(h transcodeapi.Handlers) {
 			windowFail(w, err)
 			return
 		}
-		st, ok, err := s.engine.NodeWindow(name)
-		if err != nil || !ok {
-			// stored a moment ago: answer with what was written
-			st = action.NodeWindowStatus{WorkerWindow: saved}
-		}
+		st := s.engine.NodeWindowStatusOf(saved)
 		transcodeapi.WriteJSON(w, 200, windowViewOf(st))
 	}
 	h["DELETE "+b+"/workers/{name}/window"] = func(w http.ResponseWriter, r *http.Request) {
@@ -153,7 +157,8 @@ func (s *Server) transcodeWindowWriteHandlers(h transcodeapi.Handlers) {
 			return
 		}
 		var expected *int64
-		if q := r.URL.Query().Get("revision"); q != "" {
+		if r.URL.Query().Has("revision") {
+			q := r.URL.Query().Get("revision")
 			n, err := strconv.ParseInt(q, 10, 64)
 			if err != nil || n < 0 {
 				v1Bad(w, "revision must be a non-negative integer", "")

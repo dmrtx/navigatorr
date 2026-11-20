@@ -1,8 +1,10 @@
 package action
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,11 +24,12 @@ import (
 //     no media type only where the window lists none), and
 //   - when the window has an end, the conversion can be finished before it:
 //     now plus the encode time estimated for this node from its own history
-//     (encode_samples.go) is not past the closing time. The slowest estimate
-//     among the encoder families the node has history for counts, since the
-//     family is not known before the plan. With no estimate (no probe of the
-//     source yet, or too little history on the node) it does not start there;
-//     it can still go to another node.
+//     (encode_samples.go) is not past the closing time. Once the plan has
+//     chosen the encoder family that family's estimate is used; before it the
+//     x265 estimate (the slow default), or copy for a conversion known to be
+//     audio-only. With no estimate (no probe of the source yet, or too little
+//     history on the node for that family) it does not start there; it can
+//     still go to another node.
 //
 // At the closing time nothing new starts on the node, and it stays closed
 // until the operator changes or deletes the window. What is encoding is never
@@ -79,6 +82,13 @@ type windowShape struct {
 	mediaType   string
 	durationSec float64
 	class       string
+	// family is the encoder family the plan chose, "" while none is known;
+	// audioOnly says the conversion is known to copy the video.
+	family    string
+	audioOnly bool
+	// noFit leaves out the duration fit (a batch item with no conversion yet
+	// has no probe): the type and a closed window still count.
+	noFit bool
 }
 
 func normalizedMediaType(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
@@ -87,7 +97,10 @@ func normalizedMediaType(s string) string { return strings.ToLower(strings.TrimS
 // what was probed of its source (the preflight's, else the early check's).
 func windowShapeOfState(inputs, state map[string]any) windowShape {
 	dur, class := probeOfState(state)
-	return windowShape{check: true, mediaType: normalizedMediaType(getString(inputs, "media_type")), durationSec: dur, class: class}
+	return windowShape{
+		check: true, mediaType: normalizedMediaType(getString(inputs, "media_type")), durationSec: dur, class: class,
+		family: encodeFamilyOf(EncodeRecord{State: state}), audioOnly: getBool(inputs, "audio_only"),
+	}
 }
 
 // probeOfState reads the source's length and resolution class from the
@@ -110,17 +123,24 @@ func probeOfState(state map[string]any) (durationSec float64, class string) {
 	return 0, ""
 }
 
-// maxEncodeEstimate is the slowest estimate, over the encoder families the
-// node has history for, of encoding durationSec of a class file there.
-func (e *Engine) maxEncodeEstimate(node, class string, durationSec float64) (float64, bool) {
-	samples := e.encodeSamples()
-	best, found := 0.0, false
-	for _, family := range []string{EncodeFamilyCopy, EncodeFamilyX265, EncodeFamilyHardware} {
-		if est, ok := EstimateEncodeSeconds(samples, node, class, family, durationSec); ok && (!found || est > best) {
-			best, found = est, true
-		}
+// windowEstimate is the encode time of the conversion on node, with whether
+// there is one. Once the plan has chosen the encoder family, exactly that
+// family's history counts. Before it (the queue's turn, the claims) the family
+// is not known, so the slow default decides: x265's estimate, or the copy
+// family's for a conversion known to be audio-only. A node with no history
+// for that family gives no estimate, so the conversion does not start there;
+// the faster families' history is never borrowed, as it would understate an
+// x265 encode.
+func (e *Engine) windowEstimate(node string, s windowShape) (float64, bool) {
+	family := s.family
+	switch {
+	case family != "":
+	case s.audioOnly:
+		family = EncodeFamilyCopy
+	default:
+		family = EncodeFamilyX265
 	}
-	return best, found
+	return EstimateEncodeSeconds(e.encodeSamples(), node, s.class, family, s.durationSec)
 }
 
 // windowVerdict says whether node's window lets the conversion start there
@@ -149,20 +169,31 @@ func (e *Engine) windowVerdict(wins map[string]store.WorkerWindow, werr error, s
 		}
 		return false, fmt.Sprintf("type %s is not allowed (the window takes only %s)", s.mediaType, takes)
 	}
-	if !hasEnd {
+	if !hasEnd || s.noFit {
 		return true, ""
 	}
 	if s.durationSec <= 0 || s.class == "" {
 		return false, "no duration estimate yet: its source has not been probed"
 	}
-	est, ok := e.maxEncodeEstimate(node, s.class, s.durationSec)
+	est, ok := e.windowEstimate(node, s)
 	if !ok {
-		return false, fmt.Sprintf("no duration estimate: no encode history on this node for %s files", s.class)
+		return false, fmt.Sprintf("no duration estimate: no encode history on this node for %s files%s", s.class, familyNote(s))
 	}
 	if now.Add(time.Duration(est * float64(time.Second))).After(closes) {
 		return false, fmt.Sprintf("the window closes at %s and the estimated %d min encode does not fit", windowClock(closes, now), int(est/60+0.5))
 	}
 	return true, ""
+}
+
+// familyNote names the encoder family an estimate was looked up for.
+func familyNote(s windowShape) string {
+	switch {
+	case s.family != "":
+		return " with " + s.family
+	case s.audioOnly:
+		return " with " + EncodeFamilyCopy
+	}
+	return " with " + EncodeFamilyX265
 }
 
 // windowClock words a time as HH:MM UTC, with the date when it is not today.
@@ -180,10 +211,13 @@ func (e *Engine) windowAdmits(ec *ExecutionContext) (ok bool, why string, unread
 	if ec.ActionName != "transcode_media" {
 		return true, "", false
 	}
-	node := e.instanceWorker(ec.State)
-	if node == "" {
+	// A conversion is sent to the worker its state names, and a state with
+	// none is sent to the legacy worker (see actionWorker): that is the node
+	// whose window counts. Without workers there is no window.
+	if !e.workersConfigured() {
 		return true, "", false
 	}
+	node := e.resolveWorker(assignedWorker(ec.State))
 	wins, err := e.workerWindows()
 	if err != nil {
 		return false, "the availability windows could not be read, so no node takes anything new", true
@@ -246,6 +280,9 @@ func (e *Engine) DeleteNodeWindow(name string, expected *int64) (bool, error) {
 func (e *Engine) noteWindowChanged() {
 	e.windowChangedAt.Store(e.now().UnixNano())
 	e.WakeReconciler()
+	// What a changed window no longer takes and has not been sent goes back
+	// to the queue now, not at the next tick.
+	e.startWindowSweep(context.Background())
 }
 
 // NodeWindowStatus is a window as the API reports it.
@@ -286,6 +323,24 @@ func (e *Engine) NodeWindow(name string) (NodeWindowStatus, bool, error) {
 	return e.windowStatus(w), true, nil
 }
 
+// NodeWindowStatusOf is the status (closing time, open or closed) of a window
+// as stored, computed as the reads do.
+func (e *Engine) NodeWindowStatusOf(w store.WorkerWindow) NodeWindowStatus { return e.windowStatus(w) }
+
+// NodeWindowRevision is the revision a write to the node's window must be made
+// against: the window's own, or for a node without one the revision its last
+// window ended at (0 when it never had one).
+func (e *Engine) NodeWindowRevision(name string) (int64, error) {
+	node, ok := e.deps.Workers.Get(name)
+	if !ok {
+		return 0, &transcode.WorkerNotConfiguredError{Name: name}
+	}
+	if e.deps.Store == nil {
+		return 0, nil
+	}
+	return e.deps.Store.WorkerWindowRevision(node.Name)
+}
+
 func (e *Engine) windowStatus(w store.WorkerWindow) NodeWindowStatus {
 	st := NodeWindowStatus{WorkerWindow: w}
 	if closes, ok := w.ClosesAt(); ok {
@@ -293,4 +348,91 @@ func (e *Engine) windowStatus(w store.WorkerWindow) NodeWindowStatus {
 		st.Closed = !e.now().Before(closes)
 	}
 	return st
+}
+
+// startWindowSweep runs a sweep of the node windows in the background unless
+// one is running, on the reconciler's tick and after a window is written.
+func (e *Engine) startWindowSweep(ctx context.Context) {
+	if e.deps.Store == nil || !e.windowSweeping.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer e.windowSweeping.Store(false)
+		e.sweepWindowedNodes(ctx)
+	}()
+}
+
+// sweepWindowedNodes sends back to the queue what a node's window no longer
+// takes and that has not been sent to it: a conversion assigned to the node
+// but not yet submitted. What was submitted before the window changed counts
+// as running and is left alone. A conversion another execution holds is left
+// for the next pass; that execution re-reads the window as it submits.
+func (e *Engine) sweepWindowedNodes(ctx context.Context) {
+	wins, err := e.workerWindows()
+	if err != nil || len(wins) == 0 {
+		return
+	}
+	rows, err := e.deps.Store.ListDrainActions()
+	if err != nil {
+		log.Printf("node window: listing open jobs: %v", err)
+		return
+	}
+	for _, r := range rows {
+		if ctx.Err() != nil {
+			return
+		}
+		if r.ActionName != "transcode_media" || r.Status == StatusWaitingDecision || r.Worker == "" {
+			continue
+		}
+		if r.JobID != "" || r.ExternalRef != "" || r.Submitted || r.Reconcile || r.Done || r.RecoveryRequired {
+			continue
+		}
+		if _, ok := wins[e.resolveWorker(r.Worker)]; !ok {
+			continue
+		}
+		if _, err := e.requeueForWindow(ctx, r.ID); err != nil {
+			log.Printf("node window: %s: %v", r.ID, err)
+		}
+	}
+}
+
+// requeueForWindow sends one assigned, unsent conversion back to the queue
+// when its node's window does not take it any more. It reports whether it did.
+func (e *Engine) requeueForWindow(ctx context.Context, id string) (bool, error) {
+	ctx, release, err := e.claimExecution(ctx, id, false)
+	if errors.Is(err, errActionBusy) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	inst, err := e.deps.Store.GetActionInstanceIfExists(id)
+	if err != nil || inst == nil {
+		return false, err
+	}
+	switch inst.Status {
+	case StatusPending, StatusRunning, StatusWaitingExternal:
+	default:
+		return false, nil
+	}
+	if inst.ActionName != "transcode_media" {
+		return false, nil
+	}
+	ec := parseExecutionContext(inst, e)
+	node := e.instanceWorker(ec.State)
+	// Read again under the claim: it may have been sent since the listing.
+	if node == "" || holdsWorkerJob(ec.State) || getBool(ec.State, "transcode_done") || getBool(ec.State, "recovery_required") {
+		return false, nil
+	}
+	ok, why, unreadable := e.windowAdmits(ec)
+	if ok || unreadable {
+		return false, nil
+	}
+	ec.State[requeueWhyKey] = fmt.Sprintf("Node %s: %s", node, why)
+	if err := e.resetForRequeue(ctx, inst, ec, "", node); err != nil {
+		return false, err
+	}
+	e.noteWorkerSlotFreed()
+	return true, nil
 }

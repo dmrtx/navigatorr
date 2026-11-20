@@ -54,22 +54,27 @@ func RecordEncodeShape(r EncodeRecord) (EncodeShape, bool) {
 		width, _ = strconv.Atoi(w)
 		height, _ = strconv.Atoi(h)
 	}
-	family := ""
-	if r.value("size_audio_only") == true {
-		family = EncodeFamilyCopy
-	} else {
-		codec := encodeStr(encodeMap(encodeMap(r.value("size_budget"))["encoder_choice"])["video_codec"])
-		if codec == "" {
-			codec = encodeStr(encodeMap(encodeMap(r.value("benchmark_decision"))["winner"])["video_codec"])
-		}
-		if codec == "" {
-			// A size goal without a budget runs the quality ladder instead.
-			codec = encodeStr(encodeMap(r.value("quality_ladder"))["video_codec"])
-		}
-		family = EncodeFamily(codec)
-	}
+	family := encodeFamilyOf(r)
 	s := EncodeShape{Worker: encodeStr(r.State["worker"]), Class: ResolutionClass(width, height), Family: family, DurationSec: encodeNum(original["duration_sec"])}
 	return s, s.Worker != "" && s.Class != "" && s.Family != "" && s.DurationSec > 0
+}
+
+// encodeFamilyOf is the encoder family a record's plan chose, "" while none
+// is known: an audio-only plan copies the video, else the size budget's
+// encoder choice, the search's winner or the quality ladder names the codec.
+func encodeFamilyOf(r EncodeRecord) string {
+	if r.value("size_audio_only") == true {
+		return EncodeFamilyCopy
+	}
+	codec := encodeStr(encodeMap(encodeMap(r.value("size_budget"))["encoder_choice"])["video_codec"])
+	if codec == "" {
+		codec = encodeStr(encodeMap(encodeMap(r.value("benchmark_decision"))["winner"])["video_codec"])
+	}
+	if codec == "" {
+		// A size goal without a budget runs the quality ladder instead.
+		codec = encodeStr(encodeMap(r.value("quality_ladder"))["video_codec"])
+	}
+	return EncodeFamily(codec)
 }
 
 // encodeSampleOf is the sample a finished transcode record gives.
@@ -133,8 +138,9 @@ type encodeMemo struct {
 }
 
 // encodeSamples returns the newest-first samples, read from the store at most
-// every encodeSampleTTL. Without a store, or when it cannot be read, there are
-// none: no estimate, which the windows treat as not fitting.
+// every encodeSampleTTL. Without a store there are none. A read that fails
+// gives none for this call (no estimate, which the windows treat as not
+// fitting) and is not remembered: the next call reads again.
 func (e *Engine) encodeSamples() []EncodeSample {
 	h := &e.history
 	h.mu.Lock()
@@ -143,28 +149,28 @@ func (e *Engine) encodeSamples() []EncodeSample {
 	if !h.at.IsZero() && now.Sub(h.at) < encodeSampleTTL {
 		return h.samples
 	}
-	h.at = now
+	var samples []EncodeSample
+	var err error
 	switch {
 	case e.loadEncodeSamples != nil:
-		samples, err := e.loadEncodeSamples()
-		if err != nil {
-			samples = nil
-		}
-		h.samples = samples
+		samples, err = e.loadEncodeSamples()
 	case e.deps.Store == nil:
-		h.samples = nil
 	default:
-		h.samples = e.readEncodeSamples(h)
+		samples, err = e.readEncodeSamples(h)
 	}
-	return h.samples
+	if err != nil {
+		return nil
+	}
+	h.at, h.samples = now, samples
+	return samples
 }
 
 // readEncodeSamples builds the samples from the store's action snapshot (the
 // one the maintenance page reads, itself kept by revision).
-func (e *Engine) readEncodeSamples(h *encodeHistory) []EncodeSample {
+func (e *Engine) readEncodeSamples(h *encodeHistory) ([]EncodeSample, error) {
 	instances, err := e.deps.Store.ListMaintenanceActionSnapshot()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	if h.memo == nil {
 		h.memo = map[string]encodeMemo{}
@@ -205,7 +211,7 @@ func (e *Engine) readEncodeSamples(h *encodeHistory) []EncodeSample {
 	for _, r := range refs {
 		out = append(out, h.memo[r.id].sample)
 	}
-	return out
+	return out, nil
 }
 
 func decodeJSONObject(raw string) map[string]any {
