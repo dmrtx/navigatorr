@@ -112,27 +112,60 @@ func v1Key(w http.ResponseWriter, r *http.Request, body string) (string, bool) {
 // digest ("needs confirm=true", "are required", "must carry", "invalid ...")
 // is never a conflict.
 var conflictWords = regexp.MustCompile(`\b(?:stale|changed|mismatch|differs|conflict|no longer|already|blocked|not waiting|current waiting|does not match|` +
-	`only (a |an )?(failed|finished|automatic|original)|current status|is frozen|not planned yet|read every|no previous valid|immutable|` +
+	`only (?:a |an )?(?:failed|finished|automatic|original)|current status|is frozen|not planned yet|read every|no previous valid|immutable|` +
 	`was removed after|belongs to batch|can still be promoted|candidate file kept|not a regular file|does not hold a regular file|` +
 	`never moved aside|is not empty|retained|not confirmed|uncertain|unresolved|cannot create it|not finished|not ready yet|` +
-	`requires (a|an|the|current) (waiting|unapproved|exact current))`)
+	`requires (?:a|an|the|current) (?:waiting|unapproved|exact current))\b`)
 
 // unavailableWords are refusals because the worker or service cannot take
 // the request now (503), not because of the request or the resource.
-var unavailableWords = regexp.MustCompile(`\b(?:unreachable|offline or not ready|not configured on this server|template unavailable)`)
+var unavailableWords = regexp.MustCompile(`\b(?:unreachable|offline or not ready|not configured on this server|template unavailable)\b`)
+
+// unavailableMessage is what a 503 says: the kind of failure, never the
+// refusal itself (it can carry a worker name, a path or a URL; the cause is
+// logged).
+func unavailableMessage(low string) string {
+	switch {
+	case strings.Contains(low, "offline or not ready"):
+		return "the video worker is offline or not ready"
+	case strings.Contains(low, "not configured on this server"):
+		return "the worker is not configured on this server"
+	case strings.Contains(low, "template unavailable"):
+		return "the podcast template is unavailable"
+	}
+	return "the worker or service is unreachable"
+}
 
 // internalWords are refusals that are a fault of the server, not of the
 // request or the resource: a file or database that could not be written
 // ("could not remove candidate file: ..." wraps the I/O error of
 // action/candidate_cleanup.go; the rest are the words of the operating system
 // and of SQLite). They answer 500 and the cause stays in the log.
-var internalWords = regexp.MustCompile(`\b(?:could not remove candidate file|permission denied|input/output error|i/o error|disk i/o|no space left|read-only file system|disk is full|database is locked|database disk image|sql logic error|sqlite)`)
+var internalWords = regexp.MustCompile(`\b(?:could not remove candidate file|permission denied|input/output error|i/o error|disk i/o|no space left|read-only file system|disk is full|database is locked|database disk image|sql logic error|sqlite|no such table|no such column|cross-device link|too many open files|operation not permitted)\b`)
+
+// fileMissingWords is the operating system's missing file: a fault of the
+// server's own files when a write tool reports it (toolMissing never takes it
+// for a missing resource).
+var fileMissingWords = regexp.MustCompile(`\bno such file or directory\b`)
+
+// destructiveWords are the refusals for the switch that keeps destructive
+// changes off ("allow_destructive must be enabled for backup removal",
+// "needs allow_destructive on this server", "Set allow_destructive: true"). It
+// is matched on the whole message, quoted or not, but only in the phrasings the
+// tools use, so a value the caller sent ("got \"allow_destructive\"") is not it.
+var destructiveWords = regexp.MustCompile("\\b(?:needs|requires|enable|set) [\"`]?allow_destructive|allow_destructive[\"`]?:? (?:must|is|on|true)")
+
+// decisionName is the shape of a waiting option of an action (resume, pause,
+// cancel, approve, reject, accept_loss, ...): the options differ by workflow,
+// so only the shape is checked here and the engine judges the rest.
+var decisionName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // quotedValues are the segments of a refusal that echo what the caller sent
 // ("got \"x\"", 'x', `x`): never classified, or a client value such as
-// "already" or "unreachable" would pick the status. A single quote counts only
-// when it opens a word ("attempt's" is not one).
-var quotedValues = regexp.MustCompile("\"[^\"]*\"|`[^`]*`|(?:^|[\\s(\\[:=,])'[^']*'")
+// "already" or "unreachable" would pick the status. A double-quoted segment
+// may hold escaped quotes (the tools quote with %q). A single quote counts
+// only when it opens a word ("attempt's" is not one).
+var quotedValues = regexp.MustCompile("\"(?:[^\"\\\\]|\\\\.)*\"|`[^`]*`|(?:^|[\\s(\\[:=,])'[^']*'")
 
 // v1WriteErr names how a write presents what its tool refused: the 404 and
 // hint as for a read; a refusal that is neither a missing thing, an
@@ -159,19 +192,20 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 	}
 	low := strings.ToLower(quotedValues.ReplaceAllString(msg, " "))
 	switch {
+	case destructiveWords.MatchString(strings.ToLower(msg)):
+		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
+	case internalWords.MatchString(low) || fileMissingWords.MatchString(low):
+		log.Printf("transcode v1: a write tool failed inside the server: %s", msg)
+		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the state is unchanged or can be read again")
 	case toolMissing(low):
 		code := e.notFound
 		if code == "" {
 			code = "not_found"
 		}
 		transcodeapi.WriteError(w, 404, code, msg, e.hint)
-	case strings.Contains(low, "allow_destructive"):
-		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
-	case internalWords.MatchString(low):
-		log.Printf("transcode v1: a write tool failed inside the server: %s", msg)
-		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the state is unchanged or can be read again")
 	case unavailableWords.MatchString(low):
-		transcodeapi.WriteError(w, 503, "unavailable", msg, "the worker or service did not answer; try again when it is back")
+		log.Printf("transcode v1: a write tool could not reach a worker or service: %s", msg)
+		transcodeapi.WriteError(w, 503, "unavailable", unavailableMessage(low), "the worker or service did not answer; try again when it is back")
 	case conflictWords.MatchString(low):
 		hint := "read the current state, then retry with its current revision, digest or version"
 		if e.hint != "" {
@@ -330,6 +364,10 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 		Inputs     rawObject `json:"inputs"`
 		PlanDigest string    `json:"plan_digest"`
 	}) {
+		if len(body.Decision) > 40 || (body.Decision != "" && !decisionName.MatchString(body.Decision)) {
+			v1Bad(w, "decision must be one of the action's waiting options (a lowercase name such as resume, approve, reject)", "GET "+b+"/actions/{id} lists them")
+			return
+		}
 		args := map[string]any{"id": r.PathValue("id"), "decision": body.Decision, "plan_digest": body.PlanDigest}
 		if len(bytes.TrimSpace(body.Inputs)) > 0 {
 			inputs, ok := objectString(body.Inputs)
@@ -588,29 +626,43 @@ func (s *Server) v1BundleCall(tool, flag string, args func(w http.ResponseWriter
 
 // bundleSourceWords are the failures of reaching the recipe source (recipe/
 // provider.go: reading the file, fetching the manifest or the bundle).
-var bundleSourceWords = regexp.MustCompile(`\b(?:reading recipe file|fetching recipe|http \d{3}|connection refused|no such host|timeout|timed out|response exceeds)`)
+var bundleSourceWords = regexp.MustCompile(`\b(?:reading recipe file|fetching recipe|http \d{3}|connection refused|no such host|timeout|timed out|response exceeds|recipe file path is required)\b`)
 
 // bundleCollisionWords are the refusals of the cache for a version that is
-// already there (recipe/manager.go cacheSnapshot).
-var bundleCollisionWords = regexp.MustCompile(`immutable version collision|already exists|is corrupt`)
+// already there with other content (recipe/manager.go cacheSnapshot).
+var bundleCollisionWords = regexp.MustCompile(`\b(?:immutable version collision|already exists)\b`)
+
+// bundleValidationWords is the allow-list of what a bundle (or its manifest)
+// can get wrong, from the start of the refusal: transcode/recipe/validate.go
+// and provider.go. Only these are the 422 rejection and show their text.
+var bundleValidationWords = regexp.MustCompile(`^(?:parsing recipe (?:bundle|manifest)|recipe (?:bundle|manifest) (?:must|is nil|has no|sha256 mismatch|download must)|` +
+	`unsupported (?:recipe|manifest)|invalid (?:bundle_version|manifest|recipe (?:manifest|download) url|profile name)|` +
+	`container \S+: |profile (?:name )?"|x265 abr requires|recipe requires navigatorr|github recipe bundle download|` +
+	`manifest (?:bundle_version|version) |only absolute https urls|redirected recipe request)`)
 
 // bundleRefusal presents why recipe_reload or recipe_update did not activate
-// a bundle: a fault of the server is 500 (cause hidden), an unreachable source
-// 503, a version that exists with other content 409, and only what the bundle
-// itself got wrong (schema, semantics, integrity) is the 422 rejection.
+// a bundle. Only what the bundle itself got wrong (an allow-list of validation
+// refusals) is the 422 rejection with its text; an unreachable source is a 503
+// and a version that exists with other content a 409, each with a message of
+// its own kind; anything else (I/O, a corrupt cache, an unrecognised error) is
+// a 500. A 5xx never carries the refusal: it is logged.
 func bundleRefusal(w http.ResponseWriter, msg string) {
 	low := strings.ToLower(quotedValues.ReplaceAllString(msg, " "))
 	hint := "the active bundle is unchanged: GET " + transcodeapi.BasePath + "/recipe-bundle shows its status"
 	switch {
-	case internalWords.MatchString(low):
+	case internalWords.MatchString(low) || fileMissingWords.MatchString(low) && !bundleSourceWords.MatchString(low):
 		log.Printf("transcode v1: a recipe bundle change failed inside the server: %s", msg)
-		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the active bundle is unchanged")
+		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; "+hint)
 	case bundleSourceWords.MatchString(low):
-		transcodeapi.WriteError(w, 503, "unavailable", msg, "the recipe source did not answer; try again when it is back. "+hint)
+		log.Printf("transcode v1: the recipe source could not be reached: %s", msg)
+		transcodeapi.WriteError(w, 503, "unavailable", "the recipe source could not be reached", "try again when it is back; "+hint)
 	case bundleCollisionWords.MatchString(low):
 		transcodeapi.WriteError(w, 409, "conflict", msg, hint)
-	default:
+	case bundleValidationWords.MatchString(strings.ToLower(msg)):
 		transcodeapi.WriteError(w, 422, "rejected", msg, hint)
+	default:
+		log.Printf("transcode v1: a recipe bundle change failed in an unrecognised way: %s", msg)
+		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; "+hint)
 	}
 }
 
@@ -676,6 +728,16 @@ func (s *Server) v1PostGoal(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Mode == "" {
 		v1Bad(w, "mode is required: size, quality, x265_preserve or compact", "GET "+transcodeapi.BasePath+"/batches/{id}/goal previews the selection and gives its selection_version")
+		return
+	}
+	switch body.Mode {
+	case "size", "quality", "x265_preserve", "compact":
+	default:
+		v1Bad(w, "mode must be size, quality, x265_preserve or compact", "GET "+transcodeapi.BasePath+"/batches/{id}/goal previews the selection and gives its selection_version")
+		return
+	}
+	if body.Scope != "" && body.Scope != "all" && body.Scope != "unfinished" {
+		v1Bad(w, "scope must be all or unfinished", "")
 		return
 	}
 	key, ok := v1Key(w, r, body.IdempotencyKey)

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +124,14 @@ func (e *Engine) candidatePromotionStarted(inst *store.ActionInstance, ec *Execu
 // other reason (a guard, a worker that did not stop or release it, a
 // promotion that started) is a state refusal, "candidate file kept".
 func candidateKeptError(err error) error {
+	// A network failure (a worker that did not answer) is not the file system,
+	// though it too ends in an errno.
+	var opErr *net.OpError
+	var dnsErr *net.DNSError
+	var urlErr *url.Error
+	if errors.As(err, &opErr) || errors.As(err, &dnsErr) || errors.As(err, &urlErr) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ETIMEDOUT) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return fmt.Errorf("candidate file kept: %v", err)
+	}
 	var pathErr *fs.PathError
 	var linkErr *os.LinkError
 	var errno syscall.Errno

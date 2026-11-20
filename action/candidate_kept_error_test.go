@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"strings"
 	"syscall"
@@ -21,6 +22,8 @@ func TestCandidateKeptErrorSeparatesIOFaultsFromStateRefusals(t *testing.T) {
 		{&fs.PathError{Op: "remove", Path: "/x", Err: syscall.EACCES}, "could not remove candidate file: "},
 		{&os.LinkError{Op: "rename", Old: "/a", New: "/b", Err: syscall.EIO}, "could not remove candidate file: "},
 		{fmt.Errorf("wrapped: %w", syscall.ENOSPC), "could not remove candidate file: "},
+		{&net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}, "candidate file kept: "},
+		{fmt.Errorf("release: %w", syscall.ECONNREFUSED), "candidate file kept: "},
 		{errors.New("sample-episode.mkv is not a regular file"), "candidate file kept: "},
 		{errors.New("the retained candidate could not be released on its worker: connection refused"), "candidate file kept: "},
 	} {

@@ -402,7 +402,7 @@ func TestTranscodeV1RecipeBundle(t *testing.T) {
 	if w := write(h, "POST", "/transcode/v1/recipe-bundle/rollback", `{"expected_active_digest":"a1","expected_previous_digest":"p1"}`); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	fakeWrite(s, "recipe_update", ok(`{"activated":false,"error":"the bundle did not validate"}`))
+	fakeWrite(s, "recipe_update", ok(`{"activated":false,"error":"recipe bundle has no profiles"}`))
 	if c, k := code(t, write(h, "POST", "/transcode/v1/recipe-bundle/update", ``)); c != 422 || k != "rejected" {
 		t.Fatal(c, k)
 	}
@@ -817,7 +817,13 @@ func TestBundleRefusalClassification(t *testing.T) {
 		code string
 	}{
 		{`recipe version 1 already exists with a different digest (immutable version collision)`, 409, "conflict"},
-		{`cached recipe version 1 is corrupt: parsing recipe bundle: x`, 409, "conflict"},
+		{`cached recipe version 1 is corrupt: parsing recipe bundle: x`, 500, "internal"},
+		{`rename /cache/a /other/b: invalid cross-device link`, 500, "internal"},
+		{`open /cache/x: too many open files`, 500, "internal"},
+		{`bundle archive is corrupt`, 500, "internal"},
+		{`something nobody anticipated`, 500, "internal"},
+		{`profile "x": unsupported container "avi"`, 422, "rejected"},
+		{`container mkv: invalid conversion reason "q"`, 422, "rejected"},
 		{`open /cache/1/bundle.yaml: permission denied`, 500, "internal"},
 		{`mkdir /cache/1: no space left on device`, 500, "internal"},
 		{`reading recipe file: open /x: no such file or directory`, 503, "unavailable"},
@@ -836,6 +842,101 @@ func TestBundleRefusalClassification(t *testing.T) {
 		}
 		if c.want == 500 && (strings.Contains(w.Body.String(), "/cache") || strings.Contains(w.Body.String(), "permission")) {
 			t.Errorf("%q: a 500 carries its cause: %s", c.msg, w.Body.String())
+		}
+	}
+}
+
+// Escaped quotes of %q must not end a quoted value early or swallow what
+// follows it.
+func TestWriteToolWriteErrorEscapedQuotes(t *testing.T) {
+	for msg, want := range map[string]int{
+		`decision must be selected, got "a\" permission denied \"b"`:        400,
+		`decision must be selected, got "a\" already \" unreachable"`:       400,
+		`managed profile "a\"" changed: expected digest "v1", current "v2"`: 409,
+		`managed profile "a\\" changed: expected generation 2, current 3`:   409,
+		`write /x: permission denied`:                                       500,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code != want {
+			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		}
+	}
+}
+
+// A 5xx never carries its cause, a 503 included: a path, a worker name or a
+// URL in the refusal stays in the log.
+func TestWriteToolWriteErrorFiveHundredsHideTheCause(t *testing.T) {
+	for _, msg := range []string{
+		`this job's worker "nodeA" is not configured on this server; nothing was sent`,
+		`video worker is offline or not ready; no job was submitted`,
+		`node m1 unreachable at https://worker.example.invalid/v1/x`,
+		`podcast template unavailable`,
+		`could not remove candidate file: remove /media/x/secret.mkv: permission denied`,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code < 500 {
+			t.Errorf("%q: %d", msg, w.Code)
+		}
+		for _, leak := range []string{"nodeA", "worker.example", "/media", "secret", "m1", "nothing was sent", "job was submitted"} {
+			if strings.Contains(w.Body.String(), leak) {
+				t.Errorf("%q: the %d carries %q: %s", msg, w.Code, leak, w.Body.String())
+			}
+		}
+	}
+	for _, msg := range []string{`reading recipe file: open /etc/recipes/x.yaml: no such file or directory`, `fetching recipe manifest: HTTP 502 from https://example.invalid/manifest.json`} {
+		w := httptest.NewRecorder()
+		bundleRefusal(w, msg)
+		if w.Code != 503 || strings.Contains(w.Body.String(), "/etc") || strings.Contains(w.Body.String(), "example.invalid") {
+			t.Errorf("%q: %d %s", msg, w.Code, w.Body.String())
+		}
+	}
+}
+
+// Words match whole: a word that merely starts like one is not it, and an
+// operating-system fault is never a 404 or a 409 with its cause.
+func TestWriteToolWriteErrorWholeWordsAndOrder(t *testing.T) {
+	for msg, want := range map[string]int{
+		`the selection has blockedness`:                        400,
+		`the digests are mismatched in spirit`:                 400,
+		`it is staleness itself`:                               400,
+		`upstream said http 5030 oddly`:                        400,
+		`query failed: no such table: transcode_batch_items`:   500,
+		`open /x: no such file or directory`:                   500,
+		`the thing was not found`:                              404,
+		`discard needs allow_destructive on this server`:       403,
+		`"allow_destructive" must be enabled for removal`:      403,
+		`allow_destructive must be enabled for backup removal`: 403,
+		`bad value got "allow_destructive"`:                    400,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code != want {
+			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		}
+	}
+	w := httptest.NewRecorder()
+	bundleRefusal(w, `odd failure http 5030`)
+	if w.Code != 500 {
+		t.Errorf("http 5030 is no http status: %d", w.Code)
+	}
+}
+
+// The enumerated fields of the goal and the resume are checked before the tool.
+func TestTranscodeV1EnumeratedFieldsAreCheckedBeforeTheTool(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch1", "transcode_batch", "running", map[string]any{"mode": "size"}, nil, nil)
+	for _, body := range []string{`{"mode":"unreachable","selection_version":"v","idempotency_key":"k"}`, `{"mode":"size","scope":"already","selection_version":"v","idempotency_key":"k"}`, `{"mode":"Size","selection_version":"v","idempotency_key":"k"}`} {
+		w := write(h, "POST", "/transcode/v1/batches/batch1/goal", body)
+		if c, k := code(t, w); c != 400 || k != "invalid_request" {
+			t.Errorf("%s: %d %s %s", body, c, k, w.Body.String())
+		}
+	}
+	for _, d := range []string{`blocked now`, `Resume`, `already"x`} {
+		w := write(h, "POST", "/transcode/v1/actions/batch1/resume", `{"decision":"`+strings.ReplaceAll(d, `"`, `\"`)+`"}`)
+		if c, k := code(t, w); c != 400 || k != "invalid_request" {
+			t.Errorf("decision %q: %d %s %s", d, c, k, w.Body.String())
 		}
 	}
 }
