@@ -90,6 +90,7 @@ func registerDocTools(s *server.MCPServer, registry *arrservice.Registry, store 
 const statusTimeout = 5 * time.Second
 
 func handleListServices(ctx context.Context, registry *arrservice.Registry, store *openapi.Store) (*mcp.CallToolResult, error) {
+	store.EnsureAll(ctx)
 	type svcInfo struct {
 		Name       string `json:"name"`
 		URL        string `json:"url"`
@@ -134,10 +135,11 @@ func handleListServices(ctx context.Context, registry *arrservice.Registry, stor
 	return mcp.NewToolResultText(string(data)), nil
 }
 
-func handleListEndpoints(_ context.Context, store *openapi.Store, svcName, tag, method string) (*mcp.CallToolResult, error) {
+func handleListEndpoints(ctx context.Context, store *openapi.Store, svcName, tag, method string) (*mcp.CallToolResult, error) {
 	if svcName == "" {
 		return mcp.NewToolResultError("service is required"), nil
 	}
+	store.EnsureLoaded(ctx, svcName)
 
 	idx := store.GetIndex(svcName)
 	if idx == nil {
@@ -181,18 +183,34 @@ func handleListEndpoints(_ context.Context, store *openapi.Store, svcName, tag, 
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
-func handleSearchAPI(_ context.Context, store *openapi.Store, query, svcName string) (*mcp.CallToolResult, error) {
+// maxSearchResults caps how many endpoints one search_api call lists.
+const maxSearchResults = 50
+
+func handleSearchAPI(ctx context.Context, store *openapi.Store, query, svcName string) (*mcp.CallToolResult, error) {
 	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
 
+	if svcName != "" {
+		store.EnsureLoaded(ctx, svcName)
+	} else {
+		store.EnsureAll(ctx)
+	}
 	results := store.Search(query, svcName)
 	if len(results) == 0 {
 		return mcp.NewToolResultText("No results found."), nil
 	}
 
+	total := len(results)
+	if total > maxSearchResults {
+		results = results[:maxSearchResults]
+	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("# Search results for %q (%d matches)\n\n", query, len(results)))
+	if total > len(results) {
+		sb.WriteString(fmt.Sprintf("# Search results for %q (%d matches, showing the best %d)\n\n", query, total, len(results)))
+	} else {
+		sb.WriteString(fmt.Sprintf("# Search results for %q (%d matches)\n\n", query, total))
+	}
 	for _, r := range results {
 		sb.WriteString(fmt.Sprintf("**[%s]** %s %s\n", r.Service, r.Method, r.Path))
 		if r.Summary != "" {
@@ -204,10 +222,11 @@ func handleSearchAPI(_ context.Context, store *openapi.Store, query, svcName str
 	return mcp.NewToolResultText(sb.String()), nil
 }
 
-func handleGetEndpointDetails(_ context.Context, store *openapi.Store, svcName, path, method string) (*mcp.CallToolResult, error) {
+func handleGetEndpointDetails(ctx context.Context, store *openapi.Store, svcName, path, method string) (*mcp.CallToolResult, error) {
 	if svcName == "" || path == "" {
 		return mcp.NewToolResultError("service and path are required"), nil
 	}
+	store.EnsureLoaded(ctx, svcName)
 
 	idx := store.GetIndex(svcName)
 	if idx == nil {

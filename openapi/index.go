@@ -125,45 +125,9 @@ func sortSummaries(s []EndpointSummary) []EndpointSummary {
 	return s
 }
 
-// Search searches across the index for matching endpoints.
+// Search searches across the index for matching endpoints. The query is
+// tokenized (see queryTokens); endpoints matching every token come first,
+// otherwise those matching at least half of them, best score first.
 func (idx *Index) Search(query string) []EndpointSummary {
-	query = strings.ToLower(query)
-	var results []EndpointSummary
-
-	for path, methods := range idx.Endpoints {
-		for m, detail := range methods {
-			if matches(query, path, detail) {
-				t := ""
-				if len(detail.Tags) > 0 {
-					t = detail.Tags[0]
-				}
-				results = append(results, EndpointSummary{
-					Service: idx.Service,
-					Method:  m,
-					Path:    path,
-					Summary: detail.Summary,
-					Tag:     t,
-				})
-			}
-		}
-	}
-	return sortSummaries(results)
-}
-
-func matches(query, path string, detail *EndpointDetail) bool {
-	if strings.Contains(strings.ToLower(path), query) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(detail.Summary), query) {
-		return true
-	}
-	if strings.Contains(strings.ToLower(detail.Description), query) {
-		return true
-	}
-	for _, tag := range detail.Tags {
-		if strings.Contains(strings.ToLower(tag), query) {
-			return true
-		}
-	}
-	return false
+	return selectRanked(idx.rank(query))
 }
