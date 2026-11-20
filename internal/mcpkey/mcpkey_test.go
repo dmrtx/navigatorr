@@ -111,3 +111,22 @@ func TestRequire(t *testing.T) {
 		}
 	}
 }
+
+func TestRequireWithUsesTheCallersDenial(t *testing.T) {
+	key := strings.Repeat("k", MinLength)
+	denied := 0
+	h := RequireWith(key, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }),
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { denied++; w.WriteHeader(401) }))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/x", nil))
+	if rec.Code != 401 || denied != 1 {
+		t.Errorf("without a key: %d, denied %d", rec.Code, denied)
+	}
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set(HeaderName, key)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 204 || denied != 1 {
+		t.Errorf("with the key: %d, denied %d", rec.Code, denied)
+	}
+}

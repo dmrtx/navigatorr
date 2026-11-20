@@ -361,3 +361,14 @@ maintenance:
 # Build records posted by other tools (see docs/MAINTENANCE_UI.md).
 # builds:
 #   retention_days: 30 # How long an ended build stays in the history
+
+# The separate Nodes builds registry (cmd/navigatorr-nodes). It owns
+# database.nodes_path, which must be set explicitly for it. The Transcode server
+# ignores this block until it is switched to the remote registry.
+# nodes:
+#   listen: 127.0.0.1:8097          # loopback unless allow_non_loopback is true
+#   key_file: /run/secrets/nodes_key # service key (32+ characters) every route but /healthz needs
+#   url: http://nodes:8097          # where Transcode reaches Nodes
+#   transcode_url: http://transcode:8080      # engine whose node pauses Nodes shows; empty = none
+#   transcode_key_file: /run/secrets/transcode_key
+#   allow_non_loopback: false
