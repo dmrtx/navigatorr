@@ -468,3 +468,46 @@ func TestCancelledContextStartsNoLoads(t *testing.T) {
 		t.Fatalf("a cancelled ctx started %d fetches", calls.Load())
 	}
 }
+
+func TestFailedRefreshDoesNotBlockLazyLoad(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			http.Error(w, "not up yet", http.StatusServiceUnavailable)
+			return
+		}
+		w.Write([]byte(syntheticSpec))
+	}))
+	defer srv.Close()
+
+	s, _ := newLazyStore(t, srv.URL)
+	if err := s.Refresh(context.Background(), "transcode"); err == nil {
+		t.Fatal("first refresh must fail")
+	}
+	// No time passes: the lazy load must still try at once.
+	s.EnsureLoaded(context.Background(), "transcode")
+	if calls.Load() != 2 || s.GetIndex("transcode") == nil {
+		t.Fatalf("lazy load blocked by a failed refresh: calls=%d", calls.Load())
+	}
+}
+
+func TestRefreshWithCancelledContextKeepsCache(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(syntheticSpec))
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Refresh(ctx, "transcode"); err == nil {
+		t.Fatal("refresh with a cancelled context must fail")
+	}
+	s.mu.RLock()
+	n, busy := len(s.attempts), len(s.inflight)
+	s.mu.RUnlock()
+	if calls.Load() != 0 || n != 0 || busy != 0 {
+		t.Fatalf("cancelled refresh touched state: calls=%d attempts=%d inflight=%d", calls.Load(), n, busy)
+	}
+}

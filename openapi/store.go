@@ -2,6 +2,7 @@ package openapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,7 +134,7 @@ func (s *Store) ensure(ctx context.Context, name string, force bool) bool {
 			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 			defer cancel()
 			idx, err := s.fetchIndex(lctx, name, svc.OpenAPIURL)
-			s.finish(name, idx, err, done)
+			s.finish(name, idx, err, done, true)
 		}()
 	}
 	s.mu.Unlock()
@@ -204,11 +205,15 @@ func (s *Store) fetchIndex(ctx context.Context, name, url string) (*Index, error
 // finish ends the load owned by the caller in one critical section: it
 // publishes the index (on success), updates the failure window and drops the
 // in-flight entry, so observers never see an index with a load still marked
-// in flight. It then wakes the waiters.
-func (s *Store) finish(name string, idx *Index, err error, done chan struct{}) {
+// in flight. It then wakes the waiters. Only lazy and startup loads open the
+// failure window (recordFailure): a failed Refresh must not stop the next
+// lazy load from trying straight away.
+func (s *Store) finish(name string, idx *Index, err error, done chan struct{}, recordFailure bool) {
 	s.mu.Lock()
 	if err != nil {
-		s.attempts[name] = s.now()
+		if recordFailure {
+			s.attempts[name] = s.now()
+		}
 	} else {
 		s.indices[name] = idx
 		delete(s.attempts, name)
@@ -221,6 +226,17 @@ func (s *Store) finish(name string, idx *Index, err error, done chan struct{}) {
 	} else {
 		internal.Logf("loaded %s: %d endpoints", name, idx.Count())
 	}
+}
+
+// refreshOwned reloads a service whose in-flight entry the caller owns. The
+// entry is always released, even if the fetch panics.
+func (s *Store) refreshOwned(ctx context.Context, name, url string, done chan struct{}) (err error) {
+	var idx *Index
+	err = errors.New("refresh aborted")
+	defer func() { s.finish(name, idx, err, done, false) }()
+	s.cache.Invalidate(url)
+	idx, err = s.fetchIndex(ctx, name, url)
+	return err
 }
 
 // GetIndex returns the index for a service.
@@ -284,14 +300,14 @@ func (s *Store) Refresh(ctx context.Context, name string) error {
 		s.mu.Lock()
 		running, busy := s.inflight[name]
 		if !busy {
+			if err := ctx.Err(); err != nil {
+				s.mu.Unlock()
+				return err
+			}
 			done := make(chan struct{})
 			s.inflight[name] = done
 			s.mu.Unlock()
-
-			s.cache.Invalidate(svc.OpenAPIURL)
-			idx, err := s.fetchIndex(ctx, name, svc.OpenAPIURL)
-			s.finish(name, idx, err, done)
-			return err
+			return s.refreshOwned(ctx, name, svc.OpenAPIURL, done)
 		}
 		s.mu.Unlock()
 		select {
