@@ -46,7 +46,11 @@ func openRegistry(path string) (*registry, error) {
 		return nil, fmt.Errorf("creating nodes database directory: %w", err)
 	}
 	// One process owns the database: the lock comes before anything opens it.
-	lock, err := lockFile(lockPath(path))
+	lp, err := lockPath(path)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := lockFile(lp)
 	if err != nil {
 		return nil, err
 	}
@@ -60,15 +64,21 @@ func openRegistry(path string) (*registry, error) {
 }
 
 // lockPath names the lock beside the real database file, so a path reached
-// through a symlink (to the file or to its directory) shares one lock.
-func lockPath(path string) string {
+// through a symlink (to the file or to its directory) shares one lock. A
+// symlink whose target is missing is refused: its lock could not match the
+// lock of whoever opens the target directly.
+func lockPath(path string) (string, error) {
 	if real, err := filepath.EvalSymlinks(path); err == nil {
-		return real + ".lock"
+		return real + ".lock", nil
 	}
-	if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		return filepath.Join(dir, filepath.Base(path)) + ".lock"
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("nodes database %s is a symlink to a missing file", path)
 	}
-	return path + ".lock"
+	dir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", fmt.Errorf("resolving nodes database directory: %w", err)
+	}
+	return filepath.Join(dir, filepath.Base(path)) + ".lock", nil
 }
 
 // openDB opens the database and applies the schema, without the process lock.

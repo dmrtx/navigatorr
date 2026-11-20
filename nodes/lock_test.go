@@ -58,6 +58,51 @@ func TestOpenLocksTheResolvedPath(t *testing.T) {
 	}
 }
 
+func TestOpenRefusesADanglingSymlink(t *testing.T) {
+	alias := filepath.Join(t.TempDir(), "nodes.db")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing.db"), alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(Options{Path: alias, Topology: fakeTopology{}}); err == nil || !strings.Contains(err.Error(), "symlink to a missing file") {
+		t.Fatalf("a dangling symlink must be refused: %v", err)
+	}
+}
+
+// A database in a symlinked directory takes the same lock as the real one.
+func TestOpenLocksThroughASymlinkedDirectory(t *testing.T) {
+	realDir := t.TempDir()
+	first, err := Open(Options{Path: filepath.Join(realDir, "nodes.db"), Topology: fakeTopology{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	link := filepath.Join(t.TempDir(), "dir")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(Options{Path: filepath.Join(link, "nodes.db"), Topology: fakeTopology{}}); err == nil || !strings.Contains(err.Error(), "held by another process") {
+		t.Fatalf("Open through a symlinked directory must see the held lock: %v", err)
+	}
+}
+
+// The first Open through a symlinked directory, before nodes.db exists, takes
+// the same lock as a later Open of the real path.
+func TestOpenThroughASymlinkedDirectoryBeforeTheFileExists(t *testing.T) {
+	realDir := t.TempDir()
+	link := filepath.Join(t.TempDir(), "dir")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Open(Options{Path: filepath.Join(link, "nodes.db"), Topology: fakeTopology{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if _, err := Open(Options{Path: filepath.Join(realDir, "nodes.db"), Topology: fakeTopology{}}); err == nil || !strings.Contains(err.Error(), "held by another process") {
+		t.Fatalf("the real path must see the lock taken through the link: %v", err)
+	}
+}
+
 // When the database cannot be opened, the lock is released again.
 func TestOpenReleasesTheLockWhenTheDatabaseFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nodes.db")
@@ -82,7 +127,12 @@ func TestNodesListRejectsABadTranscodeParam(t *testing.T) {
 	if code != 400 || tv.calls.Load() != 0 {
 		t.Fatalf("a bad transcode value is a 400 without asking the view: %d calls=%d", code, tv.calls.Load())
 	}
-	call(t, e.Handler(), "GET", "/nodes/v1/nodes?transcode=0", "")
+	if code, _ := call(t, e.Handler(), "GET", "/nodes/v1/nodes?transcode=", ""); code != 400 {
+		t.Fatalf("an empty transcode value is a 400: %d", code)
+	}
+	if code, _ := call(t, e.Handler(), "GET", "/nodes/v1/nodes?transcode=0", ""); code != 200 {
+		t.Fatalf("transcode=0 is a valid false: %d", code)
+	}
 	if tv.calls.Load() != 0 {
 		t.Fatalf("transcode=0 means false: calls=%d", tv.calls.Load())
 	}

@@ -157,8 +157,8 @@ func (s *Service) apiNodes(w http.ResponseWriter, r *http.Request) {
 	var list []NodeView
 	var err error
 	withTranscode := true
-	if raw := r.URL.Query().Get("transcode"); raw != "" {
-		b, perr := strconv.ParseBool(raw)
+	if q := r.URL.Query(); q.Has("transcode") {
+		b, perr := strconv.ParseBool(q.Get("transcode"))
 		if perr != nil {
 			apiError(w, 400, "invalid_request", "transcode must be true or false", "leave transcode out, or send transcode=false to skip the transcode block")
 			return
