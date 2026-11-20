@@ -251,3 +251,70 @@ func TestNon200AndBadBodiesAreSoftFailures(t *testing.T) {
 		t.Fatalf("%v %v", got, err)
 	}
 }
+
+func TestBodiesWithoutANodesListAreFailures(t *testing.T) {
+	for _, body := range []string{`{}`, `null`, `{"nodes":null}`, `{"ok":true}`} {
+		var hits atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			_, _ = w.Write([]byte(body))
+		}))
+		c, _ := New(Options{BaseURL: srv.URL, Now: (&clock{t: time.Unix(1000, 0)}).now})
+		if got, err := c.States(t.Context()); err == nil || got != nil {
+			t.Fatalf("%s: %v %v", body, got, err)
+		}
+		if got, err := c.States(t.Context()); err != ErrBackoff || got != nil || hits.Load() != 1 {
+			t.Fatalf("%s starts the backoff: %v %v hits=%d", body, got, err, hits.Load())
+		}
+		srv.Close()
+	}
+	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{"nodes":[]}`)) }))
+	defer empty.Close()
+	c, _ := New(Options{BaseURL: empty.URL})
+	if got, err := c.States(t.Context()); err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("an empty list is a good answer: %v %v", got, err)
+	}
+}
+
+// scripted answers the times in order, then repeats the last one.
+type scripted struct {
+	mu    sync.Mutex
+	times []time.Time
+}
+
+func (s *scripted) now() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := s.times[0]
+	if len(s.times) > 1 {
+		s.times = s.times[1:]
+	}
+	return t
+}
+
+// A flight that ends between a caller's check and its DoChan leaves a fresh
+// cache or a backoff behind; the next flight must honour them, not ask again.
+// The scripted clock makes the caller's check see them expired and the
+// flight's own check see them current, which is that interleaving.
+func TestAFlightRechecksTheCacheAndTheBackoff(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	f := newFake(t)
+
+	clk := &scripted{times: []time.Time{t0.Add(CacheTTL + time.Second), t0.Add(time.Second)}}
+	c, _ := New(Options{BaseURL: f.srv.URL, Now: clk.now})
+	c.haveGood, c.cached, c.cachedAt = true, map[string]State{"nodeA": {Paused: true}}, t0
+	got, err := c.States(t.Context())
+	if err != nil || !got["nodeA"].Paused || f.hits.Load() != 0 {
+		t.Fatalf("fresh cache: %v %v hits=%d", got, err, f.hits.Load())
+	}
+
+	clk = &scripted{times: []time.Time{t0.Add(BackoffTTL + time.Second), t0.Add(time.Second)}}
+	c, _ = New(Options{BaseURL: f.srv.URL, Now: clk.now})
+	c.failed, c.failedAt = true, t0
+	if got, err := c.States(t.Context()); err != ErrBackoff || got != nil || f.hits.Load() != 0 {
+		t.Fatalf("current backoff: %v %v hits=%d", got, err, f.hits.Load())
+	}
+	if !c.failedAt.Equal(t0) {
+		t.Fatalf("the backoff must not be extended: %v", c.failedAt)
+	}
+}

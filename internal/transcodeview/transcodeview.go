@@ -155,6 +155,20 @@ func (c *Client) States(ctx context.Context) (map[string]State, error) {
 	// The flight outlives any one caller: it keeps its own timeout and is not
 	// cancelled when the caller that started it gives up.
 	ch := c.flight.DoChan("states", func() (any, error) {
+		// A flight that ended between the check above and DoChan has already
+		// filled the cache or set the backoff: honour it rather than ask again.
+		c.mu.Lock()
+		now := c.now()
+		if c.haveGood && now.Sub(c.cachedAt) < CacheTTL {
+			got := c.cached
+			c.mu.Unlock()
+			return got, nil
+		}
+		if c.failed && now.Sub(c.failedAt) < BackoffTTL {
+			c.mu.Unlock()
+			return nil, ErrBackoff
+		}
+		c.mu.Unlock()
 		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), RequestTimeout)
 		defer cancel()
 		got, err := c.fetch(fctx)
@@ -200,6 +214,11 @@ func (c *Client) fetch(ctx context.Context) (map[string]State, error) {
 	var w wire
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(&w); err != nil {
 		return nil, fmt.Errorf("transcodeview: unreadable answer: %w", err)
+	}
+	// Drain what is left so the connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if w.Nodes == nil {
+		return nil, errors.New("transcodeview: answer has no nodes list")
 	}
 	out := make(map[string]State, len(w.Nodes))
 	for _, n := range w.Nodes {
