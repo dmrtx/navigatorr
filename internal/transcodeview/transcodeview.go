@@ -115,20 +115,26 @@ func New(o Options) (*Client, error) {
 	if base == "" {
 		return nil, errors.New("transcodeview: base URL is required")
 	}
-	if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("transcodeview: base URL %q is not an http(s) URL with a host", base)
+	if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil {
+		return nil, fmt.Errorf("transcodeview: base URL %q must be http(s)://host[:port][/path] with nothing else", base)
 	}
 	c := &Client{url: base + Path, key: o.APIKey, hc: o.HTTPClient, now: o.Now}
 	if c.now == nil {
 		c.now = time.Now
 	}
 	if c.hc == nil {
-		c.hc = &http.Client{Transport: &http.Transport{
-			DialContext:         (&net.Dialer{Timeout: DialTimeout}).DialContext,
-			TLSHandshakeTimeout: DialTimeout,
-			MaxIdleConns:        2,
-			IdleConnTimeout:     30 * time.Second,
-		}}
+		c.hc = &http.Client{
+			Transport: &http.Transport{
+				DialContext:         (&net.Dialer{Timeout: DialTimeout}).DialContext,
+				TLSHandshakeTimeout: DialTimeout,
+				MaxIdleConns:        2,
+				IdleConnTimeout:     30 * time.Second,
+			},
+			// A redirect is an answer other than 200 and must not carry the
+			// key to another place.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	return c, nil
 }
@@ -216,12 +222,18 @@ func (c *Client) fetch(ctx context.Context) (map[string]State, error) {
 		return nil, fmt.Errorf("transcodeview: engine answered %d", resp.StatusCode)
 	}
 	var w wire
-	dec := json.NewDecoder(io.LimitReader(resp.Body, maxBody))
+	// One byte past maxBody tells a body that ends at the limit from one that
+	// goes on beyond it, which is refused rather than read as complete.
+	lr := &io.LimitedReader{R: resp.Body, N: maxBody + 1}
+	dec := json.NewDecoder(lr)
 	if err := dec.Decode(&w); err != nil {
 		return nil, fmt.Errorf("transcodeview: unreadable answer: %w", err)
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("transcodeview: unexpected data after the answer")
+	}
+	if lr.N <= 0 {
+		return nil, fmt.Errorf("transcodeview: answer is larger than %d bytes", maxBody)
 	}
 	// Drain what is left so the connection can be reused.
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

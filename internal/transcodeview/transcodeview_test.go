@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -322,7 +323,8 @@ func TestAFlightRechecksTheCacheAndTheBackoff(t *testing.T) {
 }
 
 func TestNewRejectsABaseURLWithoutSchemeOrHost(t *testing.T) {
-	for _, base := range []string{"", "  ", "engine:8080", "ftp://engine", "http://", "://x"} {
+	for _, base := range []string{"", "  ", "engine:8080", "ftp://engine", "http://", "://x",
+		"http://:8080", "http://engine:8080?x=1", "http://engine:8080?", "http://engine:8080#x", "http://u:p@engine"} {
 		if c, err := New(Options{BaseURL: base}); err == nil || c != nil {
 			t.Fatalf("%q: %v %v", base, c, err)
 		}
@@ -331,5 +333,34 @@ func TestNewRejectsABaseURLWithoutSchemeOrHost(t *testing.T) {
 		if _, err := New(Options{BaseURL: base}); err != nil {
 			t.Fatalf("%q: %v", base, err)
 		}
+	}
+}
+
+func TestABodyPastTheLimitIsRefused(t *testing.T) {
+	// A valid answer, then padding up to the limit, then more: the limit must
+	// not be mistaken for the end of the body.
+	body := `{"nodes":[]}` + strings.Repeat(" ", maxBody) + `{"nodes":[]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) }))
+	defer srv.Close()
+	c, _ := New(Options{BaseURL: srv.URL})
+	if got, err := c.States(t.Context()); err == nil || got != nil {
+		t.Fatalf("%v %v", got, err)
+	}
+}
+
+func TestARedirectIsAFailureAndKeepsTheKey(t *testing.T) {
+	var elsewhere atomic.Int64
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		elsewhere.Add(1)
+		_, _ = w.Write([]byte(`{"nodes":[]}`))
+	}))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+Path, http.StatusFound)
+	}))
+	defer srv.Close()
+	c, _ := New(Options{BaseURL: srv.URL, APIKey: "synthetic-key"})
+	if got, err := c.States(t.Context()); err == nil || got != nil || elsewhere.Load() != 0 {
+		t.Fatalf("%v %v followed=%d", got, err, elsewhere.Load())
 	}
 }
