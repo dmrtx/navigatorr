@@ -170,7 +170,7 @@ func transcodeViewFor(n config.NodesConfig) (nodes.TranscodeView, error) {
 		}
 		key = k
 	}
-	c, err := transcodeview.New(transcodeview.Options{BaseURL: n.TranscodeURL, APIKey: key})
+	c, err := transcodeview.New(transcodeview.Options{BaseURL: strings.TrimSpace(n.TranscodeURL), APIKey: key})
 	if err != nil {
 		return nil, fmt.Errorf("nodes.transcode_url: %w", err)
 	}
