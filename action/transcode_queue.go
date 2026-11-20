@@ -250,6 +250,8 @@ type queueSlots struct {
 	placer  *placer
 	// unreported marks the nodes the queue plan has no recent report of.
 	unreported []bool
+	// reportAt is when each node last reported (zero: never), for the plan.
+	reportAt []time.Time
 }
 
 func (e *Engine) queueSlots(ctx context.Context) (queueSlots, error) {

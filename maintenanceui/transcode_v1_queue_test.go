@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -290,10 +291,15 @@ func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
 	// A single node needs no report for dispatch, so a cold one is not unknown.
-	if _, cold := get(t, h, "/transcode/v1/queue/next", keyHdr()); cold["nodes"].([]any)[0].(map[string]any)["state"] != "ready" {
+	if _, cold := get(t, h, "/transcode/v1/queue/next", keyHdr()); cold["nodes"].([]any)[0].(map[string]any)["state"] != "ready" || cold["nodes"].([]any)[0].(map[string]any)["report_at"] != nil {
 		t.Fatalf("a cold single node: %v", cold)
 	}
 	s.engine.WarmWorkerReports(context.Background())
+	if _, warm := get(t, h, "/transcode/v1/queue/next", keyHdr()); warm["nodes"].([]any)[0].(map[string]any)["report_at"] == nil {
+		t.Fatalf("a reported node has no report_at: %v", warm)
+	} else if _, err := time.Parse(time.RFC3339, warm["nodes"].([]any)[0].(map[string]any)["report_at"].(string)); err != nil {
+		t.Fatal(err)
+	}
 	// With nothing waiting every node says so.
 	code, empty := get(t, h, "/transcode/v1/queue/next", keyHdr())
 	if code != 200 || empty["queue_revision"] == nil {

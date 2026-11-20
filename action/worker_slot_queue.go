@@ -259,10 +259,14 @@ type slotWaiterKey struct {
 func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok bool) {
 	all, ok := e.slotWaitersWithKeys()
 	if !ok {
-		log.Printf("worker slot queue: reading the waiters for batch %s failed (scheduling nothing new)", batchID)
+		log.Printf("worker slot queue: listing the waiters for batch %s failed (scheduling nothing new)", batchID)
 		return nil, false
 	}
-	return foreignOf(all, batchID)
+	waiters, ok = foreignOf(all, batchID)
+	if !ok {
+		log.Printf("worker slot queue: a waiter of another batch could not be read for batch %s (scheduling nothing new)", batchID)
+	}
+	return waiters, ok
 }
 
 // foreignOf are the waiters that do not belong to batchID. ok is false when
@@ -291,7 +295,7 @@ func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 	}
 	all, err := e.workerSlotWaiters()
 	if err != nil {
-		log.Printf("worker slot queue: listing waiters: %v (scheduling nothing new)", err)
+		log.Printf("worker slot queue: listing waiters: %v", err)
 		return nil, false
 	}
 	for _, w := range all {
@@ -299,7 +303,7 @@ func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 		// one back.
 		m, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, w.id)
 		if err != nil {
-			log.Printf("worker slot queue: reading the hold of %s: %v (scheduling nothing new)", w.id, err)
+			log.Printf("worker slot queue: reading the hold of %s: %v", w.id, err)
 			waiters = append(waiters, slotWaiterKey{id: w.id, parentID: w.parentID, failed: true})
 			continue
 		}
@@ -308,7 +312,7 @@ func (e *Engine) slotWaitersWithKeys() (waiters []slotWaiterKey, ok bool) {
 		}
 		key, err := e.childQueueKey(w.id)
 		if err != nil {
-			log.Printf("worker slot queue: reading the place of %s: %v (scheduling nothing new)", w.id, err)
+			log.Printf("worker slot queue: reading the place of %s: %v", w.id, err)
 			waiters = append(waiters, slotWaiterKey{id: w.id, parentID: w.parentID, failed: true})
 			continue
 		}

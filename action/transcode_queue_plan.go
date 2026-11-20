@@ -93,6 +93,9 @@ type PlanNode struct {
 	Worker    string
 	State     string
 	FreeSlots int
+	// ReportAt is when the node last reported (zero: never); the state is
+	// what that report, and the pool read with it, said.
+	ReportAt time.Time
 	// Next is the conversion that would start on the node first; nil when none.
 	Next *PlanPick
 	// WhyNone says why Next is nil.
@@ -141,7 +144,7 @@ func (e *Engine) QueueNext(ctx context.Context) (QueuePlan, error) {
 	if err != nil {
 		return QueuePlan{}, err
 	}
-	q.unreported = e.planUnreported(ctx, q)
+	q.unreported, q.reportAt = e.planUnreported(ctx, q)
 	plan.Nodes, plan.started = e.planQueue(q, view.Entries)
 	return plan, nil
 }
@@ -180,15 +183,18 @@ const planReportMaxAge = 2 * time.Minute
 // the plan either, and a queued item (placed by media type and window only) is
 // never planned onto it; the child dispatch would make for it cannot start
 // there.
-func (e *Engine) planUnreported(ctx context.Context, q queueSlots) []bool {
-	out := make([]bool, len(q.workers))
+func (e *Engine) planUnreported(ctx context.Context, q queueSlots) (out []bool, reportAt []time.Time) {
+	out = make([]bool, len(q.workers))
+	reportAt = make([]time.Time, len(q.workers))
 	now := e.now()
 	tooOld := func(at time.Time) bool { return at.IsZero() || now.Sub(at) > planReportMaxAge }
 	for i, w := range q.workers {
+		obs := e.workerObservation(ctx, w)
+		reportAt[i] = obs.CheckedAt
 		hold := e.planRoomHold(ctx, w)
 		old := false
 		if len(q.workers) > 1 {
-			old = tooOld(e.workerObservation(ctx, w).CheckedAt)
+			old = tooOld(obs.CheckedAt)
 			if _, reads := w.Executor.(workerSlotReader); reads && !old && q.ready[i] && hold == "" &&
 				!e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
 				old = tooOld(e.workerPoolAt(w.Name))
@@ -199,12 +205,17 @@ func (e *Engine) planUnreported(ctx context.Context, q queueSlots) []bool {
 			out[i] = true
 			q.ready[i] = false
 			delete(q.free, w.Name)
+		case len(q.workers) == 1 && !obs.CheckedAt.IsZero() && (!obs.Reachable || !obs.Ready):
+			// The last news of the only node was that it is down: the plan
+			// keeps saying so until a newer report says otherwise.
+			q.ready[i] = false
+			delete(q.free, w.Name)
 		case hold != "":
 			q.free[w.Name] = 0
 		}
 	}
 	q.placer.unreported = out
-	return out
+	return out, reportAt
 }
 
 // nodeOwnHold is the hold the node's report names when the operator has not
@@ -220,7 +231,13 @@ func (e *Engine) nodeOwnHold(ctx context.Context, w transcode.NamedWorker) strin
 // "build"), or "".
 func (e *Engine) planRoomHold(ctx context.Context, w transcode.NamedWorker) string {
 	r := e.workerObservation(ctx, w).Retention
-	if r == nil || !r.Fresh(e.now()) {
+	if r == nil {
+		return ""
+	}
+	// With one node the last news counts whatever its age: nothing else says
+	// the hold is over, and dispatch has no other node to turn to. With
+	// several, an old hold is ignored as the placement ignores it.
+	if len(e.deps.Workers.All()) > 1 && !r.Fresh(e.now()) {
 		return ""
 	}
 	return r.Hold
@@ -340,7 +357,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 	nodes := make([]PlanNode, len(q.workers))
 	for ni, w := range q.workers {
 		a := accs[ni]
-		n := PlanNode{Worker: w.Name, State: a.state, FreeSlots: a.free, Next: a.next, Skipped: a.skips, SkippedTruncated: a.truncated}
+		n := PlanNode{Worker: w.Name, State: a.state, FreeSlots: a.free, ReportAt: q.reportAtOf(ni), Next: a.next, Skipped: a.skips, SkippedTruncated: a.truncated}
 		if n.Skipped == nil {
 			n.Skipped = []PlanSkip{}
 		}
@@ -507,4 +524,12 @@ func planWhyNone(node, state, hold string, entries []QueueEntry) *PlanReason {
 		return &PlanReason{ReasonAllHeld, "Everything waiting is on hold."}
 	}
 	return &PlanReason{ReasonNothingEligible, "None of the " + strconv.Itoa(len(entries)) + " waiting conversion(s) can start on node " + node + " now; skipped says why for each."}
+}
+
+// reportAtOf is when worker i last reported (zero: never, or not read).
+func (q queueSlots) reportAtOf(i int) time.Time {
+	if i < len(q.reportAt) {
+		return q.reportAt[i]
+	}
+	return time.Time{}
 }

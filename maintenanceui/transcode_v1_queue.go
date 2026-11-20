@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcodeapi"
@@ -281,6 +282,9 @@ func (s *Server) v1GetQueueNext(w http.ResponseWriter, r *http.Request) {
 			"next":              nil,
 			"skipped":           []map[string]any{},
 			"skipped_truncated": n.SkippedTruncated,
+		}
+		if !n.ReportAt.IsZero() {
+			out["report_at"] = n.ReportAt.UTC().Format(time.RFC3339)
 		}
 		if n.Next != nil {
 			next := map[string]any{

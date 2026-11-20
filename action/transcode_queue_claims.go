@@ -214,6 +214,9 @@ func (pl *placer) roomVerdict(need transcode.RoomNeed, i int) (code, reason stri
 		}
 		return ReasonNodeOnHold, "node " + w.Name + " reports that it is on hold and takes nothing new"
 	case transcode.RoomBuild:
+		if pl.e.workerPaused(w.Name) {
+			return ReasonNodePaused, "node " + w.Name + " is paused"
+		}
 		return ReasonNodeBuild, "a build is running on node " + w.Name
 	case transcode.RoomApprovals:
 		return ReasonApprovalRoom, fmt.Sprintf("node %s is holding candidates for approval and has %s of its budget left; it needs %s", w.Name, gbText(offered), gbText(n.ReserveBytes))

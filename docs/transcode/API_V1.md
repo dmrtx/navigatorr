@@ -279,14 +279,23 @@ Limits: queued batch items have no conversion yet, so they are placed by media
 type and window only (no disk check); a node whose last report is missing or older
 than 2 minutes (or whose slot pool was not read in that time) is `unknown`: no
 free slots are claimed and nothing is asked of it. With a single node nothing is
-`unknown`: dispatch needs no report from it, so the plan uses the last report
-and pool it has, or the configured capacity. The state of a node (unknown,
+`unknown`: dispatch needs no report from it, so the plan shows the last news it
+has, whatever its age (its last pool, its last offline or busy report, or the
+configured capacity when it never reported). That includes a hold: a node whose
+last report said it is on hold or building stays `paused`
+(`node_on_hold`/`node_build`) until a newer report says otherwise, even though
+dispatch itself ignores a hold report older than 45 seconds. Each node carries
+`report_at` (RFC3339 UTC; omitted when the node has not reported), the time of
+that report, so the reader sees how old what the plan shows is. The state of a node (unknown,
 offline, paused, closed, busy) is what `why_none` says even when the queue is
 empty. A node that reports it is on hold or building shows as `paused` and takes
 no queued item in the plan; batch dispatch still counts its free slot when it
 decides to make a child for a queued item, and that child then waits for a slot
 (it cannot start there), so the plan may say nothing starts while the batch
-makes a waiting child; and the walk stops once every node has its `next`, so it says
+makes a waiting child (with two or more queued items and the other node free,
+dispatch makes a child for each: the first takes the free node and the second
+waits for a slot while the held node cannot take it, whereas the plan only
+lists the first); and the walk stops once every node has its `next`, so it says
 nothing about what would start after those.
 
 ### Confirmation flows

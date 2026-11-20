@@ -3199,11 +3199,16 @@
                               "offline",
                               "unknown"
                             ],
-                            "description": "ready: a free slot; busy: every slot in use; paused: the operator paused the node or it reports it is on hold or building; closed: its availability window has closed; offline: not ready; unknown: no report from the node in the last 2 minutes (or no recent slot report), so nothing is said about it."
+                            "description": "ready: a free slot; busy: every slot in use; paused: the operator paused the node or its last report says it is on hold or building; closed: its availability window has closed; offline: not ready; unknown: with several nodes, no report from the node in the last 2 minutes (or no recent slot report), so nothing is said about it; a single node is never unknown: its last report is used whatever its age (see report_at)."
                           },
                           "free_slots": {
                             "type": "integer",
                             "description": "Video slots free now (capacity minus what runs)."
+                          },
+                          "report_at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "When the node last reported (UTC); omitted when it never has. The state is what that report said, so the age of it tells how current it is."
                           },
                           "next": {
                             "description": "What would start on the node next; null when nothing would.",
