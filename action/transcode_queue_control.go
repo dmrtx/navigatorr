@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/jakenesler/navigatorr/store"
 )
@@ -93,6 +94,13 @@ type QueueResult struct {
 	Batch    *QueueBatch // set for a batch
 }
 
+// A batch hold that changed the batch tries this many times to advance the
+// revision, with a short wait that grows between tries.
+const (
+	batchBumpTries   = 3
+	batchBumpBackoff = 20 * time.Millisecond
+)
+
 // staleQueueErr is the refusal for a write the store found stale.
 func staleQueueErr(err error) error {
 	var stale *store.StaleQueueRevisionError
@@ -102,16 +110,19 @@ func staleQueueErr(err error) error {
 	return err
 }
 
-// TranscodeQueueView lists the queue in order. It reads only. It waits for any
-// operator change in progress (queueMu), so the revision it reports and the
-// entries are of the same state.
+// TranscodeQueueView lists the queue in order. It reads only and takes no
+// lock, so it never waits for an operator change (a batch hold keeps queueMu
+// while the batch's step runs, which can be slow). That is safe because every
+// operator change advances the revision after its state change, and the view
+// reads the revision first: at worst it pairs an older revision with newer
+// entries, and a later write that carries that revision is refused as stale.
+// It can never make a stale write pass.
 func (e *Engine) TranscodeQueueView() (QueueView, error) {
-	e.queueMu.Lock()
-	defer e.queueMu.Unlock()
 	return e.queueViewLocked()
 }
 
-// queueViewLocked is TranscodeQueueView for a caller that holds queueMu. The
+// queueViewLocked is the reader behind TranscodeQueueView (and the one a
+// caller inside queueMu uses). The
 // revision is read first: a conversion made ready by the engine's own progress
 // (which does not move it) can show up under an older revision, and an older
 // revision only makes a later change refuse as stale.
@@ -383,10 +394,21 @@ func (e *Engine) setBatchHold(ctx context.Context, ref QueueRef, revision *int64
 		if _, err := e.Resume(ctx, ref.ID, decision, nil); err != nil {
 			return QueueResult{}, queueErr(QueueConflict, "the batch could not be %s now: %v", map[bool]string{true: "held", false: "released"}[hold], err)
 		}
-		if _, err := e.deps.Store.ApplyQueueWrite(store.QueueWrite{}); err != nil {
-			return QueueResult{}, err
-		}
+		// The batch has changed: the others look again now whatever happens to
+		// the revision.
 		e.WakeReconciler()
+		var bumpErr error
+		for attempt := 0; attempt < batchBumpTries; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * batchBumpBackoff)
+			}
+			if _, bumpErr = e.deps.Store.ApplyQueueWrite(store.QueueWrite{}); bumpErr == nil {
+				break
+			}
+		}
+		if bumpErr != nil {
+			return QueueResult{}, fmt.Errorf("the batch was %s, but the queue revision could not be advanced: %w", map[bool]string{true: "held", false: "released"}[hold], bumpErr)
+		}
 	}
 	return e.queueResult(ref)
 }

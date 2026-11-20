@@ -480,7 +480,7 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 		}
 	}
 	if first == "" {
-		return 0
+		return math.MaxInt // nothing of this batch is queued: nothing to limit
 	}
 	q, err := e.queueSlots(ctx)
 	if err != nil {
@@ -594,11 +594,18 @@ func (e *Engine) childQueueKey(childID string) (string, error) {
 		return m.Order, nil
 	}
 	child, err := e.deps.Store.GetActionInstanceIfExists(childID)
-	if err != nil || child == nil {
+	if err != nil {
 		return "", err
 	}
+	if child == nil {
+		// A child that no longer exists has no place to read: the caller keeps
+		// the key its item gives it.
+		return "", nil
+	}
 	var state map[string]any
-	_ = json.Unmarshal([]byte(child.StateJSON), &state)
+	if err := json.Unmarshal([]byte(child.StateJSON), &state); err != nil {
+		return "", fmt.Errorf("reading the state of %s: %w", childID, err)
+	}
 	return getString(state, transcodeQueueOrderKey), nil
 }
 

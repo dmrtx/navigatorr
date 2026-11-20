@@ -267,6 +267,9 @@ func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) 
 			log.Printf("worker slot queue: reading the place of %s: %v (scheduling nothing new)", w.id, err)
 			return nil, false
 		}
+		// A waiter with no queue key (key "") counts as ahead of every item on
+		// purpose: nothing can say it is behind, so it keeps the conservative
+		// behaviour the batch had before items could be moved.
 		keys = append(keys, key)
 	}
 	return keys, true
