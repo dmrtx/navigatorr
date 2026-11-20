@@ -141,7 +141,7 @@ func unavailableMessage(low string) string {
 // ("could not remove candidate file: ..." wraps the I/O error of
 // action/candidate_cleanup.go; the rest are the words of the operating system
 // and of SQLite). They answer 500 and the cause stays in the log.
-var internalWords = regexp.MustCompile(`\b(?:could not remove candidate file|permission denied|input/output error|i/o error|disk i/o|no space left|read-only file system|disk is full|database is locked|database disk image|sql logic error|sqlite|no such table|no such column|cross-device link|too many open files|operation not permitted)\b`)
+var internalWords = regexp.MustCompile(`\b(?:could not remove candidate file|permission denied|input/output error|i/o error|disk i/o|no space left|read-only file system|disk is full|database is locked|database disk image|sql logic error|sqlite|no such table|no such column|cross-device link|too many open files|operation not permitted|cached recipe version \d+ is corrupt)\b`)
 
 // fileMissingWords is the operating system's missing file: a fault of the
 // server's own files when a write tool reports it (toolMissing never takes it
@@ -153,7 +153,19 @@ var fileMissingWords = regexp.MustCompile(`\bno such file or directory\b`)
 // "needs allow_destructive on this server", "Set allow_destructive: true"). It
 // is matched on the whole message, quoted or not, but only in the phrasings the
 // tools use, so a value the caller sent ("got \"allow_destructive\"") is not it.
-var destructiveWords = regexp.MustCompile("\\b(?:needs|requires|enable|set) [\"`]?allow_destructive|allow_destructive[\"`]?:? (?:must|is|on|true)")
+var destructiveWords = regexp.MustCompile(`\b(?:(?:needs|requires|enable|set) allow_destructive|allow_destructive:? (?:must|is|on|true))\b`)
+
+// quotedSwitch is the switch name in quotes, which the tools may use; it is
+// made bare before the other quoted values are stripped.
+var quotedSwitch = regexp.MustCompile("[\"`']allow_destructive[\"`']")
+
+// destructiveRefusal is whether the refusal is the destructive switch's: its
+// phrasing, with the values the caller sent left out but a quoted bare switch
+// name kept.
+func destructiveRefusal(msg string) bool {
+	bare := quotedSwitch.ReplaceAllString(strings.ToLower(msg), "allow_destructive")
+	return destructiveWords.MatchString(quotedValues.ReplaceAllString(bare, " "))
+}
 
 // decisionName is the shape of a waiting option of an action (resume, pause,
 // cancel, approve, reject, accept_loss, ...): the options differ by workflow,
@@ -192,11 +204,11 @@ func writeToolWriteError(w http.ResponseWriter, msg string, e v1WriteErr) {
 	}
 	low := strings.ToLower(quotedValues.ReplaceAllString(msg, " "))
 	switch {
-	case destructiveWords.MatchString(strings.ToLower(msg)):
-		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
 	case internalWords.MatchString(low) || fileMissingWords.MatchString(low):
 		log.Printf("transcode v1: a write tool failed inside the server: %s", msg)
 		transcodeapi.WriteError(w, 500, "internal", "the change could not be completed", "the cause is in the server log; the state is unchanged or can be read again")
+	case destructiveRefusal(msg):
+		transcodeapi.WriteError(w, 403, "forbidden", msg, "destructive changes are switched off on this server")
 	case toolMissing(low):
 		code := e.notFound
 		if code == "" {
@@ -425,6 +437,10 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 	h["GET "+b+"/batches/{id}/goal"] = func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !s.checkBatch(w, id) {
+			return
+		}
+		if scope := r.URL.Query().Get("scope"); scope != "" && scope != "all" && scope != "unfinished" {
+			v1Bad(w, "scope must be all or unfinished", "")
 			return
 		}
 		s.v1Tool("transcode_goal_change", func(r *http.Request) (map[string]any, string) {
@@ -738,6 +754,10 @@ func (s *Server) v1PostGoal(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Scope != "" && body.Scope != "all" && body.Scope != "unfinished" {
 		v1Bad(w, "scope must be all or unfinished", "")
+		return
+	}
+	if body.SizeBudgetSource != nil && *body.SizeBudgetSource != "siblings" {
+		v1Bad(w, `size_budget_source must be "siblings"`, "")
 		return
 	}
 	key, ok := v1Key(w, r, body.IdempotencyKey)

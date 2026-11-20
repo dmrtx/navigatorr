@@ -264,7 +264,7 @@ func TestTranscodeV1GoalChangeFlow(t *testing.T) {
 		}
 		return `{"changed":true}`, false
 	})
-	if w := v1(h, "GET", "/transcode/v1/batches/batch1/goal?scope=pending", "", keyHdr()); w.Code != 200 || !strings.Contains(w.Body.String(), "v7") || rec.last()["scope"] != "pending" {
+	if w := v1(h, "GET", "/transcode/v1/batches/batch1/goal?scope=unfinished", "", keyHdr()); w.Code != 200 || !strings.Contains(w.Body.String(), "v7") || rec.last()["scope"] != "unfinished" {
 		t.Fatal(w.Code, w.Body.String(), rec.last())
 	}
 	if c, k := code(t, write(h, "POST", "/transcode/v1/batches/batch1/goal", `{"selection_version":"v7"}`)); c != 400 || k != "invalid_request" {
@@ -938,5 +938,52 @@ func TestTranscodeV1EnumeratedFieldsAreCheckedBeforeTheTool(t *testing.T) {
 		if c, k := code(t, w); c != 400 || k != "invalid_request" {
 			t.Errorf("decision %q: %d %s %s", d, c, k, w.Body.String())
 		}
+	}
+}
+
+// The destructive switch is matched in its own phrasings only: an internal
+// fault wins over it, a quoted bare switch name still counts, a phrase the
+// caller sent never does.
+func TestWriteToolWriteErrorDestructiveSwitchAndOrder(t *testing.T) {
+	for msg, want := range map[string]int{
+		`bad value got "requires allow_destructive"`:                          400,
+		`bad value got "needs allow_destructive" and more`:                    400,
+		`discard requires "allow_destructive"`:                                403,
+		"discard requires `allow_destructive`":                                403,
+		`allow_destructive must be enabled for backup removal`:                403,
+		`write /x: permission denied; needs allow_destructive on this server`: 500,
+		`allow_destructive_mode must be enabled`:                              400,
+	} {
+		w := httptest.NewRecorder()
+		writeToolWriteError(w, msg, v1WriteErr{})
+		if w.Code != want {
+			t.Errorf("%q: %d, want %d", msg, w.Code, want)
+		}
+	}
+	w := httptest.NewRecorder()
+	writeToolWriteError(w, `recipe_rollback failed: cached recipe version 3 is corrupt: parsing recipe bundle: x`, v1WriteErr{})
+	if w.Code != 500 || strings.Contains(w.Body.String(), "corrupt") {
+		t.Error("a corrupt cache on rollback", w.Code, w.Body.String())
+	}
+}
+
+// The goal preview and the change take the same scope, and the size budget
+// source is the one value the tool knows.
+func TestTranscodeV1GoalScopeAndBudgetSourceAreChecked(t *testing.T) {
+	s, h := transcodeUI(t)
+	seedOperation(t, s.engine.Deps().Store, "batch1", "transcode_batch", "running", map[string]any{"mode": "size"}, nil, nil)
+	for _, q := range []string{"?scope=already", "?scope=ALL"} {
+		if c, k := get(t, h, "/transcode/v1/batches/batch1/goal"+q, keyHdr()); c != 400 || k["code"] != "invalid_request" {
+			t.Errorf("GET %s: %d %v", q, c, k)
+		}
+	}
+	for _, q := range []string{"", "?scope=all", "?scope=unfinished"} {
+		if c, _ := get(t, h, "/transcode/v1/batches/batch1/goal"+q, keyHdr()); c != 200 {
+			t.Errorf("GET %s: %d", q, c)
+		}
+	}
+	w := write(h, "POST", "/transcode/v1/batches/batch1/goal", `{"mode":"size","selection_version":"v","idempotency_key":"k","size_budget_source":"already"}`)
+	if c, k := code(t, w); c != 400 || k != "invalid_request" {
+		t.Error("size_budget_source", c, k, w.Body.String())
 	}
 }
