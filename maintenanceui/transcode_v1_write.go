@@ -151,20 +151,26 @@ var fileMissingWords = regexp.MustCompile(`\bno such file or directory\b`)
 // destructiveWords are the refusals for the switch that keeps destructive
 // changes off ("allow_destructive must be enabled for backup removal",
 // "needs allow_destructive on this server", "Set allow_destructive: true"). It
-// is matched on the whole message, quoted or not, but only in the phrasings the
-// tools use, so a value the caller sent ("got \"allow_destructive\"") is not it.
+// is matched after the quoted values are left out, and only in the phrasings
+// the tools use, so a value the caller sent is not it.
 var destructiveWords = regexp.MustCompile(`\b(?:(?:needs|requires|enable|set) allow_destructive|allow_destructive:? (?:must|is|on|true))\b`)
 
-// quotedSwitch is the switch name in quotes, which the tools may use; it is
-// made bare before the other quoted values are stripped.
-var quotedSwitch = regexp.MustCompile("[\"`']allow_destructive[\"`']")
+// quotedSwitches are the switch name alone in matching quotes, which the tools
+// may use; such a quoted segment is kept as the bare name while every other
+// quoted value is left out.
+var quotedSwitches = map[string]bool{`"allow_destructive"`: true, "`allow_destructive`": true, `'allow_destructive'`: true}
 
 // destructiveRefusal is whether the refusal is the destructive switch's: its
 // phrasing, with the values the caller sent left out but a quoted bare switch
 // name kept.
 func destructiveRefusal(msg string) bool {
-	bare := quotedSwitch.ReplaceAllString(strings.ToLower(msg), "allow_destructive")
-	return destructiveWords.MatchString(quotedValues.ReplaceAllString(bare, " "))
+	low := quotedValues.ReplaceAllStringFunc(strings.ToLower(msg), func(seg string) string {
+		if q := strings.TrimLeft(seg, " \t([:=,"); quotedSwitches[q] {
+			return seg[:len(seg)-len(q)] + "allow_destructive"
+		}
+		return " "
+	})
+	return destructiveWords.MatchString(low)
 }
 
 // decisionName is the shape of a waiting option of an action (resume, pause,
@@ -440,7 +446,7 @@ func (s *Server) transcodeWriteHandlers(h transcodeapi.Handlers) {
 			return
 		}
 		if scope := r.URL.Query().Get("scope"); scope != "" && scope != "all" && scope != "unfinished" {
-			v1Bad(w, "scope must be all or unfinished", "")
+			v1Bad(w, "scope must be all or unfinished", "GET "+transcodeapi.SpecPath+" describes the query parameters")
 			return
 		}
 		s.v1Tool("transcode_goal_change", func(r *http.Request) (map[string]any, string) {
