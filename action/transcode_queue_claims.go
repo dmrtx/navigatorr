@@ -186,7 +186,7 @@ func (pl *placer) verdictAt(p placement, i int, explain bool) (code, reason stri
 	case p.sizeUnknown:
 		return ReasonSizeUnknown, "its source size could not be read yet; it is checked again shortly"
 	case !pl.ready[i] && i < len(pl.unreported) && pl.unreported[i]:
-		return ReasonNodeUnknown, unknownNodeText(w.Name, i < len(pl.poolUnread) && pl.poolUnread[i])
+		return ReasonNodeUnknown, unknownNodeText("node", w.Name, i < len(pl.poolUnread) && pl.poolUnread[i])
 	case !pl.ready[i]:
 		return ReasonNodeOffline, "node " + w.Name + " is not ready (offline or failing its checks)"
 	case !pl.eligible(p.need)[i]:
@@ -399,10 +399,11 @@ func (q queueSlots) safeWorkers(cur queueClaim, ahead []queueClaim) map[string]b
 }
 
 // unknownNodeText says why nothing is said about a node: no recent report, or
-// (poolOnly) a recent report but free slots nobody has read lately.
-func unknownNodeText(name string, poolOnly bool) string {
+// (poolOnly) a recent report but free slots not read lately. node is the word
+// that starts the sentence ("node" or "Node").
+func unknownNodeText(node, name string, poolOnly bool) string {
 	if poolOnly {
-		return "node " + name + " is reachable, but its free slots were not read lately (nothing has asked for one), so nothing is said about them until something does"
+		return node + " " + name + " is reachable, but its free slots were not read lately (they are read when a conversion waits for one), so nothing is said about them until they are"
 	}
-	return "node " + name + " has sent no recent report, so nothing is said about it until it does"
+	return node + " " + name + " has sent no recent report, so nothing is said about it until it does"
 }

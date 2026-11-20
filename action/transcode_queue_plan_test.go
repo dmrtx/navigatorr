@@ -691,7 +691,10 @@ func TestQueueNextColdReadDoesNotProbe(t *testing.T) {
 		if n.State != NodeUnknown || n.FreeSlots != 0 || n.Next != nil || n.WhyNone.Code != ReasonNodeUnknown {
 			t.Fatalf("%s: %+v", n.Worker, n)
 		}
-		wantSkip(t, n, "a", ReasonNodeUnknown)
+		if s := wantSkip(t, n, "a", ReasonNodeUnknown); !strings.Contains(s.Text, "has sent no recent report") ||
+			n.WhyNone == nil || !strings.Contains(n.WhyNone.Text, "has sent no recent report") {
+			t.Fatalf("no report, text: %q / %q", s.Text, n.WhyNone.Text)
+		}
 	}
 	// Once the workers have reported, the plan speaks for them.
 	warm(e)
@@ -1337,9 +1340,14 @@ func TestQueueNextPoolAgeOnlyWhereItIsRead(t *testing.T) {
 	st.poolMu.Lock()
 	st.pool.at = e.now().Add(-10 * time.Minute)
 	st.poolMu.Unlock()
-	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown ||
+	if n := planNode(t, mustPlan(t, e), "m4"); n.State != NodeUnknown || n.WhyNone == nil ||
 		!strings.Contains(n.WhyNone.Text, "free slots were not read lately") {
 		t.Fatalf("expired pool: %+v", n)
+	}
+	// A conversion waiting says the same of that node in its skipped list.
+	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	if s := wantSkip(t, planNode(t, mustPlan(t, e), "m4"), "a", ReasonNodeUnknown); !strings.Contains(s.Text, "free slots were not read lately") {
+		t.Fatalf("expired pool, skipped text: %q", s.Text)
 	}
 	// A node the operator paused, or whose window closed, is not read from its
 	// pool: it keeps its state, pool or no pool.

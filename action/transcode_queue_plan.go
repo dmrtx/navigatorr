@@ -499,7 +499,7 @@ func planWhyNone(node, state, hold string, poolOnly bool, entries []QueueEntry) 
 	case NodeOffline:
 		return &PlanReason{ReasonNodeOffline, "Node " + node + " is not ready (offline or failing its checks), so it takes nothing new."}
 	case NodeUnknown:
-		return &PlanReason{ReasonNodeUnknown, "N" + unknownNodeText(node, poolOnly)[1:] + "."}
+		return &PlanReason{ReasonNodeUnknown, unknownNodeText("Node", node, poolOnly) + "."}
 	case NodePaused:
 		switch hold {
 		case "build":
