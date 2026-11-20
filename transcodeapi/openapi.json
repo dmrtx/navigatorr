@@ -3152,6 +3152,300 @@
         }
       }
     },
+    "/transcode/v1/queue/next": {
+      "get": {
+        "tags": [
+          "transcode-queue"
+        ],
+        "operationId": "getQueueNext",
+        "summary": "Explain what would start next on each node",
+        "description": "For each worker node: what would start there next and why the other waiting conversions would not. The answer comes from the same decision dispatch uses (holds, paused nodes, availability windows, media types, disk room, free slots, batch ordering), computed from the last worker reports without asking any worker and without claiming anything, so it is safe to call repeatedly. It is a prediction for the state of queue_revision: a new submission, a release or a worker coming back changes it.",
+        "responses": {
+          "200": {
+            "description": "One entry per node, in configuration order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "queue_revision": {
+                      "type": "integer"
+                    },
+                    "nodes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": true,
+                        "required": [
+                          "worker",
+                          "state",
+                          "free_slots",
+                          "next",
+                          "skipped",
+                          "skipped_truncated"
+                        ],
+                        "properties": {
+                          "worker": {
+                            "type": "string"
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "ready",
+                              "busy",
+                              "paused",
+                              "closed",
+                              "offline"
+                            ],
+                            "description": "ready: a free slot; busy: every slot in use; paused: the node is paused; closed: its availability window has closed; offline: not ready."
+                          },
+                          "free_slots": {
+                            "type": "integer",
+                            "description": "Video slots free now (capacity minus what runs)."
+                          },
+                          "next": {
+                            "description": "What would start on the node next; null when nothing would.",
+                            "oneOf": [
+                              {
+                                "type": "null"
+                              },
+                              {
+                                "type": "object",
+                                "additionalProperties": true,
+                                "required": [
+                                  "ref",
+                                  "position",
+                                  "path"
+                                ],
+                                "properties": {
+                                  "ref": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": [
+                                      "kind",
+                                      "id"
+                                    ],
+                                    "properties": {
+                                      "kind": {
+                                        "type": "string",
+                                        "enum": [
+                                          "action",
+                                          "item",
+                                          "batch"
+                                        ]
+                                      },
+                                      "id": {
+                                        "description": "The id: a string for an action or a batch, a number for an item.",
+                                        "oneOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "integer"
+                                          }
+                                        ]
+                                      }
+                                    }
+                                  },
+                                  "position": {
+                                    "type": "integer",
+                                    "description": "Its place in GET /queue."
+                                  },
+                                  "path": {
+                                    "type": "string"
+                                  },
+                                  "media_type": {
+                                    "type": "string",
+                                    "description": "Only when known."
+                                  },
+                                  "batch_id": {
+                                    "type": "string"
+                                  },
+                                  "estimate_sec": {
+                                    "type": "number",
+                                    "description": "Estimated encode time on this node, when known."
+                                  }
+                                }
+                              }
+                            ]
+                          },
+                          "why_none": {
+                            "description": "Present when next is null.",
+                            "allOf": [
+                              {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "required": [
+                                  "code",
+                                  "reason"
+                                ],
+                                "properties": {
+                                  "code": {
+                                    "type": "string",
+                                    "description": "Machine code: held, batch_held, batch_gating, size_unknown, node_offline, node_paused, node_build, no_disk_room, waiting_for_approvals, too_big_for_node, recently_refused, no_free_slot, slot_taken_ahead, starts_elsewhere, node_window, media_type_not_allowed, would_not_fit_window, no_duration_estimate, no_encode_history, window_unreadable, queue_empty, all_held or nothing_eligible."
+                                  },
+                                  "reason": {
+                                    "type": "string",
+                                    "description": "A plain sentence, ending with the endpoint that would change it when there is one."
+                                  }
+                                }
+                              }
+                            ]
+                          },
+                          "skipped": {
+                            "type": "array",
+                            "description": "The conversions ahead of next in queue order (all of the queue when next is null), at most 20, each with why it does not start on this node.",
+                            "items": {
+                              "type": "object",
+                              "additionalProperties": true,
+                              "required": [
+                                "ref",
+                                "position",
+                                "reason_code",
+                                "reason"
+                              ],
+                              "properties": {
+                                "ref": {
+                                  "type": "object",
+                                  "additionalProperties": false,
+                                  "required": [
+                                    "kind",
+                                    "id"
+                                  ],
+                                  "properties": {
+                                    "kind": {
+                                      "type": "string",
+                                      "enum": [
+                                        "action",
+                                        "item",
+                                        "batch"
+                                      ]
+                                    },
+                                    "id": {
+                                      "description": "The id: a string for an action or a batch, a number for an item.",
+                                      "oneOf": [
+                                        {
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "integer"
+                                        }
+                                      ]
+                                    }
+                                  }
+                                },
+                                "position": {
+                                  "type": "integer"
+                                },
+                                "reason_code": {
+                                  "type": "string"
+                                },
+                                "reason": {
+                                  "type": "string"
+                                }
+                              }
+                            }
+                          },
+                          "skipped_truncated": {
+                            "type": "boolean",
+                            "description": "True when more conversions were ahead than skipped lists."
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "queue_revision": 7,
+                  "nodes": [
+                    {
+                      "worker": "m4",
+                      "state": "ready",
+                      "free_slots": 1,
+                      "next": {
+                        "ref": {
+                          "kind": "action",
+                          "id": "act-transcode-media-example"
+                        },
+                        "position": 2,
+                        "path": "/media/Example Show/S01E01.mkv",
+                        "media_type": "episode",
+                        "estimate_sec": 1800
+                      },
+                      "skipped": [
+                        {
+                          "ref": {
+                            "kind": "action",
+                            "id": "act-transcode-media-held"
+                          },
+                          "position": 1,
+                          "reason_code": "held",
+                          "reason": "Held by the operator; it keeps its place and starts after it is released. Release it with POST /transcode/v1/queue/actions/act-transcode-media-held/release."
+                        }
+                      ],
+                      "skipped_truncated": false
+                    },
+                    {
+                      "worker": "m1",
+                      "state": "closed",
+                      "free_slots": 0,
+                      "next": null,
+                      "why_none": {
+                        "code": "node_window",
+                        "reason": "Node m1's availability window has closed; it takes nothing new until the window changes. Change the node's window with PUT /transcode/v1/workers/m1/window or DELETE the same path."
+                      },
+                      "skipped": [],
+                      "skipped_truncated": false
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/transcode/v1/queue/actions/{id}/hold": {
       "post": {
         "tags": [

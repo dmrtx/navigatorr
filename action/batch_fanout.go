@@ -132,6 +132,9 @@ func (e *Engine) workerVideoPool(ctx context.Context, w transcode.NamedWorker) i
 	st := e.workerStateFor(w.Name)
 	st.poolMu.Lock()
 	defer st.poolMu.Unlock()
+	if isPassive(ctx) {
+		return st.pool.video
+	}
 	now := time.Now()
 	if !st.pool.at.IsZero() && now.Sub(st.pool.at) < workerPoolTTL {
 		return st.pool.video

@@ -67,6 +67,9 @@ type placement struct {
 	refusals    map[string]time.Time
 	sizeUnknown bool
 	window      windowShape
+	// requeuedFrom is the node the conversion came back from; the pick prefers
+	// it among equals.
+	requeuedFrom string
 }
 
 // placementOf is the placement of the conversion being scheduled.
@@ -77,6 +80,8 @@ func (e *Engine) placementOf(ec *ExecutionContext) placement {
 		refusals:    refusalsFromState(ec.State[roomRefusalsKey]),
 		sizeUnknown: e.deps.Fs != nil && size <= 0 && !getBool(ec.State, sourceSizeUnreadableKey),
 		window:      windowShapeOfState(ec.Inputs, ec.State),
+
+		requeuedFrom: getString(ec.State, requeuedFromKey),
 	}
 }
 
@@ -88,6 +93,7 @@ func (e *Engine) waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
 		sizeUnknown: e.deps.Fs != nil && w.SourceBytes <= 0 && !w.SizeUnreadable,
 		window: windowShape{check: true, mediaType: normalizedMediaType(w.MediaType), durationSec: w.ProbeDurationSec,
 			class: ResolutionClass(w.ProbeWidth, w.ProbeHeight), audioOnly: w.AudioOnly},
+		requeuedFrom: w.RequeuedFrom,
 	}
 }
 
@@ -145,17 +151,68 @@ func (pl *placer) eligible(need transcode.RoomNeed) []bool {
 	return el
 }
 
-// windowOK says whether the node's availability window takes the conversion
-// now, with the reason when it does not.
-func (pl *placer) windowOK(p placement, node string) (bool, string) {
+// windowCheck says whether the node's availability window takes the
+// conversion now, with the code and the reason when it does not.
+func (pl *placer) windowCheck(p placement, node string) (ok bool, code, why string) {
 	if !p.window.check {
-		return true, ""
+		return true, "", ""
 	}
 	if !pl.winRead {
 		pl.wins, pl.winErr = pl.e.workerWindows()
 		pl.winRead = true
 	}
-	return pl.e.windowVerdict(pl.wins, pl.winErr, p.window, node)
+	return pl.e.windowCheck(pl.wins, pl.winErr, p.window, node)
+}
+
+// windowOK is windowCheck without the code.
+func (pl *placer) windowOK(p placement, node string) (bool, string) {
+	ok, _, why := pl.windowCheck(p, node)
+	return ok, why
+}
+
+// verdictAt is the one decision of whether the conversion may be given worker
+// i now, free slot or not: "" when it may, else the code of what keeps it off
+// (and, with explain, the words). placeable and the queue plan both ask it, so
+// what the plan says is what the claims do.
+func (pl *placer) verdictAt(p placement, i int, explain bool) (code, reason string) {
+	w := pl.workers[i]
+	switch {
+	case p.sizeUnknown:
+		return ReasonSizeUnknown, "its source size could not be read yet; it is checked again shortly"
+	case !pl.ready[i]:
+		return ReasonNodeOffline, "node " + w.Name + " is not ready (offline or failing its checks)"
+	case !pl.eligible(p.need)[i]:
+		if !explain {
+			return ReasonNoDiskRoom, ""
+		}
+		return pl.roomVerdict(p.need, i)
+	case pl.e.refusedRecently(p, w.Name):
+		return ReasonRefused, "node " + w.Name + " refused it a moment ago; it is asked again shortly"
+	}
+	if ok, code, why := pl.windowCheck(p, w.Name); !ok {
+		return code, "node " + w.Name + ": " + why
+	}
+	return "", ""
+}
+
+// roomVerdict words why worker i reports no room for need.
+func (pl *placer) roomVerdict(need transcode.RoomNeed, i int) (code, reason string) {
+	w := pl.workers[i]
+	r := pl.e.roomOf(pl.ctx, pl.workers[i:i+1])[0]
+	verdict, offered := r.Judge(needOn(need, w), pl.e.now())
+	switch verdict {
+	case transcode.RoomPaused:
+		return ReasonNodePaused, "node " + w.Name + " is paused"
+	case transcode.RoomBuild:
+		return ReasonNodeBuild, "a build is running on node " + w.Name
+	case transcode.RoomApprovals:
+		return ReasonApprovalRoom, fmt.Sprintf("node %s is holding candidates for approval and has %s of its budget left; it needs %s", w.Name, gbText(offered), gbText(need.ReserveBytes))
+	case transcode.RoomNoSpace:
+		return ReasonNoDiskRoom, fmt.Sprintf("node %s has %s of disk room; it needs %s", w.Name, gbText(offered), gbText(need.SourceBytes+need.ReserveBytes))
+	case transcode.RoomNever:
+		return ReasonTooBig, fmt.Sprintf("it needs %s, more than node %s can ever hold", gbText(need.SourceBytes+need.ReserveBytes), w.Name)
+	}
+	return ReasonNoDiskRoom, "node " + w.Name + " reports no room for it"
 }
 
 // placeable says, for each worker, whether the conversion may be given it now,
@@ -164,15 +221,9 @@ func (pl *placer) windowOK(p placement, node string) (bool, string) {
 // conversion whose size is unknown is placeable nowhere.
 func (pl *placer) placeable(p placement) []bool {
 	out := make([]bool, len(pl.workers))
-	if p.sizeUnknown {
-		return out
-	}
-	el := pl.eligible(p.need)
-	for i, w := range pl.workers {
-		out[i] = pl.ready[i] && el[i] && !pl.e.refusedRecently(p, w.Name)
-		if out[i] {
-			out[i], _ = pl.windowOK(p, w.Name)
-		}
+	for i := range pl.workers {
+		code, _ := pl.verdictAt(p, i, false)
+		out[i] = code == ""
 	}
 	return out
 }
@@ -222,9 +273,15 @@ func (pl *placer) waitReason(p placement) (condition, reason string) {
 
 // claimFor is the claim of a conversion with the placement p.
 func (e *Engine) claimFor(q queueSlots, p placement) queueClaim {
-	c := queueClaim{reach: q.placer.placeable(p), usable: make([]bool, len(q.workers))}
+	return q.claimWith(q.placer.placeable(p))
+}
+
+// claimWith is the claim of a conversion that can be given the workers in
+// reach: usable are those with a free slot now.
+func (q queueSlots) claimWith(reach []bool) queueClaim {
+	c := queueClaim{reach: reach, usable: make([]bool, len(q.workers))}
 	for i, w := range q.workers {
-		c.usable[i] = c.reach[i] && q.free[w.Name] > 0
+		c.usable[i] = reach[i] && q.free[w.Name] > 0
 	}
 	return c
 }

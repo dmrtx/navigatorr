@@ -92,6 +92,7 @@ func Routes() []Route {
 		w("POST", "/actions/{id}/podcast/classify"),
 		w("POST", "/actions/{id}/podcast/review"),
 		g("/queue"),
+		g("/queue/next"),
 		w("POST", "/queue/actions/{id}/hold"),
 		w("POST", "/queue/actions/{id}/release"),
 		w("POST", "/queue/actions/{id}/move"),

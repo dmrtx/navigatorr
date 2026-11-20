@@ -143,46 +143,64 @@ func (e *Engine) windowEstimate(node string, s windowShape) (float64, bool) {
 	return EstimateEncodeSeconds(e.encodeSamples(), node, s.class, family, s.durationSec)
 }
 
+// Window verdict codes: why a node's window keeps a conversion off. They are
+// the codes the queue plan (transcode_queue_plan.go) reports; the wait
+// condition of every one of them is node_window.
+const (
+	windowCodeUnreadable = "window_unreadable"
+	windowCodeClosed     = windowWaitCondition
+	windowCodeMediaType  = "media_type_not_allowed"
+	windowCodeNoProbe    = "no_duration_estimate"
+	windowCodeNoHistory  = "no_encode_history"
+	windowCodeNoFit      = "would_not_fit_window"
+)
+
 // windowVerdict says whether node's window lets the conversion start there
 // now, with the reason when it does not. A node without a window, and a
 // conversion that is not checked, always pass.
 func (e *Engine) windowVerdict(wins map[string]store.WorkerWindow, werr error, s windowShape, node string) (bool, string) {
+	ok, _, why := e.windowCheck(wins, werr, s, node)
+	return ok, why
+}
+
+// windowCheck is windowVerdict with the code of the refusal.
+func (e *Engine) windowCheck(wins map[string]store.WorkerWindow, werr error, s windowShape, node string) (ok bool, code, why string) {
 	if !s.check {
-		return true, ""
+		return true, "", ""
 	}
 	if werr != nil {
-		return false, "the availability windows could not be read, so no node takes anything new"
+		return false, windowCodeUnreadable, "the availability windows could not be read, so no node takes anything new"
 	}
-	w, ok := wins[node]
-	if !ok {
-		return true, ""
+	w, found := wins[node]
+	if !found {
+		return true, "", ""
 	}
 	now := e.now()
 	closes, hasEnd := w.ClosesAt()
 	if hasEnd && !now.Before(closes) {
-		return false, "its window closed since " + windowClock(closes, now)
+		return false, windowCodeClosed, "its window closed since " + windowClock(closes, now)
 	}
 	if len(w.MediaTypes) > 0 && !slices.Contains(w.MediaTypes, s.mediaType) {
 		takes := strings.Join(w.MediaTypes, ", ")
 		if s.mediaType == "" {
-			return false, "its media type is unknown and the window takes only " + takes
+			return false, windowCodeMediaType, "its media type is unknown and the window takes only " + takes
 		}
-		return false, fmt.Sprintf("type %s is not allowed (the window takes only %s)", s.mediaType, takes)
+		return false, windowCodeMediaType, fmt.Sprintf("type %s is not allowed (the window takes only %s)", s.mediaType, takes)
 	}
 	if !hasEnd || s.noFit {
-		return true, ""
+		return true, "", ""
 	}
 	if s.durationSec <= 0 || s.class == "" {
-		return false, "no duration estimate yet: its source has not been probed"
+		return false, windowCodeNoProbe, "no duration estimate yet: its source has not been probed"
 	}
 	est, ok := e.windowEstimate(node, s)
 	if !ok {
-		return false, fmt.Sprintf("no duration estimate: no encode history on this node for %s files%s", s.class, familyNote(s))
+		return false, windowCodeNoHistory, fmt.Sprintf("no duration estimate: no encode history on this node for %s files%s", s.class, familyNote(s))
 	}
 	if now.Add(time.Duration(est * float64(time.Second))).After(closes) {
-		return false, fmt.Sprintf("the window closes at %s and the estimated %d min encode does not fit", windowClock(closes, now), int(est/60+0.5))
+		return false, windowCodeNoFit, fmt.Sprintf("the window closes at %s and the estimated %d min encode does not fit", windowClock(closes, now), int(est/60+0.5))
 	}
-	return true, ""
+	return true, "", ""
 }
 
 // familyNote names the encoder family an estimate was looked up for.

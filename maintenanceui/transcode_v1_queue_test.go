@@ -284,3 +284,60 @@ func TestTranscodeV1QueueIdsAreNormalisedAndTyped(t *testing.T) {
 		}
 	}
 }
+
+func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	// With nothing waiting every node says so.
+	code, empty := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if code != 200 || empty["queue_revision"] == nil {
+		t.Fatal(code, empty)
+	}
+	nodes, _ := empty["nodes"].([]any)
+	if len(nodes) == 0 {
+		t.Skip("the test engine has no workers")
+	}
+	for _, n := range nodes {
+		node := n.(map[string]any)
+		why := node["why_none"].(map[string]any)
+		if node["next"] != nil || why["code"] != "queue_empty" || why["reason"] == "" {
+			t.Fatalf("an empty queue: %v", node)
+		}
+	}
+
+	seedWaiter(t, st, "c-a", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", nil)
+	seedWaiter(t, st, "c-b", "1|2026-01-01T00:00:02Z|g|00000000000000000002", "/media/Example Show S01E02.mkv", nil)
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-a/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, q := queueIDsOf(t, h)
+	code, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if code != 200 || plan["queue_revision"] != q["queue_revision"] {
+		t.Fatal(code, plan, q["queue_revision"])
+	}
+	first := plan["nodes"].([]any)[0].(map[string]any)
+	if first["worker"] == "" || first["state"] == "" || first["skipped_truncated"] != false {
+		t.Fatalf("the node: %v", first)
+	}
+	skipped := first["skipped"].([]any)
+	if len(skipped) == 0 {
+		t.Fatalf("the held conversion is not listed: %v", first)
+	}
+	sk := skipped[0].(map[string]any)
+	if sk["reason_code"] != "held" || sk["ref"].(map[string]any)["id"] != "c-a" || sk["position"] != float64(1) ||
+		!strings.Contains(sk["reason"].(string), "POST /transcode/v1/queue/actions/c-a/release") {
+		t.Fatalf("the held entry: %v", sk)
+	}
+	// Reading it twice changes nothing.
+	_, again := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	if _, q2 := queueIDsOf(t, h); q2["queue_revision"] != q["queue_revision"] {
+		t.Fatal("the read moved the queue revision")
+	}
+	if a, _ := json.Marshal(again["nodes"]); string(a) != mustJSON(t, plan["nodes"]) {
+		t.Fatalf("two reads differ: %s vs %s", a, mustJSON(t, plan["nodes"]))
+	}
+	// The route needs the key like every v1 route.
+	if c, e := get(t, h, "/transcode/v1/queue/next", nil); c != 401 || e["code"] != "unauthorized" {
+		t.Fatal(c, e)
+	}
+}

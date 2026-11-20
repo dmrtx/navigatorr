@@ -319,19 +319,10 @@ func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []st
 			return nil, false
 		}
 	}
-	// Ahead of an item: a foreign waiter whose key is before the item's.
-	foreignAhead := func(key string) bool {
-		for _, k := range foreign {
-			if k < key {
-				return true
-			}
-		}
-		return false
-	}
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if it.Status == "queued" && (foreignAhead(keys[it.ID]) || (hasWaiting && keys[it.ID] > firstWaiting)) {
+		if it.Status == "queued" && queuedItemGated(keys[it.ID], foreign, hasWaiting, firstWaiting) {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {

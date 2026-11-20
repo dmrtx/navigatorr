@@ -70,6 +70,9 @@ type QueueEntry struct {
 	WaitingReason    string
 
 	key string // the order key, not shown
+	// The row it was read from, for the queue plan (not shown).
+	waiter *store.TranscodeQueueWaiterRow
+	item   *store.QueuedBatchItemRow
 }
 
 // QueueView is the waiting entries in queue order and the revision they were
@@ -145,9 +148,10 @@ func (e *Engine) readQueueView() (QueueView, error) {
 		return QueueView{}, err
 	}
 	var entries []QueueEntry
-	for _, w := range waiters {
+	for i := range waiters {
+		w := waiters[i]
 		en := QueueEntry{Kind: QueueKindAction, ID: w.ID, BatchID: w.BatchID, Path: w.Path, MediaType: w.MediaType,
-			WaitingCondition: w.WaitingCondition, WaitingReason: w.WaitingReason, key: w.QueueOrder}
+			WaitingCondition: w.WaitingCondition, WaitingReason: w.WaitingReason, key: w.QueueOrder, waiter: &waiters[i]}
 		switch {
 		case w.Held:
 			en.Held, en.HeldBy = true, "conversion"
@@ -158,9 +162,10 @@ func (e *Engine) readQueueView() (QueueView, error) {
 		}
 		entries = append(entries, en)
 	}
-	for _, it := range items {
+	for i := range items {
+		it := items[i]
 		en := QueueEntry{Kind: QueueKindItem, ID: strconv.FormatInt(it.ItemID, 10), BatchID: it.BatchID, Path: it.FilePath, MediaType: it.MediaType,
-			WaitingCondition: "queued", WaitingReason: "Queued in its batch; a conversion is created for it when its turn comes", key: batchItemQueueOrder(it)}
+			WaitingCondition: "queued", WaitingReason: "Queued in its batch; a conversion is created for it when its turn comes", key: batchItemQueueOrder(it), item: &items[i]}
 		switch {
 		case it.Held:
 			en.Held, en.HeldBy = true, "conversion"

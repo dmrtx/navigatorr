@@ -237,10 +237,6 @@ func (e *Engine) recordAssignedWorker(ctx context.Context, ec *ExecutionContext,
 // placer's reason (worker_unreachable when no worker is ready), or
 // worker_busy when every placeable worker is full.
 func (e *Engine) pickVideoWorker(ctx context.Context, ec *ExecutionContext, within map[string]bool) (string, string, error) {
-	// A requeued conversion prefers the node it came from. A node that just
-	// refused it is passed over only within roomRefusedFor; after that the
-	// preference applies again.
-	prefer := getString(ec.State, requeuedFromKey)
 	workers := e.deps.Workers.All()
 	pl := e.newPlacer(ctx, workers, e.placementReady(ctx, workers))
 	p := e.placementOf(ec)
@@ -255,23 +251,9 @@ func (e *Engine) pickVideoWorker(ctx context.Context, ec *ExecutionContext, with
 			active[e.resolveWorker(name)] += n
 		}
 	}
-	best, bestFree := -1, 0
-	for i, w := range workers {
-		if !placeable[i] {
-			continue
-		}
-		free := e.workerVideoCapacity(ctx, w) - active[w.Name]
-		if free <= 0 {
-			continue
-		}
-		if within != nil && !within[w.Name] {
-			continue
-		}
-		// A requeued conversion prefers the node that still has its source.
-		if best < 0 || (workers[best].Name != prefer && (w.Name == prefer || free > bestFree)) {
-			best, bestFree = i, free
-		}
-	}
+	best := pickWorker(workers, placeable, func(i int) int {
+		return e.workerVideoCapacity(ctx, workers[i]) - active[workers[i].Name]
+	}, within, p.requeuedFrom)
 	if best >= 0 {
 		return workers[best].Name, "", nil
 	}
@@ -279,6 +261,34 @@ func (e *Engine) pickVideoWorker(ctx context.Context, ec *ExecutionContext, with
 		return "", condition, fmt.Errorf("%s", reason)
 	}
 	return "", "worker_busy", fmt.Errorf("Every ready video worker is full; the job waits for a free slot before it is assigned")
+}
+
+// pickWorker is the choice itself, shared by the dispatch (pickVideoWorker) and
+// the queue plan (decideTurn): among the placeable workers with a free slot
+// that the queue lets it take (within, nil for no restriction) the one with
+// the most free slots, the first in config order on a tie. A requeued
+// conversion prefers the node it came from; a node that just refused it is
+// passed over only within roomRefusedFor (placeable says so), after that the
+// preference applies again. It returns the worker's index, -1 for none.
+func pickWorker(workers []transcode.NamedWorker, placeable []bool, free func(i int) int, within map[string]bool, prefer string) int {
+	best, bestFree := -1, 0
+	for i, w := range workers {
+		if !placeable[i] {
+			continue
+		}
+		f := free(i)
+		if f <= 0 {
+			continue
+		}
+		if within != nil && !within[w.Name] {
+			continue
+		}
+		// A requeued conversion prefers the node that still has its source.
+		if best < 0 || (workers[best].Name != prefer && (w.Name == prefer || f > bestFree)) {
+			best, bestFree = i, f
+		}
+	}
+	return best
 }
 
 // assignableWorkers are the workers a conversion could be assigned now: the

@@ -7,6 +7,7 @@ import (
 	"log"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -278,49 +279,135 @@ func (q queueSlots) total() int {
 	return n
 }
 
+// queueContender is one conversion that contends for a slot: a waiting
+// conversion or a queued batch item, with what the placer needs to know of it.
+type queueContender struct {
+	kind string // QueueKindAction or QueueKindItem
+	id   string
+	key  string
+	// held keeps its place but takes no slot and holds no one back; stale is a
+	// waiter nobody has polled for so long that something other than the queue
+	// holds it, so it holds no one back either.
+	held, stale bool
+	// started is a conversion the queue plan has given a node in its walk: it
+	// waits no longer.
+	started bool
+	p       placement
+	// reach is what the placer says it can be given, read once.
+	reach []bool
+}
+
+// queueContenders are the conversions that contend for slots, as the dispatch
+// reads them: the waiters and the queued items of batches that can start them
+// (those of paused batches are not among them).
+func (e *Engine) queueContenders() ([]queueContender, error) {
+	waiters, err := e.deps.Store.ListTranscodeQueueWaiters()
+	if err != nil {
+		return nil, err
+	}
+	var out []queueContender
+	for _, w := range waiters {
+		c := queueContender{kind: QueueKindAction, id: w.ID, key: w.QueueOrder, held: w.Held, p: e.waiterPlacement(w)}
+		// Something other than the queue holds a waiter that has not been
+		// polled for this long; it must not block everyone behind it.
+		c.stale = e.waiterStale(w)
+		out = append(out, c)
+	}
+	items, err := e.deps.Store.ListQueuedBatchItems()
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		out = append(out, queueContender{kind: QueueKindItem, id: strconv.FormatInt(it.ItemID, 10), key: batchItemQueueOrder(it), held: it.Held, p: queuedItemPlacement(it)})
+	}
+	return out, nil
+}
+
+// claimOf is the claim of a contender, its reach read once.
+func (q queueSlots) claimOf(c *queueContender) queueClaim {
+	if c.reach == nil {
+		c.reach = q.placer.placeable(c.p)
+	}
+	return q.claimWith(c.reach)
+}
+
 // transcodeQueueBefore lists the claims of the conversions ahead of key:
 // waiters with a smaller key (self excluded) and queued batch items with a
 // smaller key. ahead counts those that could be given a worker cur could also
 // be given, which is the place cur holds in the queue. A waiter no worker can
 // take goes first without holding anything back: it waits for room elsewhere.
 func (e *Engine) transcodeQueueBefore(q queueSlots, cur queueClaim, key, self string) ([]queueClaim, int, error) {
-	waiters, err := e.deps.Store.ListTranscodeQueueWaiters()
+	cs, err := e.queueContenders()
 	if err != nil {
 		return nil, 0, err
 	}
-	var before []queueClaim
-	ahead := 0
-	for _, w := range waiters {
-		// A held conversion keeps its place but starts nothing, so it holds no
-		// one back.
-		if w.ID == self || w.QueueOrder >= key || w.Held {
+	before, ahead := q.claimsBefore(cs, cur, key, self)
+	return before, ahead, nil
+}
+
+// claimsBefore is the part of transcodeQueueBefore that decides who is ahead,
+// shared with the queue plan. A held conversion keeps its place but starts
+// nothing, so it holds no one back.
+func (q queueSlots) claimsBefore(cs []queueContender, cur queueClaim, key, self string) (before []queueClaim, ahead int) {
+	for i := range cs {
+		c := &cs[i]
+		if c.held || c.stale || c.started || c.key >= key || (c.kind == QueueKindAction && c.id == self) {
 			continue
 		}
-		// Something other than the queue holds a waiter that has not been
-		// polled for this long; it must not block everyone behind it.
-		if updated, err := time.Parse(time.RFC3339Nano, w.UpdatedAt); err == nil && e.now().Sub(updated) > slotWaiterStaleAfter {
-			continue
-		}
-		c := e.claimFor(q, e.waiterPlacement(w))
-		before = append(before, c)
-		if cur.competesWith(c) {
+		cl := q.claimOf(c)
+		before = append(before, cl)
+		if cur.competesWith(cl) {
 			ahead++
 		}
 	}
-	items, err := e.deps.Store.ListQueuedBatchItems()
-	if err != nil {
-		return nil, 0, err
-	}
-	for _, it := range items {
-		if !it.Held && batchItemQueueOrder(it) < key {
-			c := e.claimFor(q, queuedItemPlacement(it))
-			before = append(before, c)
-			if cur.competesWith(c) {
-				ahead++
-			}
+	return before, ahead
+}
+
+// turnDecision is what the queue decides for a conversion that asks for a
+// worker: the workers it may take without anyone ahead of it losing a slot,
+// the one the pick chooses among them, or, when none, why it waits. The
+// dispatch (transcodeQueueTurn, pickVideoWorker) and the queue plan decide
+// through it and pickWorker.
+type turnDecision struct {
+	// Within are the workers it may take; nil when it may take none.
+	Within map[string]bool
+	// Node is the worker the pick gives it, "" when none.
+	Node string
+	// Condition and Reason word the wait when Within is empty.
+	Condition, Reason string
+	Ahead             int
+	Cur               queueClaim
+}
+
+func (q queueSlots) decideTurn(p placement, cur queueClaim, before []queueClaim, ahead int) turnDecision {
+	d := turnDecision{Cur: cur, Ahead: ahead}
+	if safe := q.safeWorkers(cur, before); len(safe) > 0 {
+		d.Within = safe
+		if i := pickWorker(q.workers, cur.reach, func(i int) int { return q.free[q.workers[i].Name] }, safe, p.requeuedFrom); i >= 0 {
+			d.Node = q.workers[i].Name
 		}
+		return d
 	}
-	return before, ahead, nil
+	d.Condition, d.Reason = q.turnWait(p, cur, ahead)
+	return d
+}
+
+// turnWait words why it is not the conversion's turn: the placer's reason when
+// it has one (windows and room can keep it off every node), else its place in
+// the line.
+func (q queueSlots) turnWait(p placement, cur queueClaim, ahead int) (condition, reason string) {
+	condition, reason = q.placer.waitReason(p)
+	if reason != "" {
+		return condition, reason
+	}
+	reason = fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
+	switch {
+	case p.need.SourceBytes > 0 && !cur.hasUsable() && q.total() > 0:
+		reason = retentionNoSlotReason(p.need)
+	case ahead == 0:
+		reason = "Next in the transcode queue; waiting for a worker slot to free"
+	}
+	return "worker_busy", reason
 }
 
 // sourceSizeRetry is how often the size of a source that could not be read is
@@ -421,12 +508,13 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 		log.Printf("transcode queue: listing the queue for %s: %v (waiting)", ec.InstanceID, err)
 		return queueUnreadableWait(), true, nil
 	}
-	if safe := q.safeWorkers(cur, before); len(safe) > 0 {
+	dec := q.decideTurn(p, cur, before, ahead)
+	if len(dec.Within) > 0 {
 		delete(ec.State, workerSlotPositionKey)
 		clearWaitingForWorker(ec)
-		return StepResult{}, false, safe
+		return StepResult{}, false, dec.Within
 	}
-	condition, reason := q.placer.waitReason(p)
+	condition, reason := dec.Condition, dec.Reason
 	if condition == windowWaitCondition {
 		// Only the nodes' windows keep it off every node it could use: it is no
 		// contender for a slot, takes no place in the line and is looked at
@@ -438,16 +526,6 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	position := ahead + 1
 	ec.State[workerSlotPositionKey] = position
 	markWaitingForWorker(ec)
-	if reason == "" {
-		condition = "worker_busy"
-		reason = fmt.Sprintf("Waiting its turn in the transcode queue: %d conversion(s) go first", ahead)
-		switch {
-		case need.SourceBytes > 0 && !cur.hasUsable() && q.total() > 0:
-			reason = retentionNoSlotReason(need)
-		case ahead == 0:
-			reason = "Next in the transcode queue; waiting for a worker slot to free"
-		}
-	}
 	return StepResult{
 		Status:           StepWaitingExternal,
 		WaitingCondition: condition,
