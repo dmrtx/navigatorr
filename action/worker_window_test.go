@@ -341,7 +341,11 @@ func TestBeginAdmissionRequeuesWhenTheWindowClosed(t *testing.T) {
 
 	// The window closes before the submit.
 	seedActionInstance(t, e.deps.Store, "d", "transcode_media", StatusRunning, 0, "", map[string]any{"media_type": "tv"}, state)
-	typesOnly(t, e, "m4", "movie")
+	// Written straight to the store: no sweep sees it, so it is the check at
+	// submit that catches it.
+	if _, err := e.deps.Store.SetWorkerWindow(store.WorkerWindow{Worker: "m4", MediaTypes: []string{"movie"}}, nil); err != nil {
+		t.Fatal(err)
+	}
 	w, cond, reason := turnWith(t, e, "d", tmpl)
 	got := mustInstance(t, e.deps.Store, "d")
 	if got.Status != StatusWaitingExternal || w != "" || cond == "" || !strings.Contains(reason, "Node m4: type tv is not allowed") {

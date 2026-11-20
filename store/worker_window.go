@@ -223,13 +223,16 @@ func (s *Store) WorkerWindowRevision(worker string) (int64, error) {
 func (s *Store) DeleteWorkerWindow(worker string, expectedRevision *int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, found, err := s.getWorkerWindowLocked(worker)
+	cur, found, err := s.getWorkerWindowLocked(worker)
 	if err != nil {
 		return false, err
 	}
 	have, err := s.windowRevisionLocked(worker)
 	if err != nil {
 		return false, err
+	}
+	if found && cur.Revision > have {
+		have = cur.Revision // a counter row that is missing never moves it back
 	}
 	if expectedRevision != nil && *expectedRevision != have {
 		return false, &StaleWorkerWindowError{Worker: worker, Current: have}
@@ -242,7 +245,7 @@ func (s *Store) DeleteWorkerWindow(worker string, expectedRevision *int64) (bool
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE worker_window_revisions SET revision=? WHERE worker=?`, have+1, worker); err != nil {
+	if _, err := tx.Exec(`INSERT INTO worker_window_revisions(worker, revision) VALUES(?, ?) ON CONFLICT(worker) DO UPDATE SET revision=excluded.revision`, worker, have+1); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(`DELETE FROM worker_windows WHERE worker=?`, worker); err != nil {

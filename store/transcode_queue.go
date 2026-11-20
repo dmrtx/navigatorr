@@ -124,6 +124,10 @@ type TranscodeQueueWaiterRow struct {
 	ProbeDurationSec float64
 	ProbeWidth       int
 	ProbeHeight      int
+	// AudioOnly is the request's audio_only input: the video is copied, so the
+	// window estimates it by the copy family. A waiting conversion has no
+	// plan yet (a requeue drops it), so the planned encoder is not known here.
+	AudioOnly bool
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
@@ -166,7 +170,8 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.width'), 0) AS INTEGER),
 			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.height'), 0) AS INTEGER),
 			CAST(COALESCE(json_extract(a.state_json, '$.original.duration_sec'), 0) AS REAL),
-			COALESCE(json_extract(a.state_json, '$.original.resolution'), '')
+			COALESCE(json_extract(a.state_json, '$.original.resolution'), ''),
+			COALESCE(json_extract(a.inputs_json, '$.audio_only'), 0) IN (1, 'true')
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
 		LEFT JOIN transcode_queue_marks m ON m.kind = 'action' AND m.id = a.id
@@ -194,7 +199,7 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 		var origRes string
 		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals, &r.SizeUnreadable,
 			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason,
-			&r.ProbeDurationSec, &r.ProbeWidth, &r.ProbeHeight, &origDur, &origRes); err != nil {
+			&r.ProbeDurationSec, &r.ProbeWidth, &r.ProbeHeight, &origDur, &origRes, &r.AudioOnly); err != nil {
 			return nil, err
 		}
 		// The preflight's own measure of the source wins over the early check's

@@ -282,7 +282,7 @@ func (e *Engine) noteWindowChanged() {
 	e.WakeReconciler()
 	// What a changed window no longer takes and has not been sent goes back
 	// to the queue now, not at the next tick.
-	e.startWindowSweep(context.Background())
+	e.startWindowSweep(e.serviceContext())
 }
 
 // NodeWindowStatus is a window as the API reports it.
@@ -350,16 +350,54 @@ func (e *Engine) windowStatus(w store.WorkerWindow) NodeWindowStatus {
 	return st
 }
 
-// startWindowSweep runs a sweep of the node windows in the background unless
-// one is running, on the reconciler's tick and after a window is written.
+// startWindowSweep asks for a sweep of the node windows, on the reconciler's
+// tick and after a window is written. Only one runs at a time; a request that
+// arrives while one runs is not lost: the running sweeper reads the windows
+// again until no request is pending, so a sweep never works from windows that
+// were changed after it read them.
 func (e *Engine) startWindowSweep(ctx context.Context) {
-	if e.deps.Store == nil || !e.windowSweeping.CompareAndSwap(false, true) {
+	if e.deps.Store == nil {
 		return
 	}
-	go func() {
-		defer e.windowSweeping.Store(false)
+	e.windowSweepAgain.Store(true)
+	if !e.windowSweeping.CompareAndSwap(false, true) {
+		return
+	}
+	if e.windowSweepInline {
+		e.runWindowSweeps(ctx)
+		return
+	}
+	go e.runWindowSweeps(ctx)
+}
+
+func (e *Engine) runWindowSweeps(ctx context.Context) {
+	for {
+		e.windowSweepAgain.Store(false)
+		if e.windowSweepPass != nil {
+			e.windowSweepPass()
+		}
 		e.sweepWindowedNodes(ctx)
-	}()
+		if ctx.Err() == nil && e.windowSweepAgain.Load() {
+			continue
+		}
+		e.windowSweeping.Store(false)
+		// A request that came in between the last check and the release.
+		if ctx.Err() == nil && e.windowSweepAgain.Load() && e.windowSweeping.CompareAndSwap(false, true) {
+			continue
+		}
+		return
+	}
+}
+
+// serviceContext is the context a sweep started by an API write runs in: the
+// service's own (it ends with it) once the reconciler is running. Before that
+// (tests, a service that has not started its loop) there is no lifecycle to
+// tie it to and nothing to stop, so it is a background context.
+func (e *Engine) serviceContext() context.Context {
+	if life := e.lifecycle.Load(); life != nil {
+		return *life
+	}
+	return context.Background()
 }
 
 // sweepWindowedNodes sends back to the queue what a node's window no longer

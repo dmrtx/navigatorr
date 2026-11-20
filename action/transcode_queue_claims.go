@@ -87,7 +87,7 @@ func (e *Engine) waiterPlacement(w store.TranscodeQueueWaiterRow) placement {
 		refusals:    parseRefusals(w.Refusals),
 		sizeUnknown: e.deps.Fs != nil && w.SourceBytes <= 0 && !w.SizeUnreadable,
 		window: windowShape{check: true, mediaType: normalizedMediaType(w.MediaType), durationSec: w.ProbeDurationSec,
-			class: ResolutionClass(w.ProbeWidth, w.ProbeHeight)},
+			class: ResolutionClass(w.ProbeWidth, w.ProbeHeight), audioOnly: w.AudioOnly},
 	}
 }
 

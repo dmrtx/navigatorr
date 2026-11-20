@@ -237,3 +237,102 @@ func TestEarlyPreflightProbesOnceMoreForTheQueue(t *testing.T) {
 		t.Fatal("not marked as tried")
 	}
 }
+
+// Round 2, item 2: a request that arrives while a sweep runs is not lost; the
+// running sweeper reads the windows again.
+func TestWindowSweepRunsAgainForARequestMadeDuringASweep(t *testing.T) {
+	e, _ := placementEngine(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	e.windowSweepInline = false
+	probe := map[string]any{"duration_sec": 600.0, "width": 1920, "height": 1080}
+	seedActionInstance(t, e.deps.Store, "u", "transcode_media", StatusRunning, 0, "", map[string]any{"media_type": "tv"}, map[string]any{workerStateKey: "m4", queueProbeKey: probe, transcodeQueueOrderKey: queueOrder(queueRankPlain, e.now(), "u", 0)})
+	passes := make(chan struct{}, 10)
+	release := make(chan struct{})
+	e.windowSweepPass = func() { passes <- struct{}{}; <-release }
+	// Not yet a window: the first sweep (started by an unrelated write) runs.
+	e.startWindowSweep(context.Background())
+	<-passes // the first pass is running and holds
+	// A window that excludes the file is written while it runs.
+	if _, err := e.deps.Store.SetWorkerWindow(store.WorkerWindow{Worker: "m4", MediaTypes: []string{"movie"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	e.startWindowSweep(context.Background()) // dropped before the fix
+	release <- struct{}{}
+	select {
+	case <-passes:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no second pass for the request made during the first")
+	}
+	e.windowSweepPass = nil
+	close(release)
+	for i := 0; i < 500 && (e.windowSweeping.Load() || assignedWorker(actionState(t, e.deps.Store, "u")) != ""); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if w := assignedWorker(actionState(t, e.deps.Store, "u")); w != "" {
+		t.Fatalf("the second pass did not requeue: %q", w)
+	}
+}
+
+// Round 2, item 3: a waiting conversion that copies the video is estimated by
+// the copy family, as it is when it places itself.
+func TestWaiterPlacementKeepsAudioOnly(t *testing.T) {
+	e, _ := placementEngine(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	waiter(t, e, "ao", time.Minute, map[string]any{"audio_only": true, "media_type": "movie"}, map[string]any{queueProbeKey: map[string]any{"duration_sec": 600.0, "width": 1920, "height": 1080}})
+	waiter(t, e, "vid", time.Minute, map[string]any{"media_type": "movie"}, nil)
+	ws, err := e.deps.Store.ListTranscodeQueueWaiters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, w := range ws {
+		got[w.ID] = e.waiterPlacement(w).window.audioOnly
+	}
+	if !got["ao"] || got["vid"] {
+		t.Fatalf("audio_only on the waiter rows: %v", got)
+	}
+}
+
+// Round 2, item 4: an interrupted early check leaves the marker unset.
+func TestEarlyPreflightRerunMarkerNeedsADefiniteAnswer(t *testing.T) {
+	e, _, media, _ := setupProbeTestEnv(t, &mockTranscodeExecutor{}, ordinaryProbeJSON)
+	ec := earlyCheckEC(t, e, "old2", map[string]any{"path": media, "mode": "size"})
+	ec.State[earlyPreflightKey] = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, decided := e.earlyPreflight(ctx, ec); decided {
+		t.Fatal("decided")
+	}
+	if getBool(ec.State, queueProbeTriedKey) {
+		t.Fatal("marked tried although the probe was interrupted")
+	}
+	if _, decided := e.earlyPreflight(context.Background(), ec); decided || !getBool(ec.State, queueProbeTriedKey) || ec.State[queueProbeKey] == nil {
+		t.Fatalf("the next poll should probe: %v", ec.State)
+	}
+}
+
+// Round 2, item 5 (H3): a batch's items share its media type, so an item no
+// node can take means the whole batch is such; it holds nobody back and does
+// not use another batch's allowance.
+func TestBatchNoNodeCanTakeDoesNotLimitAnotherBatch(t *testing.T) {
+	e, _ := placementEngine(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+	typesOnly(t, e, "m4", "movie")
+	typesOnly(t, e, "m1", "movie")
+	seedQueueBatch(t, e, "tvb", 2)
+	in := parseExecutionContextMust(t, e, "tvb").Inputs
+	in["media_type"] = "tv"
+	inst := mustInstance(t, e.deps.Store, "tvb")
+	inst.InputsJSON = toJSON(in)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	seedQueueBatch(t, e, "movieb", 1)
+	in = parseExecutionContextMust(t, e, "movieb").Inputs
+	in["media_type"] = "movie"
+	inst = mustInstance(t, e.deps.Store, "movieb")
+	inst.InputsJSON = toJSON(in)
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.batchQueueAllowance(context.Background(), "movieb"); n < 1 {
+		t.Fatalf("a batch that no node takes limited a movie batch: %d", n)
+	}
+}

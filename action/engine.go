@@ -78,6 +78,15 @@ type Engine struct {
 	pauseSweeping atomic.Bool
 	// windowSweeping is set while a background sweep of the node windows runs.
 	windowSweeping atomic.Bool
+	// windowSweepAgain is a request that came in while a sweep was running:
+	// the running one reads the windows again before it ends.
+	windowSweepAgain atomic.Bool
+	// windowSweepInline makes a sweep run in the caller instead of in the
+	// background, and windowSweepPass (when set) runs at the start of each
+	// pass; both are for tests, which must not have a goroutine read the
+	// engine while they change it.
+	windowSweepInline bool
+	windowSweepPass   func()
 
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the

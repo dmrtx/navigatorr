@@ -1,7 +1,9 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -164,5 +166,64 @@ func TestWaitersReadOriginalThenQueueProbe(t *testing.T) {
 	}
 	if got["both"] != (p{900, 3840, 2160}) || got["probe"] != (p{600, 1920, 1080}) || got["half"] != (p{600, 1280, 720}) {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A database that was already at version 27 gets the revision counter table
+// from migration 28, and deleting a window works there.
+func TestWindowRevisionTableComesFromMigration28(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v27.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DROP TABLE worker_window_revisions`, `DROP TABLE worker_windows`, `DELETE FROM schema_version WHERE version >= 28`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	db.Close()
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name='worker_window_revisions'`).Scan(&n); err != nil || n != 1 {
+		t.Fatal("table missing after migrating from 27", n, err)
+	}
+	if _, err := s.SetWorkerWindow(WorkerWindow{Worker: "m4", MarginSec: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteWorkerWindow("m4", nil); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.WorkerWindowRevision("m4"); r != 2 {
+		t.Fatalf("counter %d", r)
+	}
+}
+
+// A missing counter row cannot skip the bump of a delete.
+func TestDeleteWorkerWindowBumpsEvenWithoutACounterRow(t *testing.T) {
+	s := openTest(t)
+	if _, err := s.SetWorkerWindow(WorkerWindow{Worker: "m4", MarginSec: 1}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DELETE FROM worker_window_revisions`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE worker_windows SET revision=5 WHERE worker='m4'`); err != nil {
+		t.Fatal(err)
+	}
+	if had, err := s.DeleteWorkerWindow("m4", nil); err != nil || !had {
+		t.Fatal(had, err)
+	}
+	if r, _ := s.WorkerWindowRevision("m4"); r < 5 {
+		t.Fatalf("revision %d went backwards", r)
 	}
 }

@@ -449,10 +449,6 @@ var migrations = []migration{
 		// while it is paused, none otherwise. mode is 'graceful' (finish what
 		// is encoding) or 'immediate' (send it back to the queue now).
 		`CREATE TABLE IF NOT EXISTS worker_pauses (worker TEXT PRIMARY KEY, mode TEXT NOT NULL, since TEXT NOT NULL, revision INTEGER NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
-		// The revision each node's window has reached, kept after the window
-		// is deleted, so a revision is never used twice and a client holding
-		// an old one cannot write over a window made since.
-		`CREATE TABLE IF NOT EXISTS worker_window_revisions (worker TEXT PRIMARY KEY, revision INTEGER NOT NULL) WITHOUT ROWID`,
 	}},
 	{version: 24, statements: []string{
 		// How many of a node's CPUs encodes may use together, so the rest of the
@@ -497,6 +493,10 @@ var migrations = []migration{
 		// conversions and of which media types (a comma list; '' is all). One
 		// row while the operator keeps a window on the node, none otherwise.
 		`CREATE TABLE IF NOT EXISTS worker_windows (worker TEXT PRIMARY KEY, until TEXT, margin_sec INTEGER NOT NULL DEFAULT 0, media_types TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
+		// The revision each node's window has reached, kept after the window
+		// is deleted, so a revision is never used twice and a client holding
+		// an old one cannot write over a window made since.
+		`CREATE TABLE IF NOT EXISTS worker_window_revisions (worker TEXT PRIMARY KEY, revision INTEGER NOT NULL) WITHOUT ROWID`,
 	}},
 }
 
