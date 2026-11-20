@@ -21,13 +21,25 @@ func isNull(raw json.RawMessage) bool {
 	return len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
 }
 
-// validID reports whether raw is a JSON-RPC request id: a string or a number.
+// maxNumericID bounds a numeric id's text. sameID compares numbers exactly
+// with big.Rat, and an id like 1e10000000 would make that allocate without
+// bound; real clients use small integers.
+const maxNumericID = 32
+
+// validID reports whether raw is a JSON-RPC request id: a string, or a
+// number written without an exponent and at most maxNumericID characters.
 func validID(raw json.RawMessage) bool {
 	if len(raw) == 0 {
 		return false
 	}
 	c := raw[0]
-	return c == '"' || c == '-' || (c >= '0' && c <= '9')
+	if c == '"' {
+		return true
+	}
+	if c != '-' && (c < '0' || c > '9') {
+		return false
+	}
+	return len(raw) <= maxNumericID && !bytes.ContainsAny(raw, "eE")
 }
 
 // sameID compares two JSON-RPC ids by value, so 1 and 1.0 match and "1" does not.

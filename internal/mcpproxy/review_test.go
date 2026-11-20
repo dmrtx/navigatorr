@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -229,5 +230,81 @@ func TestSSEDispatchRules(t *testing.T) {
 				t.Errorf("%v %q (%s)", isErr, text, r.body)
 			}
 		})
+	}
+}
+
+// A client that sends the headers and then withholds the body must not hold
+// the request open past the body read deadline.
+func TestSlowBodyIsCutOff(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	up := newFake(t)
+	g := newGateway(t, up.url(), nil)
+	srv := httptest.NewServer(g.f)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	began := time.Now()
+	buf := make([]byte, 512)
+	_, _ = conn.Read(buf) // returns when the server answers or closes
+	if waited := time.Since(began); waited > 3*time.Second {
+		t.Fatalf("server held the request for %s", waited)
+	}
+}
+
+// A handshake that finishes after Close must end its new session, not
+// publish it: otherwise that session is never deleted.
+func TestHandshakeAfterCloseDeletesItsSession(t *testing.T) {
+	up := newFake(t)
+	release := make(chan struct{})
+	up.onInit = func(w http.ResponseWriter, r *http.Request) bool {
+		<-release
+		return false
+	}
+	g := newGateway(t, up.url(), nil)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = g.f.up.ensure(context.Background(), nil)
+	}()
+	for up.inits.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	g.f.Close(context.Background()) // no published session yet: nothing to delete
+	if up.deletes.Load() != 0 {
+		t.Fatalf("deletes before the handshake finished = %d", up.deletes.Load())
+	}
+	close(release)
+	<-done
+	if up.deletes.Load() != 1 {
+		t.Fatalf("deletes = %d, want 1 for the session opened after Close", up.deletes.Load())
+	}
+	if g.f.up.current() != nil {
+		t.Fatal("a session opened after Close was published")
+	}
+}
+
+// Numeric ids with an exponent or very long text are refused before they
+// reach the exact (big.Rat) comparison.
+func TestHugeNumericIDIsRefused(t *testing.T) {
+	up := newFake(t)
+	g := newGateway(t, up.url(), nil)
+	for _, id := range []string{"1e10000000", "1E5", strings.Repeat("9", maxNumericID+1)} {
+		r := g.post(goodSession, `{"jsonrpc":"2.0","id":`+id+`,"method":"tools/list"}`)
+		want200JSON(t, r)
+		_, _, e := r.rpc(t)
+		if !strings.Contains(string(e), "-32600") {
+			t.Errorf("id %s: error = %s, want -32600", id[:min(len(id), 12)], e)
+		}
+	}
+	if up.lists.Load() != 0 {
+		t.Fatalf("upstream was asked %d times", up.lists.Load())
 	}
 }

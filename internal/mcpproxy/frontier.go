@@ -32,6 +32,13 @@ const (
 	MsgUnknown = "Resultado desconocido: puede haberse ejecutado; comprueba antes de repetir"
 )
 
+// bodyReadTimeout bounds how long a client may take to send a request body.
+// The server has no ReadTimeout (it would also cut the SDK's long-lived GET
+// streams), so a client that sends headers and then trickles or withholds the
+// body would otherwise hold a goroutine and delay shutdown. A variable so
+// tests can shorten it.
+var bodyReadTimeout = 15 * time.Second
+
 // Options configures a Frontier. Only Server, Next and UpstreamURL are
 // required; the rest default to production values and exist for tests.
 type Options struct {
@@ -65,6 +72,8 @@ type Frontier struct {
 	cat      *catalog
 	proxied  map[string]struct{}
 	sessions server.StatelessGeneratingSessionIdManager
+	logf     func(string, ...any)
+	errorf   func(string, ...any)
 	budget   time.Duration
 }
 
@@ -106,6 +115,8 @@ func New(o Options) (*Frontier, error) {
 		srv:     o.Server,
 		proxied: map[string]struct{}{},
 		budget:  o.CallBudget,
+		logf:    o.Logf,
+		errorf:  o.Errorf,
 	}
 	names := ProxyTools()
 	for _, n := range names {
@@ -152,11 +163,17 @@ func (f *Frontier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.next.ServeHTTP(w, r)
 		return
 	}
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
 	if err != nil {
+		// Keep the deadline and close the connection: otherwise the server
+		// would wait, with no deadline, to drain the rest of the body.
+		w.Header().Set("Connection", "close")
 		writeJSON(w, rpcError(nil, mcp.PARSE_ERROR, "read request body error"))
 		return
 	}
+	_ = rc.SetReadDeadline(time.Time{})
 	if len(body) > maxRequestBody {
 		writeJSON(w, rpcError(nil, mcp.INVALID_REQUEST, "request body is larger than 1 MiB"))
 		return
@@ -237,7 +254,7 @@ func (f *Frontier) callTool(ctx context.Context, w http.ResponseWriter, env enve
 		writeJSON(w, raw)
 		return
 	}
-	internal.Logf("proxied tools/call failed (%s): %v", kindName(cerr.kind), cerr)
+	f.logf("proxied tools/call failed (%s): %v", kindName(cerr.kind), cerr)
 	msg := MsgUnknown
 	if cerr.kind == failNotDispatched {
 		msg = MsgNotRun
@@ -302,7 +319,7 @@ func (f *Frontier) listTools(ctx context.Context, w http.ResponseWriter, id json
 	}
 	own, err := f.ownTools(ctx)
 	if err != nil {
-		internal.Errorf("listing own tools: %v", err)
+		f.errorf("listing own tools: %v", err)
 		writeJSON(w, rpcError(id, mcp.INTERNAL_ERROR, "internal error"))
 		return
 	}

@@ -120,7 +120,12 @@ func build(ctx context.Context, cfg *config.Config) (http.Handler, *mcpproxy.Fro
 
 	// The default session id manager is the same stateless one the server
 	// uses, so a session id issued by either is valid at both.
-	mcpHTTP := server.NewStreamableHTTPServer(s, server.WithEndpointPath("/mcp"))
+	mcpHTTP := server.NewStreamableHTTPServer(s,
+		server.WithEndpointPath("/mcp"),
+		// The gateway never sends server-initiated messages, and an open GET
+		// stream would hold Shutdown for the whole drain: answer GET with 405.
+		server.WithDisableStreaming(true),
+	)
 	fr, err := mcpproxy.New(mcpproxy.Options{
 		Server:      s,
 		Next:        mcpHTTP,

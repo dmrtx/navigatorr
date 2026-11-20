@@ -494,3 +494,22 @@ func TestShutdownDrainsCallsBeforeClosingTheSession(t *testing.T) {
 		t.Error("the listener should be closed after shutdown")
 	}
 }
+
+// The gateway never sends notifications, so it refuses the GET stream: an
+// open stream would otherwise hold http.Server.Shutdown for the whole drain.
+func TestGetStreamIsRefused(t *testing.T) {
+	tx := transcode(t, testConfig(false, true, false), nil)
+	gw := gatewayFor(t, testConfig(false, true, false), tx.URL+"/mcp")
+	req, _ := http.NewRequest(http.MethodGet, gw.URL+"/mcp", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /mcp = %d, want 405", resp.StatusCode)
+	}
+}

@@ -70,10 +70,11 @@ type upstream struct {
 	logf        func(string, ...any)
 	errorf      func(string, ...any)
 
-	mu   sync.Mutex
-	cur  *session
-	init singleflight.Group
-	ids  atomic.Int64
+	mu     sync.Mutex
+	closed bool // set by terminate; later handshakes are ended, not published
+	cur    *session
+	init   singleflight.Group
+	ids    atomic.Int64
 
 	// afterCheck is a test hook, run between the fast-path check and the flight.
 	afterCheck func()
@@ -139,6 +140,15 @@ func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error
 				return nil, err
 			}
 			u.mu.Lock()
+			if u.closed {
+				// Close ran while this handshake was in flight: end the
+				// session it just opened instead of publishing it.
+				u.mu.Unlock()
+				dctx, dcancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer dcancel()
+				u.delete(dctx, fresh)
+				return nil, errors.New("gateway is shutting down")
+			}
 			defer u.mu.Unlock()
 			if u.cur == nil || u.cur == failed {
 				u.cur = fresh
@@ -203,7 +213,7 @@ func (u *upstream) handshake(ctx context.Context) (*session, error) {
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		if resp.StatusCode == http.StatusUnauthorized {
+		if resp.StatusCode == http.StatusUnauthorized && isKeyRejection(resp) {
 			u.errorf("Transcode rejected the gateway key (HTTP 401): check the shared key file")
 		}
 		return nil, fmt.Errorf("notifications/initialized: HTTP %d", resp.StatusCode)
@@ -494,8 +504,14 @@ func readSSE(r io.Reader, wantID json.RawMessage) ([]byte, error) {
 // terminate closes the upstream session. Best effort: the caller bounds ctx.
 func (u *upstream) terminate(ctx context.Context) {
 	u.mu.Lock()
+	u.closed = true
 	s := u.cur
 	u.mu.Unlock()
+	u.delete(ctx, s)
+}
+
+// delete sends DELETE /mcp for one session. Best effort.
+func (u *upstream) delete(ctx context.Context, s *session) {
 	if s == nil || s.id == "" {
 		return
 	}
