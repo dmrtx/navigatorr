@@ -72,6 +72,8 @@ func main() {
 	specStore := openapi.NewStore(cfg)
 	ctx := context.Background()
 	specStore.LoadAll(ctx)
+	// A service whose spec is served by this same process is not up yet.
+	go specStore.RetryMissing(ctx, 5*time.Second, 5*time.Minute)
 
 	// Build Transmission client if configured
 	var txClient *transmission.Client

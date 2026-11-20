@@ -169,6 +169,7 @@ func handleCallAPI(ctx context.Context, req mcp.CallToolRequest, registry *arrse
 		} else if hasBody {
 			effectiveCT = ContentTypeJSON
 		} else if specStore != nil {
+			specStore.EnsureLoaded(ctx, svcName)
 			// Check OpenAPI spec for default content type
 			if idx := specStore.GetIndex(svcName); idx != nil {
 				if detail, err := idx.GetDetail(path, method); err == nil && detail != nil && detail.RequestBody != nil && detail.RequestBody.ContentType != "" {

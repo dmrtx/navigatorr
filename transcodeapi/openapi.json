@@ -506,7 +506,7 @@
         ],
         "operationId": "getActivity",
         "summary": "Live slots and jobs on every worker",
-        "description": "Each worker's slots and the jobs on them, read live from the workers at once with a 5 second limit each, so an offline worker never delays the others (it shows available:false and a message). Use GET /transcode/v1/state for the instant, store-only view. Read-only.",
+        "description": "What each worker is encoding right now: its slots and the jobs on them, read live from the workers at once with a 5 second limit each, so an offline worker never delays the others (it shows available:false and a message). Use GET /transcode/v1/state for the instant, store-only view. Read-only.",
         "responses": {
           "200": {
             "description": "The activity.",
@@ -5331,7 +5331,7 @@
         ],
         "operationId": "classifyPodcast",
         "summary": "Submit the classification of a podcast's blocks",
-        "description": "The body is the classification (podcast_classify): the block ids and digests to copy come from GET /transcode/v1/actions/{id}/podcast/blocks.",
+        "description": "The body is the classification (podcast_classify) of which blocks are ads: the block ids and digests to copy come from GET /transcode/v1/actions/{id}/podcast/blocks.",
         "responses": {
           "200": {
             "description": "The classification was recorded.",
