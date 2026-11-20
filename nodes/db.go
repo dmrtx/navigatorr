@@ -34,6 +34,8 @@ var schema = []string{
 type registry struct {
 	mu sync.Mutex
 	db *sql.DB
+	// lock holds the flock on <path>.lock for the life of the registry.
+	lock *os.File
 }
 
 func openRegistry(path string) (*registry, error) {
@@ -43,6 +45,22 @@ func openRegistry(path string) (*registry, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("creating nodes database directory: %w", err)
 	}
+	// One process owns the database: the lock comes before anything opens it.
+	lock, err := lockFile(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
+	reg, err := openDB(path)
+	if err != nil {
+		unlock(lock)
+		return nil, err
+	}
+	reg.lock = lock
+	return reg, nil
+}
+
+// openDB opens the database and applies the schema, without the process lock.
+func openDB(path string) (*registry, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, fmt.Errorf("opening nodes database %s: %w", path, err)
@@ -61,7 +79,18 @@ func openRegistry(path string) (*registry, error) {
 	return &registry{db: db}, nil
 }
 
-func (r *registry) close() error { return r.db.Close() }
+// unlock releases the lock file's flock by closing it. The file stays on disk.
+func unlock(f *os.File) {
+	if f != nil {
+		f.Close()
+	}
+}
+
+func (r *registry) close() error {
+	err := r.db.Close()
+	unlock(r.lock)
+	return err
+}
 
 // BuildPause is a node whose builds are paused.
 type BuildPause struct {

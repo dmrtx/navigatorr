@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/config"
@@ -74,6 +75,31 @@ func TestBuildTranscodeWorkersRejectedExecutors(t *testing.T) {
 		workers, err := buildTranscodeWorkers(config.TranscodeConfig{Enabled: true, Executor: executor})
 		if err == nil || workers != nil {
 			t.Fatalf("executor %q: expected an error and no workers, got %v, %v", executor, workers, err)
+		}
+	}
+}
+
+// The nodes registry takes its node names from config.NodeNames; the workers
+// main builds must carry exactly those names, or the two lists drift.
+func TestNodeNamesMatchTheBuiltWorkers(t *testing.T) {
+	for name, tc := range map[string]config.TranscodeConfig{
+		"single": {Enabled: true, Executor: "http", HTTP: config.HTTPExecutorConfig{BaseURL: "http://127.0.0.1:8097"}},
+		"named": {Enabled: true, Executor: "http", Workers: []config.TranscodeWorkerConfig{
+			{Name: "m1", HTTPExecutorConfig: config.HTTPExecutorConfig{BaseURL: "http://192.0.2.1:8097"}},
+			{Name: "m4", HTTPExecutorConfig: config.HTTPExecutorConfig{BaseURL: "http://192.0.2.2:8097"}},
+		}},
+	} {
+		workers, err := buildTranscodeWorkers(tc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var built []string
+		for _, w := range workers.All() {
+			built = append(built, w.Name)
+		}
+		names, err := tc.NodeNames()
+		if err != nil || !slices.Equal(built, names) {
+			t.Fatalf("%s: built %v, NodeNames %v (%v)", name, built, names, err)
 		}
 	}
 }

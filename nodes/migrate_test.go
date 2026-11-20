@@ -258,7 +258,23 @@ func TestImportLegacyConcurrentImportsRunOnce(t *testing.T) {
 	legacy := legacyDB(t)
 	path := filepath.Join(t.TempDir(), "nodes.db")
 	a, _ := buildSvcAt(t, path)
-	b, _ := buildSvcAt(t, path)
+	// A second process cannot hold the lock, so the second service skips it:
+	// this test is about the import's own guard, not the process lock.
+	regB, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Service{reg: regB, topo: fakeTopology{}, pauseLocks: map[string]*sync.Mutex{}}
+	t.Cleanup(func() { b.Close() })
+	unlocked := func() *Service {
+		reg, err := openDB(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := &Service{reg: reg, topo: fakeTopology{}, pauseLocks: map[string]*sync.Mutex{}}
+		t.Cleanup(func() { s.Close() })
+		return s
+	}
 	ctx := context.Background()
 
 	results := make([]ImportResult, 2)
@@ -298,7 +314,7 @@ func TestImportLegacyConcurrentImportsRunOnce(t *testing.T) {
 	if _, err := a.reg.db.Exec(`DELETE FROM builds WHERE id='bld_done0001'`); err != nil {
 		t.Fatal(err)
 	}
-	c, _ := buildSvcAt(t, path)
+	c := unlocked()
 	res, err := c.ImportLegacy(ctx, legacy)
 	if err != nil || res.Skipped == "" || res.Builds != 0 || res.Pauses != 0 {
 		t.Fatalf("%+v %v", res, err)

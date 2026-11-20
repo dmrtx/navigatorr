@@ -855,6 +855,21 @@ func (t *TranscodeConfig) EffectiveWorkers() ([]TranscodeWorkerConfig, error) {
 	return workers, nil
 }
 
+// NodeNames is the names of the configured workers, in config order: the nodes
+// the builds registry knows. It reads the same list buildTranscodeWorkers
+// builds its workers from (EffectiveWorkers), and does no I/O.
+func (t *TranscodeConfig) NodeNames() ([]string, error) {
+	workers, err := t.EffectiveWorkers()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(workers))
+	for _, w := range workers {
+		names = append(names, w.Name)
+	}
+	return names, nil
+}
+
 // WorkerExecutorConfig is one worker's executor settings, built by
 // BuildWorkerConfigs.
 type WorkerExecutorConfig struct {

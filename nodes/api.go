@@ -154,7 +154,13 @@ func apiDecode(w http.ResponseWriter, r *http.Request, v any, hint string) bool 
 }
 
 func (s *Service) apiNodes(w http.ResponseWriter, r *http.Request) {
-	list, err := s.Nodes(r.Context())
+	var list []NodeView
+	var err error
+	if r.URL.Query().Get("transcode") == "false" {
+		list, err = s.NodesWithoutTranscode(r.Context())
+	} else {
+		list, err = s.Nodes(r.Context())
+	}
 	if apiFail(w, err) {
 		return
 	}
