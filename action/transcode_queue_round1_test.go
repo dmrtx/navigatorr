@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,22 +200,19 @@ func TestReleasingAChildClearsItsItemsHold(t *testing.T) {
 }
 
 // A write decided on a revision that has moved is refused whole, and the
-// refusal is the stale-revision conflict.
+// refusal is the stale-revision conflict, even when the revision moves after
+// the check (a writer that does not take queueMu).
 func TestAQueueWriteChecksTheRevisionAtomically(t *testing.T) {
 	ctx := context.Background()
 	e := controlEngine(t)
 	waiter(t, e, "a", 2*time.Minute, map[string]any{}, nil)
 	waiter(t, e, "b", time.Minute, map[string]any{}, nil)
-	seedQueueBatch(t, e, "batch-1", 1)
 	v, _ := e.TranscodeQueueView()
 	rev := v.Revision
-	// Every read of the queue is followed by another change: the revision a
-	// caller holds is current when the view is read and stale at the write.
-	e.afterQueueRead = func() { _, _ = e.deps.Store.ApplyQueueWrite(store.QueueWrite{}) }
+	e.afterQueueCheck = func() { _, _ = e.deps.Store.ApplyQueueWrite(store.QueueWrite{}) }
 	for name, call := range map[string]func() error{
-		"hold":       func() error { _, err := e.HoldQueued(ctx, act("a"), &rev); return err },
-		"move":       func() error { _, err := e.MoveQueued(ctx, act("b"), firstMove(), &rev); return err },
-		"batch hold": func() error { _, err := e.HoldQueued(ctx, bat("batch-1"), &rev); return err },
+		"hold": func() error { _, err := e.HoldQueued(ctx, act("a"), &rev); return err },
+		"move": func() error { _, err := e.MoveQueued(ctx, act("b"), firstMove(), &rev); return err },
 	} {
 		err := call()
 		if queueErrKind(err) != QueueConflict || !strings.Contains(err.Error(), "queue_revision") {
@@ -224,16 +222,12 @@ func TestAQueueWriteChecksTheRevisionAtomically(t *testing.T) {
 		// current one.
 		rev, _ = e.deps.Store.QueueRevision()
 	}
-	e.afterQueueRead = nil
+	e.afterQueueCheck = nil
 	if ids := queueIDs(t, e); ids[0] != "a" || ids[1] != "b" {
 		t.Fatalf("a stale write changed the queue: %v", ids)
 	}
 	if m, _ := e.deps.Store.GetQueueMark(store.QueueMarkAction, "a"); m.Held {
 		t.Fatal("a stale hold was applied")
-	}
-	inst, _ := e.deps.Store.GetActionInstance("batch-1")
-	if strings.Contains(inst.StateJSON, `"paused":true`) {
-		t.Fatalf("a stale batch hold paused the batch: %s", inst.StateJSON)
 	}
 }
 
@@ -256,28 +250,143 @@ func TestQueueWriteExpectRevision(t *testing.T) {
 	}
 }
 
-// A change between the reads of the view is read again: the entries and the
-// revision belong together.
-func TestTheQueueViewIsReadAgainWhenItChangesUnderneath(t *testing.T) {
+// The view waits for an operator change in progress, so its revision and its
+// entries are of one state.
+func TestTheQueueViewWaitsForAnOperatorChange(t *testing.T) {
 	e := controlEngine(t)
-	waiter(t, e, "a", 2*time.Minute, map[string]any{}, nil)
-	waiter(t, e, "b", time.Minute, map[string]any{}, nil)
-	once := true
-	e.afterQueueRead = func() {
-		if once {
-			once = false
-			if _, err := e.deps.Store.ApplyQueueWrite(store.QueueWrite{ActionHeld: map[string]bool{"a": true}}); err != nil {
-				t.Error(err)
-			}
-		}
+	waiter(t, e, "a", time.Minute, map[string]any{}, nil)
+	e.queueMu.Lock()
+	done := make(chan QueueView, 1)
+	go func() {
+		v, _ := e.TranscodeQueueView()
+		done <- v
+	}()
+	select {
+	case <-done:
+		t.Fatal("the view was read while an operator change was in progress")
+	case <-time.After(100 * time.Millisecond):
 	}
+	if _, err := e.deps.Store.ApplyQueueWrite(store.QueueWrite{ActionHeld: map[string]bool{"a": true}}); err != nil {
+		t.Fatal(err)
+	}
+	e.queueMu.Unlock()
+	v := <-done
+	cur, _ := e.deps.Store.QueueRevision()
+	if v.Revision != cur || !v.Entries[0].Held {
+		t.Fatalf("view at revision %d (store at %d), first entry %+v", v.Revision, cur, v.Entries[0])
+	}
+}
+
+// pausedBatchEngine is an engine with a real batch that starts paused.
+func pausedBatchEngine(t *testing.T) (*Engine, string) {
+	t.Helper()
+	mock := &mockTranscodeExecutor{submitFunc: func(_ context.Context, req transcode.Request) (transcode.Job, error) {
+		writeCandidateOutput(req.CandidatePath)
+		return transcode.Job{ID: req.ID}, nil
+	}}
+	e, st, _, srv, root := setupBatchTestEnv(t, mock, 1)
+	t.Cleanup(func() { srv.Close(); st.Close() })
+	e.deps.Registry = nil
+	r, err := e.Run(context.Background(), "transcode_batch", map[string]any{
+		"paths": []string{filepath.Join(root, "Moriko S01E01-E02.mkv")}, "profile": "general-hevc", "paused": true, "media_type": "movie",
+	})
+	if err != nil || r.Status != StatusWaitingDecision {
+		t.Fatalf("paused batch: %+v %v", r, err)
+	}
+	return e, r.ID
+}
+
+// While a batch release is between its check and its Resume, another change
+// that holds the revision from before is refused as stale once the release is
+// done: nobody can act on the new revision with the batch still unchanged.
+func TestABatchReleaseIsOneStepAgainstOtherQueueChanges(t *testing.T) {
+	e, batch := pausedBatchEngine(t)
+	ctx := context.Background()
+	waiter(t, e, "a", time.Minute, map[string]any{}, nil)
 	v, err := e.TranscodeQueueView()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cur, _ := e.deps.Store.QueueRevision()
-	if v.Revision != cur || !v.Entries[0].Held {
-		t.Fatalf("view at revision %d (store at %d), first entry %+v", v.Revision, cur, v.Entries[0])
+	rev := v.Revision
+	other := make(chan error, 1)
+	fired := false
+	e.afterQueueCheck = func() {
+		if fired {
+			return
+		}
+		fired = true
+		go func() { _, err := e.HoldQueued(ctx, act("a"), &rev); other <- err }()
+		// It must wait for the release, not run between its check and its end.
+		time.Sleep(100 * time.Millisecond)
+		select {
+		case err := <-other:
+			t.Errorf("another change ran in the middle of the release: %v", err)
+		default:
+		}
+	}
+	if _, err := e.ReleaseQueued(ctx, bat(batch), &rev); err != nil {
+		t.Fatal(err)
+	}
+	err = <-other
+	if queueErrKind(err) != QueueConflict || !strings.Contains(err.Error(), "queue_revision") {
+		t.Fatalf("the change on the old revision: %v", err)
+	}
+	if m, _ := e.deps.Store.GetQueueMark(store.QueueMarkAction, "a"); m.Held {
+		t.Fatal("the stale hold was applied")
+	}
+	inst, _ := e.deps.Store.GetActionInstance(batch)
+	if inst.Status == StatusWaitingDecision {
+		t.Fatalf("the batch was not released: %s", inst.Status)
+	}
+}
+
+// A hold and a release of one batch at the same time run one after the other:
+// the revision moves once, for the release.
+func TestConcurrentBatchHoldAndReleaseSerialise(t *testing.T) {
+	e, batch := pausedBatchEngine(t)
+	ctx := context.Background()
+	before, _ := e.deps.Store.QueueRevision()
+	var wg sync.WaitGroup
+	for _, hold := range []bool{true, false} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			if hold {
+				_, err = e.HoldQueued(ctx, bat(batch), nil)
+			} else {
+				_, err = e.ReleaseQueued(ctx, bat(batch), nil)
+			}
+			if err != nil && queueErrKind(err) != QueueConflict {
+				t.Errorf("hold=%v: %v", hold, err)
+			}
+		}()
+	}
+	wg.Wait()
+	after, _ := e.deps.Store.QueueRevision()
+	if after != before+1 {
+		t.Fatalf("revision %d -> %d, want one move", before, after)
+	}
+}
+
+// When the keys of the batch's items cannot be read the batch schedules
+// nothing new, rather than ordering on guessed keys.
+func TestUnreadableItemKeysFailClosed(t *testing.T) {
+	e, raw := faultEngine(t)
+	seedQueueBatch(t, e, "batch-1", 2)
+	items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+	if got, ok := e.batchDispatchCandidates(context.Background(), "batch-1", items); !ok || len(got) == 0 {
+		t.Fatalf("readable: %v %v", got, ok)
+	}
+	// The holds (queue_held) stay readable; the order column does not.
+	if _, err := raw.Exec(`ALTER TABLE transcode_batch_items DROP COLUMN queue_order`); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := e.batchDispatchCandidates(context.Background(), "batch-1", items); ok || len(got) != 0 {
+		t.Fatalf("the batch scheduled %v with unreadable keys (ok %v)", got, ok)
+	}
+	if _, ok := e.batchItemKeys("batch-1", items); ok {
+		t.Fatal("keys were returned after a read error")
 	}
 }
 
@@ -314,10 +423,151 @@ func TestMovingABatchWithUntiedChildrenIsRefused(t *testing.T) {
 	waiter(t, e, "s1", time.Minute, map[string]any{}, nil)
 	before := queueIDs(t, e)
 	_, err := e.MoveQueued(context.Background(), bat("batch-1"), afterMove(act("s1")), nil)
-	if err == nil {
-		t.Fatal("the batch was moved with children that are tied to no item")
+	if queueErrKind(err) != QueueConflict {
+		t.Fatalf("moving a batch with children tied to no item: %v, want a conflict", err)
 	}
 	if got := queueIDs(t, e); strings.Join(got, ",") != strings.Join(before, ",") {
 		t.Fatalf("a refused move changed the queue: %v -> %v", before, got)
+	}
+}
+
+// slotWaiterWithKey is a conversion of no batch that waits for a worker slot
+// and has a place in the transcode queue.
+func slotWaiterWithKey(t *testing.T, e *Engine, id string, age time.Duration) {
+	t.Helper()
+	at := e.now()
+	if err := e.deps.Store.CreateActionInstance(store.ActionInstance{
+		ID: id, ActionName: "transcode_media", Status: StatusWaitingExternal, WaitingCondition: "worker_busy",
+		InputsJSON: "{}", OutputsJSON: "{}",
+		StateJSON: toJSON(map[string]any{
+			transcodeQueueOrderKey: queueOrder(queueRankPlain, at.Add(-age), id, 0),
+			workerSlotWaitSinceKey: at.Add(-age).UTC().Format(time.RFC3339Nano),
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A batch item the operator put ahead of a waiting conversion is started, and
+// the conversion waits behind it; with nothing moved the older conversion
+// still goes first.
+func TestAMovedItemAheadOfAForeignWaiterIsScheduled(t *testing.T) {
+	ctx := context.Background()
+	e := controlEngine(t)
+	busy(t, e, "busy-m1", "m1") // one free slot
+	ids := seedQueueBatch(t, e, "batch-1", 1)
+	slotWaiterWithKey(t, e, "s", 10*time.Minute)
+	items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+	if got, ok := e.batchDispatchCandidates(ctx, "batch-1", items); !ok || len(got) != 0 {
+		t.Fatalf("with the older waiter first the batch started %v (ok %v)", got, ok)
+	}
+	if _, err := e.MoveQueued(ctx, item(ids[0]), beforeMove(act("s")), nil); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := e.batchDispatchCandidates(ctx, "batch-1", items)
+	if !ok || len(got) != 1 {
+		t.Fatalf("the moved item was not scheduled: %v (ok %v)", got, ok)
+	}
+	if w, _, _ := turn(t, e, "s"); w != "" {
+		t.Fatalf("s was given %q ahead of the moved item", w)
+	}
+	// A held waiter in front holds no one back.
+	if _, err := e.MoveQueued(ctx, item(ids[0]), afterMove(act("s")), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.batchDispatchCandidates(ctx, "batch-1", items); len(got) != 0 {
+		t.Fatalf("the batch started %v behind s", got)
+	}
+	if _, err := e.HoldQueued(ctx, act("s"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.batchDispatchCandidates(ctx, "batch-1", items); len(got) != 1 {
+		t.Fatalf("a held waiter held the batch back: %v", got)
+	}
+}
+
+// When the queue cannot be read a batch may start no new item.
+func TestBatchAllowanceFailsClosed(t *testing.T) {
+	e, raw := faultEngine(t)
+	seedQueueBatch(t, e, "batch-1", 1)
+	if n := e.batchQueueAllowance(context.Background(), "batch-1"); n < 1 {
+		t.Fatalf("readable allowance %d", n)
+	}
+	if _, err := raw.Exec(`ALTER TABLE transcode_batch_items DROP COLUMN queue_order`); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.batchQueueAllowance(context.Background(), "batch-1"); n != 0 {
+		t.Fatalf("allowance %d with an unreadable queue", n)
+	}
+}
+
+// An item's place, held or not, goes to its child's mark in one write with the
+// end of the item's own: the position survives a crash before the child's
+// state is saved.
+func TestAnItemsPlaceMovesToItsChildsMarkAtOnce(t *testing.T) {
+	e := controlEngine(t)
+	ctx := context.Background()
+	waiter(t, e, "s1", 10*time.Minute, map[string]any{}, nil)
+	ids := seedQueueBatch(t, e, "batch-1", 1)
+	if _, err := e.MoveQueued(ctx, item(ids[0]), firstMove(), nil); err != nil { // moved, not held
+		t.Fatal(err)
+	}
+	m, _ := e.deps.Store.GetQueueItemMark(ids[0])
+	itemKey := m.Order
+	if itemKey == "" {
+		t.Fatal("the item has no place of its own")
+	}
+	seedActionInstance(t, e.deps.Store, "child-k1", "transcode_media", StatusWaitingExternal, 0, "", map[string]any{"parent_action_id": "batch-1", "batch_item_key": "k1"}, map[string]any{})
+	if err := e.deps.Store.UpdateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-1", ItemKey: "k1", FilePath: "/media/batch-1/File1.mkv", Status: "waiting_for_slot", ChildActionID: "child-k1"}); err != nil {
+		t.Fatal(err)
+	}
+	ec := parseExecutionContextMust(t, e, "child-k1")
+	key, err := e.ensureQueueOrder(ec)
+	if err != nil || key != itemKey {
+		t.Fatalf("key %q (%v), want %q", key, err, itemKey)
+	}
+	// The state is not saved (a crash): the place is still the child's.
+	if cm, _ := e.deps.Store.GetQueueMark(store.QueueMarkAction, "child-k1"); cm.Order != itemKey {
+		t.Fatalf("the child's mark has place %q, want %q", cm.Order, itemKey)
+	}
+	if im, _ := e.deps.Store.GetQueueItemMark(ids[0]); im.Order != "" || im.Held {
+		t.Fatalf("the item kept its own mark: %+v", im)
+	}
+	again := parseExecutionContextMust(t, e, "child-k1")
+	if k2, err := e.ensureQueueOrder(again); err != nil || k2 != itemKey {
+		t.Fatalf("after the crash the child's key is %q (%v)", k2, err)
+	}
+}
+
+// A hold or release of a batch that cannot be resumed is refused, and the
+// revision does not move.
+func TestAFailedBatchHoldDoesNotMoveTheRevision(t *testing.T) {
+	e := controlEngine(t)
+	seedQueueBatch(t, e, "batch-x", 1)
+	before, _ := e.deps.Store.QueueRevision()
+	// The pause runs under a context that is already over, so it fails.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := e.HoldQueued(ctx, bat("batch-x"), &before)
+	if queueErrKind(err) != QueueConflict {
+		t.Fatalf("hold of a batch that cannot be paused: %v", err)
+	}
+	if after, _ := e.deps.Store.QueueRevision(); after != before {
+		t.Fatalf("a failed hold moved the revision: %d -> %d", before, after)
+	}
+}
+
+func TestBatchReleaseWakesTheReconciler(t *testing.T) {
+	e, batch := pausedBatchEngine(t)
+	for len(e.reconcileWake) > 0 {
+		<-e.reconcileWake
+	}
+	if _, err := e.ReleaseQueued(context.Background(), bat(batch), nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-e.reconcileWake:
+	default:
+		t.Fatal("releasing a batch did not wake the reconciler")
 	}
 }

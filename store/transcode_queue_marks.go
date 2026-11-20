@@ -174,14 +174,15 @@ func b2i(b bool) int {
 }
 
 // HeldBatchItemIDs are the items of a batch the operator holds: a queued item
-// held itself (its own hold ends once it has a child: the child's mark is the
-// hold then), or an item whose child conversion is held.
+// held itself, or an item whose child conversion is held. A hold moves from
+// the item to its child in one write (the item's flag is cleared as the
+// child's mark is set), so an item flag still set is a hold not yet carried.
 func (s *Store) HeldBatchItemIDs(batchID string) (map[int64]bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT i.id FROM transcode_batch_items i
 		WHERE i.batch_id = ? AND i.status IN ('queued', 'waiting_for_slot')
-		AND ((i.queue_held = 1 AND i.status = 'queued' AND COALESCE(i.child_action_id, '') = '') OR EXISTS (SELECT 1 FROM transcode_queue_marks m
+		AND (i.queue_held = 1 OR EXISTS (SELECT 1 FROM transcode_queue_marks m
 			WHERE m.kind = 'action' AND m.id = i.child_action_id AND m.held = 1))`, batchID)
 	if err != nil {
 		return nil, err

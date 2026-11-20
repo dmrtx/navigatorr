@@ -54,8 +54,12 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
-	// afterQueueRead, set by tests, runs between the reads of a queue view.
-	afterQueueRead func()
+	// queueMu serialises the operator's queue changes (hold, release, move) and
+	// the reads of the queue view against them. Lock it before bindMu.
+	queueMu sync.Mutex
+	// afterQueueCheck, set by tests, runs once a change has passed its revision
+	// check, before it is made.
+	afterQueueCheck func()
 	// lifecycle is the service's context, known once StartReconciler runs: work
 	// that outlives the request that asked for it still ends with the service.
 	lifecycle atomic.Pointer[context.Context]
