@@ -285,8 +285,12 @@ configured capacity when it never reported). That includes a hold: a node whose
 last report said it is on hold or building stays `paused`
 (`node_on_hold`/`node_build`) until a newer report says otherwise, even though
 dispatch itself ignores a hold report older than 45 seconds. Each node carries
-`report_at` (RFC3339 UTC; omitted when the node has not reported), the time of
-that report, so the reader sees how old what the plan shows is. The state of a node (unknown,
+`report_at` (RFC3339 UTC; omitted when the node was never checked), the time of
+the server's last check of the node, successful or failed, so the reader sees
+how old the node's own news is. The slot pool is read separately and may be
+older; an operator pause and the availability window are live. Likewise a
+single node whose last check failed stays `offline` in the plan, while dispatch
+tries it again. The state of a node (unknown,
 offline, paused, closed, busy) is what `why_none` says even when the queue is
 empty. A node that reports it is on hold or building shows as `paused` and takes
 no queued item in the plan; batch dispatch still counts its free slot when it

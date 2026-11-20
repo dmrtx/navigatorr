@@ -93,8 +93,8 @@ type PlanNode struct {
 	Worker    string
 	State     string
 	FreeSlots int
-	// ReportAt is when the node last reported (zero: never); the state is
-	// what that report, and the pool read with it, said.
+	// ReportAt is when the server last checked the node, successful or not
+	// (zero: never). The pool is read separately and may be older.
 	ReportAt time.Time
 	// Next is the conversion that would start on the node first; nil when none.
 	Next *PlanPick

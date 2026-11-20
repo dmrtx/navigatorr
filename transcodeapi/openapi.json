@@ -3208,7 +3208,7 @@
                           "report_at": {
                             "type": "string",
                             "format": "date-time",
-                            "description": "When the node last reported (UTC); omitted when it never has. The state is what that report said, so the age of it tells how current it is."
+                            "description": "When the server last checked the node (UTC), whether the check succeeded or failed; omitted when it never has. Its age tells how current the node's own news is (reachable, ready, on hold). The slot pool is read separately and may be older; an operator pause and the availability window are live, not part of the report."
                           },
                           "next": {
                             "description": "What would start on the node next; null when nothing would.",
