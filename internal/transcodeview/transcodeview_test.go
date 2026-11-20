@@ -324,7 +324,7 @@ func TestAFlightRechecksTheCacheAndTheBackoff(t *testing.T) {
 
 func TestNewRejectsABaseURLWithoutSchemeOrHost(t *testing.T) {
 	for _, base := range []string{"", "  ", "engine:8080", "ftp://engine", "http://", "://x",
-		"http://:8080", "http://engine:8080?x=1", "http://engine:8080?", "http://engine:8080#x", "http://u:p@engine"} {
+		"http://:8080", "http://engine:8080?x=1", "http://engine:8080?", "http://engine:8080#x", "http://engine/#", "http://u:p@engine"} {
 		if c, err := New(Options{BaseURL: base}); err == nil || c != nil {
 			t.Fatalf("%q: %v %v", base, c, err)
 		}

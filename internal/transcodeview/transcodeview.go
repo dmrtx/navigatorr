@@ -116,7 +116,7 @@ func New(o Options) (*Client, error) {
 		return nil, errors.New("transcodeview: base URL is required")
 	}
 	if u, err := url.Parse(base); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
-		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil {
+		strings.ContainsAny(base, "?#") || u.User != nil {
 		return nil, fmt.Errorf("transcodeview: base URL %q must be http(s)://host[:port][/path] with nothing else", base)
 	}
 	c := &Client{url: base + Path, key: o.APIKey, hc: o.HTTPClient, now: o.Now}
