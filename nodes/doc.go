@@ -27,8 +27,11 @@
 //	N3  Nodes being down never stops a lease. The worker fails open when the
 //	    server cannot be reached, and the server does nothing for a lease.
 //	N4  The legacy routes /api/maintenance/builds* keep their request and
-//	    response shapes, status codes and auth. They are thin aliases onto
-//	    this package.
+//	    response shapes, status codes and auth. They are served by this
+//	    package (LegacyHandler); maintenanceui only authenticates and
+//	    delegates. The one deliberate change: GET .../builds/nodes answers 503
+//	    when the registry cannot be read (never "builds paused"), and has no
+//	    transcode state when the TranscodeView does not give one.
 //	N5  A cancel through /nodes/v1 and a cancel through the legacy route are
 //	    the same operation (finish with status cancelled): the next heartbeat
 //	    the node worker forwards for that build is answered "build already
