@@ -223,7 +223,7 @@ func TestDeleteWorkerWindowBumpsEvenWithoutACounterRow(t *testing.T) {
 	if had, err := s.DeleteWorkerWindow("m4", nil); err != nil || !had {
 		t.Fatal(had, err)
 	}
-	if r, _ := s.WorkerWindowRevision("m4"); r < 5 {
-		t.Fatalf("revision %d went backwards", r)
+	if r, _ := s.WorkerWindowRevision("m4"); r != 6 {
+		t.Fatalf("counter %d after deleting revision 5, want 6", r)
 	}
 }

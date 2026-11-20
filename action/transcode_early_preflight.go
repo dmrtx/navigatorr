@@ -41,14 +41,12 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 	if ec.ActionName != "transcode_media" {
 		return StepResult{}, false
 	}
-	rerun := false // the second run, only for the queue's probe
 	if getBool(ec.State, earlyPreflightKey) {
 		// Checked already. Only a conversion that has no probe for the queue
 		// (checked before the windows existed) runs once more, for the probe.
 		if ec.State[queueProbeKey] != nil || getBool(ec.State, queueProbeTriedKey) || getBool(ec.State, "skip_transcode") {
 			return StepResult{}, false
 		}
-		rerun = true
 	}
 	check, err := cloneExecutionContext(ec)
 	if err != nil {
@@ -81,12 +79,11 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 		return res, true
 	}
 	ec.State[earlyPreflightKey] = true
-	if rerun {
-		// Marked only now that the probe ran to a definite answer; a run that
-		// was interrupted or failed in a way that may pass later left it unset
-		// and is tried again on the next poll.
-		ec.State[queueProbeTriedKey] = true
-	}
+	// Marked only now that the probe ran to a definite answer, on the first
+	// run as on the rerun, so a source whose probe gives no shape is not
+	// probed again; a run that was interrupted or failed in a way that may
+	// pass later left it unset and is tried again on the next poll.
+	ec.State[queueProbeTriedKey] = true
 	// What it probed of the source, for the queue (the node windows estimate
 	// the encode from it before the conversion has a node).
 	if probe, ok := check.State[queueProbeKey]; ok {
