@@ -154,12 +154,16 @@ func (f *Frontier) Warm(ctx context.Context) error {
 func (f *Frontier) Close(ctx context.Context) { f.up.terminate(ctx) }
 
 func (f *Frontier) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Every request gets the read deadline: whatever body is left unread,
+	// the server drains it after the handler, and a slow client must not
+	// hold that drain. Only a JSON POST, read in full below, clears it before
+	// a long call; the SDK answers the rest at once (GET streams are off).
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	if r.Method != http.MethodPost {
 		f.next.ServeHTTP(w, r)
 		return
 	}
-	rc := http.NewResponseController(w)
-	_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout))
 	// Let the SDK answer anything that is not JSON, with its own error. The
 	// deadline stays: the SDK answers at once, and the server's drain of an
 	// unread body must not wait on a slow client.

@@ -132,7 +132,12 @@ func (u *upstream) ensure(ctx context.Context, failed *session) (*session, error
 		ch := u.init.DoChan("init", func() (any, error) {
 			// A flight that finished between the check above and this one
 			// has already replaced the session: use it, do not handshake again.
+			// Close may also have run in between: then open nothing.
 			u.mu.Lock()
+			if u.closed {
+				u.mu.Unlock()
+				return nil, errShuttingDown
+			}
 			if u.cur != nil && u.cur != failed {
 				s := u.cur
 				u.mu.Unlock()

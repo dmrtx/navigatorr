@@ -79,7 +79,8 @@ func TestSSEResponses(t *testing.T) {
 		// The upstream's id is bounded too before it is compared exactly.
 		{"huge exponent id", func(id string) []string { return []string{`{"jsonrpc":"2.0","id":1e10000000,"result":{}}`} }, ""},
 		{"overlong id", func(id string) []string {
-			return []string{`{"jsonrpc":"2.0","id":` + strings.Repeat("0", maxNumericID) + id + `,"result":{}}`}
+			// Equal in value (5.000…0 == 5) but over the length bound.
+			return []string{`{"jsonrpc":"2.0","id":` + id + "." + strings.Repeat("0", maxNumericID) + `,"result":{}}`}
 		}, ""},
 	}
 	for _, c := range cases {

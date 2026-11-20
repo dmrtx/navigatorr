@@ -309,8 +309,21 @@ func TestHugeNumericIDIsRefused(t *testing.T) {
 	}
 }
 
-// A slow body is cut off also when the request is not JSON and goes to the SDK.
-func TestSlowNonJSONBodyIsCutOff(t *testing.T) {
+// A slow body is cut off also when the request goes to the SDK: a non-JSON
+// POST or another method. The rest is under 256 KiB, so net/http would
+// drain it after the handler rather than close.
+func TestSlowDelegatedBodyIsCutOff(t *testing.T) {
+	for _, head := range []string{
+		"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\n\r\n{",
+		"DELETE /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{",
+		"PUT /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n{",
+	} {
+		slowBodyIsCutOff(t, head)
+	}
+}
+
+func slowBodyIsCutOff(t *testing.T, head string) {
+	t.Helper()
 	old := bodyReadTimeout
 	bodyReadTimeout = 300 * time.Millisecond
 	t.Cleanup(func() { bodyReadTimeout = old })
@@ -324,14 +337,14 @@ func TestSlowNonJSONBodyIsCutOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	fmt.Fprintf(conn, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\n{")
+	fmt.Fprint(conn, head)
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	began := time.Now()
 	// Read until the server closes: an answer alone is not enough, the
 	// connection must not stay held while the server drains the body.
 	_, _ = io.Copy(io.Discard, conn)
 	if waited := time.Since(began); waited > 3*time.Second {
-		t.Fatalf("server held the connection for %s", waited)
+		t.Fatalf("%s: server held the connection for %s", strings.Fields(head)[0], waited)
 	}
 }
 
@@ -384,5 +397,19 @@ func TestStalledOversizeBodyIsCutOff(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "-32600") || !strings.Contains(strings.ToLower(string(got)), "connection: close") {
 		t.Fatalf("answer: %.300s", got)
+	}
+}
+
+// Close running between ensure's check and the init flight opens nothing.
+func TestCloseBetweenCheckAndFlightOpensNothing(t *testing.T) {
+	up := newFake(t)
+	g := newGateway(t, up.url(), nil)
+	u := g.f.up
+	u.afterCheck = func() { g.f.Close(context.Background()) }
+	if _, err := u.ensure(context.Background(), nil); err != errShuttingDown {
+		t.Fatalf("ensure error = %v, want errShuttingDown", err)
+	}
+	if up.inits.Load() != 0 {
+		t.Fatalf("initialize sent %d times after Close", up.inits.Load())
 	}
 }
