@@ -202,12 +202,24 @@ func handleSearchAPI(ctx context.Context, store *openapi.Store, query, svcName s
 	}
 
 	total := len(results)
-	if total > maxSearchResults {
-		results = results[:maxSearchResults]
-	}
 	var sb strings.Builder
-	if total > len(results) {
-		sb.WriteString(fmt.Sprintf("# Search results for %q (%d matches, showing the best %d)\n\n", query, total, len(results)))
+	if total > maxSearchResults {
+		perSvc := map[string]int{}
+		for _, r := range results {
+			perSvc[r.Service]++
+		}
+		names := make([]string, 0, len(perSvc))
+		for n := range perSvc {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		parts := make([]string, len(names))
+		for i, n := range names {
+			parts[i] = fmt.Sprintf("%s %d", n, perSvc[n])
+		}
+		results = results[:maxSearchResults]
+		sb.WriteString(fmt.Sprintf("# Search results for %q (showing the best %d of %d; per service: %s; add service=<name> to narrow)\n\n",
+			query, len(results), total, strings.Join(parts, ", ")))
 	} else {
 		sb.WriteString(fmt.Sprintf("# Search results for %q (%d matches)\n\n", query, total))
 	}

@@ -22,7 +22,8 @@ type Store struct {
 
 	// Lazy loading: a configured service with no index is fetched again on
 	// demand, at most once per retryInterval and per service.
-	attempts      map[string]time.Time
+	attempts      map[string]time.Time // last failed attempt per service
+	inflight      map[string]chan struct{}
 	retryInterval time.Duration
 	fetchTimeout  time.Duration
 	now           func() time.Time
@@ -44,39 +45,28 @@ func NewStore(cfg *config.Config) *Store {
 		indices: make(map[string]*Index),
 
 		attempts:      make(map[string]time.Time),
+		inflight:      make(map[string]chan struct{}),
 		retryInterval: defaultRetryInterval,
 		fetchTimeout:  defaultFetchTimeout,
 		now:           time.Now,
 	}
 }
 
-// LoadAll fetches and parses specs for all configured services.
+// LoadAll fetches and parses specs for all configured services. A failure is
+// recorded like any other failed attempt, so the lazy retry window starts then.
 func (s *Store) LoadAll(ctx context.Context) {
 	for name, svc := range s.cfg.Services {
 		if svc.OpenAPIURL == "" {
 			continue
 		}
-		s.recordAttempt(name)
-		if err := s.load(ctx, name, svc.OpenAPIURL); err != nil {
-			internal.Errorf("loading spec for %s: %v", name, err)
-		} else {
-			idx := s.GetIndex(name)
-			if idx != nil {
-				internal.Logf("loaded %s: %d endpoints", name, idx.Count())
-			}
-		}
+		s.ensure(ctx, name, true)
 	}
 }
 
-func (s *Store) recordAttempt(name string) {
-	s.mu.Lock()
-	s.attempts[name] = s.now()
-	s.mu.Unlock()
-}
-
 // EnsureLoaded makes a lazy load attempt for a configured service that has no
-// index yet. Attempts are rate-limited per service, each fetch is bounded by a
-// timeout, and the lock is never held while fetching. It is a no-op for a
+// index yet and waits for it (or for a load already in flight), bounded by
+// ctx. Failed attempts are rate-limited per service, each fetch is bounded by
+// a timeout, and the lock is never held while fetching. It is a no-op for a
 // loaded or unknown service.
 func (s *Store) EnsureLoaded(ctx context.Context, name string) {
 	s.ensure(ctx, name, false)
@@ -84,6 +74,10 @@ func (s *Store) EnsureLoaded(ctx context.Context, name string) {
 
 // EnsureAll runs EnsureLoaded for every configured service, concurrently.
 func (s *Store) EnsureAll(ctx context.Context) {
+	s.ensureEach(ctx, false)
+}
+
+func (s *Store) ensureEach(ctx context.Context, force bool) {
 	var wg sync.WaitGroup
 	for name, svc := range s.cfg.Services {
 		if svc.OpenAPIURL == "" {
@@ -92,14 +86,19 @@ func (s *Store) EnsureAll(ctx context.Context) {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			s.ensure(ctx, name, false)
+			s.ensure(ctx, name, force)
 		}(name)
 	}
 	wg.Wait()
 }
 
-// ensure loads the service when it has no index. force skips the per-service
-// rate limit (used by the startup retry loop, which has its own backoff).
+// ensure loads the service when it has no index and reports whether it has
+// one afterwards. At most one load per service runs at a time: a caller that
+// finds one in flight waits for it, even with force. The load runs on a
+// context detached from the caller (with the fetch timeout), so a caller that
+// gives up only stops waiting; the load still finishes. Only a failed load
+// starts the rate-limit window; force skips the window (used by the startup
+// retry loop, which has its own backoff).
 func (s *Store) ensure(ctx context.Context, name string, force bool) bool {
 	svc, ok := s.cfg.Services[name]
 	if !ok || svc.OpenAPIURL == "" {
@@ -111,58 +110,87 @@ func (s *Store) ensure(ctx context.Context, name string, force bool) bool {
 		s.mu.Unlock()
 		return true
 	}
-	now := s.now()
-	if last, tried := s.attempts[name]; tried && !force && now.Sub(last) < s.retryInterval {
-		s.mu.Unlock()
-		return false
+	done, running := s.inflight[name]
+	if !running {
+		if last, failed := s.attempts[name]; failed && !force && s.now().Sub(last) < s.retryInterval {
+			s.mu.Unlock()
+			return false
+		}
+		done = make(chan struct{})
+		s.inflight[name] = done
+		timeout := s.fetchTimeout
+		go func() {
+			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+			defer cancel()
+			err := s.load(lctx, name, svc.OpenAPIURL)
+			s.mu.Lock()
+			if err != nil {
+				s.attempts[name] = s.now()
+			} else {
+				delete(s.attempts, name)
+			}
+			delete(s.inflight, name)
+			s.mu.Unlock()
+			close(done)
+			if err != nil {
+				internal.Errorf("loading spec for %s: %v", name, err)
+			} else if idx := s.GetIndex(name); idx != nil {
+				internal.Logf("loaded %s: %d endpoints", name, idx.Count())
+			}
+		}()
 	}
-	s.attempts[name] = now
-	timeout := s.fetchTimeout
 	s.mu.Unlock()
 
-	fctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	if err := s.load(fctx, name, svc.OpenAPIURL); err != nil {
-		internal.Errorf("lazy load of spec for %s: %v", name, err)
-		return false
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
-	if idx := s.GetIndex(name); idx != nil {
-		internal.Logf("loaded %s: %d endpoints", name, idx.Count())
-	}
-	return true
+	return s.GetIndex(name) != nil
 }
 
 // RetryMissing keeps retrying, with exponential backoff (starting at initial,
-// doubling, capped at 1 minute), the services that still have no index until
-// all are loaded, the total duration has passed or ctx ends. It is meant to
+// 1 s when not positive, doubling, capped at 1 minute), the services that
+// still have no index until all are loaded, the total duration has passed or
+// ctx ends. Each round loads the missing services concurrently. It is meant to
 // run in a goroutine after LoadAll.
 func (s *Store) RetryMissing(ctx context.Context, initial, total time.Duration) {
 	deadline := time.Now().Add(total)
 	delay := initial
+	if delay <= 0 {
+		delay = time.Second
+	}
 	for {
-		missing := false
-		for name, svc := range s.cfg.Services {
-			if svc.OpenAPIURL != "" && s.GetIndex(name) == nil {
-				missing = true
-			}
-		}
-		if !missing || time.Now().After(deadline) {
+		if !s.anyMissing() || !time.Now().Before(deadline) {
 			return
 		}
+		wait := delay
+		if left := time.Until(deadline); wait > left {
+			wait = left
+		}
+		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(delay):
+		case <-timer.C:
 		}
-		for name, svc := range s.cfg.Services {
-			if svc.OpenAPIURL != "" {
-				s.ensure(ctx, name, true)
-			}
+		if !time.Now().Before(deadline) {
+			return
 		}
+		s.ensureEach(ctx, true)
 		if delay *= 2; delay > time.Minute {
 			delay = time.Minute
 		}
 	}
+}
+
+func (s *Store) anyMissing() bool {
+	for name, svc := range s.cfg.Services {
+		if svc.OpenAPIURL != "" && s.GetIndex(name) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) load(ctx context.Context, name, url string) error {

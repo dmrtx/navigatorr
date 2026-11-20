@@ -157,19 +157,34 @@ func firstMethod(res []EndpointSummary) string {
 }
 
 func TestStoreSearchOrdersAcrossServices(t *testing.T) {
-	a, _ := Parse(context.Background(), "aaa", []byte(syntheticSpec))
-	b, _ := Parse(context.Background(), "bbb", []byte(`{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/x":{"get":{"summary":"Restore a backup copy and verify it","responses":{"200":{"description":"ok"}}}}}}`))
+	// aaa matches both tokens only in a description (score 2); bbb matches
+	// them in the path and summary (score 6). Alphabetical order would put aaa
+	// first, so bbb leading proves the cross-service score ordering.
+	a, _ := Parse(context.Background(), "aaa", []byte(`{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/x":{"get":{"summary":"Other","description":"Restore the backup","responses":{"200":{"description":"ok"}}}}}}`))
+	b, _ := Parse(context.Background(), "bbb", []byte(`{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{"/restore-backup":{"get":{"summary":"Restore a backup","responses":{"200":{"description":"ok"}}}}}}`))
 	s := &Store{cfg: &config.Config{}, indices: map[string]*Index{"aaa": a, "bbb": b}}
 	res := s.Search("restore backup", "")
-	if len(res) != 2 {
-		t.Fatalf("got %v", res)
+	if len(res) != 2 || res[0].Service != "bbb" || res[1].Service != "aaa" {
+		t.Fatalf("higher score in bbb must come first: %v", res)
 	}
-	// Both match both tokens; the exact-ish path hit scores higher, ties by name.
-	if res[0].Service != "aaa" {
-		t.Fatalf("order: %v", res)
-	}
-	if got := s.Search("restore backup", "bbb"); len(got) != 1 || got[0].Service != "bbb" {
+	if got := s.Search("restore backup", "aaa"); len(got) != 1 || got[0].Service != "aaa" {
 		t.Fatalf("service filter: %v", got)
+	}
+}
+
+// A full match comes before a partial one even when the partial one hits the
+// primary fields (path, summary) and the full one only the description.
+func TestFullMatchBeatsHigherScoringPartialMatch(t *testing.T) {
+	const spec = `{"openapi":"3.0.0","info":{"title":"t","version":"1"},"paths":{
+	"/alpha/beta":{"get":{"summary":"Alpha beta","responses":{"200":{"description":"ok"}}}},
+	"/other":{"get":{"summary":"Other","description":"Handles alpha, beta and gamma together.","responses":{"200":{"description":"ok"}}}}}}`
+	idx, err := Parse(context.Background(), "svc", []byte(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := idx.Search("alpha beta gamma")
+	if len(res) != 2 || res[0].Path != "/other" {
+		t.Fatalf("full match must lead: %v", res)
 	}
 }
 
@@ -182,6 +197,7 @@ func newLazyStore(t *testing.T, url string) (*Store, *time.Time) {
 		cache:         NewCache(t.TempDir()),
 		indices:       map[string]*Index{},
 		attempts:      map[string]time.Time{},
+		inflight:      map[string]chan struct{}{},
 		retryInterval: 30 * time.Second,
 		fetchTimeout:  2 * time.Second,
 		now:           func() time.Time { return clock },
@@ -267,5 +283,104 @@ func TestRetryMissingLoadsWhenServerComesUp(t *testing.T) {
 	s.RetryMissing(context.Background(), 5*time.Millisecond, 5*time.Second)
 	if s.GetIndex("transcode") == nil {
 		t.Fatalf("not loaded after %d calls", calls.Load())
+	}
+}
+
+func TestEnsureWaitsForLoadInFlightAndForceNeverRunsTwo(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-release
+		w.Write([]byte(syntheticSpec))
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	s.fetchTimeout = 10 * time.Second
+
+	results := make(chan bool, 3)
+	go func() { results <- s.ensure(context.Background(), "transcode", false) }()
+	for calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	go func() { results <- s.ensure(context.Background(), "transcode", false) }()
+	go func() { results <- s.ensure(context.Background(), "transcode", true) }()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for i := 0; i < 3; i++ {
+		if !<-results {
+			t.Fatal("every caller must see the loaded index")
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("calls=%d, want a single fetch", calls.Load())
+	}
+}
+
+func TestCancelledCallerDoesNotPoisonTheLoad(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		time.Sleep(50 * time.Millisecond)
+		w.Write([]byte(syntheticSpec))
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	s.fetchTimeout = 5 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if s.ensure(ctx, "transcode", false) {
+		t.Log("loaded before the cancelled caller returned")
+	}
+	// The detached load finishes anyway and no failure window was recorded.
+	deadline := time.Now().Add(5 * time.Second)
+	for s.GetIndex("transcode") == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if s.GetIndex("transcode") == nil {
+		t.Fatal("load must complete despite the cancelled caller")
+	}
+	if len(s.attempts) != 0 {
+		t.Fatalf("a cancelled caller must not record a failure: %v", s.attempts)
+	}
+}
+
+func TestRetryMissingStopsOnCancelDuringSleep(t *testing.T) {
+	s, _ := newLazyStore(t, "http://127.0.0.1:1")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.RetryMissing(ctx, time.Hour, time.Hour)
+		close(done)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RetryMissing did not stop on cancel")
+	}
+}
+
+func TestRetryMissingDoesNotOvershootDeadline(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		http.Error(w, "down", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	s, _ := newLazyStore(t, srv.URL)
+	start := time.Now()
+	// The first sleep (1 h) is clamped to the 100 ms budget.
+	s.RetryMissing(context.Background(), time.Hour, 100*time.Millisecond)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("overshot the deadline: %v", d)
+	}
+	// A non-positive initial delay is treated as one second, still clamped.
+	start = time.Now()
+	s.RetryMissing(context.Background(), 0, 50*time.Millisecond)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("overshot with initial=0: %v", d)
 	}
 }

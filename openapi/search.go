@@ -127,7 +127,7 @@ func (idx *Index) rank(query string) ([]scored, int) {
 // always count; when fewer than three do, near misses are added: with no full
 // match at all those matching at least half of the tokens (rounded up), and
 // with a query of three or more tokens those matching at least two thirds
-// (and never fewer than two). Best score first; ties keep the stable
+// (and never fewer than two). Most tokens matched first, then best score; ties keep the stable
 // service/path/method order.
 func selectRanked(cands []scored, ntok int) []EndpointSummary {
 	if len(cands) == 0 {
@@ -160,11 +160,11 @@ func selectRanked(cands []scored, ntok int) []EndpointSummary {
 	}
 	sort.SliceStable(kept, func(i, j int) bool {
 		a, b := kept[i], kept[j]
-		if a.score != b.score {
-			return a.score > b.score
-		}
 		if a.matched != b.matched {
 			return a.matched > b.matched
+		}
+		if a.score != b.score {
+			return a.score > b.score
 		}
 		if a.summary.Service != b.summary.Service {
 			return a.summary.Service < b.summary.Service
