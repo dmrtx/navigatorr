@@ -196,6 +196,13 @@ func (e *Engine) stepTranscodePreflight(ctx context.Context, ec *ExecutionContex
 		sourceSubs = append(sourceSubs, recipe.SourceSubtitle{SourceStreamIndex: s.Index, TypeIndex: i, Codec: s.Codec})
 	}
 	origMap["subtitle_languages"] = subLangs
+	if early {
+		// The queue needs the source's length and picture size to estimate the
+		// encode for a node's availability window before it has a node.
+		if video := rep.MainVideo(); len(video) > 0 && rep.DurationSec > 0 {
+			ec.State[queueProbeKey] = map[string]any{"duration_sec": rep.DurationSec, "width": video[0].Width, "height": video[0].Height}
+		}
+	}
 
 	// The source's identity is the baseline accept_result relies on before a
 	// candidate may be kept. It is settled only once the source is known to need

@@ -208,6 +208,8 @@ func (s *Server) transcodeHandlers() transcodeapi.Handlers {
 		return pick(r, "state", "issue_type", "sort", "q", "offset", "limit")
 	}, v1Err{}))
 	s.transcodeWriteHandlers(h)
+	s.transcodeWindowReadHandlers(h)
+	s.transcodeWindowWriteHandlers(h)
 	s.transcodeQueueHandlers(h)
 	return h
 }

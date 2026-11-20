@@ -1451,6 +1451,519 @@
         }
       }
     },
+    "/transcode/v1/windows": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "listWindows",
+        "summary": "List every node's availability window",
+        "description": "Each node's availability window (available until a time, a margin before it, and only episodes/movies of some media types): worker, until, margin_minutes, media_types (empty means all), closes_at (until less the margin), state (open or closed) and revision. Nodes with no window are not listed.",
+        "responses": {
+          "200": {
+            "description": "The windows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "windows": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/WorkerWindow"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is invalid (code invalid_request); the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/transcode/v1/workers/{name}/window": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "getWindow",
+        "summary": "Show a node's availability window",
+        "description": "One node's availability window with closes_at, state (open or closed) and revision. A node with no window answers 404 no_window, whose body also carries revision (the node's current revision counter, to send as revision when creating a window); 404 unknown_worker if the name is not configured. Read-only.",
+        "responses": {
+          "200": {
+            "description": "The window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerWindow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A parameter is invalid (code invalid_request); the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The node is not configured (code unknown_worker) or has no window (code no_window, with the current revision in the body); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "putWindow",
+        "summary": "Set a node's availability window",
+        "description": "Make a node available until a time: until (RFC3339, optional), margin_minutes (0 to 1440, default 0: the node takes nothing new that long before until) and media_types (a subset of tv, anime, movie; empty means all, so use it for only episodes or only movies). A conversion starts on the node only if its media type is allowed and, when until is set, its estimated encode time fits before until less the margin; without an estimate it does not start there. Once the plan has chosen the encoder family only that family's history is used; before that, the x265 history is (the copy history for a conversion known to be audio-only). A blank entry in media_types is 400 invalid_request. Revisions only go up per node: deleting a window keeps the counter, so for a node with no window revision must be the counter that GET answers in its 404 no_window body. A conversion already assigned to the node but not yet sent that no longer qualifies after the change goes back to the queue; one already sent is left alone. Past closing the node takes nothing new until the window is changed or deleted; running conversions are never touched. revision (optional) must be the one read from the window; a stale one is 409 stale_window_revision. 404 unknown_worker if the name is not configured.",
+        "responses": {
+          "200": {
+            "description": "The window as stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerWindow"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The revision is stale (code stale_window_revision); read the window again and retry with its revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "until": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When the node stops being available (RFC3339). Omit for no end."
+                  },
+                  "margin_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1440
+                  },
+                  "media_types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "tv",
+                        "anime",
+                        "movie"
+                      ]
+                    }
+                  },
+                  "revision": {
+                    "type": "integer",
+                    "description": "The window's revision as last read; for a node with no window, the counter from the 404 no_window body (0 for a node that never had one). A mismatch is 409 stale_window_revision."
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "deleteWindow",
+        "summary": "Delete a node's availability window",
+        "description": "Remove a node's availability window so it takes every media type again with no end. Optional ?revision= must match the window's revision, else 409 stale_window_revision; present but empty or not an integer is 400 invalid_request. Deleting a window that is not there is a no-op (had_window false). 404 unknown_worker if the name is not configured.",
+        "responses": {
+          "200": {
+            "description": "Whether a window was removed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "worker": {
+                      "type": "string"
+                    },
+                    "had_window": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body or a parameter is invalid (code invalid_request): not JSON, an unknown field, a wrong type, a missing required field; the hint says how to fix it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong API key and not signed in to the web UI, or signed in without the console's write header X-Navigatorr-Request: 1 (code unauthorized).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but the request comes from another origin (code forbidden), or the change needs a switch that is off on this server.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The named thing does not exist, or is not a transcode one (code not_found or a specific one such as unknown_worker); the hint names the listing endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "A method this path does not serve (code method_not_allowed); the Allow header lists the methods it serves.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The revision is stale (code stale_window_revision); read the window again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is over 1 MiB (code payload_too_large).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (code unsupported_media_type).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The answer would not fit in one response (code response_too_large) or a part of the server answered something unreadable (code internal); the change may have been applied, read the resource with its GET endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The capability is switched off on this server (code unavailable).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "Worker name, as listed by GET /transcode/v1/workers (field worker).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "revision",
+            "in": "query",
+            "required": false,
+            "description": "The window's revision as last read.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
     "/transcode/v1/actions": {
       "get": {
         "tags": [
@@ -10567,6 +11080,51 @@
           }
         },
         "description": "Compact summary of an action. Extra fields appear by kind (transcode, podcast, work, cleanup, ...)."
+      },
+      "WorkerWindow": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "worker": {
+            "type": "string"
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "margin_minutes": {
+            "type": "integer"
+          },
+          "media_types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "tv",
+                "anime",
+                "movie"
+              ]
+            }
+          },
+          "closes_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       }
     }
   }

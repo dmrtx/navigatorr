@@ -198,3 +198,29 @@ func (s *Store) HeldBatchItemIDs(batchID string) (map[int64]bool, error) {
 	}
 	return out, rows.Err()
 }
+
+// WindowWaitingBatchItemIDs are the items of a batch whose conversion waits
+// only for a node's availability window (waiting condition node_window): the
+// batch neither counts them as contending for a slot nor lets them hold its
+// other items back.
+func (s *Store) WindowWaitingBatchItemIDs(batchID string) (map[int64]bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT i.id FROM transcode_batch_items i
+		JOIN action_instances a ON a.id = i.child_action_id
+		WHERE i.batch_id = ? AND i.status IN ('queued', 'waiting_for_slot')
+		AND a.status = 'waiting_external' AND a.waiting_condition = 'node_window'`, batchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}

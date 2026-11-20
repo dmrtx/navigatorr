@@ -11,6 +11,12 @@ import (
 // The real preflight clears it, so a retry checks again.
 const earlyPreflightKey = "early_preflight_checked"
 
+// queueProbeTriedKey marks a conversion whose early check ran once more to
+// find the queue_probe a window needs. Conversions checked before the node
+// windows existed have the checked mark but no probe; they get this one more
+// run, and a source that cannot be probed is not retried every poll.
+const queueProbeTriedKey = "queue_probe_tried"
+
 type earlyPreflightCtxKey struct{}
 
 func withEarlyPreflight(ctx context.Context) context.Context {
@@ -32,8 +38,15 @@ func isEarlyPreflight(ctx context.Context) bool {
 // leaves the action waiting for the real preflight on its worker; a failure
 // that could pass later is checked again on the next poll.
 func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (StepResult, bool) {
-	if ec.ActionName != "transcode_media" || getBool(ec.State, earlyPreflightKey) {
+	if ec.ActionName != "transcode_media" {
 		return StepResult{}, false
+	}
+	if getBool(ec.State, earlyPreflightKey) {
+		// Checked already. Only a conversion that has no probe for the queue
+		// (checked before the windows existed) runs once more, for the probe.
+		if ec.State[queueProbeKey] != nil || getBool(ec.State, queueProbeTriedKey) || getBool(ec.State, "skip_transcode") {
+			return StepResult{}, false
+		}
 	}
 	check, err := cloneExecutionContext(ec)
 	if err != nil {
@@ -66,6 +79,16 @@ func (e *Engine) earlyPreflight(ctx context.Context, ec *ExecutionContext) (Step
 		return res, true
 	}
 	ec.State[earlyPreflightKey] = true
+	// Marked only now that the probe ran to a definite answer, on the first
+	// run as on the rerun, so a source whose probe gives no shape is not
+	// probed again; a run that was interrupted or failed in a way that may
+	// pass later left it unset and is tried again on the next poll.
+	ec.State[queueProbeTriedKey] = true
+	// What it probed of the source, for the queue (the node windows estimate
+	// the encode from it before the conversion has a node).
+	if probe, ok := check.State[queueProbeKey]; ok {
+		ec.State[queueProbeKey] = probe
+	}
 	return StepResult{}, false
 }
 

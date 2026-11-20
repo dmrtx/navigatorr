@@ -76,11 +76,30 @@ type Engine struct {
 	holdSyncing atomic.Bool
 	// pauseSweeping is set while a background sweep of paused nodes runs.
 	pauseSweeping atomic.Bool
+	// windowSweeping is set while a background sweep of the node windows runs.
+	windowSweeping atomic.Bool
+	// windowSweepAgain is a request that came in while a sweep was running:
+	// the running one reads the windows again before it ends.
+	windowSweepAgain atomic.Bool
+	// windowSweepInline makes a sweep run in the caller instead of in the
+	// background, and windowSweepPass (when set) runs at the start of each
+	// pass; both are for tests, which must not have a goroutine read the
+	// engine while they change it.
+	windowSweepInline bool
+	windowSweepPass   func()
 
 	// slotFreedAt (unix nanoseconds on the engine clock) is when this process
 	// last saw a worker job end. It only shortens slot waiters' backoff; the
 	// durable queue order lives in each waiter's state (worker_slot_wait_since).
 	slotFreedAt atomic.Int64
+	// windowChangedAt (unix nanoseconds on the engine clock) is when this
+	// process last saw a node's availability window written: waiters that a
+	// window held back look again at once (see worker_window.go).
+	windowChangedAt atomic.Int64
+	// history caches the encode samples the windows estimate from, and
+	// loadEncodeSamples, set by tests, replaces reading them from the store.
+	history           encodeHistory
+	loadEncodeSamples func() ([]EncodeSample, error)
 
 	// promotionCopyBoundaryHook, when set by tests, runs after a private
 	// recovery copy has been flushed and closed and before it is verified or

@@ -95,11 +95,16 @@ func (e *Engine) batchAvailableSlots(ctx context.Context, items []store.Transcod
 // once: its video pool, capped by its max_parallel_jobs when set. Without a
 // pool reported (an older worker, or one never reached) it is the worker's
 // max_parallel_jobs, else transcode.max_parallel_jobs, else 1. A paused node
-// has none.
+// has none, and neither has one whose window has closed.
 func (e *Engine) workerVideoCapacity(ctx context.Context, w transcode.NamedWorker) int {
 	// A paused node takes no new conversion, so every count of free slots (the
 	// queue, a batch, the pick of a node) sees none there.
 	if e.workerPaused(w.Name) {
+		return 0
+	}
+	// So does a node whose availability window has closed (or cannot be read):
+	// what is encoding there finishes, nothing new is counted as a free slot.
+	if e.workerWindowClosed(w.Name) {
 		return 0
 	}
 	pool := e.workerVideoPool(ctx, w)

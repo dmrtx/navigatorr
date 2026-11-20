@@ -1,5 +1,10 @@
 package store
 
+import (
+	"strconv"
+	"strings"
+)
+
 // QueuedBatchItemRow is a batch item still waiting to start, with the batch
 // fields the transcode queue orders on.
 type QueuedBatchItemRow struct {
@@ -113,6 +118,16 @@ type TranscodeQueueWaiterRow struct {
 	MediaType        string
 	WaitingCondition string
 	WaitingReason    string
+	// ProbeDurationSec, ProbeWidth and ProbeHeight are the source's length and
+	// picture size, from the preflight's original, else as the early check
+	// probed them (0 until either has).
+	ProbeDurationSec float64
+	ProbeWidth       int
+	ProbeHeight      int
+	// AudioOnly is the request's audio_only input: the video is copied, so the
+	// window estimates it by the copy family. A waiting conversion has no
+	// plan yet (a requeue drops it), so the planned encoder is not known here.
+	AudioOnly bool
 }
 
 // ListTranscodeQueueWaiters returns the live conversions that took a place in
@@ -150,7 +165,13 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 			COALESCE(json_extract(p.state_json, '$.paused'), 0) IN (1, 'true'),
 			COALESCE(json_extract(a.inputs_json, '$.path'), ''),
 			COALESCE(json_extract(a.inputs_json, '$.media_type'), ''),
-			COALESCE(a.waiting_condition, ''), COALESCE(a.waiting_reason, '')
+			COALESCE(a.waiting_condition, ''), COALESCE(a.waiting_reason, ''),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.duration_sec'), 0) AS REAL),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.width'), 0) AS INTEGER),
+			CAST(COALESCE(json_extract(a.state_json, '$.queue_probe.height'), 0) AS INTEGER),
+			CAST(COALESCE(json_extract(a.state_json, '$.original.duration_sec'), 0) AS REAL),
+			COALESCE(json_extract(a.state_json, '$.original.resolution'), ''),
+			COALESCE(json_extract(a.inputs_json, '$.audio_only'), 0) IN (1, 'true')
 		FROM action_instances a
 		LEFT JOIN action_instances p ON p.id = COALESCE(json_extract(a.inputs_json, '$.parent_action_id'), '')
 		LEFT JOIN transcode_queue_marks m ON m.kind = 'action' AND m.id = a.id
@@ -174,9 +195,22 @@ func (s *Store) listTranscodeQueueWaiters(withPaused bool) ([]TranscodeQueueWait
 	for rows.Next() {
 		var r TranscodeQueueWaiterRow
 		var held int
+		var origDur float64
+		var origRes string
 		if err := rows.Scan(&r.ID, &r.QueueOrder, &r.UpdatedAt, &r.SourceBytes, &r.Standalone, &r.ReserveBytes, &r.Refusals, &r.SizeUnreadable,
-			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason); err != nil {
+			&held, &r.BatchID, &r.BatchPaused, &r.Path, &r.MediaType, &r.WaitingCondition, &r.WaitingReason,
+			&r.ProbeDurationSec, &r.ProbeWidth, &r.ProbeHeight, &origDur, &origRes, &r.AudioOnly); err != nil {
 			return nil, err
+		}
+		// The preflight's own measure of the source wins over the early check's
+		// when it has both a length and a picture size (as the engine reads a
+		// conversion's own state).
+		if ws, hs, ok := strings.Cut(origRes, "x"); ok && origDur > 0 {
+			w, _ := strconv.Atoi(ws)
+			h, _ := strconv.Atoi(hs)
+			if w > 0 && h > 0 {
+				r.ProbeDurationSec, r.ProbeWidth, r.ProbeHeight = origDur, w, h
+			}
 		}
 		r.Held = held != 0
 		out = append(out, r)

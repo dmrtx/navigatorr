@@ -31,6 +31,9 @@ func placementEngine(t *testing.T, m4, m1 transcode.Executor) (*Engine, *placeme
 	e := retentionWorkers(t, m4, m1)
 	clock := &placementClock{}
 	e.deps.Now = clock.now
+	// A window write sweeps in the test's own goroutine: nothing reads the
+	// engine in the background while a test changes it.
+	e.windowSweepInline = true
 	return e, clock
 }
 

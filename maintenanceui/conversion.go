@@ -138,7 +138,7 @@ func attemptSetting(r operationRecord) string {
 // waitingItsTurn says the job is held back, for a worker slot or in the worker's
 // own queue, not working.
 func waitingItsTurn(r operationRecord) bool {
-	return r.inst.WaitingCondition == "worker_busy" || r.inst.WaitingCondition == "worker_drain" || r.inst.WaitingCondition == "queue_held" || operationQueuedOnWorker(r)
+	return r.inst.WaitingCondition == "worker_busy" || r.inst.WaitingCondition == "worker_drain" || r.inst.WaitingCondition == "queue_held" || r.inst.WaitingCondition == "node_window" || operationQueuedOnWorker(r)
 }
 
 // conversionStatus is the one state a transcode job's conversion is in.

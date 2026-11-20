@@ -181,6 +181,11 @@ func (e *Engine) beginAdmission(ctx context.Context, ec *ExecutionContext, phase
 	if held, reason := e.pauseHold(assignedWorker(ec.State)); held {
 		return nil, pauseBlockedResult(phase, reason), true
 	}
+	// So does a node whose availability window no longer takes the
+	// conversion (closed, or it no longer fits): it goes back to the queue.
+	if ok, why, unreadable := e.windowAdmits(ec); !ok {
+		return nil, e.windowBlockedResult(ec, e.instanceWorker(ec.State), why, unreadable), true
+	}
 	parentID, known, err := e.resolveParentBatchID(ec)
 	if err != nil {
 		return nil, stepFailClosed(fmt.Errorf("%s parent link check failed (fail closed): %w", phase, err)), true

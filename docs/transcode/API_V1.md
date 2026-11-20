@@ -133,6 +133,7 @@ Ids: `{id}` is an action or batch id, `{name}` a worker or recipe name.
 | `GET /state` | `/api/maintenance/worker-node-state` |
 | `GET /drain` | `/api/maintenance/worker-drain` (read) |
 | `GET /pauses`, `/pauses/{name}` | `worker_pause` (read) |
+| `GET /windows`, `/workers/{name}/window` | the engine's node windows (read); a node with no window is 404 `no_window` |
 | `GET /actions`, `/actions/{id}` | `action_list`, `action_status` |
 | `GET /actions/{id}/detail/{section}` | `action_detail` (inputs, outputs, state, steps) |
 | `GET /actions/{id}/podcast/blocks`, `.../blocks/{block_id}`, `.../artifacts/{artifact}` | `podcast_blocks`, `podcast_block`, `podcast_artifact` |
@@ -204,6 +205,8 @@ of the server (5xx) never carry their cause.
 | `PUT /drain` | `/api/maintenance/worker-drain` | `enabled` | read `GET /drain` for `ready_for_deploy` |
 | `PUT /pauses/{name}` | `/api/maintenance/worker-pause` | exactly one of `mode` (`graceful`, `immediate`, `suspend`, `off`) and `builds_paused` | the two switches are independent, never both in one request |
 | `DELETE /pauses/{name}` | same, mode `off` | none | |
+| `PUT /workers/{name}/window` | the engine's node window | `until` (RFC3339, optional), `margin_minutes` (0 to 1440, default 0), `media_types` (subset of `tv`, `anime`, `movie`; empty is all), `revision` (optional) | see "Availability windows" below; a stale `revision` is 409 `stale_window_revision`, an unknown node 404 `unknown_worker` |
+| `DELETE /workers/{name}/window` | same | optional query `revision` | removes the window; stale is 409 `stale_window_revision` |
 | `POST /backups/{id}/clean`, `/restore`, `/discard-duplicate` | `transcode_backups` | none | the tool's own state checks (409) |
 | `POST /backups/{id}/discard` | `transcode_backups` discard | `confirm: true` | removes a recovery copy without verifying its replacement: `confirm` is required here, and the tool needs the destructive switch (403 when off) |
 | `POST /backups/candidates/{id}/discard` | `transcode_backups` discard_candidate | `confirm: true` | the tool refuses without `confirm`; destructive switch |
@@ -283,3 +286,38 @@ The goal change requires a key.
   classification requires it); this is the one effect of a GET and it is
   documented on that route. Because of it `HEAD` on that route answers
   `405` (`Allow: GET`) and records nothing; `HEAD` elsewhere behaves as `GET`.
+
+## Availability windows
+
+A node can be made available only until a time, and only for some media
+types. `PUT /workers/{name}/window` stores one window per node (a restart keeps
+it); `GET /windows` lists them all and `GET /workers/{name}/window` reads one.
+Each answer carries `worker`, `until`, `margin_minutes`, `media_types` (empty
+means all), `closes_at` (`until` less the margin), `state` (`open` or
+`closed`) and `revision`.
+
+- A conversion starts on the node only if its media type is allowed (a
+  conversion with no media type is allowed only when `media_types` is empty)
+  and, when `until` is set, now plus the estimated encode time on that node is
+  not past `closes_at`. The estimate is that of the encoder family the plan
+  chose, from the node's own history at the source's resolution class; no other
+  family's history is borrowed. Before the family is known (while the
+  conversion waits for a node) the x265 history counts, or the copy history for
+  a conversion known to be audio-only. With no estimate the conversion does not
+  start on a node whose window has an `until`; it can still go to other nodes.
+  A conversion that is assigned to the node but not yet sent when the window
+  changes, and no longer qualifies, goes back to the queue; one already sent
+  keeps running.
+- At or after `closes_at` the node takes nothing new, and stays closed until the
+  window is changed or deleted. Running conversions are never touched.
+- A conversion that no node accepts waits with the condition `node_window` and
+  a reason naming the node and why. It does not count as `worker_busy` and does
+  not hold back other conversions or later items of its batch. Changing or
+  deleting a window wakes it.
+- If the window cannot be read, the node takes nothing new until it can.
+- `revision` only goes up per node and survives deleting the window. For a node
+  with no window the expected `revision` is the current counter, which `GET
+  /workers/{name}/window` returns in the `no_window` 404 body as `revision`
+  (0 for a node that never had one). A blank entry in `media_types` is 400
+  `invalid_request`, and so is a `?revision=` on DELETE that is empty or not an
+  integer.
