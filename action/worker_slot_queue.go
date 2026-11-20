@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"math"
 	"math/rand/v2"
 	"sort"
 	"time"
@@ -233,25 +232,47 @@ func clearWaitingForWorker(ec *ExecutionContext) {
 	}
 }
 
-// foreignSlotWaiter reports whether an action outside batchID is waiting for
-// a worker slot. A batch must not start another child then: the freed slot
-// belongs to the older waiter. Any worker's waiter counts, since the batch
-// does not know which worker its next child will be assigned.
-func (e *Engine) foreignSlotWaiter(batchID string) bool {
+// foreignSlotWaiterKeys are the queue keys of the actions outside batchID that
+// wait for a worker slot and are ahead of nobody the operator held: a batch
+// must not start a queued item that sits behind one of them, since the freed
+// slot belongs to that waiter. A waiter without a queue key counts as ahead of
+// every item (key ""). The slot waiters of any worker count, since the batch
+// does not know which worker its next child will be assigned. ok is false when
+// the waiters or their marks could not be read.
+func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) {
 	if e.deps.Store == nil {
-		return false
+		return nil, true
 	}
 	waiters, err := e.workerSlotWaiters()
 	if err != nil {
-		log.Printf("worker slot queue: listing waiters for batch %s: %v", batchID, err)
-		return false
+		log.Printf("worker slot queue: listing waiters for batch %s: %v (scheduling nothing new)", batchID, err)
+		return nil, false
 	}
 	for _, w := range waiters {
-		if w.parentID != batchID {
-			return true
+		if w.parentID == batchID {
+			continue
 		}
+		// A held conversion keeps its place but starts nothing: it holds no
+		// one back.
+		m, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, w.id)
+		if err != nil {
+			log.Printf("worker slot queue: reading the hold of %s: %v (scheduling nothing new)", w.id, err)
+			return nil, false
+		}
+		if m.Held {
+			continue
+		}
+		key, err := e.childQueueKey(w.id)
+		if err != nil {
+			log.Printf("worker slot queue: reading the place of %s: %v (scheduling nothing new)", w.id, err)
+			return nil, false
+		}
+		// A waiter with no queue key (key "") counts as ahead of every item on
+		// purpose: nothing can say it is behind, so it keeps the conservative
+		// behaviour the batch had before items could be moved.
+		keys = append(keys, key)
 	}
-	return false
+	return keys, true
 }
 
 // slotFairPending narrows a batch's dispatch candidates to what it may start
@@ -262,29 +283,55 @@ func (e *Engine) foreignSlotWaiter(batchID string) bool {
 //     max_parallel_jobs. An item queued again before the waiting child (a
 //     retried earlier file) may start: it is ahead of that child in the
 //     transcode queue, and holding it would leave both waiting for each other;
-//   - no new child while an action outside this batch waits for a slot; the
-//     batch's own waiting children still try, in queue order;
+//   - no new child while an action outside this batch waits for a slot ahead
+//     of it in the queue (not held, with a smaller key); the batch's own
+//     waiting children still try, in queue order;
 //   - on a reconciler poll, a waiting child is left to its own backoff
 //     instead of being resumed every time the batch polls.
-func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []store.TranscodeBatchItem, pending []int) []int {
+func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []store.TranscodeBatchItem, pending []int) ([]int, bool) {
 	if len(pending) == 0 {
-		return pending
+		return pending, true
 	}
+	// Candidates go in queue order: an item the operator moved ahead of an
+	// earlier one is ahead of it here too, and "later than the first waiting
+	// child" is judged by queue key, not by item id.
+	keys, ok := e.batchItemKeys(batchID, items)
+	if !ok {
+		return nil, false
+	}
+	sortByQueueKey(items, pending, keys)
 	hasQueued := false
-	firstWaiting := int64(math.MaxInt64)
+	hasWaiting := false
+	firstWaiting := ""
 	for _, it := range items {
 		switch it.Status {
 		case "queued":
 			hasQueued = true
 		case "waiting_for_slot":
-			firstWaiting = min(firstWaiting, it.ID)
+			if k := keys[it.ID]; !hasWaiting || k < firstWaiting {
+				hasWaiting, firstWaiting = true, k
+			}
 		}
 	}
-	foreign := hasQueued && e.foreignSlotWaiter(batchID)
+	var foreign []string
+	if hasQueued {
+		if foreign, ok = e.foreignSlotWaiterKeys(batchID); !ok {
+			return nil, false
+		}
+	}
+	// Ahead of an item: a foreign waiter whose key is before the item's.
+	foreignAhead := func(key string) bool {
+		for _, k := range foreign {
+			if k < key {
+				return true
+			}
+		}
+		return false
+	}
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if it.Status == "queued" && (foreign || it.ID > firstWaiting) {
+		if it.Status == "queued" && (foreignAhead(keys[it.ID]) || (hasWaiting && keys[it.ID] > firstWaiting)) {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {
@@ -292,7 +339,7 @@ func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []st
 		}
 		out = append(out, idx)
 	}
-	return out
+	return out, true
 }
 
 // noteWorkerSlotFreed records that a worker job this process tracks has ended

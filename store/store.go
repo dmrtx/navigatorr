@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 26
+const SchemaVersion = 27
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -471,6 +471,22 @@ var migrations = []migration{
 		// pause) and only makes the server refuse to register a new build on
 		// the node; builds already registered are untouched.
 		`CREATE TABLE IF NOT EXISTS build_pauses (worker TEXT PRIMARY KEY, since TEXT NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID`,
+	}},
+	{version: 27, statements: []string{
+		// Per-conversion hold and explicit order of the transcode queue. An
+		// action's own state is rewritten whole by its steps, so the hold and the
+		// order an operator gave live here, where no step can overwrite them:
+		// kind 'action' (a waiting transcode_media) or 'batch' (the key prefix
+		// all its not-yet-started items sort under). queue_order is '' for none.
+		`CREATE TABLE IF NOT EXISTS transcode_queue_marks (kind TEXT NOT NULL, id TEXT NOT NULL, held INTEGER NOT NULL DEFAULT 0, queue_order TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY (kind, id)) WITHOUT ROWID`,
+		// A batch item that has no child yet carries its hold and order itself;
+		// the child it gets later takes both.
+		`ALTER TABLE transcode_batch_items ADD COLUMN queue_held INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE transcode_batch_items ADD COLUMN queue_order TEXT NULL`,
+		// A counter every change of a hold or an order moves, so a client can
+		// refuse to act on a queue it read before the change.
+		`CREATE TABLE IF NOT EXISTS transcode_queue_revision (id INTEGER PRIMARY KEY CHECK (id = 1), revision INTEGER NOT NULL)`,
+		`INSERT OR IGNORE INTO transcode_queue_revision (id, revision) VALUES (1, 0)`,
 	}},
 }
 

@@ -426,7 +426,7 @@ func TestParentBusyWaiterHoldsQueueHeadOnlyForGrace(t *testing.T) {
 	if got := position(); got != 1 {
 		t.Fatalf("a parent_busy waiter past its grace still blocks the queue: position %d, want 1", got)
 	}
-	if e.foreignSlotWaiter("batch-b") {
+	if k, _ := e.foreignSlotWaiterKeys("batch-b"); len(k) > 0 {
 		t.Fatal("a parent_busy waiter past its grace still holds batch B back")
 	}
 }
@@ -493,7 +493,9 @@ func TestWorkerSlotTurnOrdersByFirstWaitAcrossBatchesAndStandalone(t *testing.T)
 	if getString(work, "phase") != waitingForWorkerPhase || getInt(work, "queue_position") != 4 {
 		t.Fatalf("newcomer work phase: %v", work)
 	}
-	if !e.foreignSlotWaiter("batch-a") || !e.foreignSlotWaiter("batch-b") {
+	ka, _ := e.foreignSlotWaiterKeys("batch-a")
+	kb, _ := e.foreignSlotWaiterKeys("batch-b")
+	if len(ka) == 0 || len(kb) == 0 {
 		t.Fatal("each batch must see the other batch's and the standalone waiter")
 	}
 }
@@ -610,7 +612,7 @@ func TestBatchStartsARequeuedEarlierFileWhileALaterOneWaits(t *testing.T) {
 		{ID: 5, ItemKey: "five", Status: "waiting_for_slot"},
 		{ID: 7, ItemKey: "seven", Status: "queued"},
 	}
-	got := e.slotFairPending(context.Background(), "batch-x", items, []int{0, 2})
+	got, _ := e.slotFairPending(context.Background(), "batch-x", items, []int{0, 2})
 	if len(got) != 1 || got[0] != 0 {
 		t.Fatalf("pending %v, want only the requeued earlier file [0]", got)
 	}

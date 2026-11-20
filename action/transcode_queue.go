@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jakenesler/navigatorr/store"
@@ -42,13 +44,23 @@ import (
 // for the free slots no older conversion is waiting for.
 //
 // The queue state is in rows the engine already persists, so a restart keeps
-// the order. It is a fairness rule: if the store cannot be read the
-// conversion goes ahead as before, and the worker still queues it.
+// the order. If the store cannot be read a conversion waits and looks again
+// shortly: an unread hold or order must not let it start out of turn.
 const (
 	transcodeQueueOrderKey = "transcode_queue_order"
 	// transcodeQueueSinceKey is when the conversion took its place.
 	transcodeQueueSinceKey = "transcode_queue_since"
 )
+
+// queueHeldCondition is the waiting condition of a conversion the operator
+// holds: it keeps its place in the queue and takes no worker until released.
+const (
+	queueHeldCondition = "queue_held"
+	queueHeldReason    = "Held: it keeps its place in the queue and starts only after you release it"
+)
+
+// queueHeldPollDelay is how often a held conversion looks again at its hold.
+const queueHeldPollDelay = 15 * time.Second
 
 // queueOrderTimeLayout has a fixed width so keys compare as strings.
 const queueOrderTimeLayout = "2006-01-02T15:04:05.000000000Z"
@@ -91,8 +103,24 @@ func instanceAskedFirst(inst *store.ActionInstance) bool {
 	return getBool(inputs, "queue_priority")
 }
 
+// batchItemQueueOrder is a queued item's key: the one the operator gave the
+// item, else its batch's key prefix (the batch was moved as a block) with its
+// place in the batch, else the key its batch's creation gives it.
 func batchItemQueueOrder(r store.QueuedBatchItemRow) string {
+	switch {
+	case r.ItemOrder != "":
+		return r.ItemOrder
+	case r.BatchOrder != "":
+		return batchBlockKey(r.BatchOrder, r.ItemID)
+	}
 	return queueOrder(batchQueueRank(r.Priority), parseStoreTime(r.BatchCreatedAt), r.BatchID, r.ItemID)
+}
+
+// batchBlockKey is the key of an item of a batch that was moved: the batch's
+// prefix, then the item's place in the batch (keyBetween keeps the prefix
+// from being a prefix of the next key, so the block stays in its place).
+func batchBlockKey(prefix string, itemID int64) string {
+	return fmt.Sprintf("%s|%020d", prefix, itemID)
 }
 
 func parseStoreTime(s string) time.Time {
@@ -106,9 +134,38 @@ func transcodeQueueWaiting(state map[string]any) bool {
 	return getString(state, transcodeQueueOrderKey) != "" && assignedWorker(state) == ""
 }
 
+// batchChildItem is the batch item a child action runs, nil when it has none
+// yet (found by the item key the child was given, by the link the item keeps
+// to its child, or, for a profile batch whose link is made at the child's first
+// run, by the child's idempotency key).
+func (e *Engine) batchChildItem(instanceID string, inputs map[string]any) (*store.TranscodeBatchItem, error) {
+	parentID := getString(inputs, "parent_action_id")
+	if itemKey := getString(inputs, "batch_item_key"); itemKey != "" {
+		return e.deps.Store.GetTranscodeBatchItem(parentID, itemKey)
+	}
+	item, err := e.deps.Store.FindTranscodeBatchItemByChildActionID(instanceID)
+	if err != nil || item != nil {
+		return item, err
+	}
+	key, err := e.childIdempotencyKey(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	return e.deps.Store.FindTranscodeBatchItemByChildKey(key)
+}
+
 // ensureQueueOrder returns the conversion's queue key, stamping it the first
-// time.
+// time. A key the operator gave it (a move) wins over the stamped one.
 func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
+	if e.deps.Store != nil {
+		mark, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, ec.InstanceID)
+		if err != nil {
+			return "", err
+		}
+		if mark.Order != "" {
+			return mark.Order, nil
+		}
+	}
 	if key := getString(ec.State, transcodeQueueOrderKey); key != "" {
 		return key, nil
 	}
@@ -121,20 +178,7 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 		if parent == nil {
 			return "", fmt.Errorf("parent %s not found", parentID)
 		}
-		var item *store.TranscodeBatchItem
-		if itemKey := getString(ec.Inputs, "batch_item_key"); itemKey != "" {
-			item, err = e.deps.Store.GetTranscodeBatchItem(parentID, itemKey)
-		} else {
-			item, err = e.deps.Store.FindTranscodeBatchItemByChildActionID(ec.InstanceID)
-			if err == nil && item == nil {
-				// A profile batch's child is linked to its item only after its
-				// first run; its idempotency key names the item until then.
-				var key string
-				if key, err = e.childIdempotencyKey(ec.InstanceID); err == nil {
-					item, err = e.deps.Store.FindTranscodeBatchItemByChildKey(key)
-				}
-			}
-		}
+		item, err := e.batchChildItem(ec.InstanceID, ec.Inputs)
 		if err != nil {
 			return "", err
 		}
@@ -144,6 +188,42 @@ func (e *Engine) ensureQueueOrder(ec *ExecutionContext) (string, error) {
 			seq = item.ID
 		}
 		key = queueOrder(batchQueueRank(instanceAskedFirst(parent)), parseStoreTime(parent.CreatedAt), parentID, seq)
+		if item != nil {
+			// What the operator did to the item, or to the batch as a block,
+			// before this child existed carries over to it.
+			itemMark, err := e.deps.Store.GetQueueItemMark(item.ID)
+			if err != nil {
+				return "", err
+			}
+			batchMark, err := e.deps.Store.GetQueueMark(store.QueueMarkBatch, parentID)
+			if err != nil {
+				return "", err
+			}
+			switch {
+			case itemMark.Order != "":
+				key = itemMark.Order
+			case batchMark.Order != "":
+				key = batchBlockKey(batchMark.Order, item.ID)
+			}
+			if itemMark.Held || itemMark.Order != "" {
+				// What the operator did to the item moves to the child in one
+				// write: its hold, and its place (as the child's mark, which
+				// outlives a crash before the state below is saved). The
+				// item's own hold and place end in the same write, or releasing
+				// the child would leave the item held, and the two places could
+				// differ.
+				w := store.QueueWrite{ItemHeld: map[int64]bool{item.ID: false}, ItemOrder: map[int64]string{item.ID: ""}}
+				if itemMark.Held {
+					w.ActionHeld = map[string]bool{ec.InstanceID: true}
+				}
+				if itemMark.Order != "" {
+					w.ActionOrder = map[string]string{ec.InstanceID: itemMark.Order}
+				}
+				if _, err := e.deps.Store.ApplyQueueWrite(w); err != nil {
+					return "", err
+				}
+			}
+		}
 	} else {
 		inst, err := e.deps.Store.GetActionInstanceIfExists(ec.InstanceID)
 		if err != nil {
@@ -211,7 +291,9 @@ func (e *Engine) transcodeQueueBefore(q queueSlots, cur queueClaim, key, self st
 	var before []queueClaim
 	ahead := 0
 	for _, w := range waiters {
-		if w.ID == self || w.QueueOrder >= key {
+		// A held conversion keeps its place but starts nothing, so it holds no
+		// one back.
+		if w.ID == self || w.QueueOrder >= key || w.Held {
 			continue
 		}
 		// Something other than the queue holds a waiter that has not been
@@ -230,7 +312,7 @@ func (e *Engine) transcodeQueueBefore(q queueSlots, cur queueClaim, key, self st
 		return nil, 0, err
 	}
 	for _, it := range items {
-		if batchItemQueueOrder(it) < key {
+		if !it.Held && batchItemQueueOrder(it) < key {
 			c := e.claimFor(q, placement{})
 			before = append(before, c)
 			if cur.competesWith(c) {
@@ -302,13 +384,28 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	}
 	key, err := e.ensureQueueOrder(ec)
 	if err != nil {
-		log.Printf("transcode queue: ordering %s: %v (assigning without queue order)", ec.InstanceID, err)
-		return StepResult{}, false, nil
+		log.Printf("transcode queue: ordering %s: %v (waiting)", ec.InstanceID, err)
+		return queueUnreadableWait(), true, nil
+	}
+	held, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, ec.InstanceID)
+	if err != nil {
+		log.Printf("transcode queue: reading the hold of %s: %v (waiting)", ec.InstanceID, err)
+		return queueUnreadableWait(), true, nil
+	}
+	if held.Held {
+		delete(ec.State, workerSlotPositionKey)
+		clearWaitingForWorker(ec)
+		return StepResult{
+			Status:           StepWaitingExternal,
+			WaitingCondition: queueHeldCondition,
+			WaitingReason:    queueHeldReason,
+			Outputs:          map[string]any{"queue_held": true},
+		}, true, nil
 	}
 	q, err := e.queueSlots(ctx)
 	if err != nil {
-		log.Printf("transcode queue: counting free slots for %s: %v (assigning without queue order)", ec.InstanceID, err)
-		return StepResult{}, false, nil
+		log.Printf("transcode queue: counting free slots for %s: %v (waiting)", ec.InstanceID, err)
+		return queueUnreadableWait(), true, nil
 	}
 	// Only the free slots on workers with room for it are its own. One that no
 	// node could take even empty fails now, not after waiting for a room that
@@ -321,8 +418,8 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	cur := e.claimFor(q, p)
 	before, ahead, err := e.transcodeQueueBefore(q, cur, key, ec.InstanceID)
 	if err != nil {
-		log.Printf("transcode queue: listing the queue for %s: %v (assigning without queue order)", ec.InstanceID, err)
-		return StepResult{}, false, nil
+		log.Printf("transcode queue: listing the queue for %s: %v (waiting)", ec.InstanceID, err)
+		return queueUnreadableWait(), true, nil
 	}
 	if safe := q.safeWorkers(cur, before); len(safe) > 0 {
 		delete(ec.State, workerSlotPositionKey)
@@ -351,9 +448,21 @@ func (e *Engine) transcodeQueueTurn(ctx context.Context, ec *ExecutionContext) (
 	}, true, nil
 }
 
+// queueUnreadableWait is the wait of a conversion whose place in the queue
+// could not be read: it takes no worker and asks again at its next poll.
+func queueUnreadableWait() StepResult {
+	return StepResult{
+		Status:           StepWaitingExternal,
+		WaitingCondition: "worker_busy",
+		WaitingReason:    "The transcode queue could not be read; it will look again shortly",
+		Outputs:          map[string]any{"worker_busy": true},
+	}
+}
+
 // batchQueueAllowance is how many of its queued items the batch may start
 // now: the free slots no conversion ahead of its first queued item waits for.
-// With nothing queued, or when the queue cannot be read, it does not limit.
+// With nothing queued it does not limit; when the queue cannot be read it
+// allows none.
 func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 	if e.deps.Store == nil || !e.workersConfigured() {
 		return math.MaxInt
@@ -361,34 +470,35 @@ func (e *Engine) batchQueueAllowance(ctx context.Context, batchID string) int {
 	items, err := e.deps.Store.ListQueuedBatchItems()
 	if err != nil {
 		log.Printf("transcode queue: listing queued items for batch %s: %v", batchID, err)
-		return math.MaxInt
+		return 0
 	}
 	first := ""
 	for _, it := range items {
-		if it.BatchID == batchID {
+		if it.BatchID == batchID && !it.Held {
 			if k := batchItemQueueOrder(it); first == "" || k < first {
 				first = k
 			}
 		}
 	}
 	if first == "" {
-		return math.MaxInt
+		return math.MaxInt // nothing of this batch is queued: nothing to limit
 	}
 	q, err := e.queueSlots(ctx)
 	if err != nil {
 		log.Printf("transcode queue: counting free slots for batch %s: %v", batchID, err)
-		return math.MaxInt
+		return 0
 	}
 	before, _, err := e.transcodeQueueBefore(q, e.claimFor(q, placement{}), first, "")
 	if err != nil {
 		log.Printf("transcode queue: listing the queue for batch %s: %v", batchID, err)
-		return math.MaxInt
+		return 0
 	}
 	return q.slotsLeftAfter(before)
 }
 
 // queueOrderPending keeps the batch's children already waiting for a slot
-// and at most allowance of its queued items, in batch order.
+// and at most allowance of its queued items, in the order of pending (queue
+// order, see batchItemKeys).
 func queueOrderPending(items []store.TranscodeBatchItem, pending []int, allowance int) []int {
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
@@ -401,4 +511,169 @@ func queueOrderPending(items []store.TranscodeBatchItem, pending []int, allowanc
 		out = append(out, idx)
 	}
 	return out
+}
+
+// batchItemKeys is the queue key of each of the batch's items that is queued
+// or waiting for a slot. A queued item has the key the queue gives it (its
+// own, its batch's block, or the batch's creation); a waiting one the key of
+// its child conversion, which is the item's place once the child exists. An
+// item with no key of its own gets the key the batch's creation gives it, which
+// follows the item's id. ok is false when a read failed: a key guessed from
+// less than the queue holds could order the batch wrongly, so the batch then
+// schedules nothing new.
+func (e *Engine) batchItemKeys(batchID string, items []store.TranscodeBatchItem) (keys map[int64]string, ok bool) {
+	keys = map[int64]string{}
+	if e.deps.Store == nil {
+		for _, it := range items {
+			keys[it.ID] = queueOrder(queueRankPlain, time.Time{}, batchID, it.ID)
+		}
+		return keys, true
+	}
+	fail := func(what string, err error) (map[int64]string, bool) {
+		log.Printf("transcode queue: reading %s for batch %s: %v (scheduling nothing new)", what, batchID, err)
+		return nil, false
+	}
+	rows, err := e.deps.Store.ListQueuedBatchItems()
+	if err != nil {
+		return fail("the queued items", err)
+	}
+	for _, r := range rows {
+		if r.BatchID == batchID {
+			keys[r.ItemID] = batchItemQueueOrder(r)
+		}
+	}
+	var parent *store.ActionInstance
+	parentRead := false
+	for _, it := range items {
+		if _, have := keys[it.ID]; have || (it.Status != "queued" && it.Status != "waiting_for_slot") {
+			continue
+		}
+		if it.Status == "waiting_for_slot" && it.ChildActionID != "" {
+			k, err := e.childQueueKey(it.ChildActionID)
+			if err != nil {
+				return fail("a waiting child", err)
+			}
+			if k != "" {
+				keys[it.ID] = k
+				continue
+			}
+		}
+		if !parentRead {
+			parentRead = true
+			if parent, err = e.deps.Store.GetActionInstanceIfExists(batchID); err != nil {
+				return fail("the batch", err)
+			}
+		}
+		row := store.QueuedBatchItemRow{BatchID: batchID, ItemID: it.ID}
+		if parent != nil {
+			row.BatchCreatedAt = parent.CreatedAt
+			row.Priority = instanceAskedFirst(parent)
+		}
+		m, err := e.deps.Store.GetQueueItemMark(it.ID)
+		if err != nil {
+			return fail("an item's mark", err)
+		}
+		row.ItemOrder = m.Order
+		bm, err := e.deps.Store.GetQueueMark(store.QueueMarkBatch, batchID)
+		if err != nil {
+			return fail("the batch's mark", err)
+		}
+		row.BatchOrder = bm.Order
+		keys[it.ID] = batchItemQueueOrder(row)
+	}
+	return keys, true
+}
+
+// childQueueKey is the key of a waiting child conversion: the one the operator
+// gave it, else the one stamped when it first waited ("" when it has none).
+func (e *Engine) childQueueKey(childID string) (string, error) {
+	m, err := e.deps.Store.GetQueueMark(store.QueueMarkAction, childID)
+	if err != nil {
+		return "", err
+	}
+	if m.Order != "" {
+		return m.Order, nil
+	}
+	child, err := e.deps.Store.GetActionInstanceIfExists(childID)
+	if err != nil {
+		return "", err
+	}
+	if child == nil {
+		// A child that no longer exists has no place to read: the caller keeps
+		// the key its item gives it.
+		return "", nil
+	}
+	if strings.TrimSpace(child.StateJSON) == "" {
+		// A child that has not saved any state yet has no key of its own.
+		return "", nil
+	}
+	var state map[string]any
+	if err := json.Unmarshal([]byte(child.StateJSON), &state); err != nil {
+		return "", fmt.Errorf("reading the state of %s: %w", childID, err)
+	}
+	return getString(state, transcodeQueueOrderKey), nil
+}
+
+// sortByQueueKey orders the candidates by their place in the queue (the
+// operator may have moved an item ahead of an earlier one), ties by item id.
+func sortByQueueKey(items []store.TranscodeBatchItem, pending []int, keys map[int64]string) {
+	sort.SliceStable(pending, func(a, b int) bool {
+		ia, ib := items[pending[a]], items[pending[b]]
+		if ka, kb := keys[ia.ID], keys[ib.ID]; ka != kb {
+			return ka < kb
+		}
+		return ia.ID < ib.ID
+	})
+}
+
+// batchDispatchCandidates are the indices of the items the batch may start or
+// retry now, in queue order. ok is false when the holds could not be read: the
+// batch then schedules nothing new this pass.
+func (e *Engine) batchDispatchCandidates(ctx context.Context, batchID string, items []store.TranscodeBatchItem) (pending []int, ok bool) {
+	// A conversion the operator holds keeps its place and starts nothing: it
+	// is left out of what the batch schedules and of what the other items
+	// wait for, and the batch goes on with the rest.
+	view, ok := e.withoutHeldItems(batchID, items)
+	if !ok {
+		return nil, false
+	}
+	for i := range view {
+		if view[i].Status == "queued" || view[i].Status == "waiting_for_slot" {
+			pending = append(pending, i)
+		}
+	}
+	pending, ok = e.slotFairPending(ctx, batchID, view, pending)
+	if !ok {
+		return nil, false
+	}
+	// New children only for the free slots older work does not wait for
+	// (see transcode_queue.go).
+	return queueOrderPending(view, pending, e.batchQueueAllowance(ctx, batchID)), true
+}
+
+// withoutHeldItems is items with the ones the operator holds marked
+// queue_held, so the batch's fan-out neither schedules them nor lets them hold
+// the others back (a held item waiting for a slot would otherwise keep every
+// later queued item behind it). The slice is a copy, the indices are the same.
+// ok is false when the holds could not be read.
+func (e *Engine) withoutHeldItems(batchID string, items []store.TranscodeBatchItem) ([]store.TranscodeBatchItem, bool) {
+	if e.deps.Store == nil {
+		return items, true
+	}
+	held, err := e.deps.Store.HeldBatchItemIDs(batchID)
+	if err != nil {
+		log.Printf("transcode queue: reading the held items of batch %s: %v (scheduling nothing new)", batchID, err)
+		return nil, false
+	}
+	if len(held) == 0 {
+		return items, true
+	}
+	view := make([]store.TranscodeBatchItem, len(items))
+	copy(view, items)
+	for i := range view {
+		if held[view[i].ID] {
+			view[i].Status = queueHeldCondition
+		}
+	}
+	return view, true
 }

@@ -697,7 +697,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 					case StatusWaitingDecision:
 						items[i].Status = "waiting_decision"
 					case StatusWaitingExternal:
-						if resumedRes.WaitingCondition == "worker_busy" {
+						if resumedRes.WaitingCondition == "worker_busy" || resumedRes.WaitingCondition == queueHeldCondition {
 							items[i].Status = "waiting_for_slot"
 						} else {
 							items[i].Status = "running"
@@ -799,7 +799,7 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 						_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
 					}
 				case StatusWaitingExternal:
-					if existingChild.WaitingCondition == "worker_busy" {
+					if existingChild.WaitingCondition == "worker_busy" || existingChild.WaitingCondition == queueHeldCondition {
 						if it.Status != "waiting_for_slot" {
 							it.Status = "waiting_for_slot"
 							_ = e.deps.Store.UpdateTranscodeBatchItem(*it)
@@ -886,17 +886,12 @@ func (e *Engine) stepTranscodeBatchSchedule(ctx context.Context, ec *ExecutionCo
 			break
 		}
 
-		// Find next batch of items (both queued and waiting_for_slot are candidates)
-		var pendingIndices []int
-		for i := range items {
-			if items[i].Status == "queued" || items[i].Status == "waiting_for_slot" {
-				pendingIndices = append(pendingIndices, i)
-			}
+		// Find next batch of items (both queued and waiting_for_slot are
+		// candidates), in queue order; none when the holds cannot be read.
+		pendingIndices, readable := e.batchDispatchCandidates(ctx, ec.InstanceID, items)
+		if !readable {
+			break
 		}
-		pendingIndices = e.slotFairPending(ctx, ec.InstanceID, items, pendingIndices)
-		// New children only for the free slots older work does not wait for
-		// (see transcode_queue.go).
-		pendingIndices = queueOrderPending(items, pendingIndices, e.batchQueueAllowance(ctx, ec.InstanceID))
 
 		if len(pendingIndices) == 0 {
 			break
@@ -1406,7 +1401,7 @@ func (e *Engine) processBatchItem(ctx context.Context, item *store.TranscodeBatc
 		return false, nil
 
 	case StatusWaitingExternal:
-		if isWorkerBusy {
+		if isWorkerBusy || childRes.WaitingCondition == queueHeldCondition {
 			item.Status = "waiting_for_slot"
 		} else {
 			// Normal child waiting_external => running!

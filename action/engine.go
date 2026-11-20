@@ -54,6 +54,17 @@ type Engine struct {
 	reconcilerOnce sync.Once
 	reconcilerDone chan struct{}
 	reconcileWake  chan struct{}
+	// queueMu serialises the operator's queue changes (hold, release, move) and
+	// the reads of the queue view against them. Lock it before bindMu.
+	queueMu sync.Mutex
+	// queueRevisionOwed, guarded by queueMu, is set when a batch hold or
+	// release changed the batch but the revision bump after it failed. Every
+	// later operator change bumps the revision first, so a view read before
+	// that change can no longer be used to write.
+	queueRevisionOwed bool
+	// afterQueueCheck, set by tests, runs once a change has passed its revision
+	// check, before it is made.
+	afterQueueCheck func()
 	// lifecycle is the service's context, known once StartReconciler runs: work
 	// that outlives the request that asked for it still ends with the service.
 	lifecycle atomic.Pointer[context.Context]
