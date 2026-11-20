@@ -255,8 +255,8 @@ windows, batch ordering), from the last report of each worker: it asks no
 worker, claims nothing and writes nothing, so it is safe to call repeatedly. It
 is a prediction for the `queue_revision` it carries.
 
-Each node has `worker`, `state` (`ready`, `busy`, `paused`, `closed` or
-`offline`), `free_slots`, `next` (`ref`, `position`, `path`, `media_type`,
+Each node has `worker`, `state` (`ready`, `busy`, `paused`, `closed`,
+`offline` or `unknown`), `free_slots`, `next` (`ref`, `position`, `path`, `media_type`,
 `batch_id`, and `estimate_sec` when known; `null` when nothing would start),
 `why_none` (when `next` is null) and `skipped`: the conversions ahead of `next`
 in queue order (the whole queue when `next` is null), at most 20, with
@@ -265,7 +265,10 @@ sentence that names the endpoint that would change it.
 
 Codes: `held`, `batch_held`, `batch_gating` (its batch starts nothing new while
 a conversion ahead of it waits for a slot), `size_unknown`, `node_offline`,
-`node_paused`, `node_build`, `no_disk_room`, `waiting_for_approvals`,
+`node_paused`, `node_on_hold` (the node's own report says it takes nothing
+new), `node_unknown`, `not_polling` (nothing has polled the conversion for a
+long time, so it holds no one back and is never named as next), `node_build`,
+`no_disk_room`, `waiting_for_approvals`,
 `too_big_for_node`, `recently_refused`, `no_free_slot`, `slot_taken_ahead`,
 `starts_elsewhere`, the window codes `node_window`, `media_type_not_allowed`,
 `would_not_fit_window`, `no_duration_estimate`, `no_encode_history` and
@@ -273,8 +276,9 @@ a conversion ahead of it waits for a slot), `size_unknown`, `node_offline`,
 `nothing_eligible`.
 
 Limits: queued batch items have no conversion yet, so they are placed by media
-type and window only (no disk check); a node that has never been observed reads
-as not ready; and the walk stops once every node has its `next`, so it says
+type and window only (no disk check); a node whose last report is missing or older
+than 2 minutes is `unknown` (no free slots are claimed and nothing is asked of
+it); and the walk stops once every node has its `next`, so it says
 nothing about what would start after those.
 
 ### Confirmation flows

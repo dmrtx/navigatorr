@@ -2,7 +2,10 @@ package action
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +19,43 @@ import (
 // plan itself never probes a worker).
 func nextPlan(t *testing.T, e *Engine) QueuePlan {
 	t.Helper()
-	e.WorkerObservation(context.Background())
+	warm(e)
 	plan, err := e.QueueNext(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return plan
+}
+
+// warm is what dispatch does as a matter of course: it reads each worker's
+// report and its slot pool, which the plan then reads without asking.
+func warm(e *Engine) {
+	e.WorkerObservation(context.Background())
+	for _, w := range e.deps.Workers.All() {
+		e.workerVideoCapacity(context.Background(), w)
+	}
+}
+
+// ticketWaiter is a conversion that has a node and waits for a free slot
+// there, the way a submit that found the node full does: it holds a slot
+// ticket (worker_slot_wait_since), which is what makes a batch hold back the
+// queued items behind it.
+func ticketWaiter(t *testing.T, e *Engine, id, node string, age time.Duration) {
+	t.Helper()
+	since := e.now().Add(-age)
+	seedActionInstance(t, e.deps.Store, id, "transcode_media", StatusWaitingExternal, 0, "", map[string]any{}, map[string]any{
+		"worker":               node,
+		workerSlotWaitSinceKey: since.Format(time.RFC3339Nano),
+		transcodeQueueOrderKey: queueOrder(queueRankPlain, since, id, 0),
+	})
+	inst, err := e.deps.Store.GetActionInstance(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst.WaitingCondition = "worker_busy"
+	if err := e.deps.Store.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func planNode(t *testing.T, plan QueuePlan, name string) PlanNode {
@@ -216,13 +250,11 @@ func TestQueueNextBatchHeldAndBatchGating(t *testing.T) {
 	if err := e.deps.Store.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-1", ItemKey: "i1", FilePath: "/x/Example Show S01E01.mkv", Status: "queued"}); err != nil {
 		t.Fatal(err)
 	}
-	// "blocker" is older than the item and fits only m1, which is busy.
-	busy(t, e, "run-m1", "m1")
-	sizedWaiter(t, e, "blocker", 5*time.Hour, 120*gib, nil)
+	// "blocker" is older than the item and waits for a slot on m1.
+	ticketWaiter(t, e, "blocker", "m1", 5*time.Hour)
 	plan := nextPlan(t, e)
 	m4 := planNode(t, plan, "m4")
 	wantSkip(t, m4, "child", ReasonBatchHeld)
-	wantSkip(t, m4, "blocker", ReasonNoDiskRoom)
 	var item PlanSkip
 	for _, s := range m4.Skipped {
 		if s.Kind == QueueKindItem {
@@ -279,7 +311,7 @@ func TestQueueNextReasonCodes(t *testing.T) {
 			e, _ := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
 			sizedWaiter(t, e, "w", time.Minute, 10*gib, nil)
 			return e, "m4", "w"
-		}, ReasonNodePaused},
+		}, ReasonNodeOnHold},
 		{"recently refused", func(t *testing.T) (*Engine, string, string) {
 			e, _ := openEngine(t)
 			sizedWaiter(t, e, "w", time.Minute, 10*gib, map[string]time.Duration{"m4": 5 * time.Second})
@@ -346,8 +378,7 @@ func TestQueueNextReasonCodes(t *testing.T) {
 			if err := e.deps.Store.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-1", ItemKey: "i1", FilePath: "/x/Example Show S01E03.mkv", Status: "queued"}); err != nil {
 				t.Fatal(err)
 			}
-			busy(t, e, "run-m4", "m4")
-			sizedWaiter(t, e, "blocker", 5*time.Hour, 120*gib, nil)
+			ticketWaiter(t, e, "blocker", "m4", 5*time.Hour)
 			sizedWaiter(t, e, "w", -time.Minute, 10*gib, nil)
 			return e, "m1", "w"
 		}, ReasonSlotTakenAhead},
@@ -495,7 +526,24 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 	scenarios := []struct {
 		name  string
 		build func(t *testing.T) (*Engine, []string)
+		// unpolled are waiters nothing polls (stale ones): dispatch never gives
+		// them a turn.
+		unpolled []string
 	}{
+		{"a requeued conversion prefers the node it came from", func(t *testing.T) (*Engine, []string) {
+			e, _ := twoSlotM4(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
+			waiter(t, e, "w1", 50*time.Minute, map[string]any{}, map[string]any{SubmittedSourceBytesKey: 10 * gib, requeuedFromKey: "m1"})
+			sizedWaiter(t, e, "w2", 40*time.Minute, 10*gib, nil)
+			return e, []string{"w1", "w2"}
+		}, nil},
+		{"a stale waiter at the head, an active one behind, one slot", func(t *testing.T) (*Engine, []string) {
+			e, raw := faultEngine(t)
+			busy(t, e, "run-m1", "m1")
+			sizedWaiter(t, e, "old", 50*time.Minute, 10*gib, nil)
+			sizedWaiter(t, e, "active", 40*time.Minute, 10*gib, nil)
+			backdate(t, raw, "old", 20*time.Minute)
+			return e, []string{"old", "active"}
+		}, []string{"old"}},
 		{"room decides who fits where", func(t *testing.T) (*Engine, []string) {
 			e, _ := twoSlotM4(t, poolWorkerDisk(500*gib, 20*gib, 60*gib), poolWorkerDisk(4000*gib, 20*gib, 900*gib))
 			sizedWaiter(t, e, "w1", 50*time.Minute, 120*gib, nil)
@@ -504,7 +552,7 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 			sizedWaiter(t, e, "w4", 20*time.Minute, 10*gib, nil)
 			sizedWaiter(t, e, "w5", 10*time.Minute, 150*gib, nil)
 			return e, []string{"w1", "w2", "w3", "w4", "w5"}
-		}},
+		}, nil},
 		{"a busy node and a refusal", func(t *testing.T) (*Engine, []string) {
 			e, _ := twoSlotM4(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 			busy(t, e, "run", "m4")
@@ -512,7 +560,7 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 			sizedWaiter(t, e, "w2", 40*time.Minute, 10*gib, nil)
 			sizedWaiter(t, e, "w3", 30*time.Minute, 10*gib, nil)
 			return e, []string{"w1", "w2", "w3"}
-		}},
+		}, nil},
 		{"windows and a hold", func(t *testing.T) (*Engine, []string) {
 			e, clock := twoSlotM4(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 			realtimeSamples(e)
@@ -527,7 +575,7 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 				t.Fatal(err)
 			}
 			return e, []string{"w1", "w2", "w3", "w4", "w5"}
-		}},
+		}, nil},
 		{"a node that is paused", func(t *testing.T) (*Engine, []string) {
 			e, _ := twoSlotM4(t, diskNode(1000*gib, 10*gib, 500*gib), diskNode(1000*gib, 10*gib, 500*gib))
 			if _, err := e.SetNodePause(context.Background(), "m4", store.WorkerPauseGraceful); err != nil {
@@ -536,7 +584,7 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 			sizedWaiter(t, e, "w1", 50*time.Minute, 10*gib, nil)
 			sizedWaiter(t, e, "w2", 40*time.Minute, 10*gib, nil)
 			return e, []string{"w1", "w2"}
-		}},
+		}, nil},
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
@@ -548,6 +596,9 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 			}
 			dispatched := map[string]string{}
 			for _, id := range ids {
+				if slices.Contains(sc.unpolled, id) {
+					continue
+				}
 				if w, _, _ := turn(t, e, id); w != "" {
 					dispatched[id] = w
 				}
@@ -583,3 +634,231 @@ func TestQueueNextAgreesWithDispatch(t *testing.T) {
 // poolWorkerDisk is a node that reports a work disk, as diskNode does, kept
 // apart so the scenario above reads as what it is.
 func poolWorkerDisk(disk, floor, room int64) *roomReporter { return diskNode(disk, floor, room) }
+
+// backdate makes a waiter look as if nothing had polled it for age.
+func backdate(t *testing.T, raw *sql.DB, id string, age time.Duration) {
+	t.Helper()
+	at := time.Now().UTC().Add(-age).Format(time.RFC3339)
+	if _, err := raw.Exec(`UPDATE action_instances SET updated_at = ? WHERE id = ?`, at, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A waiter nobody polls any more is not waiting for a slot: dispatch never
+// gives it a turn and it holds no one back, so the plan never starts it, lists
+// it as not polling, and gives the node to the one behind it.
+func TestQueueNextStaleWaiterNeverStartsAndHoldsNoOneBack(t *testing.T) {
+	e, raw := faultEngine(t)
+	busy(t, e, "run-m1", "m1")
+	sizedWaiter(t, e, "old", 50*time.Minute, 10*gib, nil)
+	sizedWaiter(t, e, "active", 40*time.Minute, 10*gib, nil)
+	backdate(t, raw, "old", 20*time.Minute)
+	plan := nextPlan(t, e)
+	m4 := planNode(t, plan, "m4")
+	if nextID(m4) != "active" || m4.Next.Position != 2 {
+		t.Fatalf("m4 next: %+v", m4.Next)
+	}
+	wantSkip(t, m4, "old", ReasonNotPolling)
+	if plan.started["action:old"] != "" {
+		t.Fatalf("the stale waiter was started: %v", plan.started)
+	}
+	// m1 is busy: the stale head is listed there too.
+	wantSkip(t, planNode(t, plan, "m1"), "old", ReasonNotPolling)
+}
+
+// A node that was never observed says so, and the plan does not ask it.
+func TestQueueNextColdReadDoesNotProbe(t *testing.T) {
+	e, _ := openEngine(t)
+	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	calls := func() int {
+		n := 0
+		for _, name := range []string{"m4", "m1"} {
+			w, _ := e.deps.Workers.Get(name)
+			n += int(w.Executor.(*roomReporter).doctorCalls)
+		}
+		return n
+	}
+	before := calls()
+	plan, err := e.QueueNext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls() != before {
+		t.Fatal("a cold read asked a worker")
+	}
+	for _, n := range plan.Nodes {
+		if n.State != NodeUnknown || n.FreeSlots != 0 || n.Next != nil || n.WhyNone.Code != ReasonNodeUnknown {
+			t.Fatalf("%s: %+v", n.Worker, n)
+		}
+		wantSkip(t, n, "a", ReasonNodeUnknown)
+	}
+	// Once the workers have reported, the plan speaks for them.
+	warm(e)
+	if n := planNode(t, nextPlan(t, e), "m4"); n.State != NodeReady || nextID(n) != "a" {
+		t.Fatalf("after a report: %+v", n)
+	}
+	// A report that is too old is not spoken for either.
+	st := e.workerStateFor("m4")
+	st.obsMu.Lock()
+	st.obs.CheckedAt = time.Now().Add(-10 * time.Minute)
+	st.obsMu.Unlock()
+	plan, _ = e.QueueNext(context.Background())
+	if n := planNode(t, plan, "m4"); n.State != NodeUnknown {
+		t.Fatalf("an old report: %+v", n)
+	}
+	if n := planNode(t, plan, "m1"); n.State != NodeReady {
+		t.Fatalf("the other node: %+v", n)
+	}
+}
+
+// A node that holds itself paused through its own report is paused to the
+// plan too, and the reason does not point at the operator's pause.
+func TestQueueNextNodeOnHoldByItsOwnReport(t *testing.T) {
+	m4 := diskNode(1000*gib, 10*gib, 500*gib)
+	m4.hold = "paused"
+	e, _ := placementEngine(t, m4, diskNode(1000*gib, 10*gib, 500*gib))
+	sizedWaiter(t, e, "a", 10*time.Minute, 10*gib, nil)
+	plan := nextPlan(t, e)
+	n := planNode(t, plan, "m4")
+	if n.State != NodePaused || n.Next != nil || n.WhyNone.Code != ReasonNodeOnHold {
+		t.Fatalf("m4: %+v", n)
+	}
+	wantSkip(t, n, "a", ReasonNodeOnHold)
+	if nextID(planNode(t, plan, "m1")) != "a" {
+		t.Fatal("m1 should take it")
+	}
+}
+
+// The reasons print the need of the node they judge.
+func TestQueueNextRoomReasonUsesTheNodesOwnNeed(t *testing.T) {
+	e, _ := placementEngine(t, diskNode(500*gib, 20*gib, 60*gib), diskNode(4000*gib, 20*gib, 900*gib))
+	sizedWaiter(t, e, "w", time.Minute, 120*gib, nil)
+	s := wantSkip(t, planNode(t, nextPlan(t, e), "m4"), "w", ReasonNoDiskRoom)
+	if !strings.Contains(s.Text, "needs") || !strings.Contains(s.Text, "GB") {
+		t.Fatalf("text: %q", s.Text)
+	}
+}
+
+// With 25 held conversations ahead, the node's next is beyond position 20: the
+// skipped list stops at 20 and says so.
+func TestQueueNextSkippedBoundWhenNextIsBeyondIt(t *testing.T) {
+	e, _ := openEngine(t)
+	var held []string
+	for i := 0; i < 24; i++ {
+		id := "h" + string(rune('a'+i))
+		sizedWaiter(t, e, id, time.Duration(200-i)*time.Minute, 1*gib, nil)
+		held = append(held, id)
+	}
+	sizedWaiter(t, e, "last", 10*time.Minute, 1*gib, nil)
+	for _, id := range held {
+		if _, err := e.HoldQueued(context.Background(), act(id), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := nextPlan(t, e)
+	m4 := planNode(t, plan, "m4")
+	if nextID(m4) != "last" || m4.Next.Position != 25 {
+		t.Fatalf("next: %+v", m4.Next)
+	}
+	if len(m4.Skipped) != maxPlanSkipped || !m4.SkippedTruncated {
+		t.Fatalf("%d skipped, truncated %v", len(m4.Skipped), m4.SkippedTruncated)
+	}
+	if m4.Skipped[0].ID != "ha" || m4.Skipped[maxPlanSkipped-1].Position != maxPlanSkipped {
+		t.Fatalf("the list is not the first %d in order: %+v", maxPlanSkipped, m4.Skipped)
+	}
+}
+
+// Batch items agree with the batch's own dispatch: an item behind a conversion
+// that waits for a slot on its node is not started, and one that has the line
+// free is.
+func TestQueueNextAgreesWithBatchDispatchForItems(t *testing.T) {
+	seedBatch := func(t *testing.T, e *Engine, id string, paths ...string) {
+		seedActionInstance(t, e.deps.Store, id, "transcode_batch", StatusRunning, 0, "", map[string]any{}, map[string]any{})
+		for i, p := range paths {
+			if err := e.deps.Store.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: id, ItemKey: "i" + string(rune('1'+i)), FilePath: p, Status: "queued"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// startsInDispatch says whether the batch would start its queued items now.
+	startsInDispatch := func(t *testing.T, e *Engine, batch string) map[int64]bool {
+		items, err := e.deps.Store.ListTranscodeBatchItems(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending, ok := e.batchDispatchCandidates(context.Background(), batch, items)
+		if !ok {
+			t.Fatal("the batch could not read its queue")
+		}
+		out := map[int64]bool{}
+		for _, i := range pending {
+			if items[i].Status == "queued" {
+				out[items[i].ID] = true
+			}
+		}
+		return out
+	}
+	itemStarted := func(plan QueuePlan, id int64) bool {
+		_, ok := plan.started[QueueKindItem+":"+strconv.FormatInt(id, 10)]
+		return ok
+	}
+	t.Run("free line", func(t *testing.T) {
+		e, _ := openEngine(t)
+		seedBatch(t, e, "batch-1", "/x/Example Show S01E01.mkv", "/x/Example Show S01E02.mkv")
+		plan := nextPlan(t, e)
+		got := startsInDispatch(t, e, "batch-1")
+		items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+		for _, it := range items {
+			if itemStarted(plan, it.ID) != got[it.ID] {
+				t.Fatalf("item %d: plan %v, dispatch %v", it.ID, itemStarted(plan, it.ID), got[it.ID])
+			}
+		}
+		if !itemStarted(plan, items[0].ID) {
+			t.Fatal("the first item should start")
+		}
+	})
+	t.Run("behind a foreign waiter for a slot", func(t *testing.T) {
+		e, _ := openEngine(t)
+		ticketWaiter(t, e, "other", "m1", 5*time.Hour)
+		seedBatch(t, e, "batch-1", "/x/Example Show S01E01.mkv")
+		plan := nextPlan(t, e)
+		items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+		if got := startsInDispatch(t, e, "batch-1"); got[items[0].ID] || itemStarted(plan, items[0].ID) {
+			t.Fatalf("the item starts: plan %v dispatch %v", itemStarted(plan, items[0].ID), got)
+		}
+		n := planNode(t, plan, "m4")
+		var item PlanSkip
+		for _, sk := range n.Skipped {
+			if sk.Kind == QueueKindItem {
+				item = sk
+			}
+		}
+		if item.Code != ReasonBatchGating {
+			t.Fatalf("m4: %+v", n)
+		}
+	})
+	t.Run("behind a child of its own batch that waits for a slot", func(t *testing.T) {
+		e, _ := openEngine(t)
+		seedBatch(t, e, "batch-1", "/x/Example Show S01E01.mkv", "/x/Example Show S01E02.mkv")
+		items, _ := e.deps.Store.ListTranscodeBatchItems("batch-1")
+		// The first item already has its child, waiting in the queue.
+		waiter(t, e, "child-1", 30*time.Minute, map[string]any{"parent_action_id": "batch-1"}, map[string]any{SubmittedSourceBytesKey: 10 * gib})
+		first := items[0]
+		first.Status, first.ChildActionID = "waiting_for_slot", "child-1"
+		if err := e.deps.Store.UpdateTranscodeBatchItem(first); err != nil {
+			t.Fatal(err)
+		}
+		// Both nodes are full, so the child cannot take a slot and keeps the
+		// batch's line closed.
+		busy(t, e, "run-m4", "m4")
+		busy(t, e, "run-m1", "m1")
+		plan := nextPlan(t, e)
+		got := startsInDispatch(t, e, "batch-1")
+		if got[items[1].ID] || itemStarted(plan, items[1].ID) {
+			t.Fatalf("the second item starts: plan %v dispatch %v", itemStarted(plan, items[1].ID), got)
+		}
+		if len(plan.started) != 0 {
+			t.Fatalf("nothing should start: %v", plan.started)
+		}
+	})
+}

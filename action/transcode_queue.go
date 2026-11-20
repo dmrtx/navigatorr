@@ -248,6 +248,8 @@ type queueSlots struct {
 	ready   []bool
 	free    map[string]int
 	placer  *placer
+	// unreported marks the nodes the queue plan has no recent report of.
+	unreported []bool
 }
 
 func (e *Engine) queueSlots(ctx context.Context) (queueSlots, error) {

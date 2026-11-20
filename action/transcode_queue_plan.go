@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"fmt"
+	"github.com/jakenesler/navigatorr/transcode"
 	"maps"
 	"strconv"
 	"time"
@@ -34,6 +35,7 @@ const (
 	NodePaused  = "paused"  // the operator paused it
 	NodeClosed  = "closed"  // its availability window has closed
 	NodeOffline = "offline" // not ready: unreachable or failing its checks
+	NodeUnknown = "unknown" // no recent report from it: nothing is said about its slots
 )
 
 // Reason codes. Those that are also wait conditions of the engine keep their
@@ -44,9 +46,12 @@ const (
 	ReasonBatchHeld   = "batch_held"   // its batch is on hold (parent_paused)
 	ReasonBatchGating = "batch_gating" // its batch starts no new conversion while one ahead waits for a slot
 	ReasonSizeUnknown = "size_unknown" // its source size could not be read yet
+	ReasonNotPolling  = "not_polling"  // nothing has polled it for a long time; it is not waiting for a slot
 	// About a node.
 	ReasonNodeOffline  = "node_offline"
-	ReasonNodePaused   = "node_paused"
+	ReasonNodePaused   = "node_paused"  // paused by the operator (PUT /pauses/{node})
+	ReasonNodeOnHold   = "node_on_hold" // the node's own report says it is on hold
+	ReasonNodeUnknown  = "node_unknown" // no recent report from it
 	ReasonNodeBuild    = "node_build"
 	ReasonNoDiskRoom   = "no_disk_room"
 	ReasonApprovalRoom = "waiting_for_approvals"
@@ -136,18 +141,63 @@ func (e *Engine) QueueNext(ctx context.Context) (QueuePlan, error) {
 	if err != nil {
 		return QueuePlan{}, err
 	}
+	q.unreported = e.planUnreported(ctx, q)
 	plan.Nodes, plan.started = e.planQueue(q, view.Entries)
 	return plan, nil
 }
 
+// planReportMaxAge is how old the last report of a node may be for the plan to
+// speak for it. Waiting conversions poll every 30 to 60 seconds and each poll
+// refreshes it.
+const planReportMaxAge = 2 * time.Minute
+
+// planUnreported marks the nodes that have no recent report, which the plan
+// reads without asking (it must not probe). With one node dispatch does not
+// ask a report for readiness either, so none is marked. A marked node is made
+// not ready and has no free slot: the plan says nothing about it.
+func (e *Engine) planUnreported(ctx context.Context, q queueSlots) []bool {
+	out := make([]bool, len(q.workers))
+	if len(q.workers) < 2 {
+		return out
+	}
+	for i, w := range q.workers {
+		obs := e.workerObservation(ctx, w)
+		old := obs.CheckedAt.IsZero() || time.Since(obs.CheckedAt) > planReportMaxAge
+		// The pool counts only where capacity is read from it.
+		if _, reads := w.Executor.(workerSlotReader); reads && !old && !e.workerPaused(w.Name) && !e.workerWindowClosed(w.Name) {
+			at := e.workerPoolAt(w.Name)
+			old = at.IsZero() || time.Since(at) > planReportMaxAge
+		}
+		if old {
+			out[i] = true
+			q.ready[i] = false
+			delete(q.free, w.Name)
+		}
+	}
+	q.placer.unreported = out
+	return out
+}
+
+// planRoomHold is the hold the node's own fresh report names ("paused",
+// "build"), or "".
+func (e *Engine) planRoomHold(ctx context.Context, w transcode.NamedWorker) string {
+	r := e.workerObservation(ctx, w).Retention
+	if r == nil || !r.Fresh(e.now()) {
+		return ""
+	}
+	return r.Hold
+}
+
 // planNodeState is the state of worker i and its free slots.
-func (e *Engine) planNodeState(q queueSlots, i int) (string, int) {
+func (e *Engine) planNodeState(ctx context.Context, q queueSlots, i int) (string, int) {
 	w := q.workers[i]
 	free := q.free[w.Name]
 	switch {
+	case i < len(q.unreported) && q.unreported[i]:
+		return NodeUnknown, 0
 	case !q.ready[i]:
 		return NodeOffline, 0
-	case e.workerPaused(w.Name):
+	case e.workerPaused(w.Name), e.planRoomHold(ctx, w) == "paused":
 		return NodePaused, 0
 	case e.workerWindowClosed(w.Name):
 		return NodeClosed, 0
@@ -184,9 +234,11 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 		cs[i] = c
 	}
 	startedBy := map[string]string{}
+	gates := planGates{e: e, byBatch: map[string]*planGate{}}
+	doneActions := map[string]bool{}
 	accs := make([]planAcc, len(q.workers))
 	for i := range accs {
-		accs[i].state, accs[i].free = e.planNodeState(q, i)
+		accs[i].state, accs[i].free = e.planNodeState(q.placer.ctx, q, i)
 	}
 	// open says whether the walk still has something to learn: a node needs its
 	// next while it has a free slot, and its list of skipped until it is full.
@@ -207,7 +259,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 		var dec turnDecision
 		gated := false
 		started := ""
-		if !c.held {
+		if !c.held && !c.stale {
 			self := ""
 			if c.kind == QueueKindAction {
 				self = c.id
@@ -215,7 +267,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 			cur := sim.claimOf(c)
 			before, ahead := sim.claimsBefore(cs, cur, c.key, self)
 			dec = sim.decideTurn(c.p, cur, before, ahead)
-			gated = c.kind == QueueKindItem && queuedItemGatedInPlan(cs, entries, i)
+			gated = c.kind == QueueKindItem && gates.gated(en.BatchID, c.key, doneActions)
 			if dec.Node != "" && !gated {
 				started = dec.Node
 			}
@@ -240,6 +292,9 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 		}
 		if started != "" {
 			c.started = true
+			if en.Kind == QueueKindAction {
+				doneActions[en.ID] = true
+			}
 			startedBy[en.Kind+":"+en.ID] = started
 			sim.free[started]--
 		}
@@ -255,7 +310,7 @@ func (e *Engine) planQueue(q queueSlots, entries []QueueEntry) ([]PlanNode, map[
 			if len(a.skips) >= maxPlanSkipped && len(cs) > maxPlanSkipped {
 				n.SkippedTruncated = true
 			}
-			n.WhyNone = planWhyNone(w.Name, a.state, entries)
+			n.WhyNone = planWhyNone(w.Name, a.state, !e.workerPaused(w.Name) && e.planRoomHold(q.placer.ctx, w) == "paused", entries)
 		}
 		nodes[ni] = n
 	}
@@ -269,32 +324,40 @@ func (e *Engine) waiterStale(w store.TranscodeQueueWaiterRow) bool {
 	return err == nil && e.now().Sub(updated) > slotWaiterStaleAfter
 }
 
-// queuedItemGatedInPlan applies the rule a batch uses before it starts a
-// queued item (queuedItemGated): not while a conversion of another batch, or
-// one of its own batch that is ahead, still waits for a slot. The conversions
-// that already got a node in the walk wait no longer.
-func queuedItemGatedInPlan(cs []queueContender, entries []QueueEntry, i int) bool {
-	var foreign []string
-	hasWaiting := false
-	firstWaiting := ""
-	for j := range cs {
-		c := &cs[j]
-		if c.kind != QueueKindAction || c.held || c.stale || c.started || entries[j].waiter == nil {
-			continue
-		}
-		// Only those that contend for a slot: not one a node's window holds.
-		if cond := entries[j].waiter.WaitingCondition; cond != "worker_busy" && cond != "" {
-			continue
-		}
-		if entries[j].BatchID == entries[i].BatchID {
-			if !hasWaiting || c.key < firstWaiting {
-				hasWaiting, firstWaiting = true, c.key
+// planGates reads, once per batch, what decides whether its queued items may
+// start (batchSlotGate, the batch's own dispatch rule), and asks it again as
+// the walk gives conversions their nodes.
+type planGates struct {
+	e       *Engine
+	byBatch map[string]*planGate
+}
+
+type planGate struct {
+	items []store.TranscodeBatchItem
+	keys  map[int64]string
+	ok    bool
+}
+
+// gated says whether the batch would not start the queued item with this key
+// now. A batch that cannot be read starts nothing, as in dispatch.
+func (g *planGates) gated(batchID, key string, done map[string]bool) bool {
+	pg, have := g.byBatch[batchID]
+	if !have {
+		pg = &planGate{}
+		g.byBatch[batchID] = pg
+		if items, err := g.e.deps.Store.ListTranscodeBatchItems(batchID); err == nil {
+			if view, ok := g.e.withoutHeldItems(batchID, items); ok {
+				if keys, ok := g.e.batchItemKeys(batchID, view); ok {
+					pg.items, pg.keys, pg.ok = view, keys, true
+				}
 			}
-			continue
 		}
-		foreign = append(foreign, c.key)
 	}
-	return queuedItemGated(cs[i].key, foreign, hasWaiting, firstWaiting)
+	if !pg.ok {
+		return true
+	}
+	gate, ok := g.e.batchSlotGate(batchID, pg.items, pg.keys, true, done)
+	return !ok || gate.blocks(key)
 }
 
 // queuedItemGated says whether a batch must not start the queued item with
@@ -330,6 +393,8 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 	switch {
 	case c.held && en.HeldBy == "batch":
 		return PlanReason{ReasonBatchHeld, "Its batch is on hold; it keeps its place and starts after the batch is released."}
+	case c.stale:
+		return PlanReason{ReasonNotPolling, "Nothing has polled it for a long time, so it is not waiting for a slot and holds no one back; look at the conversion itself to see what keeps it."}
 	case c.held:
 		return PlanReason{ReasonHeld, "Held by the operator; it keeps its place and starts after it is released."}
 	case gated:
@@ -342,26 +407,33 @@ func (e *Engine) planPairReason(sim queueSlots, c *queueContender, en QueueEntry
 		switch {
 		case e.workerPaused(w.Name):
 			return PlanReason{ReasonNodePaused, "Node " + w.Name + " is paused and takes nothing new."}
+		case e.planRoomHold(sim.placer.ctx, w) == "paused":
+			return PlanReason{ReasonNodeOnHold, "Node " + w.Name + " reports that it is on hold and takes nothing new."}
 		case e.workerWindowClosed(w.Name):
 			return PlanReason{windowWaitCondition, "Node " + w.Name + "'s availability window has closed; it takes nothing new."}
 		}
 		return PlanReason{ReasonNoFreeSlot, "Every video slot on node " + w.Name + " is in use."}
 	}
 	if !dec.Within[w.Name] {
-		return PlanReason{ReasonSlotTakenAhead, fmt.Sprintf("%d conversion(s) ahead of it can use the free slot(s) on node %s and take them first.", dec.Ahead, w.Name)}
+		return PlanReason{ReasonSlotTakenAhead, fmt.Sprintf("%d conversion(s) ahead of it in the queue need the free slots it could use, so they go first.", dec.Ahead)}
 	}
 	return PlanReason{ReasonStartsElsewhere, "It starts on node " + dec.Node + " instead."}
 }
 
 // planWhyNone says why nothing would start on the node.
-func planWhyNone(node, state string, entries []QueueEntry) *PlanReason {
+func planWhyNone(node, state string, hold bool, entries []QueueEntry) *PlanReason {
 	if len(entries) == 0 {
 		return &PlanReason{ReasonQueueEmpty, "Nothing is waiting in the transcode queue."}
 	}
 	switch state {
 	case NodeOffline:
 		return &PlanReason{ReasonNodeOffline, "Node " + node + " is not ready (offline or failing its checks), so it takes nothing new."}
+	case NodeUnknown:
+		return &PlanReason{ReasonNodeUnknown, "Node " + node + " has sent no recent report, so nothing is said about it until it does."}
 	case NodePaused:
+		if hold {
+			return &PlanReason{ReasonNodeOnHold, "Node " + node + " reports that it is on hold and takes nothing new."}
+		}
 		return &PlanReason{ReasonNodePaused, "Node " + node + " is paused and takes nothing new."}
 	case NodeClosed:
 		return &PlanReason{windowWaitCondition, "Node " + node + "'s availability window has closed; it takes nothing new until the window changes."}

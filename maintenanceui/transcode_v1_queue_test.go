@@ -1,6 +1,7 @@
 package maintenanceui
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -339,5 +340,75 @@ func TestTranscodeV1QueueNextExplainsEachNode(t *testing.T) {
 	// The route needs the key like every v1 route.
 	if c, e := get(t, h, "/transcode/v1/queue/next", nil); c != 401 || e["code"] != "unauthorized" {
 		t.Fatal(c, e)
+	}
+}
+
+// What would start carries its path, media type and batch, and an item is named
+// by its number; why_none and skipped carry the endpoint that would change them.
+func TestTranscodeV1QueueNextNamesWhatStartsAndTheItem(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WorkerObservation(context.Background())
+	seedWaiter(t, st, "c-held", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	seedWaiter(t, st, "c-go", "1|2026-01-01T00:00:02Z|g|00000000000000000002", "/media/Example Show S01E02.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-held/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	next, _ := node["next"].(map[string]any)
+	if next == nil {
+		t.Fatalf("nothing would start: %v", node)
+	}
+	ref := next["ref"].(map[string]any)
+	if ref["kind"] != "action" || ref["id"] != "c-go" || next["position"] != float64(2) ||
+		next["path"] != "/media/Example Show S01E02.mkv" || next["media_type"] != "episode" {
+		t.Fatalf("next: %v", next)
+	}
+	if _, has := node["why_none"]; has && node["why_none"] != nil {
+		t.Fatalf("why_none beside a next: %v", node["why_none"])
+	}
+	sk := node["skipped"].([]any)[0].(map[string]any)
+	if sk["reason_code"] != "held" || !strings.Contains(sk["reason"].(string), "/release") {
+		t.Fatalf("skipped: %v", sk)
+	}
+
+}
+
+// A queued batch item that would start is named by its number and carries its batch.
+func TestTranscodeV1QueueNextNamesABatchItem(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WorkerObservation(context.Background())
+	seedOperation(t, st, "batch-q", "transcode_batch", "waiting_external", nil, nil, map[string]any{})
+	if err := st.CreateTranscodeBatchItem(store.TranscodeBatchItem{BatchID: "batch-q", ItemKey: "k1", FilePath: "/media/Example Show S01E03.mkv", Status: "queued"}); err != nil {
+		t.Fatal(err)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	next, _ := node["next"].(map[string]any)
+	if next == nil {
+		t.Fatalf("the item would not start: %v", node)
+	}
+	ref := next["ref"].(map[string]any)
+	if _, isNum := ref["id"].(float64); !isNum || ref["kind"] != "item" || next["batch_id"] != "batch-q" ||
+		next["path"] != "/media/Example Show S01E03.mkv" {
+		t.Fatalf("next: %v", next)
+	}
+}
+
+func TestTranscodeV1QueueNextWhyNoneSaysAllHeld(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	s.engine.WorkerObservation(context.Background())
+	seedWaiter(t, st, "c-a", "1|2026-01-01T00:00:01Z|g|00000000000000000001", "/media/Example Show S01E01.mkv", map[string]any{"submitted_source_bytes": 1 << 30})
+	if c, out := postQ(t, h, "/transcode/v1/queue/actions/c-a/hold", `{}`); c != 200 {
+		t.Fatal(c, out)
+	}
+	_, plan := get(t, h, "/transcode/v1/queue/next", keyHdr())
+	node := plan["nodes"].([]any)[0].(map[string]any)
+	why, _ := node["why_none"].(map[string]any)
+	if node["next"] != nil || why["code"] != "all_held" || why["reason"] == "" {
+		t.Fatalf("why_none: %v", node)
 	}
 }

@@ -244,6 +244,10 @@ func planHint(code, kind, id, batchID, node string) string {
 		if batchID != "" {
 			return " Release the batch with POST " + b + "/queue/batches/" + batchID + "/release."
 		}
+	case action.ReasonNotPolling:
+		if kind == action.QueueKindAction {
+			return " See GET " + b + "/actions/" + id + "."
+		}
 	case action.ReasonNodePaused:
 		return " Resume the node with DELETE " + b + "/pauses/" + node + "."
 	case action.ReasonBatchGating, action.ReasonSlotTakenAhead:

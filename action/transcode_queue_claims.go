@@ -129,7 +129,10 @@ type placer struct {
 	ctx     context.Context
 	workers []transcode.NamedWorker
 	ready   []bool
-	elig    map[transcode.RoomNeed][]bool
+	// unreported marks a node the queue plan has no recent report of: it is not
+	// ready for the plan, and says so rather than offline.
+	unreported []bool
+	elig       map[transcode.RoomNeed][]bool
 	// windows are the nodes' availability windows, read once on first use; an
 	// error closes every node (fail closed).
 	winRead bool
@@ -179,6 +182,8 @@ func (pl *placer) verdictAt(p placement, i int, explain bool) (code, reason stri
 	switch {
 	case p.sizeUnknown:
 		return ReasonSizeUnknown, "its source size could not be read yet; it is checked again shortly"
+	case !pl.ready[i] && i < len(pl.unreported) && pl.unreported[i]:
+		return ReasonNodeUnknown, "node " + w.Name + " has sent no recent report, so nothing is said about it until it does"
 	case !pl.ready[i]:
 		return ReasonNodeOffline, "node " + w.Name + " is not ready (offline or failing its checks)"
 	case !pl.eligible(p.need)[i]:
@@ -199,18 +204,23 @@ func (pl *placer) verdictAt(p placement, i int, explain bool) (code, reason stri
 func (pl *placer) roomVerdict(need transcode.RoomNeed, i int) (code, reason string) {
 	w := pl.workers[i]
 	r := pl.e.roomOf(pl.ctx, pl.workers[i:i+1])[0]
-	verdict, offered := r.Judge(needOn(need, w), pl.e.now())
+	// What this node would need: its own reserve and budget, not the fleet's.
+	n := needOn(need, w)
+	verdict, offered := r.Judge(n, pl.e.now())
 	switch verdict {
 	case transcode.RoomPaused:
-		return ReasonNodePaused, "node " + w.Name + " is paused"
+		if pl.e.workerPaused(w.Name) {
+			return ReasonNodePaused, "node " + w.Name + " is paused"
+		}
+		return ReasonNodeOnHold, "node " + w.Name + " reports that it is on hold and takes nothing new"
 	case transcode.RoomBuild:
 		return ReasonNodeBuild, "a build is running on node " + w.Name
 	case transcode.RoomApprovals:
-		return ReasonApprovalRoom, fmt.Sprintf("node %s is holding candidates for approval and has %s of its budget left; it needs %s", w.Name, gbText(offered), gbText(need.ReserveBytes))
+		return ReasonApprovalRoom, fmt.Sprintf("node %s is holding candidates for approval and has %s of its budget left; it needs %s", w.Name, gbText(offered), gbText(n.ReserveBytes))
 	case transcode.RoomNoSpace:
-		return ReasonNoDiskRoom, fmt.Sprintf("node %s has %s of disk room; it needs %s", w.Name, gbText(offered), gbText(need.SourceBytes+need.ReserveBytes))
+		return ReasonNoDiskRoom, fmt.Sprintf("node %s has %s of disk room; it needs %s", w.Name, gbText(offered), gbText(n.SourceBytes+n.ReserveBytes))
 	case transcode.RoomNever:
-		return ReasonTooBig, fmt.Sprintf("it needs %s, more than node %s can ever hold", gbText(need.SourceBytes+need.ReserveBytes), w.Name)
+		return ReasonTooBig, fmt.Sprintf("it needs %s, more than node %s can ever hold", gbText(n.SourceBytes+n.ReserveBytes), w.Name)
 	}
 	return ReasonNoDiskRoom, "node " + w.Name + " reports no room for it"
 }

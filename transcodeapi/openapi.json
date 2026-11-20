@@ -3196,7 +3196,8 @@
                               "busy",
                               "paused",
                               "closed",
-                              "offline"
+                              "offline",
+                              "unknown"
                             ],
                             "description": "ready: a free slot; busy: every slot in use; paused: the node is paused; closed: its availability window has closed; offline: not ready."
                           },
@@ -3283,7 +3284,7 @@
                                 "properties": {
                                   "code": {
                                     "type": "string",
-                                    "description": "Machine code: held, batch_held, batch_gating, size_unknown, node_offline, node_paused, node_build, no_disk_room, waiting_for_approvals, too_big_for_node, recently_refused, no_free_slot, slot_taken_ahead, starts_elsewhere, node_window, media_type_not_allowed, would_not_fit_window, no_duration_estimate, no_encode_history, window_unreadable, queue_empty, all_held or nothing_eligible."
+                                    "description": "Machine code: held, batch_held, batch_gating, size_unknown, node_offline, node_paused, node_on_hold, node_unknown, not_polling, node_build, no_disk_room, waiting_for_approvals, too_big_for_node, recently_refused, no_free_slot, slot_taken_ahead, starts_elsewhere, node_window, media_type_not_allowed, would_not_fit_window, no_duration_estimate, no_encode_history, window_unreadable, queue_empty, all_held or nothing_eligible."
                                   },
                                   "reason": {
                                     "type": "string",

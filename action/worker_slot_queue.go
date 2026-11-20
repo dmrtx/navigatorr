@@ -240,15 +240,27 @@ func clearWaitingForWorker(ec *ExecutionContext) {
 // does not know which worker its next child will be assigned. ok is false when
 // the waiters or their marks could not be read.
 func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) {
+	ws, ok := e.foreignSlotWaiters(batchID)
+	for _, w := range ws {
+		keys = append(keys, w.key)
+	}
+	return keys, ok
+}
+
+// slotWaiterKey is a waiter of another batch and its place in the queue.
+type slotWaiterKey struct{ id, key string }
+
+// foreignSlotWaiters is foreignSlotWaiterKeys with the id of each waiter.
+func (e *Engine) foreignSlotWaiters(batchID string) (waiters []slotWaiterKey, ok bool) {
 	if e.deps.Store == nil {
 		return nil, true
 	}
-	waiters, err := e.workerSlotWaiters()
+	all, err := e.workerSlotWaiters()
 	if err != nil {
 		log.Printf("worker slot queue: listing waiters for batch %s: %v (scheduling nothing new)", batchID, err)
 		return nil, false
 	}
-	for _, w := range waiters {
+	for _, w := range all {
 		if w.parentID == batchID {
 			continue
 		}
@@ -270,9 +282,50 @@ func (e *Engine) foreignSlotWaiterKeys(batchID string) (keys []string, ok bool) 
 		// A waiter with no queue key (key "") counts as ahead of every item on
 		// purpose: nothing can say it is behind, so it keeps the conservative
 		// behaviour the batch had before items could be moved.
-		keys = append(keys, key)
+		waiters = append(waiters, slotWaiterKey{w.id, key})
 	}
-	return keys, true
+	return waiters, true
+}
+
+// batchGate is what holds back a batch's queued items: the place of its first
+// child that waits for a slot, and the waiters of other batches.
+type batchGate struct {
+	hasWaiting   bool
+	firstWaiting string
+	foreign      []string
+}
+
+func (g batchGate) blocks(key string) bool {
+	return queuedItemGated(key, g.foreign, g.hasWaiting, g.firstWaiting)
+}
+
+// batchSlotGate reads the gate of a batch (slotFairPending and the queue plan
+// both use it). The other batches' waiters are read only when needForeign.
+// done are the ids of conversions that already got a worker in a simulation
+// (the plan): they wait no longer, so they count in neither list. ok is false
+// when the waiters or their marks could not be read.
+func (e *Engine) batchSlotGate(batchID string, items []store.TranscodeBatchItem, keys map[int64]string, needForeign bool, done map[string]bool) (batchGate, bool) {
+	var g batchGate
+	for _, it := range items {
+		if it.Status != "waiting_for_slot" || (it.ChildActionID != "" && done[it.ChildActionID]) {
+			continue
+		}
+		if k := keys[it.ID]; !g.hasWaiting || k < g.firstWaiting {
+			g.hasWaiting, g.firstWaiting = true, k
+		}
+	}
+	if needForeign {
+		ws, ok := e.foreignSlotWaiters(batchID)
+		if !ok {
+			return batchGate{}, false
+		}
+		for _, w := range ws {
+			if !done[w.id] {
+				g.foreign = append(g.foreign, w.key)
+			}
+		}
+	}
+	return g, true
 }
 
 // slotFairPending narrows a batch's dispatch candidates to what it may start
@@ -301,28 +354,19 @@ func (e *Engine) slotFairPending(ctx context.Context, batchID string, items []st
 	}
 	sortByQueueKey(items, pending, keys)
 	hasQueued := false
-	hasWaiting := false
-	firstWaiting := ""
 	for _, it := range items {
-		switch it.Status {
-		case "queued":
+		if it.Status == "queued" {
 			hasQueued = true
-		case "waiting_for_slot":
-			if k := keys[it.ID]; !hasWaiting || k < firstWaiting {
-				hasWaiting, firstWaiting = true, k
-			}
 		}
 	}
-	var foreign []string
-	if hasQueued {
-		if foreign, ok = e.foreignSlotWaiterKeys(batchID); !ok {
-			return nil, false
-		}
+	gate, ok := e.batchSlotGate(batchID, items, keys, hasQueued, nil)
+	if !ok {
+		return nil, false
 	}
 	out := make([]int, 0, len(pending))
 	for _, idx := range pending {
 		it := items[idx]
-		if it.Status == "queued" && queuedItemGated(keys[it.ID], foreign, hasWaiting, firstWaiting) {
+		if it.Status == "queued" && gate.blocks(keys[it.ID]) {
 			continue
 		}
 		if it.Status == "waiting_for_slot" && e.slotWaitNotDue(ctx, it.ChildActionID) {

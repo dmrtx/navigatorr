@@ -122,6 +122,14 @@ func (e *Engine) workerVideoCapacity(ctx context.Context, w transcode.NamedWorke
 	return 1
 }
 
+// workerPoolAt is when the pool of the worker was last read (zero: never).
+func (e *Engine) workerPoolAt(name string) time.Time {
+	st := e.workerStateFor(name)
+	st.poolMu.Lock()
+	defer st.poolMu.Unlock()
+	return st.pool.at
+}
+
 // workerVideoPool is the video pool the worker last reported, re-read at most
 // every workerPoolTTL. A failed read keeps the last value.
 func (e *Engine) workerVideoPool(ctx context.Context, w transcode.NamedWorker) int {
