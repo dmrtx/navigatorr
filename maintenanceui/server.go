@@ -65,6 +65,7 @@ type Server struct {
 	hasTranscodeToken  bool
 	// nodes is the build registry the builds routes serve (see SetNodes).
 	nodes       *nodes.Service
+	legacy      http.Handler // nodes.LegacyHandler of nodes
 	mu          sync.Mutex
 	sessions    map[string]time.Time
 	folderSizes folderSizeCache
@@ -220,13 +221,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/maintenance/worker-drain", s.workerDrain)
 	mux.HandleFunc("GET /api/maintenance/worker-pause", s.workerPause)
 	mux.HandleFunc("POST /api/maintenance/worker-pause", s.workerPause)
-	mux.HandleFunc("GET "+buildsPath, s.withNodes(s.buildsRoot))
-	mux.HandleFunc("POST "+buildsPath, s.withNodes(s.buildsRoot))
-	mux.HandleFunc("GET "+buildsPath+"/nodes", s.buildsNodes)
-	mux.HandleFunc("GET "+buildsPath+"/{id}", s.withNodes(s.buildOne))
-	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.withNodes(s.buildHeartbeat))
-	mux.HandleFunc("GET "+buildsPath+"/{id}/log", s.withNodes(s.buildLog))
-	mux.HandleFunc("POST "+buildsPath+"/{id}/finish", s.withNodes(s.buildFinish))
+	mux.HandleFunc("GET "+buildsPath, s.legacyBuilds)
+	mux.HandleFunc("POST "+buildsPath, s.legacyBuilds)
+	mux.HandleFunc("GET "+buildsPath+"/nodes", s.legacyBuilds)
+	mux.HandleFunc("GET "+buildsPath+"/{id}", s.legacyBuilds)
+	mux.HandleFunc("POST "+buildsPath+"/{id}/heartbeat", s.legacyBuilds)
+	mux.HandleFunc("GET "+buildsPath+"/{id}/log", s.legacyBuilds)
+	mux.HandleFunc("POST "+buildsPath+"/{id}/finish", s.legacyBuilds)
 	// The successor API and its spec (see package nodes).
 	mux.Handle("GET "+nodes.SpecPath, nodes.SpecHandler())
 	mux.HandleFunc(nodes.BasePath+"/", s.nodesAPI)
