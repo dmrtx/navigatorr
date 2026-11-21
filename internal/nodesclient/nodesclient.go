@@ -222,8 +222,14 @@ func (c *Client) Close() { c.tr.CloseIdleConnections() }
 // NodeBuildRecords is the node's running builds as Nodes lists them, oldest
 // first as Nodes sends them. Empty when the registry cannot be read.
 func (c *Client) NodeBuildRecords(node string) []Build {
-	out, _ := c.nodeBuildRecords(context.Background(), node)
+	out, _ := c.ListNodeBuildRecords(node)
 	return out
+}
+
+// ListNodeBuildRecords is NodeBuildRecords with the read error: ErrUnavailable
+// when the registry cannot be read, so a caller can tell that from no builds.
+func (c *Client) ListNodeBuildRecords(node string) ([]Build, error) {
+	return c.nodeBuildRecords(context.Background(), node)
 }
 
 func (c *Client) nodeBuildRecords(ctx context.Context, node string) ([]Build, error) {

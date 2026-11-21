@@ -123,15 +123,26 @@ func unavailable(err error) error {
 }
 
 func (r remote) NodeBuildRecords(node string) []transcode.NodeBuild {
+	out, _ := r.ListNodeBuildRecords(node)
+	return out
+}
+
+// ListNodeBuildRecords is action.BuildRecordsLister: the list with the read
+// error, so the engine shows a list it could not read as unavailable.
+func (r remote) ListNodeBuildRecords(node string) ([]transcode.NodeBuild, error) {
+	builds, err := r.c.ListNodeBuildRecords(node)
+	if err != nil {
+		return nil, unavailable(err)
+	}
 	var out []transcode.NodeBuild
-	for _, b := range r.c.NodeBuildRecords(node) {
+	for _, b := range builds {
 		out = append(out, transcode.NodeBuild{
 			ID: b.ID, Source: b.Source, Holder: b.Holder, Kind: b.Kind, Title: b.Title,
 			PreemptMode: b.PreemptMode, Priority: b.Priority, Status: b.Status, StartedAt: b.StartedAt,
 			Progress: b.Progress, CreatedAt: b.CreatedAt, LastHeartbeatAt: b.LastHeartbeatAt, ExpiresAt: b.ExpiresAt,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func (r remote) BuildsPauses() (map[string]string, error) {

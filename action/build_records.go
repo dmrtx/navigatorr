@@ -56,6 +56,15 @@ type BuildRecords interface {
 	BuildsPaused(node string) (bool, error)
 }
 
+// BuildRecordsLister is a BuildRecords whose list read can fail, as a registry
+// in another process can. The engine uses it, when there, to tell an empty
+// list from one it could not read.
+type BuildRecordsLister interface {
+	// ListNodeBuildRecords is NodeBuildRecords with the read error
+	// (ErrBuildRecordsUnavailable, wrapped, when the registry cannot be read).
+	ListNodeBuildRecords(node string) ([]transcode.NodeBuild, error)
+}
+
 // ErrBuildRecordsUnavailable is what a BuildRecords returns (wrapped, so test it
 // with errors.Is) when the registry cannot be read at all, as a registry that
 // runs in another process can be. The engine shows it as "builds registry
@@ -146,11 +155,28 @@ func (e *Engine) buildsPauses() (m map[string]string, unreadable, unavailable bo
 // for the registry's view of it (the UI). It is a record read only: nothing in
 // the engine decides on it.
 func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
+	builds, _ := e.NodeBuildRecordsState(node)
+	return builds
+}
+
+// NodeBuildRecordsState is NodeBuildRecords with the unavailable flag: true
+// when the registry could not be read, so the empty list is not "no builds".
+// Callers that show a builds pause beside the list show it as unavailable too,
+// whatever a separate pause read said: the two reads are not one snapshot.
+func (e *Engine) NodeBuildRecordsState(node string) ([]transcode.NodeBuild, bool) {
 	records := e.buildRecords()
 	if records == nil {
-		return nil
+		return nil, false
 	}
-	return records.NodeBuildRecords(node)
+	lister, ok := records.(BuildRecordsLister)
+	if !ok {
+		return records.NodeBuildRecords(node), false
+	}
+	builds, err := lister.ListNodeBuildRecords(node)
+	if errors.Is(err, ErrBuildRecordsUnavailable) {
+		return nil, true
+	}
+	return builds, false
 }
 
 // RunningLeases is how many build leases the node's worker reports running,
@@ -201,7 +227,11 @@ func (e *Engine) runningLeaseMode(node string) string {
 func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
 	for name, st := range statuses {
 		st = e.applyLeaseHold(name, st)
-		st.Builds = e.NodeBuildRecords(name)
+		var unavailable bool
+		st.Builds, unavailable = e.NodeBuildRecordsState(name)
+		if unavailable {
+			st.BuildsPaused, st.BuildsUnavailable = false, true
+		}
 		statuses[name] = st
 	}
 	return statuses

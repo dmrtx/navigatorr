@@ -40,6 +40,7 @@ type fakeRecords struct {
 	pauses     map[string]string                // node -> since
 	failing    error                            // makes the pause reads fail
 	failOnList error                            // set as failing by the first list read (the registry dies mid-observation)
+	listFail   error                            // fails the next list read only (the registry is back for the pause read)
 	seq        int
 }
 
@@ -55,6 +56,19 @@ func (f *fakeRecords) NodeBuildRecords(node string) []transcode.NodeBuild {
 		return nil
 	}
 	return append([]transcode.NodeBuild(nil), f.builds[node]...)
+}
+
+// ListNodeBuildRecords makes the fake a BuildRecordsLister, like the remote
+// registry.
+func (f *fakeRecords) ListNodeBuildRecords(node string) ([]transcode.NodeBuild, error) {
+	f.mu.Lock()
+	if err := f.listFail; err != nil {
+		f.listFail = nil
+		f.mu.Unlock()
+		return nil, err
+	}
+	f.mu.Unlock()
+	return f.NodeBuildRecords(node), nil
 }
 
 func (f *fakeRecords) BuildsPauses() (map[string]string, error) {
@@ -310,6 +324,40 @@ func TestRegistryLostMidObservationReadsAsUnavailable(t *testing.T) {
 	for _, w := range obs.Workers {
 		if !w.BuildsUnavailable {
 			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+}
+
+// A list read that failed shows as unavailable even when the registry answers
+// the pause read that follows (a write in between cleared the client's
+// backoff): the failed list is never "no builds" beside a known pause.
+func TestFailedListReadsAsUnavailableWhenThePausesAnswer(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m1", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	unavail := fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+
+	records(e).listFail = unavail
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if !w.BuildsUnavailable || w.BuildsPaused {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+
+	records(e).listFail = unavail
+	st := e.AttachNodeBuilds(e.NodePauseStatuses(context.Background()))["m1"]
+	if !st.BuildsUnavailable || st.BuildsPaused || len(st.Builds) != 0 {
+		t.Fatalf("attached: %+v", st)
+	}
+
+	obs = e.WorkerObservation(context.Background())
+	for _, w := range obs.Workers {
+		if w.Name == "m1" && (w.BuildsUnavailable || !w.BuildsPaused || len(w.Builds) != 1) {
+			t.Fatalf("recovered m1: %+v", w)
 		}
 	}
 }

@@ -537,6 +537,45 @@ func TestAnOldFlightReturnsTheCurrentSnapshot(t *testing.T) {
 	}
 }
 
+// An old flight that succeeds after a newer one set the backoff keeps to the
+// backoff and stores nothing: its answer is older than the failure.
+func TestAnOldFlightHonoursABackoffSetMidFlight(t *testing.T) {
+	f := newFixture(t, serveJSON(twoNodes), nil)
+	f.c.mu.Lock()
+	gen := f.c.gen
+	f.c.mu.Unlock()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	inner := serveJSON(twoNodes)
+	f.h.Store(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		inner.ServeHTTP(w, r) // the old flight succeeds
+	}))
+	type res struct {
+		v   any
+		err error
+	}
+	done := make(chan res, 1)
+	go func() { v, err := f.c.fetch(gen); done <- res{v, err} }()
+	<-entered
+	f.c.mu.Lock()
+	f.c.gen++
+	f.c.failUntil = f.clock.Now().Add(time.Second)
+	f.c.mu.Unlock()
+	close(release)
+	r := <-done
+	if !errors.Is(r.err, ErrUnavailable) {
+		t.Fatalf("old flight returned %v, %v", r.v, r.err)
+	}
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	if f.c.snap != nil {
+		t.Fatal("the old flight stored its snapshot")
+	}
+}
+
 // A flight that starts after another of the same generation stored a fresh
 // snapshot uses it instead of asking Nodes again.
 func TestALateFlightUsesTheFreshSnapshot(t *testing.T) {

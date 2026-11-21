@@ -62,7 +62,7 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 	// The builds running or waiting on this node, so the activity view can say why it is busy.
 	// This is the registry's view (the build records); the node's worker is
 	// what actually holds the node for them.
-	builds := s.engine.NodeBuildRecords(name)
+	builds, listUnavailable := s.engine.NodeBuildRecordsState(name)
 	if len(builds) > 0 {
 		state["builds"] = builds
 	}
@@ -79,7 +79,7 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 	// When the registry runs in another process that does not answer, nothing
 	// is known: neither paused nor not paused, and the empty build list above
 	// is not "no builds". The page says so.
-	if paused, unavailable := s.engine.NodeBuildsState(name); unavailable {
+	if paused, unavailable := s.engine.NodeBuildsState(name); unavailable || listUnavailable {
 		state["builds_unavailable"] = true
 	} else if paused {
 		state["builds_paused"] = true

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -108,7 +109,13 @@ func TestRemoteRecordsEndToEnd(t *testing.T) {
 // With Nodes gone, the pause reads fail with an error the engine recognises,
 // and the build list is empty.
 func TestRemoteRecordsUnavailable(t *testing.T) {
-	c, err := nodesclient.New(nodesclient.Options{BaseURL: "http://127.0.0.1:1", Key: remoteTestKey})
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := "http://" + ln.Addr().String()
+	ln.Close()
+	c, err := nodesclient.New(nodesclient.Options{BaseURL: closed, Key: remoteTestKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,5 +129,8 @@ func TestRemoteRecordsUnavailable(t *testing.T) {
 	}
 	if _, err := r.BuildsPauses(); !errors.Is(err, action.ErrBuildRecordsUnavailable) {
 		t.Fatalf("BuildsPauses: %v", err)
+	}
+	if _, err := r.(action.BuildRecordsLister).ListNodeBuildRecords("nodeA"); !errors.Is(err, action.ErrBuildRecordsUnavailable) {
+		t.Fatalf("ListNodeBuildRecords: %v", err)
 	}
 }

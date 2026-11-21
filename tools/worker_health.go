@@ -73,7 +73,7 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 			case err != nil:
 				return mcp.NewToolResultError("builds pause not saved: " + err.Error()), nil
 			}
-			status.Builds = engine.NodeBuildRecords(status.Node)
+			status = withBuildRecords(engine, status)
 			statuses = []transcode.NodePauseStatus{status}
 		case hasMode && mode != "" && node == "":
 			return mcp.NewToolResultError("mode needs a node: send node and mode"), nil
@@ -97,7 +97,7 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 			case err != nil:
 				return mcp.NewToolResultError("node pause not saved: " + err.Error()), nil
 			}
-			status.Builds = engine.NodeBuildRecords(status.Node)
+			status = withBuildRecords(engine, status)
 			statuses = []transcode.NodePauseStatus{status}
 		default:
 			all := engine.AttachNodeBuilds(engine.NodePauseStatuses(ctx))
@@ -117,4 +117,16 @@ func registerWorkerPause(s *server.MCPServer, engine *action.Engine) {
 		}
 		return mcp.NewToolResultText(string(data)), nil
 	})
+}
+
+// withBuildRecords adds the node's build records to its status; a list the
+// registry could not read shows the builds pause as unavailable, not as an
+// empty list beside a known pause.
+func withBuildRecords(engine *action.Engine, status transcode.NodePauseStatus) transcode.NodePauseStatus {
+	builds, unavailable := engine.NodeBuildRecordsState(status.Node)
+	status.Builds = builds
+	if unavailable {
+		status.BuildsPaused, status.BuildsUnavailable = false, true
+	}
+	return status
 }
