@@ -653,3 +653,121 @@ func TestActionList_OneHundredTranscodesRemainBounded(t *testing.T) {
 	}
 	t.Logf("100 transcode actions fit in %d bytes", len(response))
 }
+
+// A finished conversion carries kilobytes of search evidence (stages,
+// verification, windows) and per-phase costs. The list keeps only the verdict
+// so a full page of them fits; action_status still returns the evidence.
+func TestActionList_FinishedTranscodesKeepOnlyTheVerdict(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "finished_list.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	engine := action.NewEngine(action.EngineDeps{Store: st})
+	s := server.NewMCPServer("navigatorr-test", "1.0.0", server.WithToolCapabilities(true))
+	registerActionTools(s, engine)
+
+	stages := make([]map[string]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		candidates := make([]string, 0, 10)
+		for c := 0; c < 10; c++ {
+			candidates = append(candidates, fmt.Sprintf("libx265-crf%02d-preset-slow-stage%02d", 18+c, i))
+		}
+		stages = append(stages, map[string]any{"stage": fmt.Sprintf("stage-%02d", i), "candidates": candidates, "outcome": "measured"})
+	}
+	costs := map[string]any{}
+	for _, phase := range []string{"worker_encode", "worker_validation", "coordinator_inventory", "worker_samples"} {
+		costs[phase] = map[string]any{"duration_ms": 900000, "attempts": 1, "active_compute_ms": 7000000, "nas_read_bytes": 123456789, "provenance": "worker_measured", "timing_scope": "phase_wall; phases may overlap"}
+	}
+	state, err := json.Marshal(map[string]any{
+		"automatic_search":   map[string]any{"stages": stages, "verified_samples": 7},
+		"benchmark_decision": map[string]any{"winner": map[string]any{"video_codec": "hevc_videotoolbox"}},
+		"phase_costs":        costs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for i := 0; i < 100; i++ {
+		if err := st.CreateActionInstance(store.ActionInstance{
+			ID: fmt.Sprintf("act-finished-%08d", i), ActionName: "transcode_media",
+			Status: action.StatusCompleted, CurrentStep: 5,
+			InputsJSON: `{"mode":"size","path":"/media/show/episode.mkv"}`, OutputsJSON: string(state), StateJSON: string(state),
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	later := time.Now().UTC().Add(time.Minute).Format(time.RFC3339) // newest, so first in the list
+	if err := st.CreateActionInstance(store.ActionInstance{
+		ID: "act-batch", ActionName: "transcode_batch", Status: action.StatusCompleted, CurrentStep: 3,
+		InputsJSON: `{}`, OutputsJSON: string(state), StateJSON: string(state), CreatedAt: later, UpdatedAt: later,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	full := resultText(t, callTool(t, s, "action_status", map[string]any{"id": "act-finished-00000000"}))
+	if !strings.Contains(full, "stage-11") || !strings.Contains(full, "phase_costs") {
+		t.Fatalf("action_status must keep the evidence and phase costs: %.400s", full)
+	}
+
+	batchRows := resultText(t, callTool(t, s, "action_list", map[string]any{"limit": "1", "offset": "0"}))
+	if !strings.Contains(batchRows, "act-batch") || strings.Contains(batchRows, "phase_costs") {
+		t.Fatalf("no list item carries phase costs, a batch included: %s", batchRows)
+	}
+
+	response := resultText(t, callTool(t, s, "action_list", map[string]any{"limit": "100", "offset": "1"}))
+	if len(response) >= MaxActionResponseBytes {
+		t.Fatalf("page of finished conversions exceeds the budget: %d bytes", len(response))
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(response), &rows); err != nil {
+		t.Fatalf("expected an array of actions, not an overflow note: %v; %.300s", err, response)
+	}
+	if len(rows) != 100 {
+		t.Fatalf("got %d actions, want 100", len(rows))
+	}
+	for _, row := range rows {
+		if _, exists := row["phase_costs"]; exists {
+			t.Fatalf("phase costs belong in action_status: %+v", row)
+		}
+		if row["action_name"] != "transcode_media" {
+			continue
+		}
+		tr, _ := row["transcode"].(map[string]any)
+		outcome, _ := tr["outcome"].(string)
+		message, _ := tr["message"].(string)
+		if tr["goal"] != "size" || outcome == "" || message == "" || tr["tested_candidates"] != float64(120) || tr["verified_samples"] != float64(7) || tr["encoder"] != "hevc_videotoolbox" || tr["hardware"] != true {
+			t.Fatalf("list lost the transcode verdict: %+v", tr)
+		}
+		if _, exists := tr["stages"]; exists {
+			t.Fatalf("search stages belong in action_status: %+v", tr)
+		}
+	}
+	t.Logf("100 finished conversions fit in %d bytes", len(response))
+}
+
+// toolBoundedJSON answers with compact JSON when only that fits, and with the
+// overflow note when neither form fits.
+func TestToolBoundedJSONFallsBackToCompactBeforeRefusing(t *testing.T) {
+	rows := make([]map[string]any, 40)
+	for i := range rows {
+		rows[i] = map[string]any{"id": fmt.Sprintf("act-%03d", i), "status": "completed", "nested": map[string]any{"goal": "size", "outcome": "completed"}}
+	}
+	indented, _ := json.MarshalIndent(rows, "", "  ")
+	compact, _ := json.Marshal(rows)
+	limit := (len(indented) + len(compact)) / 2
+
+	text := resultText(t, toolBoundedJSON(rows, limit, nil))
+	if text != string(compact) {
+		t.Fatalf("expected the compact form (%d bytes) under a %d-byte limit, got %d bytes: %.200s", len(compact), limit, len(text), text)
+	}
+	if text := resultText(t, toolBoundedJSON(rows, len(indented), nil)); text != string(indented) {
+		t.Fatalf("indented form should be kept when it fits")
+	}
+	text = resultText(t, toolBoundedJSON(rows, len(compact)-1, nil))
+	if !strings.Contains(text, "response_too_large") {
+		t.Fatalf("expected the overflow note when neither form fits, got %.200s", text)
+	}
+}

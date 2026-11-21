@@ -293,7 +293,7 @@ func toStepSummaries(steps []store.ActionStepLog) []StepSummary {
 	return out
 }
 
-// toolBoundedJSON marshals v with indentation, enforcing maxBytes (defaults to MaxActionResponseBytes).
+// toolBoundedJSON marshals v with indentation (without it when that is what fits), enforcing maxBytes (defaults to MaxActionResponseBytes).
 // If the payload exceeds the limit, onExceeded is used to produce a bounded replacement.
 func toolBoundedJSON(v any, maxBytes int, onExceeded func(actualBytes int) any) *mcp.CallToolResult {
 	if maxBytes <= 0 {
@@ -305,6 +305,11 @@ func toolBoundedJSON(v any, maxBytes int, onExceeded func(actualBytes int) any) 
 	}
 	if len(data) <= maxBytes {
 		return mcp.NewToolResultText(string(data))
+	}
+	// Indentation is a third of a list page; the same data without it is
+	// still valid JSON, so try that before refusing.
+	if compact, err := json.Marshal(v); err == nil && len(compact) <= maxBytes {
+		return mcp.NewToolResultText(string(compact))
 	}
 
 	var fallback any
@@ -776,7 +781,7 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 	// action_list — list recent actions with optional status filtering
 	s.AddTool(
 		mcp.NewTool("action_list",
-			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, cancelled, or all). Returns compact summaries; use action_status for each job's worker telemetry and timing breakdown."),
+			mcp.WithDescription("List action workflow instances with optional status filtering (running, waiting_external, waiting_decision, completed, failed, cancelled, or all). Returns compact summaries (a transcode carries only its verdict); use action_status for each job's worker telemetry, timing breakdown, phase costs and transcode evidence."),
 			mcp.WithString("status", mcp.Description("Filter status: running, waiting_external, waiting_decision, completed, failed, cancelled, all (default all)")),
 			mcp.WithString("limit", mcp.Description("Max items to return (1-100, default 20)")),
 			mcp.WithString("offset", mcp.Description("Pagination offset (default 0)")),
@@ -814,11 +819,35 @@ func registerActionTools(s *server.MCPServer, engine *action.Engine) {
 				summaries[i].EncodeDurationMs = nil
 				summaries[i].ValidationDurationMs = nil
 				summaries[i].ReconcileLagMs = nil
+				// The transcode evidence (stages, windows, verification,
+				// ladders, budgets) and the per-phase costs are kilobytes per
+				// action, so a default page of finished conversions went over
+				// the response limit. The list keeps the verdict; the evidence
+				// stays in action_status and GET /transcode/v1/actions/{id}.
+				summaries[i].Transcode = listTranscodeExplanation(summaries[i].Transcode)
+				summaries[i].PhaseCosts = nil
 			}
 
 			return toolBoundedJSON(summaries, MaxActionResponseBytes, nil), nil
 		},
 	)
+}
+
+// listTranscodeExplanation keeps only the verdict of a transcode explanation
+// for list pages: goal, outcome, message, counts and the winning encoder.
+func listTranscodeExplanation(full *action.TranscodeExplanation) *action.TranscodeExplanation {
+	if full == nil {
+		return nil
+	}
+	return &action.TranscodeExplanation{
+		Goal:             full.Goal,
+		Outcome:          full.Outcome,
+		Message:          full.Message,
+		TestedCandidates: full.TestedCandidates,
+		VerifiedSamples:  full.VerifiedSamples,
+		Encoder:          full.Encoder,
+		Hardware:         full.Hardware,
+	}
 }
 
 func summaryStateString(res *action.ActionResult, key string) string {
