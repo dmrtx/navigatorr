@@ -264,7 +264,8 @@ period run out first.
 
 ### Rotating the service key
 
-1. Write the new key to the key file (0600, at least 32 characters). Both the
+1. Write the new key to the key file (0600, at least 32 characters, owned by
+   the user both containers run as). Both the
    server and Nodes read it once at start.
 2. Restart Nodes and the Transcode server.
 
@@ -383,8 +384,9 @@ will mount; the check and the backup are never skipped.
    anything while a `-wal` or `-shm` file exists.
 4. Make a backup of the closed `nodes.db` and its `sha256` in a place outside
    both directories.
-5. Move `nodes.db` to the new directory and set `database.nodes_path` to the
-   new path in the config.
+5. Move `nodes.db` to the new directory, mount that directory in the Transcode
+   container if it is not under a mount it already has, and set
+   `database.nodes_path` to the new path in the config.
 6. Run `check --path <nodes.db>`: it must print `ok`, and its `file owner` and
    `dir owner` lines must show the owner Nodes will run as, with modes 0600 and
    0700. Confirm with `stat`.
@@ -438,14 +440,18 @@ and the real config still points `database.nodes_path` at the real directory.
    same `status`.
 5. Set `nodes.url` in the server's config and start the Transcode server.
 
-*Check:* in the server log, `builds registry is the separate Nodes process at ...`
+*Check:* through the server, the three baseline requests match the baseline
+(they also wake the server's lazy client). Then, in the server log,
+`builds registry is the separate Nodes process at ...`
 appears and no `nodes database at ...` line (that one is only logged by the
 in-process registry); there is no ERROR about node names
 (`node names differ between this server ... and the builds registry`) or about
-the service key. Through the server, the three baseline requests match the
-baseline.
+the service key.
 
-**Step 5. Verify, still in the quiet window.**
+**Step 5. Verify, still in the quiet window.** Steps 5 and 6 need nodes whose
+builds are not paused. If the baseline has them all paused, resume the ones you
+use here and pause them again at the end of step 6, so the baseline still
+matches.
 
 1. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
    log (including a log read with `wait` up to 25 s) and finishes.
