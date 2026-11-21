@@ -173,7 +173,8 @@ func (e *Engine) NodeBuildRecordsState(node string) ([]transcode.NodeBuild, bool
 		return records.NodeBuildRecords(node), false
 	}
 	builds, err := lister.ListNodeBuildRecords(node)
-	if errors.Is(err, ErrBuildRecordsUnavailable) {
+	if err != nil {
+		// Any failed list read is a list not known, never "no builds".
 		return nil, true
 	}
 	return builds, false
@@ -225,16 +226,42 @@ func (e *Engine) runningLeaseMode(node string) string {
 // list only. "Held by builds" comes solely from the leases the node's worker
 // reports running; a running record with no reported lease holds nothing.
 func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
+	anyUnavailable := false
 	for name, st := range statuses {
-		st = e.applyLeaseHold(name, st)
-		var unavailable bool
-		st.Builds, unavailable = e.NodeBuildRecordsState(name)
-		if unavailable {
-			st.BuildsPaused, st.BuildsUnavailable = false, true
-		}
+		st = e.withBuildRecords(name, e.applyLeaseHold(name, st))
+		anyUnavailable = anyUnavailable || st.BuildsUnavailable
 		statuses[name] = st
 	}
+	// The registry is one service: when it failed for one node, it is shown
+	// as unavailable for all, never paused on one and unknown on the next.
+	if anyUnavailable {
+		for name, st := range statuses {
+			statuses[name] = buildsUnknown(st)
+		}
+	}
 	return statuses
+}
+
+// WithBuildRecords adds the node's build records to its pause status. When
+// either read failed (the list here, or the pause read behind the status),
+// the builds side is unknown: no list, no pause, only "unavailable".
+func (e *Engine) WithBuildRecords(st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	return e.withBuildRecords(st.Node, st)
+}
+
+func (e *Engine) withBuildRecords(name string, st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	builds, unavailable := e.NodeBuildRecordsState(name)
+	if unavailable || st.BuildsUnavailable {
+		return buildsUnknown(st)
+	}
+	st.Builds = builds
+	return st
+}
+
+// buildsUnknown is the status with its builds side unknown.
+func buildsUnknown(st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	st.Builds, st.BuildsPaused, st.BuildsPausedSince, st.BuildsUnavailable = nil, false, "", true
+	return st
 }
 
 // applyLeaseHold is the state half of AttachNodeBuilds: it shows a node as

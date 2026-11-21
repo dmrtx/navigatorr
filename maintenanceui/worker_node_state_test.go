@@ -261,3 +261,27 @@ func TestWorkerNodeStateShowsAnUnavailableRegistry(t *testing.T) {
 		}
 	}
 }
+
+// listFailingRecords answers the pause reads (m1 paused) but not the build
+// lists, as a registry that comes back between the two reads does.
+type listFailingRecords struct{ unavailableRecords }
+
+func (listFailingRecords) BuildsPauses() (map[string]string, error) {
+	return map[string]string{"m1": "2026-11-13T10:00:00Z"}, nil
+}
+func (listFailingRecords) BuildsPaused(node string) (bool, error) { return node == "m1", nil }
+func (listFailingRecords) ListNodeBuildRecords(string) ([]transcode.NodeBuild, error) {
+	return nil, fmt.Errorf("%w: nothing answered", action.ErrBuildRecordsUnavailable)
+}
+
+// A build list that could not be read shows the node as unavailable even when
+// the pause read answered: never "paused, no builds".
+func TestWorkerNodeStateShowsAFailedListAsUnavailable(t *testing.T) {
+	s, h, _ := twoWorkerUI(t)
+	s.engine.SetBuildRecords(listFailingRecords{})
+	for name, n := range nodeStateByName(t, h) {
+		if n["builds_unavailable"] != true || n["builds_paused"] != nil || n["builds"] != nil {
+			t.Fatalf("%s: %+v", name, n)
+		}
+	}
+}

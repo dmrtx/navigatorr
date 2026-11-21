@@ -63,9 +63,6 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 	// This is the registry's view (the build records); the node's worker is
 	// what actually holds the node for them.
 	builds, listUnavailable := s.engine.NodeBuildRecordsState(name)
-	if len(builds) > 0 {
-		state["builds"] = builds
-	}
 	// What keeps new files off the node, so the slot count can leave it out:
 	// the operator's pause, else a running build on it.
 	if held := s.engine.NodeHeldBy(name); held != "" {
@@ -77,12 +74,17 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 	}
 	// Whether new builds on the node are refused, shown beside its slots.
 	// When the registry runs in another process that does not answer, nothing
-	// is known: neither paused nor not paused, and the empty build list above
-	// is not "no builds". The page says so.
+	// is known: neither paused nor not paused, and no build list is shown
+	// (unknown, not "no builds"). The page says so.
 	if paused, unavailable := s.engine.NodeBuildsState(name); unavailable || listUnavailable {
 		state["builds_unavailable"] = true
-	} else if paused {
-		state["builds_paused"] = true
+	} else {
+		if len(builds) > 0 {
+			state["builds"] = builds
+		}
+		if paused {
+			state["builds_paused"] = true
+		}
 	}
 	return state
 }

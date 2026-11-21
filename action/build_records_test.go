@@ -361,3 +361,22 @@ func TestFailedListReadsAsUnavailableWhenThePausesAnswer(t *testing.T) {
 		}
 	}
 }
+
+// When one node's list read fails, every node's builds side reads as unknown:
+// no list, no pause and no pause time, whatever the pause read said.
+func TestAFailedListMakesEveryNodeUnknown(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m2", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	records(e).pauses["m2"] = "2026-11-13T10:00:00Z"
+	statuses := e.NodePauseStatuses(context.Background())
+	if !statuses["m1"].BuildsPaused || statuses["m1"].BuildsPausedSince == "" {
+		t.Fatalf("setup: %+v", statuses["m1"])
+	}
+	records(e).listFail = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+	for name, st := range e.AttachNodeBuilds(statuses) {
+		if !st.BuildsUnavailable || st.BuildsPaused || st.BuildsPausedSince != "" || len(st.Builds) != 0 {
+			t.Fatalf("%s: %+v", name, st)
+		}
+	}
+}

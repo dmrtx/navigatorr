@@ -38,6 +38,10 @@ func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservat
 		_, paused := buildPauses[out.Workers[i].Name]
 		out.Workers[i].BuildsPaused = (paused || unreadable) && !unavailable
 		out.Workers[i].BuildsUnavailable = unavailable
+		if unavailable {
+			// Unknown, not empty: a list read before the failure is dropped too.
+			out.Workers[i].Builds = nil
+		}
 	}
 	if len(out.Workers) == 1 {
 		out.Builds = out.Workers[0].Builds
