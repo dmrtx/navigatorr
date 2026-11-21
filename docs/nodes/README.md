@@ -347,8 +347,8 @@ register again when Nodes is back (see step 6).
 When Nodes is down (a rollback after a failure), the registry cannot be read:
 rely on `held_by` alone.
 
-*Check:* no running build, `held_by` empty on every node, and the automatic
-builds are stopped.
+*Check:* no running build (when the registry answers), `held_by` empty on every
+node, and the automatic builds are stopped.
 
 **Step 1. Image with the new binary, `nodes.url` still empty.**
 
@@ -381,32 +381,36 @@ will mount; the check and the backup are never skipped.
    `dir owner` lines must show the owner Nodes will run as, with modes 0600 and
    0700. Confirm with `stat`.
 7. Start the Transcode server (still `nodes.url` empty). Confirm the `.lock` it
-   created next to `nodes.db` has the same owner, and that no `nodes.db*` file
-   appears again in the old directory.
+   created next to `nodes.db` has the same owner, and that no `nodes.db`,
+   `-wal` or `-shm` file appears again in the old directory. The old `.lock`
+   stays there; delete it now that nothing uses the old path.
 
 *Check:* the baseline matches.
 
 **Step 3. Rehearse Nodes against an empty database.** This checks keys, ports,
 mounts and the lock before touching the real data. Use a throwaway directory
-with the same owner and modes as the real one.
+with the same owner and modes as the real one, and a copy of the real config
+in which only `database.nodes_path` points there. Mount that copy instead of
+`config.yaml`; never edit the real one for this step.
 
-1. Start `navigatorr-nodes` with the real config but `database.nodes_path` in
-   the throwaway directory (Nodes creates the database there).
+1. Start `navigatorr-nodes` with the copy (Nodes creates the database in the
+   throwaway directory).
 2. `GET /healthz` returns 200 `ok`. Without the key, `GET /nodes/v1/nodes` and
    `GET /nodes/v1/openapi.json` return 401; with the key both return 200.
 3. Nodes can read the engine: the nodes come from the configured topology, not
    from the database, so `GET /nodes/v1/nodes` lists them even here, and with
    `nodes.transcode_url` set each one carries a `transcode` block. If none
    does, the engine cannot be read (wrong URL, key or network).
-4. Start a second `navigatorr-nodes` on the same throwaway directory with another
+4. Start a second `navigatorr-nodes` from a second copy that differs only in its
    `nodes.listen` port: it exits with `nodes.db is held by another process`.
    Remove that container.
 5. `stat` the mounted key files and the directory: they belong to the user
    Nodes runs as, with modes 0600 and 0700.
 6. Stop Nodes, wait for `exited`, remove the container, and delete the
-   throwaway directory with everything in it.
+   throwaway directory with everything in it and the config copies.
 
-*Check:* all of the above pass, and the throwaway directory is gone.
+*Check:* all of the above pass, the throwaway directory and the copies are gone,
+and the real config still points `database.nodes_path` at the real directory.
 
 **Step 4. Cut over (short window).** `nodes.key_file` is already in the config
 (step 3 needed it); only `nodes.url` changes.
@@ -445,32 +449,34 @@ baseline.
 *Check:* all four pass and the baseline matches (the builds of items 1 and 2
 are extra).
 
-**Step 6. Failure injection.**
+**Step 6. Failure injection.** This needs two nodes, A and B, each with its
+worker's lease socket (`build_socket`, see
+[transcode/BUILD_LEASES.md](../transcode/BUILD_LEASES.md)). The leases on B are
+asked from the socket directly, not through `nbuild`, so the test is about the
+worker and not the tool: `POST /api/maintenance/builds` with an `id` of your own,
+then heartbeats and a finish by hand.
 
-This needs two nodes, or one with a worker free for a second lease.
-
-1. Start a build with `nbuild` on a node, then stop Nodes.
+1. On A, start a build with `nbuild` that outlasts the outage. Stop Nodes.
 2. The workers UI and `worker_health` show **Builds registry unavailable**, never
    "paused".
-3. A worker still grants a new lease (start a build on the other node, for
-   example, and see it run).
+3. On B, ask for a lease: it is answered `running` and runs. Keep it alive with
+   heartbeats.
 4. `GET /nodes/v1/builds` answers 503 with `Retry-After: 5`;
    `worker_pause` with `builds_paused` returns a visible error.
-5. The `nbuild` already running keeps going or recovers. This cannot be tested
-   from this repo; test the tool by hand here, before any cleanup.
-6. Start Nodes again. Heartbeats resume, and leases still alive register again
-   within the worker's 5 s retry.
-7. Hang it instead of stopping it: freeze the Nodes container (pause it, do not
-   stop it) and start another lease. It is granted after at most the 3 s
-   timeout. Unfreeze the container.
-8. Wait for the leases started here to end.
-
-A lease that started and ended while Nodes was down is never recorded. That is
-accepted: the registry is history and the worker is the authority.
+5. The `nbuild` on A keeps going. Whether it also recovers from errors on its
+   own cannot be tested from this repo; test the tool by hand here, before any
+   cleanup.
+6. Start Nodes again. Within the worker's 5 s retry, `GET /nodes/v1/builds/<id>`
+   finds the lease of item 3 and the `nbuild` of item 1, and their heartbeats
+   move. Finish the lease of item 3.
+7. Hang Nodes instead of stopping it: freeze its container (pause it, do not stop
+   it). On B, ask for another lease: it is answered `running` within a few
+   seconds (each call to the hung registry gives up after 3 s). Finish it, then unfreeze the container.
+8. Wait for the `nbuild` of item 1 to end.
 
 *Check:* all of the above, and once Nodes is back the baseline matches; the
-builds started in this step are present or, if they started and ended while
-Nodes was down, absent.
+builds of items 1 and 3 are present and ended; the lease of item 7 may be present
+or absent (its registration was asked while Nodes was hung).
 
 **Step 7. Rehearse the rollback, still in the quiet window.** Do the rollback
 below once (before the cleanup), check it, then cut over again from step 4.
@@ -487,7 +493,9 @@ Today the in-process registry still exists in the server, so going back is
 configuration only. Change the config only after Nodes is gone, so no restart in
 between can open `nodes.db` from the server while Nodes holds it:
 
-1. Repeat step 0.
+1. Repeat step 0. If Nodes still answers, save the three baseline requests again
+   as the reference for item 5 and note the id of one build it recorded (any
+   build since the cutover).
 2. Stop Nodes and wait for `exited` (clean shutdown). Switch off the variable
    that enables the Nodes container and remove the container, so a reboot cannot
    bring it back.
@@ -497,9 +505,10 @@ between can open `nodes.db` from the server while Nodes holds it:
 4. Empty `nodes.url` in the server config and start the Transcode server. It
    opens the same `nodes.db` in the same directory: there is no copy and never
    two writers.
-5. Check that a build created while Nodes ran is readable from the server
-   (`GET /nodes/v1/builds/<id>`), the baseline matches, and the log shows
-   `nodes database at <nodes.db>`.
+5. Check that the log shows `nodes database at <nodes.db>` and, if item 1 saved
+   a reference, that it matches (the same rule as the baseline) and the build you
+   noted is readable from the server (`GET /nodes/v1/builds/<id>`). If Nodes was
+   already down, compare with the last reference you have.
 6. Unless you are rehearsing (step 7), end the quiet window: start the
    automatic builds again.
 
