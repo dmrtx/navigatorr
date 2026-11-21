@@ -450,13 +450,14 @@ the service key.
 
 **Step 5. Verify, still in the quiet window.** Steps 5 and 6 need nodes whose
 builds are not paused. If the baseline has them all paused, resume the ones you
-use here and pause them again at the end of step 6, so the baseline still
-matches.
+use here and pause them again at the end of step 6. Until then, the checks of
+steps 5 and 6 compare `builds_paused` of those nodes with their resumed state,
+not with the baseline; everything else must match the baseline.
 
 1. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
    log (including a log read with `wait` up to 25 s) and finishes.
-2. On one node, flip its builds pause twice so it ends as in the baseline
-   (pause then resume, or resume then pause if it was paused), once from the UI
+2. On one node, flip its builds pause twice so it ends as it started this step
+   (pause then resume), once from the UI
    and once with `worker_pause` (`builds_paused`): while paused, new builds get
    409 `builds_paused`; while resumed, they are accepted.
 3. `call_api` on service `nodes` works, and the OpenAPI spec is reachable
@@ -490,9 +491,11 @@ then heartbeats and a finish by hand.
 7. Hang Nodes instead of stopping it: freeze its container (pause it, do not stop
    it). On B, ask for another lease: it is answered `running` within a few
    seconds (each call to the hung registry gives up after 3 s). Finish it, then unfreeze the container.
-8. Wait for the `nbuild` of item 1 to end.
+8. Wait for the `nbuild` of item 1 to end. Pause again any node you resumed
+   for steps 5 and 6.
 
-*Check:* all of the above, and once Nodes is back the baseline matches; the
+*Check:* all of the above, and once Nodes is back the whole baseline matches,
+`builds_paused` included; the
 lease of item 3 is present and ended; the `nbuild` of item 1 is as item 5 found
 it; the lease of item 7 may be present or absent (its registration was asked
 while Nodes was hung).
