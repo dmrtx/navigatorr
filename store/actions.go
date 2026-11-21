@@ -213,8 +213,8 @@ func (s *Store) ListActionInstancesOfKinds(names []string, status, before string
 
 	if limit <= 0 {
 		limit = 20
-	} else if limit > 100 {
-		limit = 100
+	} else if limit > 101 {
+		limit = 101 // a page of 100 plus one row that says whether more follow
 	}
 	if offset < 0 {
 		offset = 0

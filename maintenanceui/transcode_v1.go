@@ -600,7 +600,7 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 			*target = n
 		}
 	}
-	before := strings.TrimSpace(q.Get("before"))
+	before := q.Get("before")
 	if before != "" && !s.checkTranscodeActionAs(w, before, 400) {
 		return
 	}
@@ -609,7 +609,8 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 		kinds = append(kinds, name)
 	}
 	slices.Sort(kinds)
-	rows, err := s.engine.ListKinds(r.Context(), kinds, status, before, limit, offset)
+	// One row past the page says whether another page follows.
+	rows, err := s.engine.ListKinds(r.Context(), kinds, status, before, limit+1, offset)
 	if errors.Is(err, store.ErrActionNotFound) {
 		transcodeapi.WriteError(w, 400, "invalid_request", "before must be the id of a transcode action", hintActions)
 		return
@@ -621,6 +622,10 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 	}
 	items := make([]v1ActionItem, 0, len(rows))
 	size := 0
+	more := len(rows) > limit
+	if more {
+		rows = rows[:limit]
+	}
 	for i := range rows {
 		item := lightAction(&rows[i])
 		b, _ := json.Marshal(item)
@@ -633,7 +638,7 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 	page := map[string]any{
 		"items": items, "offset": offset, "limit": limit,
 		"next_offset": offset + len(items),
-		"has_more":    len(items) < len(rows) || len(rows) == limit,
+		"has_more":    more || len(items) < len(rows),
 	}
 	if len(items) > 0 {
 		page["next_before"] = items[len(items)-1].ID

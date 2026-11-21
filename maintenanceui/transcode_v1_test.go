@@ -888,7 +888,7 @@ func TestTranscodeV1ActionsListIsLight(t *testing.T) {
 		t.Fatalf("a page must fit in 64 KiB: %d bytes", w.Body.Len())
 	}
 	items, _ := page["items"].([]any)
-	if len(items) != 100 || page["has_more"] != true || page["next_offset"] != float64(100) {
+	if len(items) != 100 || page["has_more"] != true || page["next_offset"] != float64(100) || page["next_before"] != "done001" {
 		t.Fatalf("100 light rows fit in one page: %d items, %v %v", len(items), page["has_more"], page["next_offset"])
 	}
 	for _, it := range items {
@@ -910,6 +910,10 @@ func TestTranscodeV1ActionsListIsLight(t *testing.T) {
 	res, _ := row["result"].(map[string]any)
 	if row["id"] != "done099" || !strings.HasSuffix(row["file"].(string), "[h265].mkv") || res["goal"] != "size" || res["outcome"] == "" || res["message"] == "" || res["encoder"] != "libx265" {
 		t.Fatalf("a conversion row keeps id, file and verdict: %v", row)
+	}
+	// The last page says it is the last: no empty page after it.
+	if c, last := get(t, h, "/transcode/v1/actions?limit=100&before=done001", keyHdr()); c != 200 || last["has_more"] != false || len(last["items"].([]any)) != 1 {
+		t.Fatalf("exactly the rows left: %d %v", c, last)
 	}
 	code, one := get(t, h, "/transcode/v1/actions/done000", keyHdr())
 	if body, _ := json.Marshal(one); code != 200 || !strings.Contains(string(body), "stage-11") || !strings.Contains(string(body), "phase_costs") {
@@ -993,8 +997,11 @@ func TestTranscodeV1ActionsBeforeCursorSurvivesChanges(t *testing.T) {
 			seen[id] = true
 		}
 		if pages == 0 {
-			// A new action arrives at the top and a seen one leaves the filter.
+			// A new action arrives at the top, and the cursor row itself and
+			// another seen one leave the filter.
 			seedOperation(t, st, "zz-new", "transcode_media", "running", nil, nil, nil)
+			cursor := page["next_before"].(string)
+			touch(t, st, cursor, func(inst *store.ActionInstance) { inst.Status = "completed" })
 			touch(t, st, "r8", func(inst *store.ActionInstance) { inst.Status = "completed" })
 		}
 		if page["has_more"] != true {
@@ -1011,7 +1018,7 @@ func TestTranscodeV1ActionsBeforeCursorSurvivesChanges(t *testing.T) {
 		t.Fatal("an action created after the walk started is not part of it")
 	}
 	seedOperation(t, st, "foreign", "sonarr_thing", "completed", nil, nil, nil)
-	for _, b := range []string{"nope", "foreign"} {
+	for _, b := range []string{"nope", "foreign", "%20%20"} {
 		if c, e := get(t, h, "/transcode/v1/actions?before="+b, keyHdr()); c != 400 || e["code"] != "invalid_request" {
 			t.Errorf("before=%s: %d %v", b, c, e)
 		}
