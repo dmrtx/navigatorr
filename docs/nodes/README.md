@@ -213,9 +213,12 @@ The deployment must:
 - run a second container from the same image with entrypoint
   `navigatorr-nodes`, `read_only`, all capabilities dropped,
   `no-new-privileges`, a tmpfs `/tmp`, and a listen address on loopback only;
-- give both containers one network namespace (both on the host network, or one
-  joining the other's), so `127.0.0.1` in `nodes.url` and `nodes.transcode_url`
-  reaches the other container. On separate networks loopback is each
+- give both containers one network namespace that neither of them owns (both
+  on the host network, or both joining a third container that is always up), so
+  `127.0.0.1` in `nodes.url` and `nodes.transcode_url` reaches the other
+  container. Never make one join the other's namespace: the runbook stops and
+  starts them independently, and the joined one cannot run while the other is
+  stopped. On separate networks loopback is each
   container's own, every builds call answers 503 and Nodes shows no transcode
   state. If they cannot share one, Nodes needs `nodes.allow_non_loopback: true`
   and a listen address on a private network that only the server can reach;
@@ -341,7 +344,11 @@ nothing stops a lease that starts anyway. Such a lease is never stopped or lost
 on the node (N3); while the registry is down it may just go unrecorded, or
 register again when Nodes is back (see step 6).
 
-*Check:* the two lists are empty and the automatic builds are stopped.
+When Nodes is down (a rollback after a failure), the registry cannot be read:
+rely on `held_by` alone.
+
+*Check:* no running build, `held_by` empty on every node, and the automatic
+builds are stopped.
 
 **Step 1. Image with the new binary, `nodes.url` still empty.**
 
@@ -374,8 +381,8 @@ will mount; the check and the backup are never skipped.
    `dir owner` lines must show the owner Nodes will run as, with modes 0600 and
    0700. Confirm with `stat`.
 7. Start the Transcode server (still `nodes.url` empty). Confirm the `.lock` it
-   created next to `nodes.db` has the same owner, and that nothing uses the old
-   directory.
+   created next to `nodes.db` has the same owner, and that no `nodes.db*` file
+   appears again in the old directory.
 
 *Check:* the baseline matches.
 
@@ -394,7 +401,8 @@ with the same owner and modes as the real one.
 4. Start a second `navigatorr-nodes` on the same throwaway directory with another
    `nodes.listen` port: it exits with `nodes.db is held by another process`.
    Remove that container.
-5. The owners and modes of the mounted key files and directory are right.
+5. `stat` the mounted key files and the directory: they belong to the user
+   Nodes runs as, with modes 0600 and 0700.
 6. Stop Nodes, wait for `exited`, remove the container, and delete the
    throwaway directory with everything in it.
 
@@ -409,8 +417,10 @@ with the same owner and modes as the real one.
 3. Run `navigatorr-nodes check --path <nodes.db>`: `ok` (with `--checkpoint` if
    a `-wal` was left, as in step 2).
 4. Switch on the variable that enables the Nodes container and start
-   `navigatorr-nodes` on the real directory. Wait for `GET /healthz` 200. With
-   the key, `GET /nodes/v1/builds` matches the baseline.
+   `navigatorr-nodes` on the real directory. Wait for `GET /healthz` 200. Ask
+   Nodes directly (its `nodes.listen` address, with the service key; the server
+   is still stopped): `GET /nodes/v1/builds` has every baseline build with the
+   same `status`.
 5. Set `nodes.url` in the server's config and start the Transcode server.
 
 *Check:* in the server log, `builds registry is the separate Nodes process at ...`
@@ -424,22 +434,26 @@ baseline.
 
 1. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
    log (including a log read with `wait` up to 25 s) and finishes.
-2. Pause and resume builds on a node, from the UI and with `worker_pause`
-   (`builds_paused`): new builds get 409 `builds_paused`, then are accepted
-   again.
+2. On a node whose builds are not paused, pause and resume builds, from the UI
+   and with `worker_pause` (`builds_paused`): new builds get 409
+   `builds_paused`, then are accepted again. Leave it resumed, as in the
+   baseline.
 3. `call_api` on service `nodes` works, and the OpenAPI spec is reachable
    through the server.
 4. The workers UI shows no error.
 
-*Check:* all four pass and the baseline matches, plus the build of item 1.
+*Check:* all four pass and the baseline matches (the builds of items 1 and 2
+are extra).
 
 **Step 6. Failure injection.**
+
+This needs two nodes, or one with a worker free for a second lease.
 
 1. Start a build with `nbuild` on a node, then stop Nodes.
 2. The workers UI and `worker_health` show **Builds registry unavailable**, never
    "paused".
-3. A worker still grants a new lease (start a build on a node with its
-   own worker, for example, and see it run).
+3. A worker still grants a new lease (start a build on the other node, for
+   example, and see it run).
 4. `GET /nodes/v1/builds` answers 503 with `Retry-After: 5`;
    `worker_pause` with `builds_paused` returns a visible error.
 5. The `nbuild` already running keeps going or recovers. This cannot be tested
@@ -449,6 +463,7 @@ baseline.
 7. Hang it instead of stopping it: freeze the Nodes container (pause it, do not
    stop it) and start another lease. It is granted after at most the 3 s
    timeout. Unfreeze the container.
+8. Wait for the leases started here to end.
 
 A lease that started and ended while Nodes was down is never recorded. That is
 accepted: the registry is history and the worker is the authority.
@@ -456,6 +471,11 @@ accepted: the registry is history and the worker is the authority.
 *Check:* all of the above, and once Nodes is back the baseline matches; the
 builds started in this step are present or, if they started and ended while
 Nodes was down, absent.
+
+**Step 7. Rehearse the rollback, still in the quiet window.** Do the rollback
+below once (before the cleanup), check it, then cut over again from step 4.
+
+*Check:* the rollback's checks pass, and step 4's check passes again.
 
 End the quiet window: start the automatic builds again.
 
@@ -472,21 +492,22 @@ between can open `nodes.db` from the server while Nodes holds it:
    that enables the Nodes container and remove the container, so a reboot cannot
    bring it back.
 3. Stop the Transcode server and wait for `exited`. Run
-   `navigatorr-nodes check --path <nodes.db>` and require `ok`.
+   `navigatorr-nodes check --path <nodes.db>` and require `ok` (with
+   `--checkpoint` if Nodes died and left a `-wal`).
 4. Empty `nodes.url` in the server config and start the Transcode server. It
    opens the same `nodes.db` in the same directory: there is no copy and never
    two writers.
 5. Check that a build created while Nodes ran is readable from the server
    (`GET /nodes/v1/builds/<id>`), the baseline matches, and the log shows
    `nodes database at <nodes.db>`.
-
-Rehearse this once after step 5 and cut over again (from step 4).
+6. Unless you are rehearsing (step 7), end the quiet window: start the
+   automatic builds again.
 
 ### After the cleanup that removes it
 
 Once the in-process registry and the legacy import are gone from the server,
 going back is not only configuration. The cleanup's pull request records the
-last image tag from before it. To roll back, follow the same five steps, deploying
+last image tag from before it. To roll back, follow the same steps, deploying
 that older image (with `nodes.url` empty) in item 4.
 
 That only works if `nodes.db` is still readable by the older image. No schema
@@ -498,8 +519,11 @@ request.
 
 Back up the directory of `nodes.db` on the same schedule as the main database,
 from a stopped Nodes or with SQLite's online backup (never a plain copy of a
-database that is open). To recover, restore the newest backup (or the one from
-step 2) after checking its `sha256` and running `check` on it. Builds recorded
+database that is open). To recover: stop Nodes and wait for `exited`; check
+the backup's `sha256`; remove every `nodes.db*` file left in the directory (an
+old `-wal` would be replayed over the restored copy), keeping the directory's
+owner and mode 0700; restore the newest backup (or the one from step 2) as
+`nodes.db` with mode 0600; run `check --path <nodes.db>`; start Nodes. Builds recorded
 after that backup are lost from the history, and a builds pause set or cleared
 after it comes back as it was then: check the pauses of every node before
 resuming work. Workers
