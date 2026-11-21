@@ -81,7 +81,7 @@ func (b *nodesBackend) Wire(e *action.Engine) {
 }
 
 // Start runs the in-process registry's background work and returns what stops
-// it (nil when there is none: Nodes apart runs by itself).
+// it (a no-op when there is none: Nodes apart runs by itself).
 func (b *nodesBackend) Start(dbPath string) (stop func()) {
 	if b.Service == nil {
 		return func() {}

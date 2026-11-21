@@ -426,7 +426,10 @@ func TestWritesThatChangeNothingLeaveTheCacheAlone(t *testing.T) {
 			w.WriteHeader(404)
 			_, _ = w.Write([]byte(`{"error":"unknown node","code":"unknown_node"}`))
 		},
-		"500": func(w http.ResponseWriter, r *http.Request) { http.Error(w, "no", 500) },
+		"400": func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"paused is required","code":"invalid_request"}`))
+		},
 	}
 	for name, post := range cases {
 		f := newFixture(t, serveRoutes(serveJSON(twoNodes), post), nil)
@@ -449,6 +452,54 @@ func TestWritesThatChangeNothingLeaveTheCacheAlone(t *testing.T) {
 	}
 	if c2.snap == nil || c2.gen != 0 {
 		t.Fatal("a refused dial dropped the cache")
+	}
+}
+
+// A 5xx does not prove the change was not applied: the answer is "may or may
+// not have changed" and the cache is dropped, like a lost answer.
+func TestAServerErrorOnWriteIsAnUnknownResult(t *testing.T) {
+	f := newFixture(t, serveRoutes(serveJSON(twoNodes), func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", 500) }), nil)
+	_, _ = f.c.BuildsPauses()
+	if err := f.c.SetBuildsPause(context.Background(), "nodeA", true); err == nil || err.Error() != msgNoAnswer {
+		t.Fatal(err)
+	}
+	_, _ = f.c.BuildsPauses()
+	if f.gets.Load() != 2 {
+		t.Fatalf("%d GETs: the cache survived an unknown result", f.gets.Load())
+	}
+}
+
+// A flight that fails after a write opened a new generation leaves no backoff.
+func TestAStaleFailedFlightSetsNoBackoff(t *testing.T) {
+	f := newFixture(t, serveJSON(twoNodes), nil)
+	f.c.mu.Lock()
+	gen := f.c.gen
+	f.c.gen++ // a write happened while the flight was out
+	f.c.base = closedPortURL(t)
+	f.c.mu.Unlock()
+	if _, err := f.c.fetch(gen); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	f.c.mu.Lock()
+	defer f.c.mu.Unlock()
+	if !f.c.failUntil.IsZero() {
+		t.Fatal("an old flight set the backoff")
+	}
+}
+
+// A flight that starts after another of the same generation stored a fresh
+// snapshot uses it instead of asking Nodes again.
+func TestALateFlightUsesTheFreshSnapshot(t *testing.T) {
+	f := newFixture(t, serveJSON(twoNodes), nil)
+	_, _ = f.c.BuildsPauses()
+	f.c.mu.Lock()
+	gen := f.c.gen
+	f.c.mu.Unlock()
+	if _, err := f.c.fetch(gen); err != nil {
+		t.Fatal(err)
+	}
+	if f.gets.Load() != 1 {
+		t.Fatalf("%d GETs: a late flight asked again", f.gets.Load())
 	}
 }
 

@@ -306,6 +306,22 @@ func (c *Client) read(ctx context.Context) (*snapshot, error) {
 // fetch is the body of a flight: one request, its own timeout, never a caller's
 // context. It stores its result only if the generation is still gen.
 func (c *Client) fetch(gen uint64) (any, error) {
+	// A caller may have seen the cache expired just before a flight of the same
+	// generation stored a fresh snapshot: use it rather than asking again.
+	c.mu.Lock()
+	if c.gen == gen {
+		now := c.now()
+		if c.snap != nil && now.Before(c.snapUntil) {
+			s := c.snap
+			c.mu.Unlock()
+			return s, nil
+		}
+		if now.Before(c.failUntil) {
+			c.mu.Unlock()
+			return nil, ErrUnavailable
+		}
+	}
+	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), c.rto)
 	defer cancel()
 	s, err := c.request(ctx)
@@ -464,6 +480,10 @@ func (c *Client) SetBuildsPause(ctx context.Context, node string, paused bool) e
 	case res.StatusCode >= 200 && res.StatusCode < 300:
 		c.forget()
 		return nil
+	case res.StatusCode >= 500:
+		// A server error does not prove the change was not applied.
+		c.forget()
+		return errors.New(msgNoAnswer)
 	case res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden:
 		if c.limited(&c.lastAuthLog) {
 			c.log.Errorf("nodes: the builds registry refused the service key (HTTP %d); check nodes.key_file on both sides", res.StatusCode)

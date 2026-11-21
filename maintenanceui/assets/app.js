@@ -1242,8 +1242,10 @@ function nodePauseControls(worker) {
   // The builds pause sits in the same row and is independent of the transcode
   // pause above: the server refuses new builds on this node while it is on;
   // builds already registered carry on either way.
-  if (pause.builds_paused) add("Resume builds", "builds_resume", "This node accepts new builds again.", "pause-builds");
-  else add("Pause builds", "builds_pause", "New builds on this node are refused; builds already registered carry on.", "pause-builds");
+  // With the registry unavailable the switch's state is unknown: offer both
+  // (each sets a value, so either is safe to repeat).
+  if (pause.builds_paused || pause.builds_unavailable) add("Resume builds", "builds_resume", "This node accepts new builds again.", "pause-builds");
+  if (!pause.builds_paused || pause.builds_unavailable) add("Pause builds", "builds_pause", "New builds on this node are refused; builds already registered carry on.", "pause-builds");
   box.append(buttons);
   return box;
 }
@@ -8016,7 +8018,7 @@ function slotNodeDetails(n, entries) {
   const split = n.activity?.slots?.split ? n.activity.slots : null;
   summary.append(node("span","","slot-dot"), node("strong", n.name || "Worker"),
     node("span", !online ? [n.message || "Unavailable", builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null, hold === "transcode paused" ? hold : null].filter(Boolean).join(" · ") : [`${slotsBusy}/${nodeSlotCounts(n).total}`, builds.length ? `${builds.length} build${builds.length === 1 ? "" : "s"}` : null,
-      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
+      hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused || n.builds_unavailable ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
   // The builds pause is a state, so it is a paused badge, as in the workers dialog, not metadata text.
   if (n.builds_paused) summary.append(pausedBadge("Builds paused"));
   if (n.builds_unavailable) summary.append(node("span", "Builds registry unavailable", "badge"));
