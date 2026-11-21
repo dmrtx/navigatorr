@@ -160,8 +160,9 @@ The switch is one config key on the Transcode server, `nodes.url`:
   falls back to the in-process registry: a second writer on the same file
   because of a broken mount is worse than a server that does not start.
 
-The two modes live in the same binary, so switching is a config change and a
-restart.
+The two modes live in the same server binary, so switching the server is a
+config change and a restart; starting Nodes next to it follows the cutover
+runbook below.
 
 ### Config
 
@@ -203,7 +204,7 @@ transcode state (paused, mode, held by) by reading
 `GET /transcode/v1/node-states` from the engine. The key is the engine API key
 (`web.transcode_token_file`, see [transcode/API_V1.md](../transcode/API_V1.md)).
 If the engine cannot be read, Nodes shows the nodes without a transcode block; it
-never refuses anything because of it (N3).
+never refuses anything because of it: the block is for display only.
 
 ### Deployment requirements
 
@@ -354,14 +355,21 @@ node, and the automatic builds are stopped.
 
 1. Deploy an image that contains `navigatorr-nodes` and the proxy/client code,
    with `nodes.url` empty. The server behaves as before.
-2. Save the baseline, with the builds token.
+2. Prepare what Nodes needs, without starting it: the service key (`nodes.key`,
+   0600, at least 32 characters) and the copy of the engine key, both owned by
+   the user Nodes will run as; and in the config `nodes.listen`,
+   `nodes.key_file`, `nodes.transcode_url` and `nodes.transcode_key_file`.
+   With `nodes.url` empty the server does not use any of them.
+3. Save the baseline, with the builds token.
 
 The `legacy_import` mark cannot be read here (the server holds the lock); the
 `check` in step 2 requires it. If that `check` reports `legacy_import: (missing)`,
 start the server once more in this mode (it runs the import and logs an ERROR if
 it fails), and repeat step 2 from the start.
 
-*Check:* the three baseline requests answer 200 and are saved.
+*Check:* the keys exist with the right owner and mode, the config has the
+`nodes.*` keys of item 2 with `nodes.url` still empty, and the three baseline
+requests answer 200 and are saved.
 
 **Step 2. Check, back up, and move `nodes.db` into its own directory.** Only the
 move (item 5) is skipped when `nodes.db` already is in a directory only Nodes
@@ -381,9 +389,10 @@ will mount; the check and the backup are never skipped.
    `dir owner` lines must show the owner Nodes will run as, with modes 0600 and
    0700. Confirm with `stat`.
 7. Start the Transcode server (still `nodes.url` empty). Confirm the `.lock` it
-   created next to `nodes.db` has the same owner, and that no `nodes.db`,
-   `-wal` or `-shm` file appears again in the old directory. The old `.lock`
-   stays there; delete it now that nothing uses the old path.
+   created next to `nodes.db` has the same owner. Only if you moved it (item
+   5): no `nodes.db`, `-wal` or `-shm` file appears again in the old directory,
+   and the old `.lock` there can be deleted now that nothing uses the old path.
+   Never delete the `.lock` next to the `nodes.db` in use.
 
 *Check:* the baseline matches.
 
@@ -400,7 +409,9 @@ in which only `database.nodes_path` points there. Mount that copy instead of
 3. Nodes can read the engine: the nodes come from the configured topology, not
    from the database, so `GET /nodes/v1/nodes` lists them even here, and with
    `nodes.transcode_url` set each one carries a `transcode` block. If none
-   does, the engine cannot be read (wrong URL, key or network).
+   does, the engine cannot be read (wrong URL, key or network); if only some
+   lack it, the engine does not know those node names, so compare the node
+   lists of the two configs.
 4. Start a second `navigatorr-nodes` from a second copy that differs only in its
    `nodes.listen` port: it exits with `nodes.db is held by another process`.
    Remove that container.
@@ -438,10 +449,10 @@ baseline.
 
 1. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
    log (including a log read with `wait` up to 25 s) and finishes.
-2. On a node whose builds are not paused, pause and resume builds, from the UI
-   and with `worker_pause` (`builds_paused`): new builds get 409
-   `builds_paused`, then are accepted again. Leave it resumed, as in the
-   baseline.
+2. On one node, flip its builds pause twice so it ends as in the baseline
+   (pause then resume, or resume then pause if it was paused), once from the UI
+   and once with `worker_pause` (`builds_paused`): while paused, new builds get
+   409 `builds_paused`; while resumed, they are accepted.
 3. `call_api` on service `nodes` works, and the OpenAPI spec is reachable
    through the server.
 4. The workers UI shows no error.
@@ -466,17 +477,19 @@ then heartbeats and a finish by hand.
 5. The `nbuild` on A keeps going. Whether it also recovers from errors on its
    own cannot be tested from this repo; test the tool by hand here, before any
    cleanup.
-6. Start Nodes again. Within the worker's 5 s retry, `GET /nodes/v1/builds/<id>`
-   finds the lease of item 3 and the `nbuild` of item 1, and their heartbeats
-   move. Finish the lease of item 3.
+6. Start Nodes again. Within about 10 s (the worker retries every 5 s),
+   `GET /nodes/v1/builds/<id>` finds the lease of item 3 and its heartbeats
+   move. The `nbuild` of item 1 shows up the same way if the tool kept
+   reporting (item 5). Finish the lease of item 3.
 7. Hang Nodes instead of stopping it: freeze its container (pause it, do not stop
    it). On B, ask for another lease: it is answered `running` within a few
    seconds (each call to the hung registry gives up after 3 s). Finish it, then unfreeze the container.
 8. Wait for the `nbuild` of item 1 to end.
 
 *Check:* all of the above, and once Nodes is back the baseline matches; the
-builds of items 1 and 3 are present and ended; the lease of item 7 may be present
-or absent (its registration was asked while Nodes was hung).
+lease of item 3 is present and ended; the `nbuild` of item 1 is as item 5 found
+it; the lease of item 7 may be present or absent (its registration was asked
+while Nodes was hung).
 
 **Step 7. Rehearse the rollback, still in the quiet window.** Do the rollback
 below once (before the cleanup), check it, then cut over again from step 4.
