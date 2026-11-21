@@ -56,6 +56,22 @@ type BuildRecords interface {
 	BuildsPaused(node string) (bool, error)
 }
 
+// BuildRecordsLister is a BuildRecords whose list read can fail, as a registry
+// in another process can. The engine uses it, when there, to tell an empty
+// list from one it could not read.
+type BuildRecordsLister interface {
+	// ListNodeBuildRecords is NodeBuildRecords with the read error
+	// (ErrBuildRecordsUnavailable, wrapped, when the registry cannot be read).
+	ListNodeBuildRecords(node string) ([]transcode.NodeBuild, error)
+}
+
+// ErrBuildRecordsUnavailable is what a BuildRecords returns (wrapped, so test it
+// with errors.Is) when the registry cannot be read at all, as a registry that
+// runs in another process can be. The engine shows it as "builds registry
+// unavailable", never as paused and never as not paused: nothing is known.
+// Any other error keeps failing closed (reads as paused).
+var ErrBuildRecordsUnavailable = errors.New("builds registry not available")
+
 // recordsBox lets an interface value sit in an atomic pointer.
 type recordsBox struct{ r BuildRecords }
 
@@ -97,35 +113,71 @@ func (e *Engine) SetNodeBuildsPause(ctx context.Context, node string, paused boo
 }
 
 // NodeBuildsPaused reports whether new builds on the named node are refused. An
-// unreadable state reads as paused, as the create path fails closed too.
+// unreadable state reads as paused, as the create path fails closed too, except
+// when the registry is unavailable (see NodeBuildsState).
 func (e *Engine) NodeBuildsPaused(name string) bool {
-	records := e.buildRecords()
-	if records == nil {
-		return false
-	}
-	paused, err := records.BuildsPaused(e.resolveWorker(name))
-	return paused || err != nil
+	paused, _ := e.NodeBuildsState(name)
+	return paused
 }
 
-// buildsPauses is the registry's paused nodes with the unreadable flag.
-func (e *Engine) buildsPauses() (map[string]string, bool) {
+// NodeBuildsState is NodeBuildsPaused with the unavailable flag: unavailable is
+// true when the registry could not be read at all (ErrBuildRecordsUnavailable);
+// paused is then false, because nothing is known and the screens say so
+// instead. Any other read error reads as paused.
+func (e *Engine) NodeBuildsState(name string) (paused, unavailable bool) {
 	records := e.buildRecords()
 	if records == nil {
-		return nil, false
+		return false, false
+	}
+	paused, err := records.BuildsPaused(e.resolveWorker(name))
+	if errors.Is(err, ErrBuildRecordsUnavailable) {
+		return false, true
+	}
+	return paused || err != nil, false
+}
+
+// buildsPauses is the registry's paused nodes with the two read failures: the
+// state could not be read (reads as paused) and the registry is unavailable
+// (reads as neither).
+func (e *Engine) buildsPauses() (m map[string]string, unreadable, unavailable bool) {
+	records := e.buildRecords()
+	if records == nil {
+		return nil, false, false
 	}
 	m, err := records.BuildsPauses()
-	return m, err != nil
+	if errors.Is(err, ErrBuildRecordsUnavailable) {
+		return nil, false, true
+	}
+	return m, err != nil, false
 }
 
 // NodeBuildRecords is a node's running and waiting build records, oldest first,
 // for the registry's view of it (the UI). It is a record read only: nothing in
 // the engine decides on it.
 func (e *Engine) NodeBuildRecords(node string) []transcode.NodeBuild {
+	builds, _ := e.NodeBuildRecordsState(node)
+	return builds
+}
+
+// NodeBuildRecordsState is NodeBuildRecords with the unavailable flag: true
+// when the registry could not be read, so the empty list is not "no builds".
+// Callers that show a builds pause beside the list show it as unavailable too,
+// whatever a separate pause read said: the two reads are not one snapshot.
+func (e *Engine) NodeBuildRecordsState(node string) ([]transcode.NodeBuild, bool) {
 	records := e.buildRecords()
 	if records == nil {
-		return nil
+		return nil, false
 	}
-	return records.NodeBuildRecords(node)
+	lister, ok := records.(BuildRecordsLister)
+	if !ok {
+		return records.NodeBuildRecords(node), false
+	}
+	builds, err := lister.ListNodeBuildRecords(node)
+	if err != nil {
+		// Any failed list read is a list not known, never "no builds".
+		return nil, true
+	}
+	return builds, false
 }
 
 // RunningLeases is how many build leases the node's worker reports running,
@@ -174,12 +226,42 @@ func (e *Engine) runningLeaseMode(node string) string {
 // list only. "Held by builds" comes solely from the leases the node's worker
 // reports running; a running record with no reported lease holds nothing.
 func (e *Engine) AttachNodeBuilds(statuses map[string]transcode.NodePauseStatus) map[string]transcode.NodePauseStatus {
+	anyUnavailable := false
 	for name, st := range statuses {
-		st = e.applyLeaseHold(name, st)
-		st.Builds = e.NodeBuildRecords(name)
+		st = e.withBuildRecords(name, e.applyLeaseHold(name, st))
+		anyUnavailable = anyUnavailable || st.BuildsUnavailable
 		statuses[name] = st
 	}
+	// The registry is one service: when it failed for one node, it is shown
+	// as unavailable for all, never paused on one and unknown on the next.
+	if anyUnavailable {
+		for name, st := range statuses {
+			statuses[name] = buildsUnknown(st)
+		}
+	}
 	return statuses
+}
+
+// WithBuildRecords adds the node's build records to its pause status. When
+// either read failed (the list here, or the pause read behind the status),
+// the builds side is unknown: no list, no pause, only "unavailable".
+func (e *Engine) WithBuildRecords(st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	return e.withBuildRecords(st.Node, st)
+}
+
+func (e *Engine) withBuildRecords(name string, st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	builds, unavailable := e.NodeBuildRecordsState(name)
+	if unavailable || st.BuildsUnavailable {
+		return buildsUnknown(st)
+	}
+	st.Builds = builds
+	return st
+}
+
+// buildsUnknown is the status with its builds side unknown.
+func buildsUnknown(st transcode.NodePauseStatus) transcode.NodePauseStatus {
+	st.Builds, st.BuildsPaused, st.BuildsPausedSince, st.BuildsUnavailable = nil, false, "", true
+	return st
 }
 
 // applyLeaseHold is the state half of AttachNodeBuilds: it shows a node as

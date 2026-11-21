@@ -18,16 +18,36 @@ import (
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
-	buildPauses, unreadable := e.buildsPauses()
+	// The build lists are read before the pauses: a registry that stops
+	// answering between the two reads then shows as unavailable (the pause read
+	// meets the failure), never as a node with no builds.
+	// A list read that failed also counts, so a registry that comes back in
+	// between (a write clears the client's backoff) does not turn a list it
+	// could not read into "no builds".
+	listUnavailable := make([]bool, len(out.Workers))
 	for i := range out.Workers {
-		out.Workers[i].Builds = e.NodeBuildRecords(out.Workers[i].Name)
+		out.Workers[i].Builds, listUnavailable[i] = e.NodeBuildRecordsState(out.Workers[i].Name)
+	}
+	buildPauses, unreadable, unavailable := e.buildsPauses()
+	for i := range out.Workers {
+		if listUnavailable[i] {
+			unavailable = true
+		}
+	}
+	for i := range out.Workers {
 		_, paused := buildPauses[out.Workers[i].Name]
-		out.Workers[i].BuildsPaused = paused || unreadable
+		out.Workers[i].BuildsPaused = (paused || unreadable) && !unavailable
+		out.Workers[i].BuildsUnavailable = unavailable
+		if unavailable {
+			// Unknown, not empty: a list read before the failure is dropped too.
+			out.Workers[i].Builds = nil
+		}
 	}
 	if len(out.Workers) == 1 {
 		out.Builds = out.Workers[0].Builds
 		out.BuildsPaused = out.Workers[0].BuildsPaused
 	}
+	out.BuildsUnavailable = unavailable
 	if len(out.Workers) > 0 {
 		drain := e.drainStatus(ctx, out)
 		out.Drain = &drain

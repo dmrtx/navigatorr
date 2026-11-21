@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jakenesler/navigatorr/action"
@@ -146,5 +148,60 @@ func TestWorkerPauseToolRefusesMixedOrMistypedBuildsRequests(t *testing.T) {
 	}
 	if engine.NodeBuildsPaused("node-a") {
 		t.Fatal("nothing changed")
+	}
+}
+
+// unavailableRecords is a builds registry that does not answer.
+type unavailableRecords struct{}
+
+func (unavailableRecords) NodeBuildRecords(string) []transcode.NodeBuild { return nil }
+func (unavailableRecords) BuildsPauses() (map[string]string, error) {
+	return nil, fmt.Errorf("%w: nothing answered", action.ErrBuildRecordsUnavailable)
+}
+func (unavailableRecords) SetBuildsPause(context.Context, string, bool) error {
+	return errors.New("builds registry unreachable; nothing changed")
+}
+func (unavailableRecords) BuildsPaused(string) (bool, error) {
+	return false, fmt.Errorf("%w: nothing answered", action.ErrBuildRecordsUnavailable)
+}
+
+// worker_health and worker_pause show an unreachable registry as unavailable:
+// not as paused and not as "no builds, not paused".
+func TestWorkerToolsShowAnUnavailableBuildsRegistry(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "builds.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	set, err := transcode.NewWorkerSet([]transcode.NamedWorker{{Name: "node-a", Executor: &observedHealthWorker{}, Podcast: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := action.NewEngine(action.EngineDeps{Store: st, Workers: set, DrainSettle: -1})
+	engine.SetBuildRecords(unavailableRecords{})
+	s := server.NewMCPServer("test", "0")
+	registerWorkerHealth(s, engine)
+	registerWorkerPause(s, engine)
+
+	var health transcode.WorkerObservation
+	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "worker_health", map[string]any{}))), &health); err != nil {
+		t.Fatal(err)
+	}
+	if !health.BuildsUnavailable || health.BuildsPaused || len(health.Workers) != 1 || !health.Workers[0].BuildsUnavailable || health.Workers[0].BuildsPaused {
+		t.Fatalf("worker_health: %+v", health)
+	}
+	var pause struct {
+		Nodes []transcode.NodePauseStatus `json:"nodes"`
+	}
+	if err := json.Unmarshal([]byte(resultText(t, callTool(t, s, "worker_pause", map[string]any{}))), &pause); err != nil {
+		t.Fatal(err)
+	}
+	if len(pause.Nodes) != 1 || !pause.Nodes[0].BuildsUnavailable || pause.Nodes[0].BuildsPaused {
+		t.Fatalf("worker_pause: %+v", pause)
+	}
+	// A write that fails says so and changes nothing.
+	res := callTool(t, s, "worker_pause", map[string]any{"node": "node-a", "builds_paused": true})
+	if !res.IsError || !strings.Contains(resultText(t, res), "nothing changed") {
+		t.Fatalf("write: %v %s", res.IsError, resultText(t, res))
 	}
 }

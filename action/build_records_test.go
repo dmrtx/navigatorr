@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,11 +35,13 @@ func (c *buildClock) advance(d time.Duration) {
 // with no rules of its own. The real one is package nodes, which this package
 // never imports.
 type fakeRecords struct {
-	mu      sync.Mutex
-	builds  map[string][]transcode.NodeBuild // by node
-	pauses  map[string]string                // node -> since
-	failing error                            // makes the pause reads fail
-	seq     int
+	mu         sync.Mutex
+	builds     map[string][]transcode.NodeBuild // by node
+	pauses     map[string]string                // node -> since
+	failing    error                            // makes the pause reads fail
+	failOnList error                            // set as failing by the first list read (the registry dies mid-observation)
+	listFail   error                            // fails the next list read only (the registry is back for the pause read)
+	seq        int
 }
 
 func newFakeRecords() *fakeRecords {
@@ -48,7 +51,24 @@ func newFakeRecords() *fakeRecords {
 func (f *fakeRecords) NodeBuildRecords(node string) []transcode.NodeBuild {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnList != nil {
+		f.failing, f.failOnList = f.failOnList, nil
+		return nil
+	}
 	return append([]transcode.NodeBuild(nil), f.builds[node]...)
+}
+
+// ListNodeBuildRecords makes the fake a BuildRecordsLister, like the remote
+// registry.
+func (f *fakeRecords) ListNodeBuildRecords(node string) ([]transcode.NodeBuild, error) {
+	f.mu.Lock()
+	if err := f.listFail; err != nil {
+		f.listFail = nil
+		f.mu.Unlock()
+		return nil, err
+	}
+	f.mu.Unlock()
+	return f.NodeBuildRecords(node), nil
 }
 
 func (f *fakeRecords) BuildsPauses() (map[string]string, error) {
@@ -243,5 +263,138 @@ func TestSetBuildRecordsWhileReading(t *testing.T) {
 	e.SetBuildRecords(newFakeRecords())
 	if e.buildRecords() == nil {
 		t.Fatal("wired")
+	}
+}
+
+// A registry that cannot be read at all (it runs in another process) is
+// neither paused nor not paused: the observation, the pause statuses and the
+// per-node state say "unavailable", and a read error of any other kind still
+// reads as paused.
+func TestUnavailableRegistryIsNeitherPausedNorNot(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).failing = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+
+	if paused, unavailable := e.NodeBuildsState("m1"); paused || !unavailable {
+		t.Fatalf("NodeBuildsState: paused=%v unavailable=%v", paused, unavailable)
+	}
+	if e.NodeBuildsPaused("m1") {
+		t.Fatal("an unavailable registry must not read as paused")
+	}
+	st := e.NodePauseStatuses(context.Background())["m1"]
+	if st.BuildsPaused || !st.BuildsUnavailable {
+		t.Fatalf("pause status: %+v", st)
+	}
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable || obs.BuildsPaused || len(obs.Workers) == 0 {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if w.BuildsPaused || !w.BuildsUnavailable {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+
+	// Any other error keeps failing closed.
+	records(e).failing = errors.New("disk I/O error")
+	if paused, unavailable := e.NodeBuildsState("m1"); !paused || unavailable {
+		t.Fatalf("other error: paused=%v unavailable=%v", paused, unavailable)
+	}
+	st = e.NodePauseStatuses(context.Background())["m1"]
+	if !st.BuildsPaused || st.BuildsUnavailable {
+		t.Fatalf("other error, status: %+v", st)
+	}
+
+	// Healthy again: neither flag.
+	records(e).failing = nil
+	st = e.NodePauseStatuses(context.Background())["m1"]
+	if st.BuildsPaused || st.BuildsUnavailable {
+		t.Fatalf("healthy: %+v", st)
+	}
+}
+
+// A registry that stops answering while the observation reads the build lists
+// shows as unavailable, never as nodes with no builds.
+func TestRegistryLostMidObservationReadsAsUnavailable(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).failOnList = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable || len(obs.Workers) == 0 {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if !w.BuildsUnavailable {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+}
+
+// A list read that failed shows as unavailable even when the registry answers
+// the pause read that follows (a write in between cleared the client's
+// backoff): the failed list is never "no builds" beside a known pause.
+func TestFailedListReadsAsUnavailableWhenThePausesAnswer(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m1", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	unavail := fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+
+	records(e).listFail = unavail
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if !w.BuildsUnavailable || w.BuildsPaused {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+
+	records(e).listFail = unavail
+	st := e.AttachNodeBuilds(e.NodePauseStatuses(context.Background()))["m1"]
+	if !st.BuildsUnavailable || st.BuildsPaused || len(st.Builds) != 0 {
+		t.Fatalf("attached: %+v", st)
+	}
+
+	obs = e.WorkerObservation(context.Background())
+	for _, w := range obs.Workers {
+		if w.Name == "m1" && (w.BuildsUnavailable || !w.BuildsPaused || len(w.Builds) != 1) {
+			t.Fatalf("recovered m1: %+v", w)
+		}
+	}
+}
+
+// When one node's list read fails, every node's builds side reads as unknown:
+// no list, no pause and no pause time, whatever the pause read said.
+func TestAFailedListMakesEveryNodeUnknown(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m2", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	records(e).pauses["m2"] = "2026-11-13T10:00:00Z"
+	statuses := e.NodePauseStatuses(context.Background())
+	if !statuses["m1"].BuildsPaused || statuses["m1"].BuildsPausedSince == "" {
+		t.Fatalf("setup: %+v", statuses["m1"])
+	}
+	records(e).listFail = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+	for name, st := range e.AttachNodeBuilds(statuses) {
+		if !st.BuildsUnavailable || st.BuildsPaused || st.BuildsPausedSince != "" || len(st.Builds) != 0 {
+			t.Fatalf("%s: %+v", name, st)
+		}
+	}
+}
+
+// Any failed list read, not only an unavailable registry, leaves the builds
+// side unknown in WithBuildRecords (the single-node path of worker_pause).
+func TestWithBuildRecordsTreatsAnyListErrorAsUnknown(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m1", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	st := e.NodePauseStatuses(context.Background())["m1"]
+	records(e).listFail = errors.New("decode: unexpected EOF")
+	got := e.WithBuildRecords(st)
+	if !got.BuildsUnavailable || got.BuildsPaused || got.BuildsPausedSince != "" || len(got.Builds) != 0 {
+		t.Fatalf("after a failed list: %+v", got)
+	}
+	got = e.WithBuildRecords(st)
+	if got.BuildsUnavailable || !got.BuildsPaused || len(got.Builds) != 1 {
+		t.Fatalf("after recovery: %+v", got)
 	}
 }
