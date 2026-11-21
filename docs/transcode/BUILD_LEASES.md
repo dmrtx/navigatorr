@@ -179,6 +179,17 @@ paused on the node (a read, nothing registered): paused refuses it with 409
 lease waits; a lease already waiting is not affected by a later pause. The
 registration always carries `"via": "node_lease"`.
 
+When Nodes runs as a separate process (`nodes.url` set), the worker still talks
+to the same server URL: the server forwards these calls to Nodes. If Nodes is
+down, hung or restarting, the server answers 503 (never 400, 404 or 409) and the
+worker fails open: the registration and the pause read fail open (3 second
+timeout), heartbeats and finishes are retried, and the lease runs. When Nodes is
+back, heartbeats resume and live leases register again on the worker's next
+retry (5 seconds). A lease that starts and ends while Nodes is down is never
+recorded; that is accepted on purpose, because the worker is the authority and
+the registry is history. See "Running Nodes as its own process" and the cutover
+runbook in [../nodes/README.md](../nodes/README.md).
+
 ## Deploy order and version skew
 
 Deploy the workers and the server together. The server decodes request bodies
@@ -194,6 +205,11 @@ In both cases the lease is still granted locally, because only the builds pause
 ever stops a lease; the server's record merely lags until both sides are
 deployed. Nothing is lost on the node.
 
+Running Nodes as a separate process does not change this order. The server and
+Nodes may start in either order; while Nodes is not up the workers see 503 and
+keep granting leases (N3). The step-by-step cutover and rollback are in
+[../nodes/README.md](../nodes/README.md) ("Cutover runbook", "Rollback").
+
 ## Failure modes
 
 - Worker restart mid-lease: the freeze and the queue hold are in the record, so
@@ -206,6 +222,12 @@ deployed. Nothing is lost on the node.
   reports are retried and the server's record catches up. The server's own
   expiry may mark the build lost while the worker still holds it.
 - Low lease promoted while the server is down: granted; the pause was checked (and failed open) when it was asked for.
+- Nodes (the builds registry) is a separate process and is down: the server
+  answers 503 on the builds routes, the worker fails open as for an unreachable
+  server, and the workers UI shows "Builds registry unavailable", not "paused".
+  A lease that starts and ends during the outage is not recorded (accepted: the
+  registry is history); a live one registers again within 5 seconds of Nodes
+  coming back. See the cutover runbook in [../nodes/README.md](../nodes/README.md).
 - Low lease promoted, then the registration is refused as paused (the operator
   paused builds after the lease asked): the lease keeps running, it is marked
   unrecorded and is not registered again, so the worker does not retry a refusal
