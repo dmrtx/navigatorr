@@ -380,3 +380,21 @@ func TestAFailedListMakesEveryNodeUnknown(t *testing.T) {
 		}
 	}
 }
+
+// Any failed list read, not only an unavailable registry, leaves the builds
+// side unknown in WithBuildRecords (the single-node path of worker_pause).
+func TestWithBuildRecordsTreatsAnyListErrorAsUnknown(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).add("m1", "graceful")
+	records(e).pauses["m1"] = "2026-11-13T10:00:00Z"
+	st := e.NodePauseStatuses(context.Background())["m1"]
+	records(e).listFail = errors.New("decode: unexpected EOF")
+	got := e.WithBuildRecords(st)
+	if !got.BuildsUnavailable || got.BuildsPaused || got.BuildsPausedSince != "" || len(got.Builds) != 0 {
+		t.Fatalf("after a failed list: %+v", got)
+	}
+	got = e.WithBuildRecords(st)
+	if got.BuildsUnavailable || !got.BuildsPaused || len(got.Builds) != 1 {
+		t.Fatalf("after recovery: %+v", got)
+	}
+}
