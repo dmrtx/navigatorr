@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,4 +119,30 @@ func TestEmptyNodesURLOpensInProcess(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "locked") || !strings.Contains(err.Error(), "nodes database") {
 		t.Fatal(err)
 	}
+}
+
+type recUI struct{ inProcess, proxied int }
+
+func (u *recUI) SetNodes(*nodes.Service)    { u.inProcess++ }
+func (u *recUI) SetNodesProxy(http.Handler) { u.proxied++ }
+
+// With nodes.url the UI gets the proxy and never the in-process registry, and
+// the engine is wired to the remote records.
+func TestRemoteBackendConnectsTheProxyOnly(t *testing.T) {
+	key := writeKey(t, strings.Repeat("nodeskey", 5), 0o600)
+	b, err := openNodes(switchCfg("http://127.0.0.1:8097", key), nodesInputs{Topology: noNodes{}}, func(nodes.Options) (*nodes.Service, error) {
+		t.Fatal("nodes.Open called")
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	ui := &recUI{}
+	b.ConnectUI(ui)
+	if ui.proxied != 1 || ui.inProcess != 0 {
+		t.Fatalf("%+v", ui)
+	}
+	b.Wire(nil) // a nil engine is ignored
+	b.Start("")()
 }

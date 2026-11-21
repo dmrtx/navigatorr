@@ -503,6 +503,40 @@ func TestALateOldFlightHonoursTheBackoff(t *testing.T) {
 	}
 }
 
+// An old flight that ends after a newer one stored a snapshot hands its
+// callers the newer snapshot, whatever its own answer was.
+func TestAnOldFlightReturnsTheCurrentSnapshot(t *testing.T) {
+	f := newFixture(t, serveJSON(twoNodes), nil)
+	f.c.mu.Lock()
+	gen := f.c.gen
+	f.c.mu.Unlock()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	var once sync.Once
+	f.h.Store(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(entered) })
+		<-release
+		http.Error(w, "gone", 500) // the old flight fails
+	}))
+	type res struct {
+		v   any
+		err error
+	}
+	done := make(chan res, 1)
+	go func() { v, err := f.c.fetch(gen); done <- res{v, err} }()
+	<-entered
+	fresh := &snapshot{nodes: map[string]nodeView{"nodeA": {Name: "nodeA"}}, pauses: map[string]string{}}
+	f.c.mu.Lock()
+	f.c.gen++
+	f.c.snap, f.c.snapUntil = fresh, f.clock.Now().Add(time.Second)
+	f.c.mu.Unlock()
+	close(release)
+	r := <-done
+	if r.err != nil || r.v.(*snapshot) != fresh {
+		t.Fatalf("old flight returned %v, %v", r.v, r.err)
+	}
+}
+
 // A flight that starts after another of the same generation stored a fresh
 // snapshot uses it instead of asking Nodes again.
 func TestALateFlightUsesTheFreshSnapshot(t *testing.T) {
@@ -652,5 +686,26 @@ func TestNewRejectsBadOptions(t *testing.T) {
 		if _, err := New(o); err == nil {
 			t.Errorf("%+v accepted", o)
 		}
+	}
+}
+
+// A redirect is never followed (the key would go with it): a read is
+// unavailable and a write is refused with nothing changed.
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	var elsewhere atomic.Int32
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { elsewhere.Add(1) }))
+	defer other.Close()
+	redirect := func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}
+	f := newFixture(t, redirect, nil)
+	if _, err := f.c.BuildsPauses(); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	if err := f.c.SetBuildsPause(context.Background(), "nodeA", true); err == nil || !strings.Contains(err.Error(), "nothing changed") {
+		t.Fatal(err)
+	}
+	if elsewhere.Load() != 0 {
+		t.Fatal("a redirect was followed")
 	}
 }

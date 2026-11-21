@@ -328,16 +328,27 @@ func (c *Client) fetch(gen uint64) (any, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now = c.now()
-	if err != nil {
-		if c.gen == gen {
-			c.snap, c.failUntil = nil, now.Add(c.back)
+	if c.gen != gen {
+		// A write opened a newer generation while this flight was out: its
+		// result is older than what the cache may hold now. Hand the callers
+		// the current state when there is one, else this flight's own result.
+		if c.snap != nil && now.Before(c.snapUntil) {
+			return c.snap, nil
 		}
+		if now.Before(c.failUntil) {
+			return nil, ErrUnavailable
+		}
+		if err != nil {
+			return nil, ErrUnavailable
+		}
+		return s, nil
+	}
+	if err != nil {
+		c.snap, c.failUntil = nil, now.Add(c.back)
 		return nil, ErrUnavailable
 	}
-	if c.gen == gen {
-		c.snap, c.snapUntil, c.failUntil = s, now.Add(c.ttl), time.Time{}
-		c.checkDriftLocked(s, now)
-	}
+	c.snap, c.snapUntil, c.failUntil = s, now.Add(c.ttl), time.Time{}
+	c.checkDriftLocked(s, now)
 	return s, nil
 }
 
