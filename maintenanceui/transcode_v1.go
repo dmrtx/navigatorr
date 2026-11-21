@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jakenesler/navigatorr/action"
 	"github.com/jakenesler/navigatorr/transcodeapi"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -561,10 +562,14 @@ func (s *Server) checkTranscodeAction(w http.ResponseWriter, id string) bool {
 	return true
 }
 
-// v1Actions lists the transcode actions, newest first, as a page:
-// {items, offset, limit, next_offset, has_more}. The engine pages over every
-// action and the page is then cut to the transcode ones, so a page can hold
-// fewer than limit items, even none: follow next_offset until has_more is false.
+// v1Actions lists the transcode actions, newest created first, as a page of
+// light rows: {items, offset, limit, next_offset, has_more}. Every row read is a
+// transcode action and the order does not move as actions update, so following
+// next_offset until has_more is false sees each action once. A row is only what
+// tells actions apart (id, kind, status, file, result, dates); the evidence,
+// phase costs, budgets and steps are in GET /actions/{id}. A page always fits in
+// one answer: when limit rows would not, it ends early and next_offset says
+// where the next one starts.
 func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	status := q.Get("status")
@@ -583,37 +588,109 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 			*target = n
 		}
 	}
-	text, errText, found, err := s.callTool(r.Context(), "action_list", map[string]any{"status": status, "limit": limit, "offset": offset})
-	switch {
-	case !found:
-		transcodeapi.WriteError(w, 503, "unavailable", "this endpoint is not available on this server", "")
-		return
-	case err != nil:
-		writeToolFault(w, "action_list", err)
-		return
-	case errText != "":
-		writeToolError(w, errText, v1Err{})
+	kinds := make([]string, 0, len(allowedActions))
+	for name := range allowedActions {
+		kinds = append(kinds, name)
+	}
+	slices.Sort(kinds)
+	rows, err := s.engine.ListKinds(r.Context(), kinds, status, limit, offset)
+	if err != nil {
+		log.Printf("transcode v1: listing actions: %v", err)
+		transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
 		return
 	}
-	var rows []map[string]any
-	if err := json.Unmarshal([]byte(text), &rows); err != nil {
-		// Not a page: the tool sent its "response too large" note (or
-		// something unexpected). Never answer 200 without the page fields.
-		if toolTooLarge(text) {
-			writeTooLarge(w, "lower limit")
-		} else {
-			log.Printf("transcode v1: action_list answered something that is not a page: %v", err)
-			transcodeapi.WriteError(w, 502, "internal", "the action list could not be read", "")
+	items := make([]v1ActionItem, 0, len(rows))
+	size := 0
+	for i := range rows {
+		item := lightAction(&rows[i])
+		b, _ := json.Marshal(item)
+		if len(items) > 0 && size+len(b)+1 > v1ActionPageBytes {
+			break
 		}
-		return
+		size += len(b) + 1
+		items = append(items, item)
 	}
-	items := make([]map[string]any, 0, len(rows))
-	for _, row := range rows {
-		if name, _ := row["action_name"].(string); transcodeAction(name) {
-			items = append(items, row)
+	transcodeapi.WriteJSON(w, 200, map[string]any{
+		"items": items, "offset": offset, "limit": limit,
+		"next_offset": offset + len(items),
+		"has_more":    len(items) < len(rows) || len(rows) == limit,
+	})
+}
+
+// v1ActionPageBytes bounds the rows of one list page, well under the 64 KiB a
+// caller such as call_api accepts, whatever the rows hold.
+const v1ActionPageBytes = 48 << 10
+
+// v1ActionItem is one light row of the action list.
+type v1ActionItem struct {
+	ID         string          `json:"id"`
+	ActionName string          `json:"action_name"`
+	Status     string          `json:"status"`
+	File       string          `json:"file,omitempty"`
+	Title      string          `json:"title,omitempty"`
+	Result     *v1ActionResult `json:"result,omitempty"`
+	Waiting    string          `json:"waiting,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	ParentID   string          `json:"parent_action_id,omitempty"`
+	CreatedAt  string          `json:"created_at"`
+	UpdatedAt  string          `json:"updated_at"`
+}
+
+// v1ActionResult is the verdict of a conversion (outcome, message, encoder) or
+// the item counts of a batch.
+type v1ActionResult struct {
+	Goal    string         `json:"goal,omitempty"`
+	Outcome string         `json:"outcome,omitempty"`
+	Message string         `json:"message,omitempty"`
+	Encoder string         `json:"encoder,omitempty"`
+	Counts  map[string]int `json:"counts,omitempty"`
+}
+
+// v1BatchCounts are the batch counts a list row carries.
+var v1BatchCounts = []string{"total", "completed", "failed", "cancelled", "skip", "review", "queued", "running", "waiting_for_slot", "waiting_decision"}
+
+func lightAction(res *action.ActionResult) v1ActionItem {
+	str := func(m map[string]any, key string) string { v, _ := m[key].(string); return v }
+	item := v1ActionItem{
+		ID: res.ID, ActionName: res.ActionName, Status: res.Status,
+		File:      clipRunes(str(res.Inputs, "path"), 512),
+		ParentID:  str(res.Inputs, "parent_action_id"),
+		Waiting:   clipRunes(res.WaitingReason, 200),
+		Error:     clipRunes(res.Error, 200),
+		CreatedAt: res.CreatedAt, UpdatedAt: res.UpdatedAt,
+	}
+	if e := action.ExplainTranscode(res); e != nil {
+		item.Result = &v1ActionResult{Goal: e.Goal, Outcome: e.Outcome, Message: clipRunes(e.Message, 200), Encoder: e.Encoder}
+	}
+	if res.ActionName == "transcode_batch" {
+		item.Title = clipRunes(str(res.State, "series_title"), 200)
+		if item.Title == "" {
+			item.Title = clipRunes(str(res.Outputs, "series_title"), 200)
+		}
+		counts, _ := res.State["counts"].(map[string]any)
+		if counts == nil {
+			counts, _ = res.Outputs["counts"].(map[string]any)
+		}
+		if len(counts) > 0 {
+			out := map[string]int{}
+			for _, k := range v1BatchCounts {
+				if n, ok := counts[k].(float64); ok && n != 0 {
+					out[k] = int(n)
+				}
+			}
+			item.Result = &v1ActionResult{Counts: out}
 		}
 	}
-	transcodeapi.WriteJSON(w, 200, map[string]any{"items": items, "offset": offset, "limit": limit, "next_offset": offset + len(rows), "has_more": len(rows) == limit})
+	return item
+}
+
+// clipRunes cuts s to at most n runes, marking a cut with an ellipsis.
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // v1Param is one numeric or boolean query parameter of a tool-backed route.

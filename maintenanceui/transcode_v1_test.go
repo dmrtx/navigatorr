@@ -589,7 +589,6 @@ func TestTranscodeV1TooLargeAnswersAnError(t *testing.T) {
 		fakeTool(s, tool, func(map[string]any) (*mcp.CallToolResult, error) { return mcp.NewToolResultText(note), nil })
 	}
 	for p, hint := range map[string]string{
-		"/transcode/v1/actions":      "limit",
 		"/transcode/v1/actions/job1": "narrow",
 		"/transcode/v1/history":      "narrow",
 	} {
@@ -597,11 +596,6 @@ func TestTranscodeV1TooLargeAnswersAnError(t *testing.T) {
 		if c != 502 || e["code"] != "response_too_large" || !strings.Contains(e["hint"].(string), hint) || e["items"] != nil {
 			t.Errorf("%s: %d %v", p, c, e)
 		}
-	}
-	// A plain sentence instead of a page is an error too, not a 200 message.
-	fakeTool(s, "action_list", func(map[string]any) (*mcp.CallToolResult, error) { return mcp.NewToolResultText("nothing"), nil })
-	if c, e := get(t, h, "/transcode/v1/actions", keyHdr()); c != 502 || e["code"] != "internal" {
-		t.Fatal(c, e)
 	}
 	// History that is not a page ({}, null, a sentence) is an error, never an
 	// empty 200.
@@ -862,7 +856,7 @@ func TestTranscodeV1PodcastListFollowsTheSwitch(t *testing.T) {
 // The REST list is a page of verdicts: a default page of finished conversions
 // with their full search evidence answers 200, and the evidence and phase
 // costs are left to GET /transcode/v1/actions/{id}.
-func TestTranscodeV1ActionsListKeepsOnlyTheVerdict(t *testing.T) {
+func TestTranscodeV1ActionsListIsLight(t *testing.T) {
 	s, h := transcodeUI(t)
 	st := s.engine.Deps().Store
 	stages := make([]any, 0, 12)
@@ -877,30 +871,109 @@ func TestTranscodeV1ActionsListKeepsOnlyTheVerdict(t *testing.T) {
 		"automatic_search":   map[string]any{"stages": stages, "verified_samples": 7},
 		"benchmark_decision": map[string]any{"winner": map[string]any{"video_codec": "libx265"}},
 		"phase_costs":        map[string]any{"worker_encode": map[string]any{"duration_ms": 900000, "attempts": 1, "provenance": "worker_measured", "timing_scope": strings.Repeat("phase_wall; phases may overlap ", 40)}},
+		"work_progress":      map[string]any{"phase": "encode", "bytes_read": 1, "total_bytes": 2},
 	}
-	for i := 0; i < 20; i++ {
-		seedOperation(t, st, fmt.Sprintf("done%02d", i), "transcode_media", "completed", map[string]any{"mode": "size", "path": fmt.Sprintf("/media/Show S01E%02d.mkv", i)}, heavy, heavy)
+	for i := 0; i < 100; i++ {
+		seedOperation(t, st, fmt.Sprintf("done%03d", i), "transcode_media", "completed", map[string]any{"mode": "size", "path": fmt.Sprintf("/media/Some Long Series Name (2024)/Season 01/Some Long Series Name (2024) - S01E%03d - An Episode Title [WEBDL-2160p][HDR10][EAC3 5.1][h265].mkv", i)}, heavy, heavy)
 	}
-	code, page := get(t, h, "/transcode/v1/actions", keyHdr())
+	seedOperation(t, st, "batch1", "transcode_batch", "running", map[string]any{"mode": "size"}, nil,
+		map[string]any{"series_title": "Some Series", "counts": map[string]any{"total": 8, "completed": 3, "running": 1, "queued": 4}, "batch_items": strings.Repeat("x", 20000)})
+	allowed := map[string]bool{"id": true, "action_name": true, "status": true, "file": true, "title": true, "result": true, "waiting": true, "error": true, "parent_action_id": true, "created_at": true, "updated_at": true}
+	w := v1(h, "GET", "/transcode/v1/actions?limit=100", "", keyHdr())
+	var page map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 {
+		t.Fatalf("limit=100: %d %.300s", w.Code, w.Body.String())
+	}
+	if w.Body.Len() > 64<<10 {
+		t.Fatalf("a page must fit in 64 KiB: %d bytes", w.Body.Len())
+	}
 	items, _ := page["items"].([]any)
-	if code != 200 || len(items) != 20 {
-		t.Fatalf("default page: %d, %d items: %v", code, len(items), page)
+	if len(items) != 100 || page["has_more"] != true || page["next_offset"] != float64(100) {
+		t.Fatalf("100 light rows fit in one page: %d items, %v %v", len(items), page["has_more"], page["next_offset"])
 	}
 	for _, it := range items {
 		row := it.(map[string]any)
-		tr, _ := row["transcode"].(map[string]any)
-		_, costs := row["phase_costs"]
-		_, stages := tr["stages"]
-		_, hardware := tr["hardware"]
-		outcome, _ := tr["outcome"].(string)
-		message, _ := tr["message"].(string)
-		if costs || stages || hardware || tr["goal"] != "size" || outcome == "" || message == "" ||
-			tr["tested_candidates"] != float64(120) || tr["verified_samples"] != float64(7) || tr["encoder"] != "libx265" {
-			t.Fatalf("list item carries detail or lost its verdict: %v", row)
+		for k := range row {
+			if !allowed[k] {
+				t.Fatalf("list row carries %q: %v", k, row)
+			}
 		}
 	}
-	code, one := get(t, h, "/transcode/v1/actions/done00", keyHdr())
+	first := items[0].(map[string]any)
+	if first["id"] != "batch1" || first["title"] != "Some Series" {
+		t.Fatalf("newest first, a batch shows its title: %v", first)
+	}
+	if c, _ := first["result"].(map[string]any)["counts"].(map[string]any); c["total"] != float64(8) || c["queued"] != float64(4) || c["failed"] != nil {
+		t.Fatalf("a batch shows its non-zero counts: %v", first)
+	}
+	row := items[1].(map[string]any)
+	res, _ := row["result"].(map[string]any)
+	if row["id"] != "done099" || !strings.HasSuffix(row["file"].(string), "[h265].mkv") || res["goal"] != "size" || res["outcome"] == "" || res["message"] == "" || res["encoder"] != "libx265" {
+		t.Fatalf("a conversion row keeps id, file and verdict: %v", row)
+	}
+	code, one := get(t, h, "/transcode/v1/actions/done000", keyHdr())
 	if body, _ := json.Marshal(one); code != 200 || !strings.Contains(string(body), "stage-11") || !strings.Contains(string(body), "phase_costs") {
 		t.Fatalf("one action must keep the evidence: %d %.300s", code, body)
+	}
+}
+
+// A page ends early instead of overflowing, and walking with next_offset still
+// sees every action once, even when actions update between pages.
+func TestTranscodeV1ActionsPageEndsEarlyAndWalksEveryAction(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	for i := 0; i < 100; i++ {
+		seedOperation(t, st, fmt.Sprintf("f%03d", i), "transcode_media", "failed", map[string]any{"path": "/media/" + strings.Repeat("p", 700)}, nil, nil)
+		touch(t, st, fmt.Sprintf("f%03d", i), func(inst *store.ActionInstance) {
+			inst.ErrorJSON = `{"error":"` + strings.Repeat("e", 3000) + `"}`
+			inst.WaitingReason = strings.Repeat("w", 3000)
+		})
+	}
+	seen := map[string]bool{}
+	offset, pages := 0, 0
+	for ; pages < 100; pages++ {
+		w := v1(h, "GET", fmt.Sprintf("/transcode/v1/actions?status=failed&limit=100&offset=%d", offset), "", keyHdr())
+		var page map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != 200 || w.Body.Len() > 64<<10 {
+			t.Fatalf("offset %d: %d, %d bytes", offset, w.Code, w.Body.Len())
+		}
+		items, _ := page["items"].([]any)
+		for _, it := range items {
+			row := it.(map[string]any)
+			if len([]rune(row["error"].(string))) > 200 || len([]rune(row["waiting"].(string))) > 200 || len([]rune(row["file"].(string))) > 512 {
+				t.Fatalf("text is not clipped: %d %d %d", len(row["error"].(string)), len(row["waiting"].(string)), len(row["file"].(string)))
+			}
+			id := row["id"].(string)
+			if seen[id] {
+				t.Fatalf("%s repeated", id)
+			}
+			seen[id] = true
+		}
+		if pages == 0 {
+			if len(items) >= 100 || page["has_more"] != true {
+				t.Fatalf("a page of big rows must end early with has_more: %d %v", len(items), page["has_more"])
+			}
+			// An older action updates: the order stays by creation.
+			touch(t, st, "f000", func(inst *store.ActionInstance) { inst.WaitingReason = "touched" })
+		}
+		offset = int(page["next_offset"].(float64))
+		if page["has_more"] != true {
+			break
+		}
+	}
+	if len(seen) != 100 || pages < 1 {
+		t.Fatalf("the walk must see all 100 once: %d in %d pages", len(seen), pages+1)
+	}
+}
+
+func touch(t *testing.T, st *store.Store, id string, change func(*store.ActionInstance)) {
+	t.Helper()
+	inst, err := st.GetActionInstanceIfExists(id)
+	if err != nil || inst == nil {
+		t.Fatal(id, err)
+	}
+	change(inst)
+	if err := st.UpdateActionInstance(*inst); err != nil {
+		t.Fatal(err)
 	}
 }

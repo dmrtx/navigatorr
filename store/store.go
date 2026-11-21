@@ -270,6 +270,7 @@ var migrations = []migration{
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_action_instances_status ON action_instances (status, updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_action_instances_created ON action_instances (created_at, id)`,
 		`CREATE TABLE IF NOT EXISTS action_steps_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			instance_id TEXT NOT NULL REFERENCES action_instances (id) ON DELETE CASCADE,

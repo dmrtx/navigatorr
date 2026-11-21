@@ -2055,7 +2055,7 @@
         ],
         "operationId": "listActions",
         "summary": "List transcode actions",
-        "description": "Actions (durable workflows) of the transcode kind, newest first, as compact summaries: transcode_media (one file), transcode_batch (a series or folder, its files are children), clean_podcast_ads, promote_transcode_candidate and benchmark_transcode. Filter by status. Paging: offset-based. Send offset (0 first) and limit; the answer carries next_offset and has_more. Follow next_offset until has_more is false; a page can be short or empty and still have more. The engine pages over every action and the page is then cut to the transcode ones, so a page can hold fewer than limit items, or none. Each item is short: no item carries phase costs, and a transcode_media item carries only its verdict (goal, outcome, message, tested candidates, verified samples, encoder, hardware); the search evidence and phase costs are in GET /transcode/v1/actions/{id}, which returns one action with its steps. Read-only.",
+        "description": "Actions (durable workflows) of the transcode kind, newest created first, as light rows: transcode_media (one file), transcode_batch (a series or folder, its files are children), clean_podcast_ads, promote_transcode_candidate and benchmark_transcode. Each row is only id, action_name, status, file (the source path), title (a batch's series), result (a conversion's goal, outcome, message and encoder, or a batch's non-zero counts), waiting (why it waits), error, parent_action_id, created_at and updated_at; long text is clipped. VMAF and search evidence, phase timings and costs, budgets, validations and steps are only in GET /transcode/v1/actions/{id}. Filter by status. Paging: offset-based. Send offset (0 first) and limit; the answer carries next_offset and has_more. Follow next_offset until has_more is false. Every row of a page is a transcode action and the order is by creation, so it does not move while actions run: a walk sees each action once. A page always fits in one answer: when limit rows would not fit, it returns fewer, with has_more true and next_offset where the next page starts. An empty first page means there are no such actions now. Read-only.",
         "responses": {
           "200": {
             "description": "A page of actions.",
@@ -2068,7 +2068,7 @@
                     "items": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/ActionSummary"
+                        "$ref": "#/components/schemas/ActionListItem"
                       }
                     },
                     "offset": {
@@ -2130,16 +2130,6 @@
           },
           "500": {
             "description": "The server failed to answer (code internal); the cause is in the server log, never in the answer.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "The answer does not fit in one response (code response_too_large); the hint says how to narrow the request.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11464,6 +11454,97 @@
           }
         },
         "description": "Compact summary of an action. Extra fields appear by kind (transcode, podcast, work, cleanup, ...)."
+      },
+      "ActionListItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "One light row of the action list. The detail of the action is in GET /transcode/v1/actions/{id}.",
+        "required": [
+          "id",
+          "action_name",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action_name": {
+            "type": "string",
+            "enum": [
+              "transcode_media",
+              "transcode_batch",
+              "clean_podcast_ads",
+              "promote_transcode_candidate",
+              "benchmark_transcode"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "waiting_external",
+              "waiting_decision",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "file": {
+            "type": "string",
+            "description": "The source path of a one-file action (at most 512 characters)."
+          },
+          "title": {
+            "type": "string",
+            "description": "A batch's series title."
+          },
+          "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "goal": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "encoder": {
+                "type": "string"
+              },
+              "counts": {
+                "type": "object",
+                "description": "A batch's non-zero item counts: total, completed, failed, cancelled, skip, review, queued, running, waiting_for_slot, waiting_decision.",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "waiting": {
+            "type": "string",
+            "description": "Why the action waits (at most 200 characters)."
+          },
+          "error": {
+            "type": "string",
+            "description": "The error of a failed action (at most 200 characters)."
+          },
+          "parent_action_id": {
+            "type": "string",
+            "description": "The batch a child conversion belongs to."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "WorkerWindow": {
         "type": "object",

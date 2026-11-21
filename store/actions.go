@@ -193,6 +193,59 @@ func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]Ac
 	return s.listActionInstances(status, "", limit, offset)
 }
 
+// ListActionInstancesOfKinds pages the instances of the named workflows,
+// optionally in one status, oldest-created last: created_at DESC, id DESC.
+// The order does not move when a row is updated, so walking every page with
+// offset sees each instance once even while actions run.
+func (s *Store) ListActionInstancesOfKinds(names []string, status string, limit, offset int) ([]ActionInstance, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
+		state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances WHERE action_name IN (?` + strings.Repeat(",?", len(names)-1) + `)`
+	args := make([]any, 0, len(names)+3)
+	for _, n := range names {
+		args = append(args, n)
+	}
+	if status != "" && !strings.EqualFold(status, "all") {
+		q += ` AND status=?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActionInstance
+	for rows.Next() {
+		var inst ActionInstance
+		if err := rows.Scan(
+			&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+			&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+			&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
+}
+
 // ListActionInstancesByName pages one workflow without loading unrelated state.
 func (s *Store) ListActionInstancesByName(name string, limit, offset int) ([]ActionInstance, error) {
 	return s.listActionInstances("", name, limit, offset)
