@@ -64,8 +64,11 @@ type Server struct {
 	transcodeTokenHash [32]byte
 	hasTranscodeToken  bool
 	// nodes is the build registry the builds routes serve (see SetNodes).
-	nodes       *nodes.Service
-	legacy      http.Handler // nodes.LegacyHandler of nodes
+	nodes  *nodes.Service
+	legacy http.Handler // nodes.LegacyHandler of nodes
+	// nodesProxy, when set, serves the builds routes from a separate Nodes
+	// process instead (see SetNodesProxy).
+	nodesProxy  http.Handler
 	mu          sync.Mutex
 	sessions    map[string]time.Time
 	folderSizes folderSizeCache

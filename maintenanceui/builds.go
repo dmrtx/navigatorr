@@ -63,6 +63,10 @@ func (s *Server) buildsTokenCall(r *http.Request) bool {
 // legacyBuilds serves every legacy builds route (auth was checked by Handler's
 // wrapper). The routes themselves live in package nodes (LegacyHandler).
 func (s *Server) legacyBuilds(w http.ResponseWriter, r *http.Request) {
+	if s.nodesProxy != nil {
+		s.nodesProxy.ServeHTTP(w, r)
+		return
+	}
 	if s.nodes == nil || s.legacy == nil {
 		fail(w, 503, "builds are not available")
 		return
@@ -79,8 +83,19 @@ func (s *Server) SetNodes(n *nodes.Service) {
 	}
 }
 
+// SetNodesProxy sends the builds routes (legacy and /nodes/v1, but not the spec,
+// which stays embedded here) to a separate Nodes process through h (package
+// nodesproxy) instead of to the in-process registry. Authentication is still
+// Transcode's own: it runs before the request reaches h. It takes precedence
+// over SetNodes. Call it before serving.
+func (s *Server) SetNodesProxy(h http.Handler) { s.nodesProxy = h }
+
 // nodesAPI serves /nodes/v1 (auth was checked by Handler's wrapper).
 func (s *Server) nodesAPI(w http.ResponseWriter, r *http.Request) {
+	if s.nodesProxy != nil {
+		s.nodesProxy.ServeHTTP(w, r)
+		return
+	}
 	if s.nodes == nil {
 		writeJSON(w, 503, map[string]string{"error": "nodes is not available", "code": "unavailable"})
 		return

@@ -21,7 +21,15 @@ func gzipResponses(next http.Handler) http.Handler {
 			return
 		}
 		gw := &gzipWriter{ResponseWriter: w}
-		defer gw.finish()
+		defer func() {
+			// A handler that panics (http.ErrAbortHandler when Nodes breaks
+			// mid-answer) must not get a clean gzip trailer: the client has to
+			// see the body fail, not end.
+			if p := recover(); p != nil {
+				panic(p)
+			}
+			gw.finish()
+		}()
 		next.ServeHTTP(gw, r)
 	})
 }

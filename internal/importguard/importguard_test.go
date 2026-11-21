@@ -310,3 +310,15 @@ func TestNodesBinaryStaysApart(t *testing.T) {
 			"internal/mcpproxy", "internal/transcodeworker")
 	})
 }
+
+// TestNodesProxyStaysApart guards the reverse proxy Transcode uses to reach a
+// separate Nodes process: it must link neither the registry (nodes) nor the
+// engine (action, transcode*), the store, the UI, the tools, the podcast
+// pipeline, the queue, the packages that join them (nodeswire, nodesclient),
+// the MCP proxy nor the worker. It may reach only itself and package internal
+// (logging), so it can never carry the code it stands in front of.
+func TestNodesProxyStaysApart(t *testing.T) {
+	checkStatelessRoot(t, "internal/nodesproxy", func(p string) bool {
+		return p != "internal/nodesproxy" && p != "internal"
+	})
+}
