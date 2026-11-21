@@ -173,10 +173,10 @@ database:
   nodes_path: /path/to/<nodes.db dir>/nodes.db   # required by navigatorr-nodes
 
 nodes:
-  listen: 127.0.0.1:<port>              # Nodes only; default 127.0.0.1:8097
+  listen: 127.0.0.1:<nodes port>        # Nodes only; default 127.0.0.1:8097
   key_file: /path/to/nodes.key          # both sides: the service key
-  url: http://127.0.0.1:<port>          # Transcode server only: where Nodes is
-  transcode_url: http://127.0.0.1:<port>  # Nodes only: the engine; empty = no transcode view
+  url: http://127.0.0.1:<nodes port>    # Transcode server only: where Nodes is
+  transcode_url: http://127.0.0.1:<server port>  # Nodes only: the engine; empty = no transcode view
   transcode_key_file: /path/to/transcode.key  # Nodes only: sent to the engine as X-Api-Key
   allow_non_loopback: false
 ```
@@ -213,10 +213,19 @@ The deployment must:
 - run a second container from the same image with entrypoint
   `navigatorr-nodes`, `read_only`, all capabilities dropped,
   `no-new-privileges`, a tmpfs `/tmp`, and a listen address on loopback only;
+- give both containers one network namespace (both on the host network, or one
+  joining the other's), so `127.0.0.1` in `nodes.url` and `nodes.transcode_url`
+  reaches the other container. On separate networks loopback is each
+  container's own, every builds call answers 503 and Nodes shows no transcode
+  state. If they cannot share one, Nodes needs `nodes.allow_non_loopback: true`
+  and a listen address on a private network that only the server can reach;
 - run it as the user that owns `nodes.db` and its directory. Without
   `CAP_DAC_OVERRIDE`, that user reads only what it owns: the directory of
   `nodes.db` (mode 0700), `nodes.db` (0600), the service key and the copy of the
   engine key it mounts (0600) must all belong to it;
+- run the Transcode server as that same user. It opens `nodes.db` itself before
+  the cutover and after a rollback, and the `.lock`, `-wal` and `-shm` files it
+  creates must stay readable by Nodes;
 - mount only `config.yaml` (read-only), the two key files (read-only) and the
   directory of `nodes.db` (read-write). The directory holds `nodes.db` and
   nothing else of the server: never the directory of the main database. Put it
@@ -303,110 +312,126 @@ in order and do not start a step until the previous one's check passes. Every
 step that stops a container waits until it is `exited`. Run `navigatorr-nodes
 check` as the user that owns the files (see the deployment requirements), in a
 container of the image, never as another user from the host: it would create
-files with the wrong owner.
+files with the wrong owner. `check` exits 0 and prints `ok` only when the lock
+is free, there is no `-wal` file (unless `--checkpoint` folded it in), the
+integrity check passes and the `legacy_import` mark is present.
 
 `<nodes.db>` is the path in `database.nodes_path`.
 
-**Step 0. Quiet window.** Before the cutover, and again before steps 2, 4 and
-any rollback:
+**Baseline.** Step 1 saves the responses of `GET /nodes/v1/nodes`,
+`GET /nodes/v1/builds` and `GET /api/maintenance/builds/nodes`. "Matches the
+baseline" means: the same node names, the same `builds_paused` per node, and
+every build of the baseline still present with the same `status`. Builds that
+the steps below create are expected on top of it. Compare meaning, not bytes:
+ignore timestamps and the `transcode` block.
 
+**Step 0. Quiet window.** Before the cutover, and again before steps 2 and 4
+and before any rollback:
+
+- stop whatever starts builds on its own (scheduled `nbuild` runs, scripts) and
+  start none by hand until the window ends;
 - no running build in the registry (`GET /nodes/v1/builds?status=running` is
   empty);
-- no `nbuild` starting on any node;
 - no lease on any worker: `held_by` is empty for every node in the Transcode
   state (`GET /transcode/v1/node-states`, or the workers UI). This comes from the
   worker, so it also covers a lease that was never registered.
 
-If one appears, wait for it to end. When you compare responses below, compare
-meaning, not bytes: the set of build ids with their `status`, `builds_paused` per
-node, and the node names. Ignore timestamps and the `transcode` block.
+If one appears, wait for it to end. The window is a precaution, not a lock:
+nothing stops a lease that starts anyway. Such a lease is never stopped or lost
+on the node (N3); while the registry is down it may just go unrecorded, or
+register again when Nodes is back (see step 6).
 
-*Check:* all three are empty.
+*Check:* the two lists are empty and the automatic builds are stopped.
 
 **Step 1. Image with the new binary, `nodes.url` still empty.**
 
 1. Deploy an image that contains `navigatorr-nodes` and the proxy/client code,
    with `nodes.url` empty. The server behaves as before.
-2. Check the `legacy_import` mark exists in `nodes.db`. The separate binary
-   never runs the legacy import and does not read the main database, so the
-   cutover is refused if it was never done. It is created by the in-process
-   registry the first time that import succeeds; if the mark is missing, run the
-   current server once (it logs an ERROR if the import fails) and check again.
-   The `check` in step 2 reports it as `legacy_import: ...` or `(missing)`.
-3. Save the baseline: the responses of `GET /nodes/v1/nodes`,
-   `GET /nodes/v1/builds` and `GET /api/maintenance/builds/nodes`, with the
-   builds token.
+2. Save the baseline, with the builds token.
 
-*Check:* the server is healthy, the baseline is saved.
+The `legacy_import` mark cannot be read here (the server holds the lock); the
+`check` in step 2 requires it. If that `check` reports `legacy_import: (missing)`,
+start the server once more in this mode (it runs the import and logs an ERROR if
+it fails), and repeat step 2 from the start.
 
-**Step 2. Move `nodes.db` into its own directory.** Skip the move if it already
-is in a directory only Nodes will mount.
+*Check:* the three baseline requests answer 200 and are saved.
+
+**Step 2. Check, back up, and move `nodes.db` into its own directory.** Only the
+move (item 5) is skipped when `nodes.db` already is in a directory only Nodes
+will mount; the check and the backup are never skipped.
 
 1. Repeat step 0.
 2. Stop the Transcode server and wait for `exited`.
-3. In a container of the image, as the file owner, run
-   `navigatorr-nodes check --path <nodes.db>`. It must print `ok`. If it fails
-   because `<nodes.db>-wal` exists, run it again with `--checkpoint` (everything
-   is stopped, so it can fold the WAL in). Do not move anything while a `-wal`
-   or `-shm` file exists.
+3. Run `navigatorr-nodes check --path <nodes.db>`. It must print `ok`. If it
+   fails because `<nodes.db>-wal` exists, run it again with `--checkpoint`
+   (everything is stopped, so it can fold the WAL in). Do not copy or move
+   anything while a `-wal` or `-shm` file exists.
 4. Make a backup of the closed `nodes.db` and its `sha256` in a place outside
    both directories.
-5. Move `nodes.db` to the new directory. Run `check --path <new nodes.db>`: it
-   must print `ok`, and its `file owner` and `dir owner` lines must show the
-   owner Nodes will run as, with modes 0600 and 0700. Confirm with `stat`.
-6. Set `database.nodes_path` to the new path in the config and start the
-   Transcode server (still `nodes.url` empty). Confirm the `.lock` it created in
-   the new directory has the right owner, and that nothing is using the old
+5. Move `nodes.db` to the new directory and set `database.nodes_path` to the
+   new path in the config.
+6. Run `check --path <nodes.db>`: it must print `ok`, and its `file owner` and
+   `dir owner` lines must show the owner Nodes will run as, with modes 0600 and
+   0700. Confirm with `stat`.
+7. Start the Transcode server (still `nodes.url` empty). Confirm the `.lock` it
+   created next to `nodes.db` has the same owner, and that nothing uses the old
    directory.
 
-*Check:* the baseline responses are the same as in step 1.
+*Check:* the baseline matches.
 
-**Step 3. Rehearse Nodes against an empty database.** This checks keys, ports and
-mounts before touching the real data.
+**Step 3. Rehearse Nodes against an empty database.** This checks keys, ports,
+mounts and the lock before touching the real data. Use a throwaway directory
+with the same owner and modes as the real one.
 
 1. Start `navigatorr-nodes` with the real config but `database.nodes_path` in
-   another, empty directory (Nodes creates the database).
-2. `GET /healthz` returns 200 `ok`; any other route without the key returns 401
-   (also the OpenAPI spec); with the key it returns 200.
-3. Nodes can read the engine: with `nodes.transcode_url` set, a `GET /nodes/v1/nodes`
-   with the key shows a `transcode` state for the nodes (it is absent if the
-   engine view cannot be read).
-4. The owners and modes of the mounted key files and directory are right.
-5. Stop it, wait for `exited`, and delete the test database.
+   the throwaway directory (Nodes creates the database there).
+2. `GET /healthz` returns 200 `ok`. Without the key, `GET /nodes/v1/nodes` and
+   `GET /nodes/v1/openapi.json` return 401; with the key both return 200.
+3. Nodes can read the engine: the nodes come from the configured topology, not
+   from the database, so `GET /nodes/v1/nodes` lists them even here, and with
+   `nodes.transcode_url` set each one carries a `transcode` block. If none
+   does, the engine cannot be read (wrong URL, key or network).
+4. Start a second `navigatorr-nodes` on the same throwaway directory with another
+   `nodes.listen` port: it exits with `nodes.db is held by another process`.
+   Remove that container.
+5. The owners and modes of the mounted key files and directory are right.
+6. Stop Nodes, wait for `exited`, remove the container, and delete the
+   throwaway directory with everything in it.
 
 *Check:* all of the above pass, and the throwaway directory is gone.
 
-**Step 4. Cut over (short window).**
+**Step 4. Cut over (short window).** `nodes.key_file` is already in the config
+(step 3 needed it); only `nodes.url` changes.
 
 1. Repeat step 0.
 2. Stop the Transcode server and wait for `exited`. Workers keep their leases and
    fail open.
-3. Run `navigatorr-nodes check --path <nodes.db>`: `ok`, no `-wal`, lock free.
-4. Start `navigatorr-nodes` on the real directory. Wait for `GET /healthz` 200.
-   With the key, `GET /nodes/v1/builds` must equal the baseline.
-5. Set `nodes.url` (and `nodes.key_file`) in the server's config and start the
-   Transcode server.
+3. Run `navigatorr-nodes check --path <nodes.db>`: `ok` (with `--checkpoint` if
+   a `-wal` was left, as in step 2).
+4. Switch on the variable that enables the Nodes container and start
+   `navigatorr-nodes` on the real directory. Wait for `GET /healthz` 200. With
+   the key, `GET /nodes/v1/builds` matches the baseline.
+5. Set `nodes.url` in the server's config and start the Transcode server.
 
 *Check:* in the server log, `builds registry is the separate Nodes process at ...`
 appears and no `nodes database at ...` line (that one is only logged by the
 in-process registry); there is no ERROR about node names
 (`node names differ between this server ... and the builds registry`) or about
-the service key. A second Nodes started on the same directory exits with
-`nodes.db is held by another process`.
+the service key. Through the server, the three baseline requests match the
+baseline.
 
 **Step 5. Verify, still in the quiet window.**
 
-1. The baseline is identical.
-2. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
+1. Run a real build with `nbuild` on a node: it registers, heartbeats, shows its
    log (including a log read with `wait` up to 25 s) and finishes.
-3. Pause and resume builds on a node, from the UI and with `worker_pause`
+2. Pause and resume builds on a node, from the UI and with `worker_pause`
    (`builds_paused`): new builds get 409 `builds_paused`, then are accepted
    again.
-4. `call_api` on service `nodes` works, and the OpenAPI spec is reachable
+3. `call_api` on service `nodes` works, and the OpenAPI spec is reachable
    through the server.
-5. The workers UI shows no error.
+4. The workers UI shows no error.
 
-*Check:* all five pass.
+*Check:* all four pass and the baseline matches, plus the build of item 1.
 
 **Step 6. Failure injection.**
 
@@ -421,39 +446,48 @@ the service key. A second Nodes started on the same directory exits with
    from this repo; test the tool by hand here, before any cleanup.
 6. Start Nodes again. Heartbeats resume, and leases still alive register again
    within the worker's 5 s retry.
+7. Hang it instead of stopping it: freeze the Nodes container (pause it, do not
+   stop it) and start another lease. It is granted after at most the 3 s
+   timeout. Unfreeze the container.
 
 A lease that started and ended while Nodes was down is never recorded. That is
 accepted: the registry is history and the worker is the authority.
 
-*Check:* all of the above, and the baseline is the same once Nodes is back.
+*Check:* all of the above, and once Nodes is back the baseline matches; the
+builds started in this step are present or, if they started and ended while
+Nodes was down, absent.
+
+End the quiet window: start the automatic builds again.
 
 ## Rollback
 
 ### Before the in-process registry is removed from the server
 
 Today the in-process registry still exists in the server, so going back is
-configuration only. Do this in the quiet window (step 0):
+configuration only. Change the config only after Nodes is gone, so no restart in
+between can open `nodes.db` from the server while Nodes holds it:
 
-1. Switch off the variable that enables the Nodes container, and empty `nodes.url`
-   in the server config.
-2. Stop Nodes first and wait for `exited` (clean shutdown). Run
-   `navigatorr-nodes check --path <nodes.db>` and require `ok`, no `-wal` and the
-   lock free.
-3. Restart the Transcode server. It opens the same `nodes.db` in the same
-   directory: there is no copy and never two writers.
-4. Check that a build created while Nodes ran is readable from the server
+1. Repeat step 0.
+2. Stop Nodes and wait for `exited` (clean shutdown). Switch off the variable
+   that enables the Nodes container and remove the container, so a reboot cannot
+   bring it back.
+3. Stop the Transcode server and wait for `exited`. Run
+   `navigatorr-nodes check --path <nodes.db>` and require `ok`.
+4. Empty `nodes.url` in the server config and start the Transcode server. It
+   opens the same `nodes.db` in the same directory: there is no copy and never
+   two writers.
+5. Check that a build created while Nodes ran is readable from the server
    (`GET /nodes/v1/builds/<id>`), the baseline matches, and the log shows
    `nodes database at <nodes.db>`.
 
-Rehearse this once after step 5 and cut over again.
+Rehearse this once after step 5 and cut over again (from step 4).
 
 ### After the cleanup that removes it
 
 Once the in-process registry and the legacy import are gone from the server,
 going back is not only configuration. The cleanup's pull request records the
-last image tag from before it. To roll back, do the same sequence as above
-(switch off the Nodes container, stop it and check it with `check`, require the
-lock free), deploying that older image with `nodes.url` empty.
+last image tag from before it. To roll back, follow the same five steps, deploying
+that older image (with `nodes.url` empty) in item 4.
 
 That only works if `nodes.db` is still readable by the older image. No schema
 change to `nodes.db` may ship around the cleanup unless it is backward
@@ -462,8 +496,13 @@ request.
 
 ### Losing the Nodes volume
 
-Restore the backup from step 2 after checking its `sha256` and running `check`
-on it. Builds recorded after that backup are lost from the history. Workers
+Back up the directory of `nodes.db` on the same schedule as the main database,
+from a stopped Nodes or with SQLite's online backup (never a plain copy of a
+database that is open). To recover, restore the newest backup (or the one from
+step 2) after checking its `sha256` and running `check` on it. Builds recorded
+after that backup are lost from the history, and a builds pause set or cleared
+after it comes back as it was then: check the pauses of every node before
+resuming work. Workers
 register their live leases again (a heartbeat answered 404 means "it ended", and
 the next report registers the lease anew). The registry is history; the worker is
 the authority.

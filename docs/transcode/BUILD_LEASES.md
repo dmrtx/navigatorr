@@ -181,8 +181,9 @@ registration always carries `"via": "node_lease"`.
 
 When Nodes runs as a separate process (`nodes.url` set), the worker still talks
 to the same server URL: the server forwards these calls to Nodes. If Nodes is
-down, hung or restarting, the server answers 503 (never 400, 404 or 409) and the
-worker fails open: the registration and the pause read fail open (3 second
+down, hung or restarting, the server answers 503 (never 400, 404 or 409), or,
+if Nodes fails in the middle of an answer, the call ends in a network error.
+Either way the worker fails open: the registration and the pause read fail open (3 second
 timeout), heartbeats and finishes are retried, and the lease runs. When Nodes is
 back, heartbeats resume and live leases register again on the worker's next
 retry (5 seconds). A lease that starts and ends while Nodes is down is never
