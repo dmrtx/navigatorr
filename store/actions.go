@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -191,6 +192,76 @@ func (s *Store) ListActionInstances(status string, limit int) ([]ActionInstance,
 // ListActionInstancesPaged returns action instances optionally filtered by status with offset pagination.
 func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]ActionInstance, error) {
 	return s.listActionInstances(status, "", limit, offset)
+}
+
+// ErrActionNotFound is the answer to a list cursor that names no action.
+var ErrActionNotFound = errors.New("action not found")
+
+// ListActionInstancesOfKinds pages the instances of the named workflows,
+// optionally in one status, newest created first: created_at DESC, id DESC.
+// The order does not move when a row is updated. With a non-empty before (an
+// instance id), only the instances strictly after it in that order are read,
+// so a walk that passes the last id of each page sees every instance once
+// even while new ones are created or rows change status. An unknown before
+// is ErrActionNotFound.
+func (s *Store) ListActionInstancesOfKinds(names []string, status, before string, limit, offset int) ([]ActionInstance, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		limit = 20
+	} else if limit > 101 {
+		limit = 101 // a page of 100 plus one row that says whether more follow
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	q := `SELECT id, action_name, status, current_step, inputs_json, outputs_json,
+		state_json, waiting_reason, waiting_condition, waiting_options_json,
+		error_json, idempotency_key, created_at, updated_at
+		FROM action_instances WHERE action_name IN (?` + strings.Repeat(",?", len(names)-1) + `)`
+	args := make([]any, 0, len(names)+6)
+	for _, n := range names {
+		args = append(args, n)
+	}
+	if before != "" {
+		var created string
+		if err := s.db.QueryRow(`SELECT created_at FROM action_instances WHERE id=?`, before).Scan(&created); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrActionNotFound
+			}
+			return nil, err
+		}
+		q += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		args = append(args, created, created, before)
+	}
+	if status != "" && !strings.EqualFold(status, "all") {
+		q += ` AND status=?`
+		args = append(args, status)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActionInstance
+	for rows.Next() {
+		var inst ActionInstance
+		if err := rows.Scan(
+			&inst.ID, &inst.ActionName, &inst.Status, &inst.CurrentStep, &inst.InputsJSON,
+			&inst.OutputsJSON, &inst.StateJSON, &inst.WaitingReason, &inst.WaitingCondition,
+			&inst.WaitingOptionsJSON, &inst.ErrorJSON, &inst.IdempotencyKey, &inst.CreatedAt, &inst.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, inst)
+	}
+	return out, rows.Err()
 }
 
 // ListActionInstancesByName pages one workflow without loading unrelated state.

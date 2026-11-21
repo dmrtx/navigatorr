@@ -804,6 +804,28 @@ func (e *Engine) ListPaged(ctx context.Context, status string, limit, offset int
 	return res, nil
 }
 
+// ListKinds pages the actions of the named workflows, newest created first,
+// optionally in one status ("" or "all" for every status). Unlike ListPaged,
+// every row of the page is one of the named workflows, and the order does not
+// change as actions update. before (an action id) starts the page right
+// after that action, so a walk is unaffected by new actions and status
+// changes; see store.ListActionInstancesOfKinds.
+func (e *Engine) ListKinds(ctx context.Context, names []string, status, before string, limit, offset int) ([]ActionResult, error) {
+	if e.deps.Store == nil {
+		return nil, fmt.Errorf("maintenance store is required")
+	}
+	instances, err := e.deps.Store.ListActionInstancesOfKinds(names, status, before, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("listing action instances: %w", err)
+	}
+	res := make([]ActionResult, 0, len(instances))
+	for _, inst := range instances {
+		tmpl, _ := e.GetTemplate(inst.ActionName)
+		res = append(res, *buildActionResult(&inst, len(tmpl.Steps), parseExecutionContext(&inst, e)))
+	}
+	return res, nil
+}
+
 // Cancel marks an active action as cancelled and propagates cancellation to
 // remote transcode work. A transcode_batch cancellation cascades to every
 // non-terminal child action so already-admitted worker jobs are stopped too.
