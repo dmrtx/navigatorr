@@ -487,6 +487,22 @@ func TestAStaleFailedFlightSetsNoBackoff(t *testing.T) {
 	}
 }
 
+// A late flight of an older generation honours the backoff a newer one set.
+func TestALateOldFlightHonoursTheBackoff(t *testing.T) {
+	f := newFixture(t, serveJSON(twoNodes), nil)
+	f.c.mu.Lock()
+	gen := f.c.gen
+	f.c.gen++
+	f.c.failUntil = f.clock.Now().Add(time.Second)
+	f.c.mu.Unlock()
+	if _, err := f.c.fetch(gen); !errors.Is(err, ErrUnavailable) {
+		t.Fatal(err)
+	}
+	if f.gets.Load() != 0 {
+		t.Fatalf("%d GETs during the backoff", f.gets.Load())
+	}
+}
+
 // A flight that starts after another of the same generation stored a fresh
 // snapshot uses it instead of asking Nodes again.
 func TestALateFlightUsesTheFreshSnapshot(t *testing.T) {

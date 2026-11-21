@@ -18,9 +18,14 @@ import (
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
-	buildPauses, unreadable, unavailable := e.buildsPauses()
+	// The build lists are read before the pauses: a registry that stops
+	// answering between the two reads then shows as unavailable (the pause read
+	// meets the failure), never as a node with no builds.
 	for i := range out.Workers {
 		out.Workers[i].Builds = e.NodeBuildRecords(out.Workers[i].Name)
+	}
+	buildPauses, unreadable, unavailable := e.buildsPauses()
+	for i := range out.Workers {
 		_, paused := buildPauses[out.Workers[i].Name]
 		out.Workers[i].BuildsPaused = paused || unreadable
 		out.Workers[i].BuildsUnavailable = unavailable

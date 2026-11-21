@@ -35,11 +35,12 @@ func (c *buildClock) advance(d time.Duration) {
 // with no rules of its own. The real one is package nodes, which this package
 // never imports.
 type fakeRecords struct {
-	mu      sync.Mutex
-	builds  map[string][]transcode.NodeBuild // by node
-	pauses  map[string]string                // node -> since
-	failing error                            // makes the pause reads fail
-	seq     int
+	mu         sync.Mutex
+	builds     map[string][]transcode.NodeBuild // by node
+	pauses     map[string]string                // node -> since
+	failing    error                            // makes the pause reads fail
+	failOnList error                            // set as failing by the first list read (the registry dies mid-observation)
+	seq        int
 }
 
 func newFakeRecords() *fakeRecords {
@@ -49,6 +50,10 @@ func newFakeRecords() *fakeRecords {
 func (f *fakeRecords) NodeBuildRecords(node string) []transcode.NodeBuild {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failOnList != nil {
+		f.failing, f.failOnList = f.failOnList, nil
+		return nil
+	}
 	return append([]transcode.NodeBuild(nil), f.builds[node]...)
 }
 
@@ -290,5 +295,21 @@ func TestUnavailableRegistryIsNeitherPausedNorNot(t *testing.T) {
 	st = e.NodePauseStatuses(context.Background())["m1"]
 	if st.BuildsPaused || st.BuildsUnavailable {
 		t.Fatalf("healthy: %+v", st)
+	}
+}
+
+// A registry that stops answering while the observation reads the build lists
+// shows as unavailable, never as nodes with no builds.
+func TestRegistryLostMidObservationReadsAsUnavailable(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).failOnList = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable || len(obs.Workers) == 0 {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if !w.BuildsUnavailable {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
 	}
 }

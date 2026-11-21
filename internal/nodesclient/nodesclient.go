@@ -306,20 +306,20 @@ func (c *Client) read(ctx context.Context) (*snapshot, error) {
 // fetch is the body of a flight: one request, its own timeout, never a caller's
 // context. It stores its result only if the generation is still gen.
 func (c *Client) fetch(gen uint64) (any, error) {
-	// A caller may have seen the cache expired just before a flight of the same
-	// generation stored a fresh snapshot: use it rather than asking again.
+	// A caller may have seen the cache expired just before another flight
+	// stored a fresh snapshot or a backoff: use it rather than asking again. What
+	// the cache holds always belongs to the current generation, never older
+	// than this flight's.
 	c.mu.Lock()
-	if c.gen == gen {
-		now := c.now()
-		if c.snap != nil && now.Before(c.snapUntil) {
-			s := c.snap
-			c.mu.Unlock()
-			return s, nil
-		}
-		if now.Before(c.failUntil) {
-			c.mu.Unlock()
-			return nil, ErrUnavailable
-		}
+	now := c.now()
+	if c.snap != nil && now.Before(c.snapUntil) {
+		s := c.snap
+		c.mu.Unlock()
+		return s, nil
+	}
+	if now.Before(c.failUntil) {
+		c.mu.Unlock()
+		return nil, ErrUnavailable
 	}
 	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), c.rto)
@@ -327,7 +327,7 @@ func (c *Client) fetch(gen uint64) (any, error) {
 	s, err := c.request(ctx)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.now()
+	now = c.now()
 	if err != nil {
 		if c.gen == gen {
 			c.snap, c.failUntil = nil, now.Add(c.back)
