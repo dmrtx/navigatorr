@@ -858,3 +858,49 @@ func TestTranscodeV1PodcastListFollowsTheSwitch(t *testing.T) {
 		}
 	}
 }
+
+// The REST list is a page of verdicts: a default page of finished conversions
+// with their full search evidence answers 200, and the evidence and phase
+// costs are left to GET /transcode/v1/actions/{id}.
+func TestTranscodeV1ActionsListKeepsOnlyTheVerdict(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	stages := make([]any, 0, 12)
+	for i := 0; i < 12; i++ {
+		candidates := make([]any, 0, 10)
+		for c := 0; c < 10; c++ {
+			candidates = append(candidates, fmt.Sprintf("libx265-crf%02d-preset-slow-stage%02d", 18+c, i))
+		}
+		stages = append(stages, map[string]any{"stage": fmt.Sprintf("stage-%02d", i), "candidates": candidates, "outcome": "measured"})
+	}
+	heavy := map[string]any{
+		"automatic_search":   map[string]any{"stages": stages, "verified_samples": 7},
+		"benchmark_decision": map[string]any{"winner": map[string]any{"video_codec": "libx265"}},
+		"phase_costs":        map[string]any{"worker_encode": map[string]any{"duration_ms": 900000, "attempts": 1, "provenance": "worker_measured", "timing_scope": strings.Repeat("phase_wall; phases may overlap ", 40)}},
+	}
+	for i := 0; i < 20; i++ {
+		seedOperation(t, st, fmt.Sprintf("done%02d", i), "transcode_media", "completed", map[string]any{"mode": "size", "path": fmt.Sprintf("/media/Show S01E%02d.mkv", i)}, heavy, heavy)
+	}
+	code, page := get(t, h, "/transcode/v1/actions", keyHdr())
+	items, _ := page["items"].([]any)
+	if code != 200 || len(items) != 20 {
+		t.Fatalf("default page: %d, %d items: %v", code, len(items), page)
+	}
+	for _, it := range items {
+		row := it.(map[string]any)
+		tr, _ := row["transcode"].(map[string]any)
+		_, costs := row["phase_costs"]
+		_, stages := tr["stages"]
+		_, hardware := tr["hardware"]
+		outcome, _ := tr["outcome"].(string)
+		message, _ := tr["message"].(string)
+		if costs || stages || hardware || tr["goal"] != "size" || outcome == "" || message == "" ||
+			tr["tested_candidates"] != float64(120) || tr["verified_samples"] != float64(7) || tr["encoder"] != "libx265" {
+			t.Fatalf("list item carries detail or lost its verdict: %v", row)
+		}
+	}
+	code, one := get(t, h, "/transcode/v1/actions/done00", keyHdr())
+	if body, _ := json.Marshal(one); code != 200 || !strings.Contains(string(body), "stage-11") || !strings.Contains(string(body), "phase_costs") {
+		t.Fatalf("one action must keep the evidence: %d %.300s", code, body)
+	}
+}
