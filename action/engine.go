@@ -807,12 +807,14 @@ func (e *Engine) ListPaged(ctx context.Context, status string, limit, offset int
 // ListKinds pages the actions of the named workflows, newest created first,
 // optionally in one status ("" or "all" for every status). Unlike ListPaged,
 // every row of the page is one of the named workflows, and the order does not
-// change as actions update, so offset paging never skips or repeats a row.
-func (e *Engine) ListKinds(ctx context.Context, names []string, status string, limit, offset int) ([]ActionResult, error) {
+// change as actions update. before (an action id) starts the page right
+// after that action, so a walk is unaffected by new actions and status
+// changes; see store.ListActionInstancesOfKinds.
+func (e *Engine) ListKinds(ctx context.Context, names []string, status, before string, limit, offset int) ([]ActionResult, error) {
 	if e.deps.Store == nil {
 		return nil, fmt.Errorf("maintenance store is required")
 	}
-	instances, err := e.deps.Store.ListActionInstancesOfKinds(names, status, limit, offset)
+	instances, err := e.deps.Store.ListActionInstancesOfKinds(names, status, before, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("listing action instances: %w", err)
 	}

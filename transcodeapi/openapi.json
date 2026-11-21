@@ -2055,7 +2055,7 @@
         ],
         "operationId": "listActions",
         "summary": "List transcode actions",
-        "description": "Actions (durable workflows) of the transcode kind, newest created first, as light rows: transcode_media (one file), transcode_batch (a series or folder, its files are children), clean_podcast_ads, promote_transcode_candidate and benchmark_transcode. Each row is only id, action_name, status, file (the source path), title (a batch's series), result (a conversion's goal, outcome, message and encoder, or a batch's non-zero counts), waiting (why it waits), error, parent_action_id, created_at and updated_at; long text is clipped. VMAF and search evidence, phase timings and costs, budgets, validations and steps are only in GET /transcode/v1/actions/{id}. Filter by status. Paging: offset-based. Send offset (0 first) and limit; the answer carries next_offset and has_more. Follow next_offset until has_more is false. Every row of a page is a transcode action and the order is by creation, so it does not move while actions run: a walk sees each action once. A page always fits in one answer: when limit rows would not fit, it returns fewer, with has_more true and next_offset where the next page starts. An empty first page means there are no such actions now. Read-only.",
+        "description": "Actions (durable workflows) of the transcode kind, newest created first, as light rows: transcode_media (one file), transcode_batch (a series or folder, its files are children), clean_podcast_ads, promote_transcode_candidate and benchmark_transcode. Each row is only id, action_name, status, file (the source path), title (a batch's series), result (a conversion's goal, outcome, message and encoder, or a batch's non-zero counts), waiting (why it waits), error, parent_action_id, created_at and updated_at; long text is clipped. VMAF and search evidence, phase timings and costs, budgets, validations, progress and steps are only in GET /transcode/v1/actions/{id}. Filter by status. Every row of a page is a transcode action. Two ways to page: before (send the next_before of the previous page) or offset (send next_offset); has_more says whether to go on. To see every action exactly once, walk with before: it is not disturbed by actions created during the walk nor by actions that leave the status filter. With offset, a new action shifts the pages by one (a row repeats) and an action that leaves the status filter can make one skipped. A page always fits in one answer: when limit rows would not fit, it returns fewer, with has_more true. An empty first page means there are no such actions now. Read-only.",
         "responses": {
           "200": {
             "description": "A page of actions.",
@@ -2082,6 +2082,10 @@
                     },
                     "has_more": {
                       "type": "boolean"
+                    },
+                    "next_before": {
+                      "type": "string",
+                      "description": "The id of the last row of this page, for before= on the next request. Absent on an empty page."
                     }
                   }
                 }
@@ -2179,6 +2183,15 @@
               "type": "integer",
               "default": 0,
               "minimum": 0
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "description": "Start right after this action (an id, normally the next_before of the previous page) in the list order. 400 invalid_request when it is not a transcode action.",
+            "schema": {
+              "type": "string"
             }
           }
         ]

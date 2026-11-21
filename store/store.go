@@ -19,7 +19,7 @@ import (
 )
 
 // SchemaVersion is the current schema revision. Migrations run in order.
-const SchemaVersion = 28
+const SchemaVersion = 29
 
 // MaxPreferenceValueLen bounds a stored preference value. Values ride into
 // memory_get/memory_list/get_context verbatim, so one huge blob would tax
@@ -270,7 +270,6 @@ var migrations = []migration{
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_action_instances_status ON action_instances (status, updated_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_action_instances_created ON action_instances (created_at, id)`,
 		`CREATE TABLE IF NOT EXISTS action_steps_log (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			instance_id TEXT NOT NULL REFERENCES action_instances (id) ON DELETE CASCADE,
@@ -498,6 +497,10 @@ var migrations = []migration{
 		// is deleted, so a revision is never used twice and a client holding
 		// an old one cannot write over a window made since.
 		`CREATE TABLE IF NOT EXISTS worker_window_revisions (worker TEXT PRIMARY KEY, revision INTEGER NOT NULL) WITHOUT ROWID`,
+	}},
+	{version: 29, statements: []string{
+		// The transcode action list pages by creation, newest first.
+		`CREATE INDEX IF NOT EXISTS idx_action_instances_created ON action_instances (created_at, id)`,
 	}},
 }
 

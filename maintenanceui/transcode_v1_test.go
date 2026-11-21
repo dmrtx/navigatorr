@@ -966,6 +966,58 @@ func TestTranscodeV1ActionsPageEndsEarlyAndWalksEveryAction(t *testing.T) {
 	}
 }
 
+// Walking with before/next_before sees every action once even when new
+// actions are created and rows leave the status filter during the walk.
+func TestTranscodeV1ActionsBeforeCursorSurvivesChanges(t *testing.T) {
+	s, h := transcodeUI(t)
+	st := s.engine.Deps().Store
+	for i := 0; i < 9; i++ {
+		seedOperation(t, st, fmt.Sprintf("r%d", i), "transcode_media", "running", map[string]any{"path": fmt.Sprintf("/media/E%d.mkv", i)}, nil, nil)
+	}
+	seen := map[string]bool{}
+	before := ""
+	for pages := 0; pages < 20; pages++ {
+		url := "/transcode/v1/actions?status=running&limit=3"
+		if before != "" {
+			url += "&before=" + before
+		}
+		code, page := get(t, h, url, keyHdr())
+		if code != 200 {
+			t.Fatal(code, page)
+		}
+		for _, it := range page["items"].([]any) {
+			id := it.(map[string]any)["id"].(string)
+			if seen[id] {
+				t.Fatalf("%s repeated", id)
+			}
+			seen[id] = true
+		}
+		if pages == 0 {
+			// A new action arrives at the top and a seen one leaves the filter.
+			seedOperation(t, st, "zz-new", "transcode_media", "running", nil, nil, nil)
+			touch(t, st, "r8", func(inst *store.ActionInstance) { inst.Status = "completed" })
+		}
+		if page["has_more"] != true {
+			break
+		}
+		before = page["next_before"].(string)
+	}
+	for i := 0; i < 9; i++ {
+		if !seen[fmt.Sprintf("r%d", i)] {
+			t.Fatalf("r%d skipped: %v", i, seen)
+		}
+	}
+	if seen["zz-new"] {
+		t.Fatal("an action created after the walk started is not part of it")
+	}
+	seedOperation(t, st, "foreign", "sonarr_thing", "completed", nil, nil, nil)
+	for _, b := range []string{"nope", "foreign"} {
+		if c, e := get(t, h, "/transcode/v1/actions?before="+b, keyHdr()); c != 400 || e["code"] != "invalid_request" {
+			t.Errorf("before=%s: %d %v", b, c, e)
+		}
+	}
+}
+
 func touch(t *testing.T, st *store.Store, id string, change func(*store.ActionInstance)) {
 	t.Helper()
 	inst, err := st.GetActionInstanceIfExists(id)

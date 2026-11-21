@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/store"
 	"github.com/jakenesler/navigatorr/transcodeapi"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -549,6 +550,12 @@ func (s *Server) v1ActionTool(tool string, args func(r *http.Request) (map[strin
 
 // checkTranscodeAction answers 404 unless id is a transcode action.
 func (s *Server) checkTranscodeAction(w http.ResponseWriter, id string) bool {
+	return s.checkTranscodeActionAs(w, id, 404)
+}
+
+// checkTranscodeActionAs answers notFound (404 for a path, 400 for a
+// parameter) unless id is a transcode action.
+func (s *Server) checkTranscodeActionAs(w http.ResponseWriter, id string, notFound int) bool {
 	inst, err := s.engine.Deps().Store.GetActionInstanceIfExists(id)
 	if err != nil {
 		log.Printf("transcode v1: reading action %q: %v", id, err)
@@ -556,20 +563,25 @@ func (s *Server) checkTranscodeAction(w http.ResponseWriter, id string) bool {
 		return false
 	}
 	if inst == nil || !transcodeAction(inst.ActionName) {
-		transcodeapi.WriteError(w, 404, "action_not_found", "action not found", hintActions)
+		if notFound == 400 {
+			transcodeapi.WriteError(w, 400, "invalid_request", "before must be the id of a transcode action", hintActions)
+		} else {
+			transcodeapi.WriteError(w, 404, "action_not_found", "action not found", hintActions)
+		}
 		return false
 	}
 	return true
 }
 
 // v1Actions lists the transcode actions, newest created first, as a page of
-// light rows: {items, offset, limit, next_offset, has_more}. Every row read is a
-// transcode action and the order does not move as actions update, so following
-// next_offset until has_more is false sees each action once. A row is only what
-// tells actions apart (id, kind, status, file, result, dates); the evidence,
-// phase costs, budgets and steps are in GET /actions/{id}. A page always fits in
-// one answer: when limit rows would not, it ends early and next_offset says
-// where the next one starts.
+// light rows: {items, offset, limit, next_offset, next_before, has_more}. Every
+// row read is a transcode action and the order does not move as actions
+// update. Two ways to walk: offset/next_offset, or before/next_before (the id
+// of the last row), which is not disturbed by actions created during the walk
+// or by a row leaving a status filter. A row is only what tells actions apart
+// (id, kind, status, file, result, dates); the evidence, phase costs, budgets
+// and steps are in GET /actions/{id}. A page always fits in one answer: when
+// limit rows would not, it ends early and the cursors say where to go on.
 func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	status := q.Get("status")
@@ -588,12 +600,20 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 			*target = n
 		}
 	}
+	before := strings.TrimSpace(q.Get("before"))
+	if before != "" && !s.checkTranscodeActionAs(w, before, 400) {
+		return
+	}
 	kinds := make([]string, 0, len(allowedActions))
 	for name := range allowedActions {
 		kinds = append(kinds, name)
 	}
 	slices.Sort(kinds)
-	rows, err := s.engine.ListKinds(r.Context(), kinds, status, limit, offset)
+	rows, err := s.engine.ListKinds(r.Context(), kinds, status, before, limit, offset)
+	if errors.Is(err, store.ErrActionNotFound) {
+		transcodeapi.WriteError(w, 400, "invalid_request", "before must be the id of a transcode action", hintActions)
+		return
+	}
 	if err != nil {
 		log.Printf("transcode v1: listing actions: %v", err)
 		transcodeapi.WriteError(w, 500, "internal", "the request could not be completed", "")
@@ -610,11 +630,15 @@ func (s *Server) v1Actions(w http.ResponseWriter, r *http.Request) {
 		size += len(b) + 1
 		items = append(items, item)
 	}
-	transcodeapi.WriteJSON(w, 200, map[string]any{
+	page := map[string]any{
 		"items": items, "offset": offset, "limit": limit,
 		"next_offset": offset + len(items),
 		"has_more":    len(items) < len(rows) || len(rows) == limit,
-	})
+	}
+	if len(items) > 0 {
+		page["next_before"] = items[len(items)-1].ID
+	}
+	transcodeapi.WriteJSON(w, 200, page)
 }
 
 // v1ActionPageBytes bounds the rows of one list page, well under the 64 KiB a
@@ -654,13 +678,13 @@ func lightAction(res *action.ActionResult) v1ActionItem {
 	item := v1ActionItem{
 		ID: res.ID, ActionName: res.ActionName, Status: res.Status,
 		File:      clipRunes(str(res.Inputs, "path"), 512),
-		ParentID:  str(res.Inputs, "parent_action_id"),
+		ParentID:  clipRunes(str(res.Inputs, "parent_action_id"), 128),
 		Waiting:   clipRunes(res.WaitingReason, 200),
 		Error:     clipRunes(res.Error, 200),
 		CreatedAt: res.CreatedAt, UpdatedAt: res.UpdatedAt,
 	}
 	if e := action.ExplainTranscode(res); e != nil {
-		item.Result = &v1ActionResult{Goal: e.Goal, Outcome: e.Outcome, Message: clipRunes(e.Message, 200), Encoder: e.Encoder}
+		item.Result = &v1ActionResult{Goal: clipRunes(e.Goal, 64), Outcome: clipRunes(e.Outcome, 64), Message: clipRunes(e.Message, 200), Encoder: clipRunes(e.Encoder, 64)}
 	}
 	if res.ActionName == "transcode_batch" {
 		item.Title = clipRunes(str(res.State, "series_title"), 200)
@@ -668,16 +692,17 @@ func lightAction(res *action.ActionResult) v1ActionItem {
 			item.Title = clipRunes(str(res.Outputs, "series_title"), 200)
 		}
 		counts, _ := res.State["counts"].(map[string]any)
-		if counts == nil {
+		if len(counts) == 0 {
 			counts, _ = res.Outputs["counts"].(map[string]any)
 		}
-		if len(counts) > 0 {
-			out := map[string]int{}
-			for _, k := range v1BatchCounts {
-				if n, ok := counts[k].(float64); ok && n != 0 {
-					out[k] = int(n)
-				}
+		out := map[string]int{}
+		for _, k := range v1BatchCounts {
+			if n, ok := counts[k].(float64); ok && n != 0 {
+				out[k] = int(n)
 			}
+		}
+		item.Result = nil
+		if len(out) > 0 {
 			item.Result = &v1ActionResult{Counts: out}
 		}
 	}

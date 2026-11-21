@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -193,11 +194,17 @@ func (s *Store) ListActionInstancesPaged(status string, limit, offset int) ([]Ac
 	return s.listActionInstances(status, "", limit, offset)
 }
 
+// ErrActionNotFound is the answer to a list cursor that names no action.
+var ErrActionNotFound = errors.New("action not found")
+
 // ListActionInstancesOfKinds pages the instances of the named workflows,
-// optionally in one status, oldest-created last: created_at DESC, id DESC.
-// The order does not move when a row is updated, so walking every page with
-// offset sees each instance once even while actions run.
-func (s *Store) ListActionInstancesOfKinds(names []string, status string, limit, offset int) ([]ActionInstance, error) {
+// optionally in one status, newest created first: created_at DESC, id DESC.
+// The order does not move when a row is updated. With a non-empty before (an
+// instance id), only the instances strictly after it in that order are read,
+// so a walk that passes the last id of each page sees every instance once
+// even while new ones are created or rows change status. An unknown before
+// is ErrActionNotFound.
+func (s *Store) ListActionInstancesOfKinds(names []string, status, before string, limit, offset int) ([]ActionInstance, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -216,9 +223,20 @@ func (s *Store) ListActionInstancesOfKinds(names []string, status string, limit,
 		state_json, waiting_reason, waiting_condition, waiting_options_json,
 		error_json, idempotency_key, created_at, updated_at
 		FROM action_instances WHERE action_name IN (?` + strings.Repeat(",?", len(names)-1) + `)`
-	args := make([]any, 0, len(names)+3)
+	args := make([]any, 0, len(names)+6)
 	for _, n := range names {
 		args = append(args, n)
+	}
+	if before != "" {
+		var created string
+		if err := s.db.QueryRow(`SELECT created_at FROM action_instances WHERE id=?`, before).Scan(&created); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, ErrActionNotFound
+			}
+			return nil, err
+		}
+		q += ` AND (created_at < ? OR (created_at = ? AND id < ?))`
+		args = append(args, created, created, before)
 	}
 	if status != "" && !strings.EqualFold(status, "all") {
 		q += ` AND status=?`
