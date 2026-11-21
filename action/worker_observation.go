@@ -18,16 +18,18 @@ import (
 // lists each one.
 func (e *Engine) WorkerObservation(ctx context.Context) transcode.WorkerObservation {
 	out := e.observeWorkers(ctx)
-	buildPauses, unreadable := e.buildsPauses()
+	buildPauses, unreadable, unavailable := e.buildsPauses()
 	for i := range out.Workers {
 		out.Workers[i].Builds = e.NodeBuildRecords(out.Workers[i].Name)
 		_, paused := buildPauses[out.Workers[i].Name]
 		out.Workers[i].BuildsPaused = paused || unreadable
+		out.Workers[i].BuildsUnavailable = unavailable
 	}
 	if len(out.Workers) == 1 {
 		out.Builds = out.Workers[0].Builds
 		out.BuildsPaused = out.Workers[0].BuildsPaused
 	}
+	out.BuildsUnavailable = unavailable
 	if len(out.Workers) > 0 {
 		drain := e.drainStatus(ctx, out)
 		out.Drain = &drain

@@ -574,9 +574,9 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 	// An unreadable builds-pause state reads as paused, like the transcode
 	// pause: the create path fails closed too, so the page must not say otherwise.
 	var buildPauses map[string]string
-	var bperr bool
+	var bperr, bunavailable bool
 	if withBuildsPause {
-		buildPauses, bperr = e.buildsPauses()
+		buildPauses, bperr, bunavailable = e.buildsPauses()
 	}
 	rows, rerr := e.deps.Store.ListDrainActions()
 	encoding := map[string]int{}
@@ -593,6 +593,8 @@ func (e *Engine) nodePauseStatuses(ctx context.Context, obs transcode.WorkerObse
 		} else if bperr {
 			st.BuildsPaused = true
 		}
+		// A registry that cannot be read is neither paused nor not paused.
+		st.BuildsUnavailable = bunavailable
 		if perr != nil {
 			st.Paused, st.Message = true, "The pause state could not be read; new jobs are held until it can."
 			out[name] = st

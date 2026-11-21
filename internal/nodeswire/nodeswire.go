@@ -6,9 +6,12 @@ package nodeswire
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 
 	"github.com/jakenesler/navigatorr/action"
+	"github.com/jakenesler/navigatorr/internal/nodesclient"
 	"github.com/jakenesler/navigatorr/nodes"
 	"github.com/jakenesler/navigatorr/transcode"
 )
@@ -101,5 +104,55 @@ func (r records) BuildsPaused(node string) (bool, error) { return r.s.BuildsPaus
 func Wire(e *action.Engine, s *nodes.Service) {
 	if e != nil && s != nil {
 		e.SetBuildRecords(Records(s))
+	}
+}
+
+// RemoteRecords is action.BuildRecords over a Nodes process reached through
+// nodesclient. When the registry cannot be read, the pause reads fail with an
+// error that is both action.ErrBuildRecordsUnavailable (what the engine and the
+// screens test) and nodesclient.ErrUnavailable; the build list reads as empty.
+func RemoteRecords(c *nodesclient.Client) action.BuildRecords { return remote{c} }
+
+type remote struct{ c *nodesclient.Client }
+
+func unavailable(err error) error {
+	if errors.Is(err, nodesclient.ErrUnavailable) {
+		return fmt.Errorf("%w: %w", action.ErrBuildRecordsUnavailable, err)
+	}
+	return err
+}
+
+func (r remote) NodeBuildRecords(node string) []transcode.NodeBuild {
+	var out []transcode.NodeBuild
+	for _, b := range r.c.NodeBuildRecords(node) {
+		out = append(out, transcode.NodeBuild{
+			ID: b.ID, Source: b.Source, Holder: b.Holder, Kind: b.Kind, Title: b.Title,
+			PreemptMode: b.PreemptMode, Priority: b.Priority, Status: b.Status, StartedAt: b.StartedAt,
+			Progress: b.Progress, CreatedAt: b.CreatedAt, LastHeartbeatAt: b.LastHeartbeatAt, ExpiresAt: b.ExpiresAt,
+		})
+	}
+	return out
+}
+
+func (r remote) BuildsPauses() (map[string]string, error) {
+	m, err := r.c.BuildsPauses()
+	return m, unavailable(err)
+}
+
+func (r remote) SetBuildsPause(ctx context.Context, node string, paused bool) error {
+	return r.c.SetBuildsPause(ctx, node, paused)
+}
+
+func (r remote) BuildsPaused(node string) (bool, error) {
+	p, err := r.c.BuildsPaused(node)
+	return p, unavailable(err)
+}
+
+// WireRemote connects the engine to a Nodes process. The other direction
+// (Nodes asking the engine for node states) is Nodes' own client, not this
+// process'.
+func WireRemote(e *action.Engine, c *nodesclient.Client) {
+	if e != nil && c != nil {
+		e.SetBuildRecords(RemoteRecords(c))
 	}
 }

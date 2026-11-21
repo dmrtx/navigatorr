@@ -76,7 +76,12 @@ func (s *Server) nodeStoreState(name string) map[string]any {
 		state["held_by"] = "builds"
 	}
 	// Whether new builds on the node are refused, shown beside its slots.
-	if s.engine.NodeBuildsPaused(name) {
+	// When the registry runs in another process that does not answer, nothing
+	// is known: neither paused nor not paused, and the empty build list above
+	// is not "no builds". The page says so.
+	if paused, unavailable := s.engine.NodeBuildsState(name); unavailable {
+		state["builds_unavailable"] = true
+	} else if paused {
 		state["builds_paused"] = true
 	}
 	return state

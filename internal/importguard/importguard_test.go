@@ -322,3 +322,16 @@ func TestNodesProxyStaysApart(t *testing.T) {
 		return p != "internal/nodesproxy" && p != "internal"
 	})
 }
+
+// TestNodesClientStaysApart guards the engine's client of a separate Nodes
+// process: it must link neither the registry (nodes) nor the engine (action,
+// transcode*), the store, the UI, the tools, the podcast pipeline, the queue,
+// the packages that join them (nodeswire, nodesproxy), the MCP proxy nor the
+// worker. It may reach only itself and package internal (logging), so it has
+// DTOs of its own and internal/nodeswire is the only place that joins it to the
+// engine.
+func TestNodesClientStaysApart(t *testing.T) {
+	checkStatelessRoot(t, "internal/nodesclient", func(p string) bool {
+		return p != "internal/nodesclient" && p != "internal"
+	})
+}

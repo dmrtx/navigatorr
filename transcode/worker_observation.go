@@ -199,6 +199,9 @@ type WorkerObservation struct {
 	Builds []NodeBuild `json:"builds,omitempty"`
 	// BuildsPaused is true while the server refuses new builds on this node.
 	BuildsPaused bool `json:"builds_paused,omitempty"`
+	// BuildsUnavailable is true when the builds registry could not be read:
+	// builds and builds_paused are then unknown, not empty or off.
+	BuildsUnavailable bool `json:"builds_unavailable,omitempty"`
 	// Workers is each configured worker's own observation, in config order.
 	// The fields above summarise them: reachable and ready when any worker is.
 	Workers []WorkerObservation `json:"workers,omitempty"`

@@ -3,6 +3,7 @@ package action
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -243,5 +244,51 @@ func TestSetBuildRecordsWhileReading(t *testing.T) {
 	e.SetBuildRecords(newFakeRecords())
 	if e.buildRecords() == nil {
 		t.Fatal("wired")
+	}
+}
+
+// A registry that cannot be read at all (it runs in another process) is
+// neither paused nor not paused: the observation, the pause statuses and the
+// per-node state say "unavailable", and a read error of any other kind still
+// reads as paused.
+func TestUnavailableRegistryIsNeitherPausedNorNot(t *testing.T) {
+	e, _ := buildEngine(t, newSuspendingM1(transcode.StatusRunning))
+	records(e).failing = fmt.Errorf("%w: %w", ErrBuildRecordsUnavailable, errors.New("connection refused"))
+
+	if paused, unavailable := e.NodeBuildsState("m1"); paused || !unavailable {
+		t.Fatalf("NodeBuildsState: paused=%v unavailable=%v", paused, unavailable)
+	}
+	if e.NodeBuildsPaused("m1") {
+		t.Fatal("an unavailable registry must not read as paused")
+	}
+	st := e.NodePauseStatuses(context.Background())["m1"]
+	if st.BuildsPaused || !st.BuildsUnavailable {
+		t.Fatalf("pause status: %+v", st)
+	}
+	obs := e.WorkerObservation(context.Background())
+	if !obs.BuildsUnavailable || obs.BuildsPaused || len(obs.Workers) == 0 {
+		t.Fatalf("observation: %+v", obs)
+	}
+	for _, w := range obs.Workers {
+		if w.BuildsPaused || !w.BuildsUnavailable {
+			t.Fatalf("worker %s: %+v", w.Name, w)
+		}
+	}
+
+	// Any other error keeps failing closed.
+	records(e).failing = errors.New("disk I/O error")
+	if paused, unavailable := e.NodeBuildsState("m1"); !paused || unavailable {
+		t.Fatalf("other error: paused=%v unavailable=%v", paused, unavailable)
+	}
+	st = e.NodePauseStatuses(context.Background())["m1"]
+	if !st.BuildsPaused || st.BuildsUnavailable {
+		t.Fatalf("other error, status: %+v", st)
+	}
+
+	// Healthy again: neither flag.
+	records(e).failing = nil
+	st = e.NodePauseStatuses(context.Background())["m1"]
+	if st.BuildsPaused || st.BuildsUnavailable {
+		t.Fatalf("healthy: %+v", st)
 	}
 }

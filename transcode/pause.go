@@ -53,6 +53,10 @@ type NodePauseStatus struct {
 	// transcode pause above and never affects builds already registered.
 	BuildsPaused      bool   `json:"builds_paused,omitempty"`
 	BuildsPausedSince string `json:"builds_paused_since,omitempty"`
+	// BuildsUnavailable is true when the builds registry could not be read
+	// (it runs in another process that does not answer): builds_paused and
+	// builds say nothing then, and a screen must not show them as "no builds".
+	BuildsUnavailable bool `json:"builds_unavailable,omitempty"`
 	// Builds are the build records running or waiting on the node, oldest
 	// first: the registry's view, filled by the UI layer.
 	Builds []NodeBuild `json:"builds,omitempty"`

@@ -1164,6 +1164,8 @@ function renderWorkerDetails(host, info) {
     if (operatorPaused) badges.append(pausedBadge(worker.pause.idle ? "Transcode paused · idle" : "Pausing transcode"));
     // The builds pause is its own switch: shown whatever the transcode pause is.
     if (worker.pause?.builds_paused) badges.append(pausedBadge("Builds paused"));
+    // The registry runs apart and did not answer: its state is unknown, neither paused nor idle.
+    if (worker.pause?.builds_unavailable) badges.append(node("span", "Builds registry unavailable", "badge"));
     if (worker.pause?.held_by === "builds" || (worker.pause?.builds || []).some(b => b.status === "running")) badges.append(node("span", "Busy · build", "badge"));
     badges.append(node("span", !serverReachable ? "Unknown" : worker.ready ? "Reachable · Ready" : worker.reachable || worker.connected ? "Reachable · Blocked" : "Unavailable", "badge"));
     head.append(node("strong", worker.name), badges);
@@ -8017,6 +8019,7 @@ function slotNodeDetails(n, entries) {
       hold === "transcode paused" ? hold : slotsBusy || builds.length ? null : hold || (n.builds_paused ? null : "all available")].filter(Boolean).join(" · "), "metadata"));
   // The builds pause is a state, so it is a paused badge, as in the workers dialog, not metadata text.
   if (n.builds_paused) summary.append(pausedBadge("Builds paused"));
+  if (n.builds_unavailable) summary.append(node("span", "Builds registry unavailable", "badge"));
   if (online && split) summary.append(node("span",`Video ${split.video.used}/${split.video.total} · Podcast ${split.podcast.used}/${split.podcast.total}`,"metadata slot-split"));
   summary.append(node("span","","slot-chevron"));
   // The click runs before the details toggles: the new state is the opposite.
@@ -8123,10 +8126,10 @@ function slotTable(groups) {
 // answer waits for the workers (a node loaded by a build is slow), so this small read
 // runs every couple of seconds apart from it and a build starting, ending or being
 // cancelled, or a pause, shows at once.
-const nodeStateKeys = ["builds", "held_by", "builds_paused"];
+const nodeStateKeys = ["builds", "held_by", "builds_paused", "builds_unavailable"];
 const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // What decides whether the slots and the builds table must be read again.
-const nodeStateShape = nodes => JSON.stringify((nodes || []).map(n => [n.name, (n.builds || []).map(b => [b.id, b.status]), n.held_by || "", Boolean(n.builds_paused)]));
+const nodeStateShape = nodes => JSON.stringify((nodes || []).map(n => [n.name, (n.builds || []).map(b => [b.id, b.status]), n.held_by || "", Boolean(n.builds_paused), Boolean(n.builds_unavailable)]));
 function applyNodeState(data, nodes) {
   if (!Array.isArray(data?.workers) || !Array.isArray(nodes)) return false;
   let changed = false;
@@ -8147,7 +8150,7 @@ function applyNodeState(data, nodes) {
 function placeholderActivity(nodes) {
   return {
     available: false, placeholder: true, message: "Reading the workers…",
-    workers: nodes.map(n => ({name: n.name, available: false, message: "Reading the workers…", builds: n.builds, held_by: n.held_by, builds_paused: n.builds_paused})),
+    workers: nodes.map(n => ({name: n.name, available: false, message: "Reading the workers…", builds: n.builds, held_by: n.held_by, builds_paused: n.builds_paused, builds_unavailable: n.builds_unavailable})),
   };
 }
 async function refreshNodeState() {

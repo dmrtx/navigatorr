@@ -229,34 +229,22 @@ func main() {
 	// Register all tools
 	tools.RegisterAll(s, cfg, registry, specStore, txClient, qbClient, sabClient, qStore)
 	actEngine := tools.RegisterMaintenance(s, cfg, registry, qbClient, mStore, transcodeWorkers)
-	// The build registry (Nodes) has its own database. It is registered before
-	// the reconciler's deferred stop so it closes after it (LIFO).
-	nodesPath := cfg.Database.NodesDatabasePath(dbPath)
-	nodeSvc, err := nodes.Open(nodes.Options{
-		Path:      nodesPath,
+	// The build registry (Nodes) is in this process (own database, opened here)
+	// or, with nodes.url, a separate process. It is registered before the
+	// reconciler's deferred stop so it closes after it (LIFO).
+	nodesBack, err := openNodes(cfg, nodesInputs{
+		DBPath:    dbPath,
 		Topology:  nodeswire.Topology(transcodeWorkers),
 		Transcode: nodeswire.TranscodeView(actEngine),
-		Retention: cfg.Builds.RetentionDuration,
-	})
+	}, nodes.Open)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: nodes database %s: %v\n", nodesPath, err)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer nodeSvc.Close()
-	internal.Logf("nodes database at %s", nodesPath)
-	if _, err := nodeSvc.ImportLegacy(context.Background(), dbPath); err != nil {
-		// Not fatal: the import is one transaction, so nothing was imported, and
-		// its flag is only written when it succeeds: the next start tries again,
-		// whatever the registry holds by then (rows already there are kept).
-		internal.Logf("nodes: ERROR importing builds and pauses from the main database failed (the registry starts without them; the import is retried at the next start): %v", err)
-	}
-	nodeswire.Wire(actEngine, nodeSvc)
-	nodesCtx, stopNodes := context.WithCancel(context.Background())
-	nodesDone := nodeSvc.Start(nodesCtx, 0)
-	defer func() {
-		stopNodes()
-		<-nodesDone
-	}()
+	defer nodesBack.Close()
+	nodesBack.Wire(actEngine)
+	stopNodes := nodesBack.Start(dbPath)
+	defer stopNodes()
 	if actEngine != nil {
 		// Jobs from before workers had names keep their worker; this runs
 		// before anything polls them.
@@ -281,7 +269,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: maintenance UI: %v\n", err)
 			os.Exit(1)
 		}
-		webUI.SetNodes(nodeSvc)
+		nodesBack.ConnectUI(webUI)
 		// How full the NAS and its folders are, sampled for the Stats tab. It
 		// stops before the store closes, like the retention pass.
 		storageCtx, stopStorage := context.WithCancel(context.Background())
